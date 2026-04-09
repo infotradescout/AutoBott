@@ -106,6 +106,14 @@ def _slippage_pct(reference_price: float, current_price: float) -> float:
     return ((current_price - reference_price) / reference_price) * 100.0
 
 
+def _order_reject_reason(order) -> str:
+    for field in ("rejected_reason", "cancel_reject_reason", "failed_at"):
+        value = getattr(order, field, None)
+        if value:
+            return f"{field}={value}"
+    return ""
+
+
 def _is_news_block_day(now_et: datetime) -> bool:
     return now_et.date().isoformat() in set(config.NEWS_BLOCK_DATES_ET)
 
@@ -838,82 +846,113 @@ def main():
 
                 option_symbol = contract["symbol"]
                 ask_price = data_client.get_latest_option_ask(option_symbol)
+                direct_market_entry = False
                 if ask_price is None or ask_price <= 0:
-                    print(f"[{ts(now_et)}] {ticker}: skip (no option ask for {option_symbol}).")
-                    time.sleep(config.RATE_LIMIT_SLEEP_SECONDS)
-                    continue
+                    if config.EMERGENCY_EXECUTION_MODE and config.ALLOW_MARKET_ENTRY_WITHOUT_QUOTE:
+                        print(
+                            f"[{ts(now_et)}] {ticker}: no option ask for {option_symbol}; "
+                            "emergency mode using direct market entry."
+                        )
+                        direct_market_entry = True
+                        ask_price = 0.0
+                    else:
+                        print(f"[{ts(now_et)}] {ticker}: skip (no option ask for {option_symbol}).")
+                        time.sleep(config.RATE_LIMIT_SLEEP_SECONDS)
+                        continue
 
-                initial_chain_ask = float(contract.get("ask_price", ask_price) or ask_price)
-                pre_submit_slippage = _slippage_pct(initial_chain_ask, ask_price)
-                if pre_submit_slippage > config.MAX_ENTRY_SLIPPAGE_PCT:
-                    # Retry quote once before skipping on stale chain snapshot drift.
-                    retry_ask = data_client.get_latest_option_ask(option_symbol)
-                    if retry_ask is not None and retry_ask > 0:
-                        ask_price = retry_ask
-                        pre_submit_slippage = _slippage_pct(initial_chain_ask, ask_price)
-                if pre_submit_slippage > (config.MAX_ENTRY_SLIPPAGE_PCT * 3):
-                    print(
-                        f"[{ts(now_et)}] {ticker}: skip (entry slippage {pre_submit_slippage:.2f}% > "
-                        f"hard cap {(config.MAX_ENTRY_SLIPPAGE_PCT * 3):.2f}%)."
-                    )
-                    time.sleep(config.RATE_LIMIT_SLEEP_SECONDS)
-                    continue
+                if not direct_market_entry:
+                    initial_chain_ask = float(contract.get("ask_price", ask_price) or ask_price)
+                    pre_submit_slippage = _slippage_pct(initial_chain_ask, ask_price)
+                    if pre_submit_slippage > config.MAX_ENTRY_SLIPPAGE_PCT:
+                        # Retry quote once before skipping on stale chain snapshot drift.
+                        retry_ask = data_client.get_latest_option_ask(option_symbol)
+                        if retry_ask is not None and retry_ask > 0:
+                            ask_price = retry_ask
+                            pre_submit_slippage = _slippage_pct(initial_chain_ask, ask_price)
+                    if pre_submit_slippage > (config.MAX_ENTRY_SLIPPAGE_PCT * 3):
+                        print(
+                            f"[{ts(now_et)}] {ticker}: skip (entry slippage {pre_submit_slippage:.2f}% > "
+                            f"hard cap {(config.MAX_ENTRY_SLIPPAGE_PCT * 3):.2f}%)."
+                        )
+                        time.sleep(config.RATE_LIMIT_SLEEP_SECONDS)
+                        continue
 
                 # Always trade exactly 1 contract
                 qty = 1
 
-                order = broker.place_option_limit_buy(option_symbol, qty, ask_price)
-                print(
-                    f"[{ts(now_et)}] ENTRY {ticker} {direction.upper()} "
-                    f"{option_symbol} qty={qty} limit={ask_price:.2f} order_id={order.id}"
-                )
+                if direct_market_entry:
+                    order = broker.place_option_market_buy(option_symbol, qty)
+                    print(
+                        f"[{ts(now_et)}] ENTRY {ticker} {direction.upper()} "
+                        f"{option_symbol} qty={qty} market order_id={order.id}"
+                    )
+                else:
+                    order = broker.place_option_limit_buy(option_symbol, qty, ask_price)
+                    print(
+                        f"[{ts(now_et)}] ENTRY {ticker} {direction.upper()} "
+                        f"{option_symbol} qty={qty} limit={ask_price:.2f} order_id={order.id}"
+                    )
 
                 time.sleep(8)
                 filled_order = broker.get_order_status(order.id)
                 order_status = str(getattr(filled_order, "status", "")).lower()
+                reject_detail = _order_reject_reason(filled_order)
 
                 if order_status not in ("filled", "partially_filled"):
                     try:
-                        broker.cancel_order(order.id)
+                        if not direct_market_entry:
+                            broker.cancel_order(order.id)
                     except Exception:
                         pass
                     # Retry once with a slightly more aggressive limit before market fallback.
-                    aggressive_limit = round(float(ask_price) * 1.05, 4)
-                    print(
-                        f"[{ts(now_et)}] {ticker}: limit order {order.id} not filled ({order_status}). "
-                        f"Retry limit={aggressive_limit:.4f}."
-                    )
-                    try:
-                        retry_order = broker.place_option_limit_buy(option_symbol, qty, aggressive_limit)
-                        time.sleep(5)
-                        filled_order = broker.get_order_status(retry_order.id)
-                        order_status = str(getattr(filled_order, "status", "")).lower()
-                        if order_status not in ("filled", "partially_filled"):
-                            try:
-                                broker.cancel_order(retry_order.id)
-                            except Exception:
-                                pass
-                            print(f"[{ts(now_et)}] {ticker}: retry limit not filled ({order_status}). Trying market buy.")
-                            mkt_order = broker.place_option_market_buy(option_symbol, qty)
-                            time.sleep(3)
-                            filled_order = broker.get_order_status(mkt_order.id)
+                    if not direct_market_entry:
+                        aggressive_limit = round(float(ask_price) * 1.05, 4)
+                        print(
+                            f"[{ts(now_et)}] {ticker}: limit order {order.id} not filled ({order_status}). "
+                            f"Retry limit={aggressive_limit:.4f}."
+                        )
+                        try:
+                            retry_order = broker.place_option_limit_buy(option_symbol, qty, aggressive_limit)
+                            time.sleep(5)
+                            filled_order = broker.get_order_status(retry_order.id)
                             order_status = str(getattr(filled_order, "status", "")).lower()
-                        if order_status not in ("filled", "partially_filled"):
-                            print(
-                                f"[{ts(now_et)}] {ticker}: market fallback not filled "
-                                f"(status={order_status}). Skipping."
-                            )
+                            reject_detail = _order_reject_reason(filled_order)
+                            if order_status not in ("filled", "partially_filled"):
+                                try:
+                                    broker.cancel_order(retry_order.id)
+                                except Exception:
+                                    pass
+                                print(f"[{ts(now_et)}] {ticker}: retry limit not filled ({order_status}). Trying market buy.")
+                                mkt_order = broker.place_option_market_buy(option_symbol, qty)
+                                time.sleep(3)
+                                filled_order = broker.get_order_status(mkt_order.id)
+                                order_status = str(getattr(filled_order, "status", "")).lower()
+                                reject_detail = _order_reject_reason(filled_order)
+                            if order_status not in ("filled", "partially_filled"):
+                                extra = f" {reject_detail}" if reject_detail else ""
+                                print(
+                                    f"[{ts(now_et)}] {ticker}: market fallback not filled "
+                                    f"(status={order_status}).{extra} Skipping."
+                                )
+                                time.sleep(config.RATE_LIMIT_SLEEP_SECONDS)
+                                continue
+                        except Exception as exc:  # noqa: BLE001
+                            print(f"[{ts(now_et)}] {ticker}: market fallback failed: {exc}")
                             time.sleep(config.RATE_LIMIT_SLEEP_SECONDS)
                             continue
-                    except Exception as exc:  # noqa: BLE001
-                        print(f"[{ts(now_et)}] {ticker}: market fallback failed: {exc}")
+                    else:
+                        extra = f" {reject_detail}" if reject_detail else ""
+                        print(
+                            f"[{ts(now_et)}] {ticker}: direct market entry not filled "
+                            f"(status={order_status}).{extra} Skipping."
+                        )
                         time.sleep(config.RATE_LIMIT_SLEEP_SECONDS)
                         continue
 
                 filled_avg_price = float(getattr(filled_order, "filled_avg_price", 0) or 0)
                 filled_qty = position_qty_as_int(getattr(filled_order, "filled_qty", qty)) or qty
-                fill_slippage = _slippage_pct(ask_price, filled_avg_price) if filled_avg_price > 0 else 0.0
-                if fill_slippage > config.MAX_FILL_SLIPPAGE_PCT:
+                fill_slippage = _slippage_pct(ask_price, filled_avg_price) if (filled_avg_price > 0 and ask_price > 0) else 0.0
+                if (not direct_market_entry) and fill_slippage > config.MAX_FILL_SLIPPAGE_PCT:
                     print(
                         f"[{ts(now_et)}] {ticker}: fill slippage {fill_slippage:.2f}% exceeds "
                         f"{config.MAX_FILL_SLIPPAGE_PCT:.2f}%. Closing immediately."

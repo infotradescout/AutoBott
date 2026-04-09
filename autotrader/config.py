@@ -223,6 +223,8 @@ ENABLE_DELTA_TARGETING = _env_bool("ENABLE_DELTA_TARGETING", True)
 TARGET_DELTA_MIN = _env_float("TARGET_DELTA_MIN", 0.40)
 TARGET_DELTA_MAX = _env_float("TARGET_DELTA_MAX", 0.55)
 TARGET_DELTA_FALLBACK = _env_float("TARGET_DELTA_FALLBACK", 0.50)
+EMERGENCY_EXECUTION_MODE = _env_bool("EMERGENCY_EXECUTION_MODE", True)
+ALLOW_MARKET_ENTRY_WITHOUT_QUOTE = _env_bool("ALLOW_MARKET_ENTRY_WITHOUT_QUOTE", True)
 
 # --- Entry confirmation / index regime ---
 # Both disabled: confirmation candle blocks midday chop entries; index bias

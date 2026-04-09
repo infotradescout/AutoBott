@@ -132,10 +132,10 @@ def select_atm_option_contract_with_reason(
         if strike is None or not exp or not symbol:
             fail_counts["missing_fields"] += 1
             continue
-        if open_interest is None or open_interest <= config.MIN_OPTION_OPEN_INTEREST:
+        if (not config.EMERGENCY_EXECUTION_MODE) and (open_interest is None or open_interest <= config.MIN_OPTION_OPEN_INTEREST):
             fail_counts["low_open_interest"] += 1
             continue
-        if volume is None or volume <= config.MIN_OPTION_DAILY_VOLUME:
+        if (not config.EMERGENCY_EXECUTION_MODE) and (volume is None or volume <= config.MIN_OPTION_DAILY_VOLUME):
             fail_counts["low_volume"] += 1
             continue
         if active and tradable and strike is not None and exp and symbol:
@@ -156,7 +156,7 @@ def select_atm_option_contract_with_reason(
     for contract in filtered:
         exp_date = _safe_date(contract.get("expiration_date"))
         open_interest = _safe_float(contract.get("open_interest")) or 0.0
-        if exp_date == today and open_interest < float(config.MIN_OPTION_OPEN_INTEREST_0DTE):
+        if (not config.EMERGENCY_EXECUTION_MODE) and exp_date == today and open_interest < float(config.MIN_OPTION_OPEN_INTEREST_0DTE):
             fail_counts["low_open_interest"] += 1
             continue
         strike_gap = abs(float(contract["strike_price"]) - underlying_price)
@@ -217,7 +217,7 @@ def select_atm_option_contract_with_reason(
             time.sleep(config.RATE_LIMIT_SLEEP_SECONDS)
             continue
         spread_pct = ((ask - bid) / mid) * 100
-        if spread_pct >= config.MAX_OPTION_SPREAD_PCT:
+        if (not config.EMERGENCY_EXECUTION_MODE) and spread_pct >= config.MAX_OPTION_SPREAD_PCT:
             quote_fail_counts["spread_too_wide"] += 1
             time.sleep(config.RATE_LIMIT_SLEEP_SECONDS)
             continue
@@ -226,6 +226,13 @@ def select_atm_option_contract_with_reason(
         contract["ask_price"] = ask
         contract["spread_pct"] = round(spread_pct, 2)
         return contract, "ok"
+
+    if config.EMERGENCY_EXECUTION_MODE and scored:
+        fallback = scored[0]
+        fallback["bid_price"] = _safe_float(fallback.get("bid_price"))
+        fallback["ask_price"] = _safe_float(fallback.get("ask_price"))
+        fallback["spread_pct"] = fallback.get("spread_pct", "")
+        return fallback, "emergency_fallback_without_quote"
 
     reason = (
         f"quotes rejected: bad_quote={quote_fail_counts['bad_quote']}, "
