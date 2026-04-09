@@ -47,7 +47,6 @@ def position_qty_as_int(qty_value) -> int:
 
 
 def _prune_recent_entries(entry_times: list[datetime], now_et: datetime, days: int = 5) -> list[datetime]:
-    # Rolling calendar-day window used as a conservative throttle for sub-$25k accounts.
     threshold = now_et.timestamp() - (days * 24 * 60 * 60)
     return [dt for dt in entry_times if dt.timestamp() >= threshold]
 
@@ -433,7 +432,6 @@ def main():
             time.sleep(sleep_seconds)
             continue
         if loss_counters_day != now_et.date():
-            # Reset daily counters when market opens (once per session)
             daily_realized_loss_usd = 0.0
             consecutive_losses = 0
             loss_counters_day = now_et.date()
@@ -503,17 +501,27 @@ def main():
             observation_done = True
             print(f"[{ts(now_et)}] Observation phase complete. Hot tickers at front of queue: {hot_tickers}")
 
+        # --- PDT / equity checks (log-only, non-blocking) ---
         pdt_allowed, pdt_info = broker.pdt_allows_new_day_trade()
         entry_times_rolling = _prune_recent_entries(entry_times_rolling, now_et, days=5)
         equity = pdt_info.get("equity")
         under_25k = equity is not None and float(equity) < config.PDT_MIN_EQUITY
-        local_trade_budget_hit = under_25k and len(entry_times_rolling) >= config.PDT_MAX_DAY_TRADES_5D
+        local_trade_budget_hit = (
+            config.ENFORCE_PDT_GUARD
+            and under_25k
+            and len(entry_times_rolling) >= config.PDT_MAX_DAY_TRADES_5D
+        )
+        if under_25k and len(entry_times_rolling) >= config.PDT_MAX_DAY_TRADES_5D:
+            print(
+                f"[{ts(now_et)}] PDT note: {len(entry_times_rolling)}/{config.PDT_MAX_DAY_TRADES_5D} "
+                f"entries in 5 days, equity=${float(equity):.2f} (guard={'ON' if config.ENFORCE_PDT_GUARD else 'OFF'})."
+            )
+
         blocked_day = _is_news_block_day(now_et)
         vix_value = _fetch_vix_level() if config.ENABLE_VIX_GUARD else None
         vix_blocked = False
         if config.ENABLE_VIX_GUARD:
             if vix_value is None:
-                # Fail-open on data fetch issues so missing VIX data does not halt all trading.
                 vix_blocked = False
                 if vix_block_notice != now_et.date().isoformat():
                     vix_block_notice = now_et.date().isoformat()
@@ -558,19 +566,16 @@ def main():
 
         if not pdt_allowed:
             print(
-                f"[{ts(now_et)}] PDT guard active: no new entries. "
+                f"[{ts(now_et)}] PDT broker flag: no new entries reported. "
                 f"equity={float(pdt_info.get('equity') or 0):.2f} "
-                f"daytrades_5d={pdt_info.get('daytrade_count')}/{config.PDT_MAX_DAY_TRADES_5D}"
-            )
-        elif local_trade_budget_hit:
-            print(
-                f"[{ts(now_et)}] PDT throttle active: {len(entry_times_rolling)}/{config.PDT_MAX_DAY_TRADES_5D} "
-                f"entries used in rolling 5 days while equity < {config.PDT_MIN_EQUITY:.0f}. No new entries."
+                f"daytrades_5d={pdt_info.get('daytrade_count')}/{config.PDT_MAX_DAY_TRADES_5D} "
+                f"(ENFORCE_PDT_GUARD={config.ENFORCE_PDT_GUARD})"
             )
 
         for signal in signals:
             now_et = datetime.now(tz)
-            # Daily loss limit circuit breaker
+
+            # --- Daily loss limit ---
             if daily_realized_loss_usd >= config.DAILY_LOSS_LIMIT_USD:
                 print(
                     f"[{ts(now_et)}] DAILY LOSS LIMIT hit: "
@@ -586,7 +591,9 @@ def main():
                     level="warning",
                     dedupe_key=f"daily-loss-{now_et.date().isoformat()}",
                 )
-                break  # exit the signals loop entirely
+                break
+
+            # --- Weekly loss limit ---
             if weekly_realized_loss_usd >= config.WEEKLY_LOSS_LIMIT_USD:
                 print(
                     f"[{ts(now_et)}] WEEKLY LOSS LIMIT hit: "
@@ -604,18 +611,20 @@ def main():
                 )
                 break
 
-            # Consecutive loss circuit breaker
-            if consecutive_losses >= config.CONSECUTIVE_LOSS_LIMIT:
+            # --- Consecutive loss circuit breaker (only if ENFORCE_PDT_GUARD is on) ---
+            if config.ENFORCE_PDT_GUARD and consecutive_losses >= config.CONSECUTIVE_LOSS_LIMIT:
                 print(
                     f"[{ts(now_et)}] {consecutive_losses} consecutive losses. "
                     f"Pausing new entries for the rest of the day."
                 )
                 break
 
-            if under_25k and len(entry_times_rolling) >= config.PDT_MAX_DAY_TRADES_5D:
+            # --- PDT guard (only blocks if ENFORCE_PDT_GUARD=True) ---
+            if local_trade_budget_hit:
                 break
-            if not pdt_allowed or local_trade_budget_hit:
+            if config.ENFORCE_PDT_GUARD and not pdt_allowed:
                 break
+
             ticker = signal["symbol"]
             direction = signal["direction"]
             if not is_at_or_after(now_et, config.NO_NEW_TRADES_BEFORE):
@@ -688,11 +697,12 @@ def main():
                     reduce_after_consecutive_losses=int(config.DRAWDOWN_REDUCE_AFTER_CONSEC_LOSSES),
                     drawdown_size_multiplier=float(config.DRAWDOWN_SIZE_MULTIPLIER),
                 )
-                qty = calculate_entry_qty(position_budget_usd, ask_price)
+                # qty is contracts; ask_price is per-share so multiply by 100 for cost per contract
+                qty = calculate_entry_qty(position_budget_usd, ask_price * 100)
                 if qty < 1:
-                    print(f"[{ts(now_et)}] {ticker}: skip (qty calc invalid).")
-                    time.sleep(config.RATE_LIMIT_SLEEP_SECONDS)
-                    continue
+                    # Fallback: if budget math still gives 0, force 1 contract
+                    qty = 1
+                    print(f"[{ts(now_et)}] {ticker}: qty forced to 1 (budget=${position_budget_usd:.2f} ask=${ask_price:.2f}).")
 
                 order = broker.place_option_limit_buy(option_symbol, qty, ask_price)
                 print(
@@ -700,13 +710,11 @@ def main():
                     f"{option_symbol} qty={qty} limit={ask_price:.2f} order_id={order.id}"
                 )
 
-                # Wait briefly then confirm the order filled
                 time.sleep(5)
                 filled_order = broker.get_order_status(order.id)
                 order_status = str(getattr(filled_order, "status", "")).lower()
 
                 if order_status not in ("filled", "partially_filled"):
-                    # Did not fill - cancel then try one market-buy fallback.
                     try:
                         broker.cancel_order(order.id)
                     except Exception:
@@ -772,6 +780,7 @@ def main():
                 print(f"[{ts(now_et)}] {ticker}: error during entry flow: {exc}")
                 time.sleep(config.RATE_LIMIT_SLEEP_SECONDS)
 
+        # --- Exit management ---
         option_positions = broker.get_open_option_positions()
         for pos in option_positions:
             now_et = datetime.now(tz)
@@ -822,19 +831,15 @@ def main():
                         }
                     )
 
-                    # Track realized loss for daily circuit breaker
-                    entry_price = float(meta.get("entry_price", getattr(pos, "avg_entry_price", 0) or 0))
-                    exit_price = float(getattr(pos, "current_price", 0) or 0)
-                    # Use plpc x original premium spent for realized-loss tracking.
                     premium_spent = entry_price * qty * 100
-                    trade_pnl_usd = premium_spent * plpc  # plpc is already a signed fraction
+                    trade_pnl_usd = premium_spent * plpc
 
                     if trade_pnl_usd < 0:
                         daily_realized_loss_usd += abs(trade_pnl_usd)
                         weekly_realized_loss_usd += abs(trade_pnl_usd)
                         consecutive_losses += 1
                     else:
-                        consecutive_losses = 0  # reset streak on a win
+                        consecutive_losses = 0
 
                     open_trade_meta.pop(symbol, None)
                     _save_runtime_state()
