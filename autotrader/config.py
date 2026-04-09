@@ -223,9 +223,11 @@ TARGET_DELTA_MAX = _env_float("TARGET_DELTA_MAX", 0.55)
 TARGET_DELTA_FALLBACK = _env_float("TARGET_DELTA_FALLBACK", 0.50)
 
 # --- Entry confirmation / index regime ---
-ENABLE_ENTRY_CONFIRMATION = _env_bool("ENABLE_ENTRY_CONFIRMATION", True)
+# Both disabled: confirmation candle blocks midday chop entries; index bias
+# filter drops signals on whipsaw days when SPY/QQQ EMAs conflict.
+ENABLE_ENTRY_CONFIRMATION = _env_bool("ENABLE_ENTRY_CONFIRMATION", False)
 ENTRY_CONFIRM_BARS = _env_int("ENTRY_CONFIRM_BARS", 3)
-ENABLE_INDEX_BIAS_FILTER = _env_bool("ENABLE_INDEX_BIAS_FILTER", True)
+ENABLE_INDEX_BIAS_FILTER = _env_bool("ENABLE_INDEX_BIAS_FILTER", False)
 INDEX_BIAS_TIMEFRAME = _env_str("INDEX_BIAS_TIMEFRAME", "5m")
 INDEX_BIAS_LOOKBACK = _env_int("INDEX_BIAS_LOOKBACK", 30)
 
@@ -257,4 +259,3 @@ ALERT_WEBHOOK_URL = os.getenv("ALERT_WEBHOOK_URL", "")
 
 ALPACA_PAPER_BASE_URL = "https://paper-api.alpaca.markets"
 ALPACA_DATA_BASE_URL = "https://data.alpaca.markets"
-
