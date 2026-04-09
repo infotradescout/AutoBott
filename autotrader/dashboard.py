@@ -29,6 +29,7 @@ HEADERS = {"APCA-API-KEY-ID": API_KEY or "", "APCA-API-SECRET-KEY": SECRET_KEY o
 TRADES_CSV = Path(config.TRADES_CSV_PATH)
 SCAN_LOG_CSV = Path(config.SCAN_LOG_CSV_PATH)
 EASTERN = pytz.timezone(config.EASTERN_TZ)
+CENTRAL = pytz.timezone(config.CENTRAL_TZ)
 _REVIEW_CACHE: dict[str, Any] = {"ts": None, "payload": None}
 
 app = Flask(__name__)
@@ -40,6 +41,12 @@ def healthz():
 
 def _now_et() -> datetime:
     return datetime.now(EASTERN)
+
+
+def _to_ct_label(dt: datetime | None) -> str:
+    if dt is None:
+        return ""
+    return dt.astimezone(CENTRAL).strftime("%Y-%m-%d %H:%M:%S %Z")
 
 
 def _extract_underlying(symbol: str) -> str:
@@ -427,7 +434,14 @@ def api_scanfails():
     try:
         rows = _read_csv_rows(SCAN_LOG_CSV, limit=200, reverse=True)
         fails = [r for r in rows if str(r.get("result", "")).lower() == "fail"]
-        return jsonify(fails[:20])
+        out: list[dict[str, Any]] = []
+        for row in fails[:20]:
+            ts_raw = str(row.get("timestamp", "") or "")
+            ts_dt = _parse_ts(ts_raw)
+            patched = dict(row)
+            patched["timestamp"] = _to_ct_label(ts_dt) or ts_raw
+            out.append(patched)
+        return jsonify(out)
     except Exception as exc:  # noqa: BLE001
         return jsonify({"error": str(exc)}), 500
 
@@ -452,7 +466,7 @@ def api_scansummary():
                 "pass_count": pass_count,
                 "fail_count": fail_count,
                 "top_reason": top_reason,
-                "last_scan": last_ts,
+                "last_scan": _to_ct_label(_parse_ts(str(last_ts))) or str(last_ts),
             }
         )
     except Exception as exc:  # noqa: BLE001
