@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import time
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 
 import pytz
 import yfinance as yf
@@ -24,7 +24,7 @@ from risk import (
     is_at_or_after,
     position_matches_ticker,
 )
-from scanner import initialize_scanner, run_observation_phase, run_scan
+from scanner import initialize_scanner, run_observation_phase, run_scan, set_catalyst_mode
 from state_store import load_bot_state, save_bot_state
 from trading_control import load_trading_control
 
@@ -142,6 +142,66 @@ def _parse_trade_meta_entry_time(meta: dict) -> datetime | None:
         return None
 
 
+def _parse_state_datetime(value: str | None) -> datetime | None:
+    if not value:
+        return None
+    try:
+        parsed = datetime.fromisoformat(value)
+        if parsed.tzinfo is None:
+            return pytz.timezone(config.EASTERN_TZ).localize(parsed)
+        return parsed.astimezone(pytz.timezone(config.EASTERN_TZ))
+    except Exception:
+        return None
+
+
+def _latest_5m_move_pct(data_client: AlpacaDataClient, symbol: str, now_et: datetime) -> float | None:
+    try:
+        bars = data_client.get_intraday_bars_since_open(symbol=symbol, now_et=now_et, limit=3)
+        if bars is None or bars.empty or len(bars) < 2:
+            return None
+        prev_close = float(bars["close"].iloc[-2])
+        last_close = float(bars["close"].iloc[-1])
+        if prev_close <= 0:
+            return None
+        return ((last_close - prev_close) / prev_close) * 100.0
+    except Exception:
+        return None
+
+
+def _detect_catalyst_event(
+    data_client: AlpacaDataClient,
+    now_et: datetime,
+    watchlist: list[str],
+) -> tuple[bool, str]:
+    idx_threshold = float(config.CATALYST_INDEX_5M_MOVE_PCT)
+    spy_move = _latest_5m_move_pct(data_client, "SPY", now_et)
+    qqq_move = _latest_5m_move_pct(data_client, "QQQ", now_et)
+    if spy_move is not None and qqq_move is not None and abs(spy_move) >= idx_threshold and abs(qqq_move) >= idx_threshold:
+        same_dir = (spy_move > 0 and qqq_move > 0) or (spy_move < 0 and qqq_move < 0)
+        if same_dir:
+            direction = "UP" if spy_move > 0 else "DOWN"
+            return True, f"{direction} shock: SPY {spy_move:+.2f}% / QQQ {qqq_move:+.2f}% (5m)"
+
+    breadth_symbols = list(dict.fromkeys((watchlist or [])[:20] + list(config.CORE_TICKERS)[:10]))
+    up = 0
+    down = 0
+    breadth_threshold = float(config.CATALYST_BREADTH_MOVE_PCT)
+    for symbol in breadth_symbols:
+        move = _latest_5m_move_pct(data_client, symbol, now_et)
+        if move is None:
+            continue
+        if move >= breadth_threshold:
+            up += 1
+        elif move <= -breadth_threshold:
+            down += 1
+    required = int(config.CATALYST_BREADTH_MIN_COUNT)
+    if up >= required:
+        return True, f"Breadth shock UP: {up} names >= +{breadth_threshold:.2f}% (5m)"
+    if down >= required:
+        return True, f"Breadth shock DOWN: {down} names <= -{breadth_threshold:.2f}% (5m)"
+    return False, ""
+
+
 def _build_scan_universe(data_client: AlpacaDataClient) -> list[str]:
     base = [str(sym).upper() for sym in config.TICKERS if str(sym).strip()]
     core = [str(sym).upper() for sym in config.CORE_TICKERS if str(sym).strip()]
@@ -206,8 +266,16 @@ def main():
     weekly_loss_key = str(state.get("weekly_loss_key") or _week_key(datetime.now(tz).date()))
     blocked_day_notice = state.get("blocked_day_notice")
     vix_block_notice = state.get("vix_block_notice")
+    catalyst_mode_active = bool(state.get("catalyst_mode_active", False))
+    catalyst_mode_reason = str(state.get("catalyst_mode_reason", "") or "")
+    catalyst_mode_until = _parse_state_datetime(state.get("catalyst_mode_until_iso"))
     next_heartbeat_at = 0.0
     manual_stop_latched = False
+    if catalyst_mode_until and datetime.now(tz) >= catalyst_mode_until:
+        catalyst_mode_active = False
+        catalyst_mode_reason = ""
+        catalyst_mode_until = None
+    set_catalyst_mode(catalyst_mode_active, catalyst_mode_reason)
 
     def _save_runtime_state() -> None:
         save_bot_state(
@@ -224,6 +292,9 @@ def main():
                 "weekly_loss_key": weekly_loss_key,
                 "blocked_day_notice": blocked_day_notice,
                 "vix_block_notice": vix_block_notice,
+                "catalyst_mode_active": catalyst_mode_active,
+                "catalyst_mode_reason": catalyst_mode_reason,
+                "catalyst_mode_until_iso": catalyst_mode_until.isoformat() if catalyst_mode_until else "",
             }
         )
 
@@ -371,6 +442,10 @@ def main():
             hot_tickers = []
             blocked_day_notice = None
             vix_block_notice = None
+            catalyst_mode_active = False
+            catalyst_mode_reason = ""
+            catalyst_mode_until = None
+            set_catalyst_mode(False, "")
 
         option_positions = broker.get_open_option_positions()
         open_count = len(option_positions)
@@ -389,6 +464,25 @@ def main():
         if hot_tickers:
             watchlist = hot_tickers + [s for s in watchlist if s not in hot_tickers]
         print(f"[{ts(now_et)}] Running full-universe scan on {len(watchlist)} tickers.")
+
+        if catalyst_mode_active and catalyst_mode_until and now_et >= catalyst_mode_until:
+            catalyst_mode_active = False
+            catalyst_mode_reason = ""
+            catalyst_mode_until = None
+            set_catalyst_mode(False, "")
+            print(f"[{ts(now_et)}] Catalyst mode expired. Returning to normal filters.")
+
+        if config.ENABLE_CATALYST_MODE and not catalyst_mode_active:
+            triggered, reason = _detect_catalyst_event(data_client=data_client, now_et=now_et, watchlist=watchlist)
+            if triggered:
+                catalyst_mode_active = True
+                catalyst_mode_reason = reason
+                catalyst_mode_until = now_et + timedelta(minutes=int(config.CATALYST_WINDOW_MINUTES))
+                set_catalyst_mode(True, reason)
+                print(
+                    f"[{ts(now_et)}] CATALYST MODE ON ({reason}). "
+                    f"Relaxed filters active until {ts(catalyst_mode_until)}."
+                )
 
         if (
             config.OBSERVATION_ENABLED

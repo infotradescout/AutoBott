@@ -15,6 +15,7 @@ from flask import Flask, jsonify, render_template_string, request
 
 import config
 from env_config import get_required_env, load_runtime_env
+from state_store import load_bot_state
 from trading_control import load_trading_control, set_manual_stop
 
 load_runtime_env()
@@ -496,6 +497,10 @@ def api_status():
         entry_open = _clock_hhmm_to_minutes(config.NO_NEW_TRADES_BEFORE)
         entry_close = _clock_hhmm_to_minutes(config.NO_NEW_TRADES_AFTER)
         entry_window_open = bool(clock_body.get("is_open", False)) and (entry_open <= now_minutes < entry_close)
+        runtime_state = load_bot_state()
+        catalyst_mode_active = bool(runtime_state.get("catalyst_mode_active", False))
+        catalyst_mode_reason = str(runtime_state.get("catalyst_mode_reason", "") or "")
+        catalyst_mode_until = str(runtime_state.get("catalyst_mode_until_iso", "") or "")
         wins = 0
         losses = 0
         total_plpc = 0.0
@@ -513,6 +518,9 @@ def api_status():
                 "trading_paused": bool(load_trading_control().get("manual_stop", False)),
                 "entry_window_open": entry_window_open,
                 "entry_window_label": f"{config.NO_NEW_TRADES_BEFORE}-{config.NO_NEW_TRADES_AFTER} ET",
+                "catalyst_mode_active": catalyst_mode_active,
+                "catalyst_mode_reason": catalyst_mode_reason,
+                "catalyst_mode_until": catalyst_mode_until,
                 "last_updated": _now_et().strftime("%Y-%m-%d %H:%M:%S ET"),
                 "trades_today": len(today_rows),
                 "wins_today": wins,
@@ -710,7 +718,7 @@ def home():
       <div class="card strong"><div class="label">Equity</div><div id="equity" class="num">--</div><div class="kpi-sub">Portfolio net liquidation</div></div>
       <div class="card strong"><div class="label">Buying Power</div><div id="buying-power" class="num">--</div><div class="kpi-sub">Available for entries</div></div>
       <div class="card strong"><div class="label">Today P&L</div><div id="daily-pnl" class="num">--</div><div class="kpi-sub">Sum of closed trade %</div></div>
-      <div class="card strong"><div class="label">Market Status</div><div id="market-status" class="num">--</div><div id="entry-window-status" class="kpi-sub">Entry Window: --</div></div>
+      <div class="card strong"><div class="label">Market Status</div><div id="market-status" class="num">--</div><div id="entry-window-status" class="kpi-sub">Entry Window: --</div><div id="catalyst-mode-status" class="kpi-sub">Catalyst Mode: --</div></div>
     </div>
 
     <div class="grid3 section">
@@ -1104,6 +1112,20 @@ def home():
         const entryState = status.error ? "--" : (status.entry_window_open ? "OPEN" : "CLOSED");
         entryEl.textContent = `Entry Window: ${entryState} (${windowLabel})`;
         entryEl.style.color = status.error ? "var(--muted)" : (status.entry_window_open ? "var(--green)" : "var(--yellow)");
+      }
+      const catalystEl = document.getElementById("catalyst-mode-status");
+      if (catalystEl) {
+        if (status.error) {
+          catalystEl.textContent = "Catalyst Mode: --";
+          catalystEl.style.color = "var(--muted)";
+        } else if (status.catalyst_mode_active) {
+          const reason = String(status.catalyst_mode_reason || "shock detected");
+          catalystEl.textContent = `Catalyst Mode: ON (${reason})`;
+          catalystEl.style.color = "var(--green)";
+        } else {
+          catalystEl.textContent = "Catalyst Mode: OFF";
+          catalystEl.style.color = "var(--muted)";
+        }
       }
       const paused = !control.error && Boolean(control.manual_stop);
       const controlEl = document.getElementById("trading-control-status");

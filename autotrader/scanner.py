@@ -17,6 +17,8 @@ from data import AlpacaDataClient
 from risk import is_at_or_after
 
 _DEFAULT_SCANNER: "IntradayScanner | None" = None
+_CATALYST_MODE_ACTIVE = False
+_CATALYST_MODE_REASON = ""
 SCAN_LOG_PATH = Path(config.SCAN_LOG_CSV_PATH)
 SCAN_LOG_COLUMNS = [
     "timestamp",
@@ -105,6 +107,12 @@ def calculate_rvol(symbol: str, today_volume: float, daily_bars_df: pd.DataFrame
 
 def _scan_failure(reason: str) -> dict[str, Any]:
     return {"failed": True, "reason": reason}
+
+
+def set_catalyst_mode(active: bool, reason: str = "") -> None:
+    global _CATALYST_MODE_ACTIVE, _CATALYST_MODE_REASON
+    _CATALYST_MODE_ACTIVE = bool(active)
+    _CATALYST_MODE_REASON = reason or ""
 
 
 def _historical_regime_score(daily_bars_df: pd.DataFrame) -> tuple[float, str]:
@@ -355,7 +363,8 @@ def _scan_ticker_details(
     )
     if math.isnan(rvol):
         return _scan_failure("rvol unavailable")
-    if rvol < config.RVOL_MIN:
+    effective_rvol_min = float(config.CATALYST_RELAXED_RVOL_MIN) if _CATALYST_MODE_ACTIVE else float(config.RVOL_MIN)
+    if rvol < effective_rvol_min:
         return _scan_failure(f"RVOL {rvol:.1f}x (too low)")
 
     atr = calculate_atr(symbol=symbol, daily_bars_df=daily_bars_df, period=14)
@@ -423,14 +432,17 @@ def _scan_ticker_details(
         if rsi_period >= 2:
             rsi = calculate_rsi(closes, period=rsi_period)
     if math.isnan(rsi):
-        if is_at_or_after(now_et, config.RSI_STRICT_AFTER_TIME):
+        if is_at_or_after(now_et, config.RSI_STRICT_AFTER_TIME) and not (
+            _CATALYST_MODE_ACTIVE and config.CATALYST_DISABLE_RSI
+        ):
             return _scan_failure("RSI unavailable")
-        # Pre-strict window: allow signal flow if all other filters pass.
+        # Pre-strict window or catalyst mode: allow signal flow if all other filters pass.
         rsi = 50.0
-    if direction == "call" and not (50 <= rsi <= 72):
-        return _scan_failure(f"RSI {rsi:.0f} outside call range")
-    if direction == "put" and not (28 <= rsi <= 50):
-        return _scan_failure(f"RSI {rsi:.0f} outside put range")
+    if not (_CATALYST_MODE_ACTIVE and config.CATALYST_DISABLE_RSI):
+        if direction == "call" and not (50 <= rsi <= 72):
+            return _scan_failure(f"RSI {rsi:.0f} outside call range")
+        if direction == "put" and not (28 <= rsi <= 50):
+            return _scan_failure(f"RSI {rsi:.0f} outside put range")
 
     expiry_gte = _add_trading_days(now_et.date(), config.MIN_DTE_TRADING_DAYS)
     expiry_lte = _add_trading_days(now_et.date(), config.MAX_DTE_TRADING_DAYS)
@@ -444,14 +456,24 @@ def _scan_ticker_details(
     except Exception as exc:  # noqa: BLE001
         return _scan_failure(f"IV data unavailable: {exc}")
     if not chain:
-        return _scan_failure("no option chain for IV check")
+        if _CATALYST_MODE_ACTIVE and config.CATALYST_ALLOW_IV_FALLBACK:
+            iv_value, iv_rank = None, 50.0
+        else:
+            return _scan_failure("no option chain for IV check")
 
-    iv_value, iv_rank = _calculate_iv_rank_from_contracts(
-        chain, price=price, data_client=data_client, symbol=symbol
-    )
+    if chain:
+        iv_value, iv_rank = _calculate_iv_rank_from_contracts(
+            chain, price=price, data_client=data_client, symbol=symbol
+        )
     if iv_rank is None:
-        return _scan_failure("IV rank unavailable")
-    if iv_rank > config.IV_RANK_MAX:
+        if _CATALYST_MODE_ACTIVE and config.CATALYST_ALLOW_IV_FALLBACK:
+            iv_rank = 50.0
+        else:
+            return _scan_failure("IV rank unavailable")
+    effective_iv_rank_max = (
+        float(config.CATALYST_RELAXED_IV_RANK_MAX) if _CATALYST_MODE_ACTIVE else float(config.IV_RANK_MAX)
+    )
+    if iv_rank > effective_iv_rank_max:
         return _scan_failure(f"IV Rank {iv_rank:.0f}% too high")
     if iv_rank < config.IV_RANK_MIN:
         return _scan_failure(f"IV Rank {iv_rank:.0f}% too low")
@@ -479,8 +501,11 @@ def _scan_ticker_details(
         iv_rank=float(iv_rank),
         regime_score=float(regime_score),
     )
-    if config.ENABLE_SIGNAL_SCORING and signal_score < float(config.MIN_SIGNAL_SCORE):
-        return _scan_failure(f"signal score {signal_score:.2f} below {config.MIN_SIGNAL_SCORE:.2f}")
+    effective_min_signal_score = (
+        float(config.CATALYST_RELAXED_MIN_SIGNAL_SCORE) if _CATALYST_MODE_ACTIVE else float(config.MIN_SIGNAL_SCORE)
+    )
+    if config.ENABLE_SIGNAL_SCORING and signal_score < effective_min_signal_score:
+        return _scan_failure(f"signal score {signal_score:.2f} below {effective_min_signal_score:.2f}")
 
     above_below = "Above VWAP" if direction == "call" else "Below VWAP"
     return {
@@ -503,7 +528,7 @@ def _scan_ticker_details(
             f"RVOL {rvol:.1f}x | {above_below} | EMA {'bullish' if direction == 'call' else 'bearish'} | "
             f"ROC {roc:+.2f}% | IVR {iv_rank:.0f}% | Regime {regime_score:.2f} | "
             f"Flow {(flow_score if flow_score is not None else 0):+.2f} | Score {signal_score:.2f}"
-        ),
+        ) + (f" | Catalyst {_CATALYST_MODE_REASON}" if _CATALYST_MODE_ACTIVE and _CATALYST_MODE_REASON else ""),
         "regime_reason": regime_reason,
     }
 
