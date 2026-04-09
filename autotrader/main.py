@@ -23,8 +23,9 @@ from risk import (
     is_at_or_after,
     position_matches_ticker,
 )
-from scanner import build_watchlist, initialize_scanner, run_scan, should_build_watchlist
+from scanner import initialize_scanner, run_scan
 from state_store import load_bot_state, save_bot_state
+from trading_control import load_trading_control
 
 
 def ts(now_et: datetime | None = None) -> str:
@@ -110,6 +111,25 @@ def _is_news_block_day(now_et: datetime) -> bool:
     return now_et.date().isoformat() in set(config.NEWS_BLOCK_DATES_ET)
 
 
+def _flatten_positions_for_killswitch(broker: AlpacaBroker, now_et: datetime, *, label: str = "KILLSWITCH") -> None:
+    option_positions = broker.get_open_option_positions()
+    for pos in option_positions:
+        symbol = str(getattr(pos, "symbol", ""))
+        qty = position_qty_as_int(getattr(pos, "qty", 0))
+        if qty <= 0:
+            continue
+        try:
+            broker.close_option_market(symbol, qty)
+            print(f"[{ts(now_et)}] {label} CLOSE {symbol} qty={qty}")
+        except Exception as exc:  # noqa: BLE001
+            print(f"[{ts(now_et)}] {label} close error for {symbol}: {exc}")
+        time.sleep(config.RATE_LIMIT_SLEEP_SECONDS)
+    try:
+        broker.cancel_all_open_orders()
+    except Exception as exc:  # noqa: BLE001
+        print(f"[{ts(now_et)}] {label} cancel orders error: {exc}")
+
+
 def main():
     api_key = get_required_env("ALPACA_API_KEY")
     secret_key = get_required_env("ALPACA_SECRET_KEY")
@@ -122,8 +142,7 @@ def main():
     alerts = AlertManager()
     state = load_bot_state()
     open_trade_meta: dict[str, dict] = dict(state.get("open_trade_meta") or {})
-    watchlist: list[str] = list(state.get("watchlist") or [])
-    watchlist_built = bool(state.get("watchlist_built", False))
+    watchlist: list[str] = []
     entry_times_rolling: list[datetime] = [
         dt
         for dt in (_parse_iso_datetime(item) for item in (state.get("entry_times_rolling") or []))
@@ -137,13 +156,13 @@ def main():
     weekly_loss_key = str(state.get("weekly_loss_key") or _week_key(datetime.now(tz).date()))
     blocked_day_notice = state.get("blocked_day_notice")
     next_heartbeat_at = 0.0
+    manual_stop_latched = False
 
     def _save_runtime_state() -> None:
         save_bot_state(
             {
                 "open_trade_meta": open_trade_meta,
                 "watchlist": watchlist,
-                "watchlist_built": watchlist_built,
                 "entry_times_rolling": [item.isoformat() for item in entry_times_rolling],
                 "daily_realized_loss_usd": round(daily_realized_loss_usd, 6),
                 "weekly_realized_loss_usd": round(weekly_realized_loss_usd, 6),
@@ -163,6 +182,33 @@ def main():
     )
 
     while True:
+        control_state = load_trading_control()
+        manual_stop = bool(control_state.get("manual_stop", False))
+        if manual_stop:
+            now_et = datetime.now(tz)
+            now_ct = datetime.now(pytz.timezone(config.CENTRAL_TZ))
+            if not manual_stop_latched:
+                reason = str(control_state.get("reason", "") or "manual_stop")
+                print(f"[{ts(now_et)} | {ts_ct(now_ct)}] KILLSWITCH ACTIVE ({reason}). Waiting for manual start.")
+                alerts.send(
+                    "killswitch_active",
+                    f"Kill-switch active. Trading paused until manual start. reason={reason}",
+                    level="warning",
+                    dedupe_key="killswitch-active",
+                )
+                manual_stop_latched = True
+            time.sleep(max(5, int(config.MANUAL_PAUSE_SLEEP_SECONDS)))
+            continue
+        if manual_stop_latched:
+            now_et = datetime.now(tz)
+            now_ct = datetime.now(pytz.timezone(config.CENTRAL_TZ))
+            print(f"[{ts(now_et)} | {ts_ct(now_ct)}] KILLSWITCH CLEARED. Auto mode re-enabled.")
+            alerts.send(
+                "killswitch_cleared",
+                "Kill-switch cleared. Trading auto mode re-enabled.",
+                dedupe_key=f"killswitch-cleared-{now_et.date().isoformat()}",
+            )
+            manual_stop_latched = False
         clock = broker.get_clock()
         now_et = datetime.now(tz)
         now_ct = datetime.now(pytz.timezone(config.CENTRAL_TZ))
@@ -199,6 +245,34 @@ def main():
     while True:
         now_et = datetime.now(tz)
         now_ct = datetime.now(pytz.timezone(config.CENTRAL_TZ))
+        control_state = load_trading_control()
+        manual_stop = bool(control_state.get("manual_stop", False))
+        if manual_stop:
+            if not manual_stop_latched:
+                reason = str(control_state.get("reason", "") or "manual_stop")
+                print(
+                    f"[{ts(now_et)} | {ts_ct(now_ct)}] KILLSWITCH ACTIVE ({reason}). "
+                    "Flattening positions and pausing trading."
+                )
+                alerts.send(
+                    "killswitch_active",
+                    f"Kill-switch active in live loop. Flattening positions. reason={reason}",
+                    level="warning",
+                    dedupe_key=f"killswitch-live-{now_et.date().isoformat()}",
+                )
+                _flatten_positions_for_killswitch(broker, now_et, label="KILLSWITCH")
+                manual_stop_latched = True
+                _save_runtime_state()
+            time.sleep(max(5, int(config.MANUAL_PAUSE_SLEEP_SECONDS)))
+            continue
+        if manual_stop_latched:
+            print(f"[{ts(now_et)} | {ts_ct(now_ct)}] KILLSWITCH CLEARED. Manual start acknowledged.")
+            alerts.send(
+                "killswitch_cleared",
+                "Kill-switch cleared. Trading resumed.",
+                dedupe_key=f"killswitch-resume-{now_et.date().isoformat()}",
+            )
+            manual_stop_latched = False
         week_key_now = _week_key(now_et.date())
         if week_key_now != weekly_loss_key:
             weekly_loss_key = week_key_now
@@ -232,7 +306,6 @@ def main():
             daily_realized_loss_usd = 0.0
             consecutive_losses = 0
             loss_counters_day = now_et.date()
-            watchlist_built = False
             watchlist = []
             blocked_day_notice = None
 
@@ -249,13 +322,8 @@ def main():
             )
             next_heartbeat_at = time.time() + max(30, int(config.HEARTBEAT_SECONDS))
 
-        if not watchlist_built:
-            if should_build_watchlist(now_et):
-                watchlist = build_watchlist()
-                watchlist_built = True
-                print(f"[{ts(now_et)}] Morning watchlist built with {len(watchlist)} symbols: {watchlist}")
-            else:
-                print(f"[{ts(now_et)}] Waiting for {config.SCAN_MORNING_TIME} ET to build watchlist.")
+        watchlist = list(dict.fromkeys([str(sym).upper() for sym in config.TICKERS if str(sym).strip()]))
+        print(f"[{ts(now_et)}] Running full-universe scan on {len(watchlist)} tickers.")
 
         pdt_allowed, pdt_info = broker.pdt_allows_new_day_trade()
         entry_times_rolling = _prune_recent_entries(entry_times_rolling, now_et, days=5)
@@ -278,7 +346,7 @@ def main():
                 )
             signals = []
         else:
-            signals = run_scan(watchlist) if watchlist_built and watchlist else []
+            signals = run_scan(watchlist) if watchlist else []
 
         if not pdt_allowed:
             print(

@@ -11,10 +11,11 @@ from typing import Any
 
 import pytz
 import requests
-from flask import Flask, jsonify, render_template_string
+from flask import Flask, jsonify, render_template_string, request
 
 import config
 from env_config import get_required_env, load_runtime_env
+from trading_control import load_trading_control, set_manual_stop
 
 load_runtime_env()
 
@@ -438,11 +439,63 @@ def api_status():
         return jsonify(
             {
                 "market_open": bool(clock_body.get("is_open", False)),
+                "trading_paused": bool(load_trading_control().get("manual_stop", False)),
                 "last_updated": _now_et().strftime("%Y-%m-%d %H:%M:%S ET"),
                 "trades_today": len(today_rows),
                 "wins_today": wins,
                 "losses_today": losses,
                 "daily_pnl_pct": round(total_plpc, 4),
+            }
+        )
+    except Exception as exc:  # noqa: BLE001
+        return jsonify({"error": str(exc)}), 500
+
+
+@app.get("/api/trading-control")
+def api_trading_control():
+    try:
+        state = load_trading_control()
+        return jsonify(
+            {
+                "manual_stop": bool(state.get("manual_stop", False)),
+                "updated_at_et": str(state.get("updated_at_et", "")),
+                "reason": str(state.get("reason", "")),
+            }
+        )
+    except Exception as exc:  # noqa: BLE001
+        return jsonify({"error": str(exc)}), 500
+
+
+@app.post("/api/trading-control/stop")
+def api_trading_stop():
+    try:
+        payload = request.get_json(silent=True) or {}
+        reason = str(payload.get("reason", "") or "manual_stop_dashboard")
+        state = set_manual_stop(True, reason=reason)
+        return jsonify(
+            {
+                "ok": True,
+                "manual_stop": bool(state.get("manual_stop", False)),
+                "updated_at_et": str(state.get("updated_at_et", "")),
+                "reason": str(state.get("reason", "")),
+            }
+        )
+    except Exception as exc:  # noqa: BLE001
+        return jsonify({"error": str(exc)}), 500
+
+
+@app.post("/api/trading-control/start")
+def api_trading_start():
+    try:
+        payload = request.get_json(silent=True) or {}
+        reason = str(payload.get("reason", "") or "manual_start_dashboard")
+        state = set_manual_stop(False, reason=reason)
+        return jsonify(
+            {
+                "ok": True,
+                "manual_stop": bool(state.get("manual_stop", False)),
+                "updated_at_et": str(state.get("updated_at_et", "")),
+                "reason": str(state.get("reason", "")),
             }
         )
     except Exception as exc:  # noqa: BLE001
@@ -507,6 +560,11 @@ def home():
     .header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 14px; padding: 8px 2px; }
     .title { font-size: 24px; font-weight: 750; letter-spacing: 0.2px; }
     .paper { color: #111; background: linear-gradient(180deg, #ffd773 0%, #f8b739 100%); padding: 5px 10px; border-radius: 999px; font-size: 12px; font-weight: 800; }
+    .ctrl { display:flex; gap:8px; align-items:center; flex-wrap:wrap; }
+    .ctrl-btn { border: 1px solid var(--border); border-radius: 10px; padding: 8px 10px; font-weight: 700; cursor: pointer; color: var(--text); background: rgba(127, 156, 191, 0.15); }
+    .ctrl-btn.stop { background: rgba(255, 78, 87, 0.2); border-color: rgba(255, 78, 87, 0.45); }
+    .ctrl-btn.start { background: rgba(29, 215, 95, 0.2); border-color: rgba(29, 215, 95, 0.45); }
+    .ctrl-state { font-size: 13px; color: var(--muted); }
     .muted { color: var(--muted); }
     .grid4 { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 10px; }
     .grid3 { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; }
@@ -564,6 +622,15 @@ def home():
         <div class="muted">Last updated: <span id="last-updated">--</span> | Auto-refresh: 30s</div>
       </div>
       <div class="paper">{{ "PAPER MODE" if paper else "LIVE MODE" }}</div>
+    </div>
+
+    <div class="card section">
+      <h3>TRADING CONTROL</h3>
+      <div class="ctrl">
+        <button class="ctrl-btn stop" onclick="setTradingControl('stop')">STOP TRADING</button>
+        <button class="ctrl-btn start" onclick="setTradingControl('start')">START TRADING</button>
+        <span id="trading-control-status" class="ctrl-state">Control: --</span>
+      </div>
     </div>
 
     <div class="grid4">
@@ -901,14 +968,35 @@ def home():
       }
     }
 
+    async function setTradingControl(action) {
+      const endpoint = action === "stop" ? "/api/trading-control/stop" : "/api/trading-control/start";
+      try {
+        const res = await fetch(endpoint, {
+          method: "POST",
+          headers: {"Content-Type": "application/json"},
+          body: JSON.stringify({reason: `dashboard_${action}`}),
+        });
+        const body = await res.json();
+        if (!res.ok || body.error) {
+          alert(`Trading control failed: ${body.error || "request failed"}`);
+          return;
+        }
+      } catch {
+        alert("Trading control request failed");
+        return;
+      }
+      await refresh();
+    }
+
     async function refresh() {
-      const [account, positions, trades, scanlog, status, review] = await Promise.all([
+      const [account, positions, trades, scanlog, status, review, control] = await Promise.all([
         fetchJson("/api/account"),
         fetchJson("/api/positions"),
         fetchJson("/api/trades"),
         fetchJson("/api/scanlog"),
         fetchJson("/api/status"),
         fetchJson("/api/daily-review"),
+        fetchJson("/api/trading-control"),
       ]);
 
       document.getElementById("last-updated").textContent = new Date().toLocaleTimeString();
@@ -923,6 +1011,13 @@ def home():
       const market = status.error ? "—" : (status.market_open ? "OPEN ●" : "CLOSED ○");
       document.getElementById("market-status").textContent = market;
       document.getElementById("market-status").className = `num ${status.error ? "" : (status.market_open ? "pnl-pos" : "pnl-neg")}`;
+      const paused = !control.error && Boolean(control.manual_stop);
+      const controlEl = document.getElementById("trading-control-status");
+      if (controlEl) {
+        const when = !control.error ? String(control.updated_at_et || "") : "";
+        controlEl.textContent = paused ? `Control: PAUSED (${when || "manual"})` : "Control: AUTO";
+        controlEl.style.color = paused ? "var(--red)" : "var(--green)";
+      }
 
       renderPositions(positions.error ? [] : positions);
       renderTrades(trades.error ? [] : trades);
