@@ -186,7 +186,14 @@ def select_atm_option_contract_with_reason(
         scored.append(contract)
 
     if not scored:
-        return None, "no eligible contracts after 0DTE/quality checks"
+        # Fail-open fallback: if stricter 0DTE quality checks empty the pool,
+        # fall back to the already-liquidity-filtered set so entries can proceed.
+        scored = list(filtered)
+        for contract in scored:
+            strike_gap = abs(float(contract["strike_price"]) - underlying_price)
+            contract["_select_score"] = strike_gap * 0.05
+        if not scored:
+            return None, "no eligible contracts after 0DTE/quality checks"
 
     scored.sort(key=lambda c: (float(c.get("_select_score", 99.0)), c.get("expiration_date", "")))
 
