@@ -12,6 +12,8 @@ import yfinance as yf
 
 import config
 
+_EARNINGS_SKIP_SYMBOLS = {str(s).upper() for s in config.EARNINGS_SKIP_SYMBOLS}
+
 
 class AlpacaDataClient:
     def __init__(self, api_key: str, secret_key: str, paper: bool = True):
@@ -255,6 +257,8 @@ class AlpacaDataClient:
         Uses yfinance as the data source - free, no API key required.
         Wraps in try/except so a lookup failure never blocks a trade.
         """
+        if str(symbol).upper() in _EARNINGS_SKIP_SYMBOLS:
+            return False
         try:
             import yfinance as yf
 
