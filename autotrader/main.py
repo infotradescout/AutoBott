@@ -111,6 +111,21 @@ def _is_news_block_day(now_et: datetime) -> bool:
     return now_et.date().isoformat() in set(config.NEWS_BLOCK_DATES_ET)
 
 
+def _build_scan_universe(data_client: AlpacaDataClient) -> list[str]:
+    base = [str(sym).upper() for sym in config.TICKERS if str(sym).strip()]
+    combined = list(base)
+    if config.AUTO_EXPAND_UNIVERSE_WITH_MOVERS:
+        try:
+            gainers, losers = data_client.get_top_movers(top=int(config.UNIVERSE_MOVER_TOP))
+            combined.extend(str(sym).upper() for sym in gainers if str(sym).strip())
+            combined.extend(str(sym).upper() for sym in losers if str(sym).strip())
+        except Exception as exc:  # noqa: BLE001
+            print(f"[{ts()}] Universe expansion skipped (movers unavailable): {exc}")
+    deduped = list(dict.fromkeys(combined))
+    max_tickers = max(1, int(config.UNIVERSE_MAX_TICKERS))
+    return deduped[:max_tickers]
+
+
 def _flatten_positions_for_killswitch(broker: AlpacaBroker, now_et: datetime, *, label: str = "KILLSWITCH") -> None:
     option_positions = broker.get_open_option_positions()
     for pos in option_positions:
@@ -322,7 +337,7 @@ def main():
             )
             next_heartbeat_at = time.time() + max(30, int(config.HEARTBEAT_SECONDS))
 
-        watchlist = list(dict.fromkeys([str(sym).upper() for sym in config.TICKERS if str(sym).strip()]))
+        watchlist = _build_scan_universe(data_client)
         print(f"[{ts(now_et)}] Running full-universe scan on {len(watchlist)} tickers.")
 
         pdt_allowed, pdt_info = broker.pdt_allows_new_day_trade()
