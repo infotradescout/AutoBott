@@ -380,9 +380,11 @@ def _scan_ticker_details(
     if distance_pct <= config.VWAP_NEUTRAL_BAND_PCT:
         return _scan_failure(f"price near VWAP ({distance_pct:.2f}%)")
 
+    # Relaxed VWAP direction: require 2-of-3 recent bars on the same side.
+    # Previously required all 3, which was too strict on whipsaw/high-vol days.
     last3 = closes.tail(3)
-    above_vwap = price > vwap and (last3 > vwap).all()
-    below_vwap = price < vwap and (last3 < vwap).all()
+    above_vwap = price > vwap and (last3 > vwap).sum() >= 2
+    below_vwap = price < vwap and (last3 < vwap).sum() >= 2
     if not above_vwap and not below_vwap:
         return _scan_failure("VWAP direction not clean")
     direction = "call" if above_vwap else "put"
@@ -414,10 +416,12 @@ def _scan_ticker_details(
 
     ema9 = closes.ewm(span=9, adjust=False).mean()
     ema21 = closes.ewm(span=21, adjust=False).mean()
-    if len(ema9) < 4 or len(ema21) < 4:
+    if len(ema9) < 3 or len(ema21) < 3:
         return _scan_failure("EMA unavailable")
-    ema_bull = ema9.iloc[-1] > ema21.iloc[-1] and ema9.iloc[-1] > ema9.iloc[-4] and ema21.iloc[-1] > ema21.iloc[-4]
-    ema_bear = ema9.iloc[-1] < ema21.iloc[-1] and ema9.iloc[-1] < ema9.iloc[-4] and ema21.iloc[-1] < ema21.iloc[-4]
+    # Reduced EMA slope lookback from 4 bars to 2 bars.
+    # On explosive gap/momentum moves the trend fires within 1-2 bars, not 4.
+    ema_bull = ema9.iloc[-1] > ema21.iloc[-1] and ema9.iloc[-1] > ema9.iloc[-2] and ema21.iloc[-1] > ema21.iloc[-2]
+    ema_bear = ema9.iloc[-1] < ema21.iloc[-1] and ema9.iloc[-1] < ema9.iloc[-2] and ema21.iloc[-1] < ema21.iloc[-2]
     if direction == "call" and not ema_bull:
         return _scan_failure("EMA not bullish")
     if direction == "put" and not ema_bear:
