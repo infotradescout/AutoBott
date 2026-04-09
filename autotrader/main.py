@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import time
 from datetime import date, datetime, timedelta
+import re
 
 import pytz
 import yfinance as yf
@@ -165,6 +166,20 @@ def _latest_5m_move_pct(data_client: AlpacaDataClient, symbol: str, now_et: date
         return None
 
 
+_OPTION_SYMBOL_RE = re.compile(r"^([A-Z]+)\d{6}([CP])\d{8}$")
+
+
+def _parse_option_symbol(option_symbol: str) -> tuple[str, str]:
+    symbol = str(option_symbol or "").upper().strip()
+    match = _OPTION_SYMBOL_RE.match(symbol)
+    if not match:
+        return "", ""
+    ticker = match.group(1)
+    cp = match.group(2)
+    direction = "call" if cp == "C" else "put"
+    return ticker, direction
+
+
 def _index_regime_bias(data_client: AlpacaDataClient, now_et: datetime) -> str:
     if not config.ENABLE_INDEX_BIAS_FILTER:
         return "both"
@@ -220,6 +235,40 @@ def _entry_confirmation_passes(
         return last_close < prev_close
     except Exception:
         return False
+
+
+def _hydrate_missing_position_meta(open_trade_meta: dict[str, dict], option_positions: list, now_et: datetime) -> int:
+    hydrated = 0
+    for pos in option_positions:
+        symbol = str(getattr(pos, "symbol", "") or "")
+        if not symbol or symbol in open_trade_meta:
+            continue
+        qty = position_qty_as_int(getattr(pos, "qty", 0))
+        if qty <= 0:
+            continue
+        underlying = str(getattr(pos, "underlying_symbol", "") or "").upper()
+        ticker, direction = _parse_option_symbol(symbol)
+        if not ticker:
+            ticker = underlying
+        if not direction:
+            direction = "call" if "C" in symbol else "put" if "P" in symbol else ""
+        entry_price = float(getattr(pos, "avg_entry_price", 0) or 0)
+        open_trade_meta[symbol] = {
+            "timestamp": ts(now_et),
+            "entry_time_iso": now_et.isoformat(),
+            "ticker": ticker,
+            "direction": direction,
+            "option_symbol": symbol,
+            "strike": "",
+            "expiry": "",
+            "qty": qty,
+            "entry_price": entry_price,
+            "stop_floor_plpc": -float(config.STOP_LOSS_PCT),
+            "max_plpc": 0.0,
+            "inferred": True,
+        }
+        hydrated += 1
+    return hydrated
 
 
 def _detect_catalyst_event(
@@ -519,6 +568,10 @@ def main():
             set_catalyst_mode(False, "")
 
         option_positions = broker.get_open_option_positions()
+        hydrated_count = _hydrate_missing_position_meta(open_trade_meta, option_positions, now_et)
+        if hydrated_count > 0:
+            print(f"[{ts(now_et)}] Hydrated {hydrated_count} externally-opened position(s) into runtime state.")
+            _save_runtime_state()
         open_count = len(option_positions)
         if alerts.enabled() and time.time() >= next_heartbeat_at:
             alerts.send(
@@ -898,6 +951,10 @@ def main():
 
         # --- Exit management ---
         option_positions = broker.get_open_option_positions()
+        hydrated_count = _hydrate_missing_position_meta(open_trade_meta, option_positions, now_et)
+        if hydrated_count > 0:
+            print(f"[{ts(now_et)}] Hydrated {hydrated_count} externally-opened position(s) before exit management.")
+            _save_runtime_state()
         for pos in option_positions:
             now_et = datetime.now(tz)
             symbol = str(getattr(pos, "symbol", ""))

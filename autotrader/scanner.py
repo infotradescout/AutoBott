@@ -405,12 +405,15 @@ def _scan_ticker_details(
             return _scan_failure(f"order flow weak for put ({flow_score:+.2f})")
 
     roc = calculate_roc(closes, period=config.ROC_PERIOD)
-    if math.isnan(roc):
-        return _scan_failure("ROC unavailable")
-    if direction == "call" and roc <= config.ROC_BULL_MIN:
-        return _scan_failure(f"ROC {roc:+.2f}% too weak for call")
-    if direction == "put" and roc >= config.ROC_BEAR_MAX:
-        return _scan_failure(f"ROC {roc:+.2f}% too weak for put")
+    if config.ENABLE_ROC_FILTER:
+        if math.isnan(roc):
+            return _scan_failure("ROC unavailable")
+        if direction == "call" and roc <= config.ROC_BULL_MIN:
+            return _scan_failure(f"ROC {roc:+.2f}% too weak for call")
+        if direction == "put" and roc >= config.ROC_BEAR_MAX:
+            return _scan_failure(f"ROC {roc:+.2f}% too weak for put")
+    elif math.isnan(roc):
+        roc = 0.0
 
     ema9 = closes.ewm(span=9, adjust=False).mean()
     ema21 = closes.ewm(span=21, adjust=False).mean()
