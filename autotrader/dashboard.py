@@ -421,9 +421,19 @@ def api_trades():
 @app.get("/api/scanlog")
 def api_scanlog():
     try:
-        rows = _read_csv_rows(SCAN_LOG_CSV, limit=200, reverse=True)
-        passed = [r for r in rows if str(r.get("result", "")).lower() == "pass"]
-        return jsonify(passed[:30])
+        today = _now_et().date()
+        rows = _read_csv_rows(SCAN_LOG_CSV, limit=5000, reverse=True)
+        passed: list[dict[str, Any]] = []
+        for row in rows:
+            if str(row.get("result", "")).lower() != "pass":
+                continue
+            dt = _parse_ts(str(row.get("timestamp", "")))
+            if dt is not None and dt.date() != today:
+                continue
+            passed.append(row)
+            if len(passed) >= 30:
+                break
+        return jsonify(passed)
     except Exception as exc:  # noqa: BLE001
         return jsonify({"error": str(exc)}), 500
 
