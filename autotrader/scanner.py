@@ -339,9 +339,18 @@ def _scan_ticker_details(
     if direction == "put" and not ema_bear:
         return _scan_failure("EMA not bearish")
 
-    rsi = calculate_rsi(closes, period=14)
+    rsi_period = 14
+    rsi = calculate_rsi(closes, period=rsi_period)
     if math.isnan(rsi):
-        return _scan_failure("RSI unavailable")
+        # Early-session fallback: use shorter RSI period when bars are still limited.
+        rsi_period = min(14, max(int(config.RSI_EARLY_MIN_PERIOD), len(closes) - 1))
+        if rsi_period >= 2:
+            rsi = calculate_rsi(closes, period=rsi_period)
+    if math.isnan(rsi):
+        if is_at_or_after(now_et, config.RSI_STRICT_AFTER_TIME):
+            return _scan_failure("RSI unavailable")
+        # Pre-strict window: allow signal flow if all other filters pass.
+        rsi = 50.0
     if direction == "call" and not (50 <= rsi <= 72):
         return _scan_failure(f"RSI {rsi:.0f} outside call range")
     if direction == "put" and not (28 <= rsi <= 50):
@@ -404,6 +413,7 @@ def _scan_ticker_details(
         "rvol": round(rvol, 2),
         "atr_pct": round(atr_pct, 2),
         "rsi": round(rsi, 2),
+        "rsi_period": rsi_period,
         "roc": round(roc, 2),
         "vwap": round(vwap, 4),
         "price": round(price, 4),

@@ -144,6 +144,8 @@ def _parse_trade_meta_entry_time(meta: dict) -> datetime | None:
 
 def _build_scan_universe(data_client: AlpacaDataClient) -> list[str]:
     base = [str(sym).upper() for sym in config.TICKERS if str(sym).strip()]
+    core = [str(sym).upper() for sym in config.CORE_TICKERS if str(sym).strip()]
+    base = list(dict.fromkeys(base + core))
     combined = list(base)
     if config.AUTO_EXPAND_UNIVERSE_WITH_MOVERS:
         try:
