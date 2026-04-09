@@ -47,6 +47,13 @@ def _env_csv_strings(name: str, default: tuple[str, ...] = ()) -> tuple[str, ...
     return tuple(item for item in items if item)
 
 
+def _env_str(name: str, default: str) -> str:
+    value = os.getenv(name)
+    if value is None:
+        return default
+    return value.strip() or default
+
+
 _DEFAULT_DATA_DIR = Path(__file__).resolve().parent
 _DATA_DIR = Path(os.getenv("DATA_DIR", str(_DEFAULT_DATA_DIR)))
 
@@ -116,6 +123,11 @@ LOOP_INTERVAL_SECONDS = 60
 SCAN_MORNING_TIME = "09:30"
 OBSERVATION_END_TIME = "10:00"
 OBSERVATION_ENABLED = _env_bool("OBSERVATION_ENABLED", True)
+ENABLE_HTF_CONFIRM = _env_bool("ENABLE_HTF_CONFIRM", True)
+HTF_TIMEFRAME = _env_str("HTF_TIMEFRAME", "15m")
+HTF_LOOKBACK_BARS = _env_int("HTF_LOOKBACK_BARS", 30)
+ENABLE_ORDER_FLOW_FILTER = _env_bool("ENABLE_ORDER_FLOW_FILTER", True)
+MIN_FLOW_SCORE = _env_float("MIN_FLOW_SCORE", 0.05)
 ENABLE_NEWS_EVENT_BLOCK = _env_bool("ENABLE_NEWS_EVENT_BLOCK", True)
 NEWS_LOOKBACK_MINUTES = _env_int("NEWS_LOOKBACK_MINUTES", 90)
 NEWS_BLOCK_KEYWORDS = _env_csv_strings(

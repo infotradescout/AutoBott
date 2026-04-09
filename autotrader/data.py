@@ -143,6 +143,46 @@ class AlpacaDataClient:
         except Exception:
             return None
 
+    def get_latest_stock_quote(self, symbol: str) -> dict[str, float | None]:
+        try:
+            resp = self.data_session.get(
+                f"{self.data_base_url}/v2/stocks/quotes/latest",
+                params={"symbols": symbol},
+                timeout=15,
+            )
+            resp.raise_for_status()
+            body = resp.json()
+            quote_map = body.get("quotes", {}) if isinstance(body, dict) else {}
+            quote = quote_map.get(symbol) if isinstance(quote_map, dict) else None
+            if not quote:
+                return {"bid": None, "ask": None, "bid_size": None, "ask_size": None}
+            return {
+                "bid": float(quote.get("bp")) if quote.get("bp") is not None else None,
+                "ask": float(quote.get("ap")) if quote.get("ap") is not None else None,
+                "bid_size": float(quote.get("bs")) if quote.get("bs") is not None else None,
+                "ask_size": float(quote.get("as")) if quote.get("as") is not None else None,
+            }
+        except Exception:
+            return {"bid": None, "ask": None, "bid_size": None, "ask_size": None}
+
+    def get_latest_stock_trade_price(self, symbol: str) -> float | None:
+        try:
+            resp = self.data_session.get(
+                f"{self.data_base_url}/v2/stocks/trades/latest",
+                params={"symbols": symbol},
+                timeout=15,
+            )
+            resp.raise_for_status()
+            body = resp.json()
+            trade_map = body.get("trades", {}) if isinstance(body, dict) else {}
+            trade = trade_map.get(symbol) if isinstance(trade_map, dict) else None
+            if not trade:
+                return None
+            price = trade.get("p")
+            return float(price) if price is not None else None
+        except Exception:
+            return None
+
     def get_option_contracts(
         self,
         underlying_symbol: str,

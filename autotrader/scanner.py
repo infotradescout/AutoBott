@@ -29,6 +29,8 @@ SCAN_LOG_COLUMNS = [
     "iv_rank",
     "regime_score",
     "signal_score",
+    "flow_score",
+    "htf_reason",
     "reason",
 ]
 OBSERVATION_LOG_PATH = Path(config.OBSERVATION_LOG_CSV_PATH)
@@ -154,6 +156,64 @@ def _combined_signal_score(rvol: float, atr_pct: float, roc: float, iv_rank: flo
     score += max(0.0, 1.0 - (iv_center_distance / 40.0))
     score += min(5.0, max(0.0, regime_score))
     return round(score, 2)
+
+
+def _htf_trend_confirmation(
+    symbol: str,
+    direction: str,
+    data_client: AlpacaDataClient,
+) -> tuple[bool, str]:
+    bars = data_client.get_stock_bars(
+        symbol=symbol,
+        limit=max(20, int(config.HTF_LOOKBACK_BARS)),
+        timeframe=str(config.HTF_TIMEFRAME),
+    )
+    if bars is None or bars.empty or len(bars) < 12:
+        return False, "insufficient HTF bars"
+
+    closes = bars["close"].astype(float)
+    ema9 = closes.ewm(span=9, adjust=False).mean()
+    ema21 = closes.ewm(span=21, adjust=False).mean()
+    if len(ema9) < 6 or len(ema21) < 6:
+        return False, "HTF EMA unavailable"
+
+    last_ema9 = float(ema9.iloc[-1])
+    last_ema21 = float(ema21.iloc[-1])
+    prev_ema21 = float(ema21.iloc[-4])
+    slope_pct = ((last_ema21 - prev_ema21) / prev_ema21 * 100) if prev_ema21 != 0 else 0.0
+
+    if direction == "call":
+        ok = last_ema9 > last_ema21 and slope_pct >= 0
+    else:
+        ok = last_ema9 < last_ema21 and slope_pct <= 0
+    relation = "above" if last_ema9 > last_ema21 else "below"
+    reason = f"HTF ema9 {relation} ema21, ema21_slope={slope_pct:+.2f}%"
+    return ok, reason
+
+
+def _order_flow_score(symbol: str, data_client: AlpacaDataClient) -> float | None:
+    quote = data_client.get_latest_stock_quote(symbol)
+    bid = _safe_float(quote.get("bid"))
+    ask = _safe_float(quote.get("ask"))
+    bid_size = _safe_float(quote.get("bid_size"))
+    ask_size = _safe_float(quote.get("ask_size"))
+    if bid is None or ask is None or bid <= 0 or ask <= 0 or ask <= bid:
+        return None
+
+    size_imbalance = 0.0
+    if bid_size is not None and ask_size is not None and (bid_size + ask_size) > 0:
+        size_imbalance = (bid_size - ask_size) / (bid_size + ask_size)
+
+    trade_price = data_client.get_latest_stock_trade_price(symbol)
+    mid = (bid + ask) / 2
+    spread = ask - bid
+    trade_vs_mid = 0.0
+    if trade_price is not None and spread > 0:
+        trade_vs_mid = (trade_price - mid) / (spread / 2)
+        trade_vs_mid = max(-1.0, min(1.0, trade_vs_mid))
+
+    score = (0.6 * size_imbalance) + (0.4 * trade_vs_mid)
+    return round(float(score), 4)
 
 
 def _safe_float(value: Any) -> float | None:
@@ -319,6 +379,23 @@ def _scan_ticker_details(
         return _scan_failure("VWAP direction not clean")
     direction = "call" if above_vwap else "put"
 
+    htf_reason = ""
+    if config.ENABLE_HTF_CONFIRM:
+        htf_ok, htf_reason = _htf_trend_confirmation(symbol=symbol, direction=direction, data_client=data_client)
+        if not htf_ok:
+            return _scan_failure(f"HTF trend mismatch: {htf_reason}")
+
+    flow_score: float | None = None
+    if config.ENABLE_ORDER_FLOW_FILTER:
+        flow_score = _order_flow_score(symbol=symbol, data_client=data_client)
+        if flow_score is None:
+            return _scan_failure("order flow unavailable")
+        threshold = float(config.MIN_FLOW_SCORE)
+        if direction == "call" and flow_score < threshold:
+            return _scan_failure(f"order flow weak for call ({flow_score:+.2f})")
+        if direction == "put" and flow_score > -threshold:
+            return _scan_failure(f"order flow weak for put ({flow_score:+.2f})")
+
     roc = calculate_roc(closes, period=config.ROC_PERIOD)
     if math.isnan(roc):
         return _scan_failure("ROC unavailable")
@@ -420,9 +497,12 @@ def _scan_ticker_details(
         "iv_rank": round(iv_rank, 2),
         "regime_score": round(regime_score, 2),
         "signal_score": round(signal_score, 2),
+        "flow_score": round(flow_score, 4) if flow_score is not None else None,
+        "htf_reason": htf_reason,
         "reason": (
             f"RVOL {rvol:.1f}x | {above_below} | EMA {'bullish' if direction == 'call' else 'bearish'} | "
-            f"ROC {roc:+.2f}% | IVR {iv_rank:.0f}% | Regime {regime_score:.2f} | Score {signal_score:.2f}"
+            f"ROC {roc:+.2f}% | IVR {iv_rank:.0f}% | Regime {regime_score:.2f} | "
+            f"Flow {(flow_score if flow_score is not None else 0):+.2f} | Score {signal_score:.2f}"
         ),
         "regime_reason": regime_reason,
     }
@@ -547,6 +627,8 @@ class IntradayScanner:
                         "iv_rank": item.get("iv_rank", ""),
                         "regime_score": item.get("regime_score", ""),
                         "signal_score": item.get("signal_score", ""),
+                        "flow_score": item.get("flow_score", ""),
+                        "htf_reason": item.get("htf_reason", ""),
                         "reason": item.get("reason", ""),
                     }
                 )
@@ -563,6 +645,8 @@ class IntradayScanner:
                         "iv_rank": "",
                         "regime_score": "",
                         "signal_score": "",
+                        "flow_score": "",
+                        "htf_reason": "",
                         "reason": item.get("reason", ""),
                     }
                 )
