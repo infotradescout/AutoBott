@@ -118,7 +118,7 @@ PREOPEN_READY_MINUTES = 10
 HARD_CLOSE_TIME = _env_str("HARD_CLOSE_TIME", "15:30")
 NO_NEW_TRADES_BEFORE = _env_str("NO_NEW_TRADES_BEFORE", "09:30")
 NO_NEW_TRADES_AFTER = _env_str("NO_NEW_TRADES_AFTER", "15:30")
-PAPER = _env_bool("PAPER_TRADING", True)
+PAPER = _env_bool("PAPER_TRADING", False)
 LOOP_INTERVAL_SECONDS = _env_int("LOOP_INTERVAL_SECONDS", 30)
 SCAN_MORNING_TIME = "09:30"
 OBSERVATION_END_TIME = "10:00"
@@ -227,8 +227,6 @@ EMERGENCY_EXECUTION_MODE = _env_bool("EMERGENCY_EXECUTION_MODE", True)
 ALLOW_MARKET_ENTRY_WITHOUT_QUOTE = _env_bool("ALLOW_MARKET_ENTRY_WITHOUT_QUOTE", True)
 
 # --- Entry confirmation / index regime ---
-# Both disabled: confirmation candle blocks midday chop entries; index bias
-# filter drops signals on whipsaw days when SPY/QQQ EMAs conflict.
 ENABLE_ENTRY_CONFIRMATION = _env_bool("ENABLE_ENTRY_CONFIRMATION", False)
 ENTRY_CONFIRM_BARS = _env_int("ENTRY_CONFIRM_BARS", 3)
 ENABLE_INDEX_BIAS_FILTER = _env_bool("ENABLE_INDEX_BIAS_FILTER", False)
