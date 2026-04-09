@@ -1,6 +1,43 @@
 """Configuration for the intraday options autotrader."""
 
+import os
 from pathlib import Path
+
+
+def _env_bool(name: str, default: bool) -> bool:
+    value = os.getenv(name)
+    if value is None:
+        return default
+    return value.strip().lower() in {"1", "true", "yes", "y", "on"}
+
+
+def _env_int(name: str, default: int) -> int:
+    value = os.getenv(name)
+    if value is None:
+        return default
+    try:
+        return int(value)
+    except ValueError:
+        return default
+
+
+def _env_float(name: str, default: float) -> float:
+    value = os.getenv(name)
+    if value is None:
+        return default
+    try:
+        return float(value)
+    except ValueError:
+        return default
+
+
+def _env_csv_dates(name: str, default: tuple[str, ...] = ()) -> tuple[str, ...]:
+    value = os.getenv(name)
+    if value is None:
+        return default
+    items = [item.strip() for item in value.split(",")]
+    return tuple(item for item in items if item)
+
 
 TICKERS = [
     "SPY",
@@ -45,16 +82,25 @@ BAR_TIMEFRAME = "5Min"
 SIGNAL_LOOKBACK = 20
 MAX_POSITIONS = 3
 POSITION_SIZE_USD = 500
+RISK_PER_TRADE_PCT = _env_float("RISK_PER_TRADE_PCT", 0.01)
+MAX_POSITION_SIZE_USD = _env_float("MAX_POSITION_SIZE_USD", 700.0)
+DRAWDOWN_REDUCE_AFTER_CONSEC_LOSSES = _env_int("DRAWDOWN_REDUCE_AFTER_CONSEC_LOSSES", 2)
+DRAWDOWN_SIZE_MULTIPLIER = _env_float("DRAWDOWN_SIZE_MULTIPLIER", 0.5)
 PROFIT_TARGET_PCT = 0.80
 STOP_LOSS_PCT = 0.45
 DAILY_LOSS_LIMIT_USD = 300.0
+WEEKLY_LOSS_LIMIT_USD = _env_float("WEEKLY_LOSS_LIMIT_USD", 900.0)
 CONSECUTIVE_LOSS_LIMIT = 3
 MARKET_OPEN = "09:30"
+PREOPEN_READY_MINUTES = 10
 HARD_CLOSE_TIME = "15:45"
 NO_NEW_TRADES_AFTER = "15:15"
-PAPER = True
+PAPER = _env_bool("PAPER_TRADING", True)
 LOOP_INTERVAL_SECONDS = 60
-SCAN_MORNING_TIME = "09:35"
+SCAN_MORNING_TIME = "09:30"
+MAX_ENTRY_SLIPPAGE_PCT = _env_float("MAX_ENTRY_SLIPPAGE_PCT", 2.0)
+MAX_FILL_SLIPPAGE_PCT = _env_float("MAX_FILL_SLIPPAGE_PCT", 5.0)
+NEWS_BLOCK_DATES_ET = _env_csv_dates("NEWS_BLOCK_DATES_ET", default=())
 
 MIN_SHARE_PRICE = 10
 MAX_SHARE_PRICE = 800
@@ -89,6 +135,11 @@ RATE_LIMIT_SLEEP_SECONDS = 0.3
 CLOSED_MIN_SLEEP_SECONDS = 60
 CLOSED_MAX_SLEEP_SECONDS = 900
 TRADES_CSV_PATH = Path(__file__).resolve().parent / "trades.csv"
+STATE_JSON_PATH = Path(__file__).resolve().parent / "runtime_state.json"
+HEARTBEAT_SECONDS = _env_int("HEARTBEAT_SECONDS", 300)
+ALERT_COOLDOWN_SECONDS = _env_int("ALERT_COOLDOWN_SECONDS", 300)
+DISCORD_WEBHOOK_URL = os.getenv("DISCORD_WEBHOOK_URL", "")
+ALERT_WEBHOOK_URL = os.getenv("ALERT_WEBHOOK_URL", "")
 
 ALPACA_PAPER_BASE_URL = "https://paper-api.alpaca.markets"
 ALPACA_DATA_BASE_URL = "https://data.alpaca.markets"

@@ -3,18 +3,28 @@
 from __future__ import annotations
 
 import time
-from datetime import datetime
+from datetime import date, datetime
 
 import pytz
 
+from env_config import get_required_env, load_runtime_env
+load_runtime_env()
+
 import config
+from alerts import AlertManager
 from broker import AlpacaBroker
 from data import AlpacaDataClient
-from env_config import get_required_env, load_runtime_env
 from logger import TradeLogger
 from options import select_atm_option_contract
-from risk import calculate_entry_qty, can_open_new_positions, is_at_or_after, position_matches_ticker
+from risk import (
+    calculate_entry_qty,
+    calculate_position_budget_usd,
+    can_open_new_positions,
+    is_at_or_after,
+    position_matches_ticker,
+)
 from scanner import build_watchlist, initialize_scanner, run_scan, should_build_watchlist
+from state_store import load_bot_state, save_bot_state
 
 
 def ts(now_et: datetime | None = None) -> str:
@@ -40,7 +50,7 @@ def _prune_recent_entries(entry_times: list[datetime], now_et: datetime, days: i
     return [dt for dt in entry_times if dt.timestamp() >= threshold]
 
 
-def _closed_market_sleep_seconds(clock) -> int:
+def _closed_market_sleep_seconds(clock, *, preopen_ready_minutes: int = 0) -> int:
     next_open = getattr(clock, "next_open", None)
     min_sleep = int(config.CLOSED_MIN_SLEEP_SECONDS)
     max_sleep = int(config.CLOSED_MAX_SLEEP_SECONDS)
@@ -55,11 +65,52 @@ def _closed_market_sleep_seconds(clock) -> int:
     if seconds_until_open <= 0:
         return min_sleep
 
+    if preopen_ready_minutes > 0:
+        preopen_seconds = int(preopen_ready_minutes) * 60
+        if seconds_until_open > preopen_seconds:
+            return max(min_sleep, min(max_sleep, seconds_until_open - preopen_seconds))
     return max(min_sleep, min(max_sleep, seconds_until_open))
 
 
+def _seconds_until_next_open(clock) -> int | None:
+    next_open = getattr(clock, "next_open", None)
+    if next_open is None:
+        return None
+    if next_open.tzinfo is None:
+        next_open = pytz.utc.localize(next_open)
+
+    now_utc = datetime.now(pytz.utc)
+    return int((next_open - now_utc).total_seconds())
+
+
+def _parse_iso_datetime(value: str | None) -> datetime | None:
+    if not value:
+        return None
+    try:
+        parsed = datetime.fromisoformat(value)
+        if parsed.tzinfo is None:
+            return pytz.timezone(config.EASTERN_TZ).localize(parsed)
+        return parsed
+    except Exception:
+        return None
+
+
+def _week_key(day: date) -> str:
+    year, week, _weekday = day.isocalendar()
+    return f"{year}-W{week:02d}"
+
+
+def _slippage_pct(reference_price: float, current_price: float) -> float:
+    if reference_price <= 0 or current_price <= 0:
+        return 0.0
+    return ((current_price - reference_price) / reference_price) * 100.0
+
+
+def _is_news_block_day(now_et: datetime) -> bool:
+    return now_et.date().isoformat() in set(config.NEWS_BLOCK_DATES_ET)
+
+
 def main():
-    load_runtime_env()
     api_key = get_required_env("ALPACA_API_KEY")
     secret_key = get_required_env("ALPACA_SECRET_KEY")
 
@@ -68,47 +119,108 @@ def main():
     data_client = AlpacaDataClient(api_key, secret_key, paper=config.PAPER)
     initialize_scanner(data_client)
     trade_logger = TradeLogger()
-    open_trade_meta: dict[str, dict] = {}
-    watchlist: list[str] = []
-    watchlist_built = False
-    entry_times_rolling: list[datetime] = []
-    daily_realized_loss_usd: float = 0.0
-    consecutive_losses: int = 0
-    loss_counters_day = None
+    alerts = AlertManager()
+    state = load_bot_state()
+    open_trade_meta: dict[str, dict] = dict(state.get("open_trade_meta") or {})
+    watchlist: list[str] = list(state.get("watchlist") or [])
+    watchlist_built = bool(state.get("watchlist_built", False))
+    entry_times_rolling: list[datetime] = [
+        dt
+        for dt in (_parse_iso_datetime(item) for item in (state.get("entry_times_rolling") or []))
+        if dt is not None
+    ]
+    daily_realized_loss_usd = float(state.get("daily_realized_loss_usd", 0.0) or 0.0)
+    weekly_realized_loss_usd = float(state.get("weekly_realized_loss_usd", 0.0) or 0.0)
+    consecutive_losses = int(state.get("consecutive_losses", 0) or 0)
+    loss_counters_day_raw = state.get("loss_counters_day")
+    loss_counters_day = date.fromisoformat(loss_counters_day_raw) if loss_counters_day_raw else None
+    weekly_loss_key = str(state.get("weekly_loss_key") or _week_key(datetime.now(tz).date()))
+    blocked_day_notice = state.get("blocked_day_notice")
+    next_heartbeat_at = 0.0
 
-    print(f"[{ts()} | {ts_ct()}] Autotrader started. Waiting for market open.")
+    def _save_runtime_state() -> None:
+        save_bot_state(
+            {
+                "open_trade_meta": open_trade_meta,
+                "watchlist": watchlist,
+                "watchlist_built": watchlist_built,
+                "entry_times_rolling": [item.isoformat() for item in entry_times_rolling],
+                "daily_realized_loss_usd": round(daily_realized_loss_usd, 6),
+                "weekly_realized_loss_usd": round(weekly_realized_loss_usd, 6),
+                "consecutive_losses": consecutive_losses,
+                "loss_counters_day": loss_counters_day.isoformat() if loss_counters_day else None,
+                "weekly_loss_key": weekly_loss_key,
+                "blocked_day_notice": blocked_day_notice,
+            }
+        )
+
+    mode = "PAPER" if config.PAPER else "LIVE"
+    print(f"[{ts()} | {ts_ct()}] Autotrader started in {mode} mode. Waiting for market open.")
+    alerts.send(
+        "startup",
+        f"Autotrader online ({mode}). Pre-open readiness: {config.PREOPEN_READY_MINUTES}m.",
+        dedupe_key="startup",
+    )
+
     while True:
         clock = broker.get_clock()
         now_et = datetime.now(tz)
         now_ct = datetime.now(pytz.timezone(config.CENTRAL_TZ))
-        if clock.is_open:
+        seconds_until_open = _seconds_until_next_open(clock)
+        preopen_window_seconds = int(config.PREOPEN_READY_MINUTES) * 60
+        if clock.is_open or (
+            seconds_until_open is not None and 0 < seconds_until_open <= preopen_window_seconds
+        ):
             break
-        sleep_seconds = _closed_market_sleep_seconds(clock)
+        sleep_seconds = _closed_market_sleep_seconds(clock, preopen_ready_minutes=config.PREOPEN_READY_MINUTES)
         next_open = getattr(clock, "next_open", None)
         next_open_ct = ""
         if next_open is not None:
             if next_open.tzinfo is None:
                 next_open = pytz.utc.localize(next_open)
             next_open_ct = next_open.astimezone(pytz.timezone(config.CENTRAL_TZ)).strftime("%Y-%m-%d %H:%M:%S %Z")
+        if alerts.enabled() and time.time() >= next_heartbeat_at:
+            alerts.send(
+                "heartbeat",
+                f"Heartbeat ({mode}): waiting for open. Next open CT: {next_open_ct or 'unknown'}.",
+                dedupe_key=f"heartbeat-{int(time.time() // max(1, config.HEARTBEAT_SECONDS))}",
+            )
+            next_heartbeat_at = time.time() + max(30, int(config.HEARTBEAT_SECONDS))
         print(
             f"[{ts(now_et)} | {ts_ct(now_ct)}] Market closed. "
             f"Next open (CT): {next_open_ct or 'unknown'}. Sleeping {sleep_seconds}s."
         )
         time.sleep(sleep_seconds)
 
-    print(f"[{ts()} | {ts_ct()}] Market open. Starting loop.")
+    print(
+        f"[{ts()} | {ts_ct()}] Pre-open readiness window reached "
+        f"({config.PREOPEN_READY_MINUTES}m before open) or market already open. Starting loop."
+    )
     while True:
         now_et = datetime.now(tz)
         now_ct = datetime.now(pytz.timezone(config.CENTRAL_TZ))
+        week_key_now = _week_key(now_et.date())
+        if week_key_now != weekly_loss_key:
+            weekly_loss_key = week_key_now
+            weekly_realized_loss_usd = 0.0
+
         clock = broker.get_clock()
         if not clock.is_open:
-            sleep_seconds = _closed_market_sleep_seconds(clock)
+            sleep_seconds = _closed_market_sleep_seconds(clock, preopen_ready_minutes=config.PREOPEN_READY_MINUTES)
             next_open = getattr(clock, "next_open", None)
             next_open_ct = ""
             if next_open is not None:
                 if next_open.tzinfo is None:
                     next_open = pytz.utc.localize(next_open)
                 next_open_ct = next_open.astimezone(pytz.timezone(config.CENTRAL_TZ)).strftime("%Y-%m-%d %H:%M:%S %Z")
+            if alerts.enabled() and time.time() >= next_heartbeat_at:
+                alerts.send(
+                    "heartbeat",
+                    f"Heartbeat ({mode}): market closed. Next open CT: {next_open_ct or 'unknown'}.",
+                    dedupe_key=f"heartbeat-{int(time.time() // max(1, config.HEARTBEAT_SECONDS))}",
+                )
+                next_heartbeat_at = time.time() + max(30, int(config.HEARTBEAT_SECONDS))
+            _save_runtime_state()
             print(
                 f"[{ts(now_et)} | {ts_ct(now_ct)}] Market closed. "
                 f"Next open (CT): {next_open_ct or 'unknown'}. Sleeping {sleep_seconds}s."
@@ -120,9 +232,22 @@ def main():
             daily_realized_loss_usd = 0.0
             consecutive_losses = 0
             loss_counters_day = now_et.date()
+            watchlist_built = False
+            watchlist = []
+            blocked_day_notice = None
 
         option_positions = broker.get_open_option_positions()
         open_count = len(option_positions)
+        if alerts.enabled() and time.time() >= next_heartbeat_at:
+            alerts.send(
+                "heartbeat",
+                (
+                    f"Heartbeat ({mode}): market open. Positions={open_count} "
+                    f"daily_loss=${daily_realized_loss_usd:.2f} weekly_loss=${weekly_realized_loss_usd:.2f}"
+                ),
+                dedupe_key=f"heartbeat-{int(time.time() // max(1, config.HEARTBEAT_SECONDS))}",
+            )
+            next_heartbeat_at = time.time() + max(30, int(config.HEARTBEAT_SECONDS))
 
         if not watchlist_built:
             if should_build_watchlist(now_et):
@@ -132,12 +257,29 @@ def main():
             else:
                 print(f"[{ts(now_et)}] Waiting for {config.SCAN_MORNING_TIME} ET to build watchlist.")
 
-        signals = run_scan(watchlist) if watchlist_built and watchlist else []
         pdt_allowed, pdt_info = broker.pdt_allows_new_day_trade()
         entry_times_rolling = _prune_recent_entries(entry_times_rolling, now_et, days=5)
         equity = pdt_info.get("equity")
         under_25k = equity is not None and float(equity) < config.PDT_MIN_EQUITY
         local_trade_budget_hit = under_25k and len(entry_times_rolling) >= config.PDT_MAX_DAY_TRADES_5D
+        blocked_day = _is_news_block_day(now_et)
+        if blocked_day:
+            if blocked_day_notice != now_et.date().isoformat():
+                blocked_day_notice = now_et.date().isoformat()
+                notice = (
+                    f"[{ts(now_et)}] Event block day ({blocked_day_notice}) configured via "
+                    f"NEWS_BLOCK_DATES_ET. Skipping new entries."
+                )
+                print(notice)
+                alerts.send(
+                    "event_day_block",
+                    f"Autotrader paused new entries for configured event day: {blocked_day_notice}.",
+                    dedupe_key=f"event-day-{blocked_day_notice}",
+                )
+            signals = []
+        else:
+            signals = run_scan(watchlist) if watchlist_built and watchlist else []
+
         if not pdt_allowed:
             print(
                 f"[{ts(now_et)}] PDT guard active: no new entries. "
@@ -159,7 +301,32 @@ def main():
                     f"${daily_realized_loss_usd:.2f} >= ${config.DAILY_LOSS_LIMIT_USD:.2f}. "
                     f"No new entries today."
                 )
+                alerts.send(
+                    "daily_loss_limit",
+                    (
+                        f"Daily loss limit hit: ${daily_realized_loss_usd:.2f} "
+                        f"(limit ${config.DAILY_LOSS_LIMIT_USD:.2f}). New entries paused."
+                    ),
+                    level="warning",
+                    dedupe_key=f"daily-loss-{now_et.date().isoformat()}",
+                )
                 break  # exit the signals loop entirely
+            if weekly_realized_loss_usd >= config.WEEKLY_LOSS_LIMIT_USD:
+                print(
+                    f"[{ts(now_et)}] WEEKLY LOSS LIMIT hit: "
+                    f"${weekly_realized_loss_usd:.2f} >= ${config.WEEKLY_LOSS_LIMIT_USD:.2f}. "
+                    f"No new entries this week."
+                )
+                alerts.send(
+                    "weekly_loss_limit",
+                    (
+                        f"Weekly loss limit hit: ${weekly_realized_loss_usd:.2f} "
+                        f"(limit ${config.WEEKLY_LOSS_LIMIT_USD:.2f}). New entries paused."
+                    ),
+                    level="warning",
+                    dedupe_key=f"weekly-loss-{weekly_loss_key}",
+                )
+                break
 
             # Consecutive loss circuit breaker
             if consecutive_losses >= config.CONSECUTIVE_LOSS_LIMIT:
@@ -223,7 +390,26 @@ def main():
                     time.sleep(config.RATE_LIMIT_SLEEP_SECONDS)
                     continue
 
-                qty = calculate_entry_qty(config.POSITION_SIZE_USD, ask_price)
+                initial_chain_ask = float(contract.get("ask_price", ask_price) or ask_price)
+                pre_submit_slippage = _slippage_pct(initial_chain_ask, ask_price)
+                if pre_submit_slippage > config.MAX_ENTRY_SLIPPAGE_PCT:
+                    print(
+                        f"[{ts(now_et)}] {ticker}: skip (entry slippage {pre_submit_slippage:.2f}% > "
+                        f"{config.MAX_ENTRY_SLIPPAGE_PCT:.2f}%)."
+                    )
+                    time.sleep(config.RATE_LIMIT_SLEEP_SECONDS)
+                    continue
+
+                position_budget_usd = calculate_position_budget_usd(
+                    equity=float(equity) if equity is not None else None,
+                    base_position_size_usd=float(config.POSITION_SIZE_USD),
+                    risk_per_trade_pct=float(config.RISK_PER_TRADE_PCT),
+                    max_position_size_usd=float(config.MAX_POSITION_SIZE_USD),
+                    consecutive_losses=consecutive_losses,
+                    reduce_after_consecutive_losses=int(config.DRAWDOWN_REDUCE_AFTER_CONSEC_LOSSES),
+                    drawdown_size_multiplier=float(config.DRAWDOWN_SIZE_MULTIPLIER),
+                )
+                qty = calculate_entry_qty(position_budget_usd, ask_price)
                 if qty < 1:
                     print(f"[{ts(now_et)}] {ticker}: skip (qty calc invalid).")
                     time.sleep(config.RATE_LIMIT_SLEEP_SECONDS)
@@ -253,6 +439,30 @@ def main():
                     time.sleep(config.RATE_LIMIT_SLEEP_SECONDS)
                     continue
 
+                filled_avg_price = float(getattr(filled_order, "filled_avg_price", 0) or 0)
+                filled_qty = position_qty_as_int(getattr(filled_order, "filled_qty", qty)) or qty
+                fill_slippage = _slippage_pct(ask_price, filled_avg_price) if filled_avg_price > 0 else 0.0
+                if fill_slippage > config.MAX_FILL_SLIPPAGE_PCT:
+                    print(
+                        f"[{ts(now_et)}] {ticker}: fill slippage {fill_slippage:.2f}% exceeds "
+                        f"{config.MAX_FILL_SLIPPAGE_PCT:.2f}%. Closing immediately."
+                    )
+                    alerts.send(
+                        "high_fill_slippage",
+                        (
+                            f"High fill slippage on {option_symbol}: {fill_slippage:.2f}% "
+                            f"(limit {config.MAX_FILL_SLIPPAGE_PCT:.2f}%). Position closed."
+                        ),
+                        level="warning",
+                        dedupe_key=f"slippage-{option_symbol}-{now_et.strftime('%Y%m%d%H%M')}",
+                    )
+                    try:
+                        broker.close_option_market(option_symbol, filled_qty)
+                    except Exception as exc:  # noqa: BLE001
+                        print(f"[{ts(now_et)}] {ticker}: immediate slippage close failed: {exc}")
+                    time.sleep(config.RATE_LIMIT_SLEEP_SECONDS)
+                    continue
+
                 open_trade_meta[option_symbol] = {
                     "timestamp": ts(now_et),
                     "ticker": ticker,
@@ -260,11 +470,12 @@ def main():
                     "option_symbol": option_symbol,
                     "strike": contract.get("strike_price", ""),
                     "expiry": contract.get("expiration_date", ""),
-                    "qty": qty,
-                    "entry_price": ask_price,
+                    "qty": filled_qty,
+                    "entry_price": filled_avg_price or ask_price,
                 }
                 open_count += 1
                 entry_times_rolling.append(now_et)
+                _save_runtime_state()
                 time.sleep(config.RATE_LIMIT_SLEEP_SECONDS)
             except Exception as exc:  # noqa: BLE001
                 print(f"[{ts(now_et)}] {ticker}: error during entry flow: {exc}")
@@ -324,11 +535,13 @@ def main():
 
                     if trade_pnl_usd < 0:
                         daily_realized_loss_usd += abs(trade_pnl_usd)
+                        weekly_realized_loss_usd += abs(trade_pnl_usd)
                         consecutive_losses += 1
                     else:
                         consecutive_losses = 0  # reset streak on a win
 
                     open_trade_meta.pop(symbol, None)
+                    _save_runtime_state()
                     print(f"[{ts(now_et)}] EXIT {symbol} qty={qty} reason={exit_reason} pnl_pct={plpc:.2%}")
                 except Exception as exc:  # noqa: BLE001
                     print(f"[{ts(now_et)}] {symbol}: error closing position: {exc}")
@@ -352,8 +565,15 @@ def main():
                 broker.cancel_all_open_orders()
             except Exception as exc:  # noqa: BLE001
                 print(f"[{ts(now_et)}] Cancel orders error: {exc}")
+            _save_runtime_state()
+            alerts.send(
+                "session_complete",
+                "Hard close completed. Positions flattened and open orders canceled.",
+                dedupe_key=f"session-close-{now_et.date().isoformat()}",
+            )
             break
 
+        _save_runtime_state()
         time.sleep(config.LOOP_INTERVAL_SECONDS)
 
     print(f"[{ts()}] Trader stopped.")

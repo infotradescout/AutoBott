@@ -25,6 +25,26 @@ def calculate_entry_qty(position_size_usd: float, ask_price: float) -> int:
     return max(1, qty)
 
 
+def calculate_position_budget_usd(
+    *,
+    equity: float | None,
+    base_position_size_usd: float,
+    risk_per_trade_pct: float,
+    max_position_size_usd: float,
+    consecutive_losses: int,
+    reduce_after_consecutive_losses: int,
+    drawdown_size_multiplier: float,
+) -> float:
+    budget = float(base_position_size_usd)
+    if equity is not None and equity > 0 and risk_per_trade_pct > 0:
+        budget = min(max_position_size_usd, equity * risk_per_trade_pct)
+    budget = max(100.0, budget)
+
+    if consecutive_losses >= reduce_after_consecutive_losses:
+        budget *= max(0.1, drawdown_size_multiplier)
+    return budget
+
+
 def infer_underlying_from_option_symbol(option_symbol: str) -> str:
     # OCC-style option symbols start with the underlying before YYMMDD.
     match = re.match(r"^([A-Z.]+)\d{6}[CP]\d{8}$", option_symbol)

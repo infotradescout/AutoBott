@@ -30,3 +30,16 @@ Copy-Item .env.example .env
 # fill in real Alpaca keys in .env
 python dashboard.py
 ```
+
+## Safety + Ops Controls
+
+The trader now includes:
+- Pre-open readiness (`PREOPEN_READY_MINUTES`, default 10).
+- Daily and weekly loss circuit breakers.
+- Drawdown-aware position size reduction after losing streaks.
+- Entry/fill slippage guards.
+- Optional event-day entry block list (`NEWS_BLOCK_DATES_ET`).
+- Runtime state persistence (`autotrader/runtime_state.json`) for restart continuity.
+- Optional alerting/heartbeat to Discord and/or a generic webhook.
+
+Configure these in `autotrader/.env` (see `autotrader/.env.example`).

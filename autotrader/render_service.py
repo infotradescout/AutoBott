@@ -7,8 +7,15 @@ import threading
 import time
 import traceback
 
+from env_config import load_runtime_env
+
+load_runtime_env()
+
+from alerts import AlertManager
 from dashboard import app
 from main import main as trader_main
+
+ALERTS = AlertManager()
 
 
 def _run_trader_forever() -> None:
@@ -18,6 +25,12 @@ def _run_trader_forever() -> None:
         except Exception as exc:  # noqa: BLE001
             print(f"[render_service] Trader crashed: {exc}")
             traceback.print_exc()
+            ALERTS.send(
+                "trader_crash",
+                f"Trader crashed and will restart in 30 seconds: {exc}",
+                level="error",
+                dedupe_key=f"trader-crash-{int(time.time() // 60)}",
+            )
         # Always restart trader loop so service can stay 24/7.
         time.sleep(30)
 
