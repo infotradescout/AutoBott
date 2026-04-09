@@ -1,0 +1,25 @@
+services:
+  - type: worker
+    name: autobott-trader
+    env: python
+    plan: starter
+    buildCommand: pip install -r autotrader/requirements.txt
+    startCommand: python autotrader/main.py
+    envVars:
+      - key: ALPACA_API_KEY
+        sync: false
+      - key: ALPACA_SECRET_KEY
+        sync: false
+
+  - type: web
+    name: autobott-dashboard
+    env: python
+    plan: starter
+    buildCommand: pip install -r autotrader/requirements.txt
+    startCommand: python autotrader/dashboard.py
+    healthCheckPath: /api/status
+    envVars:
+      - key: ALPACA_API_KEY
+        sync: false
+      - key: ALPACA_SECRET_KEY
+        sync: false

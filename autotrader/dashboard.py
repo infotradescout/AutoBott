@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import csv
+import os
 import re
 from datetime import datetime
 from pathlib import Path
@@ -233,24 +234,46 @@ def home():
   <title>Alpaca Options Dashboard</title>
   <style>
     :root {
-      --bg: #0d1117;
-      --card: #161b22;
-      --text: #e6edf3;
-      --muted: #8b949e;
-      --green: #00c853;
-      --red: #ff1744;
-      --yellow: #ffb300;
-      --border: #30363d;
+      --bg: #070b11;
+      --card: rgba(15, 23, 36, 0.82);
+      --card-strong: rgba(20, 31, 49, 0.95);
+      --text: #e9f0f7;
+      --muted: #8fa1b8;
+      --green: #1dd75f;
+      --red: #ff4e57;
+      --yellow: #f8b739;
+      --cyan: #2ac7ff;
+      --border: rgba(127, 156, 191, 0.25);
+      --shadow: 0 12px 30px rgba(2, 8, 20, 0.45);
     }
-    body { margin: 0; background: var(--bg); color: var(--text); font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      color: var(--text);
+      font-family: "Segoe UI", Tahoma, Geneva, Verdana, sans-serif;
+      background:
+        radial-gradient(1200px 500px at -10% -20%, rgba(42, 199, 255, 0.16), transparent 45%),
+        radial-gradient(1000px 450px at 110% -10%, rgba(29, 215, 95, 0.12), transparent 45%),
+        linear-gradient(140deg, #05080f 0%, #0a1220 45%, #090f19 100%);
+      min-height: 100vh;
+    }
     .wrap { max-width: 1200px; margin: 0 auto; padding: 16px; }
-    .header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px; }
-    .title { font-size: 22px; font-weight: 700; }
-    .paper { color: #111; background: var(--yellow); padding: 4px 8px; border-radius: 8px; font-size: 12px; font-weight: 700; }
+    .header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 14px; padding: 8px 2px; }
+    .title { font-size: 24px; font-weight: 750; letter-spacing: 0.2px; }
+    .paper { color: #111; background: linear-gradient(180deg, #ffd773 0%, #f8b739 100%); padding: 5px 10px; border-radius: 999px; font-size: 12px; font-weight: 800; }
     .muted { color: var(--muted); }
     .grid4 { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 10px; }
-    .card { background: var(--card); border: 1px solid var(--border); border-radius: 12px; padding: 12px; }
-    .label { font-size: 12px; color: var(--muted); margin-bottom: 6px; }
+    .grid3 { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; }
+    .card {
+      background: var(--card);
+      border: 1px solid var(--border);
+      border-radius: 14px;
+      padding: 12px;
+      box-shadow: var(--shadow);
+      backdrop-filter: blur(3px);
+    }
+    .card.strong { background: var(--card-strong); }
+    .label { font-size: 12px; color: var(--muted); margin-bottom: 6px; text-transform: uppercase; letter-spacing: 0.4px; }
     .num { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 22px; }
     .section { margin-top: 12px; }
     .section h3 { margin: 0 0 8px 0; font-size: 14px; color: var(--muted); letter-spacing: 0.4px; }
@@ -268,7 +291,22 @@ def home():
     .pnl-pos { color: var(--green); }
     .pnl-neg { color: var(--red); }
     .pnl-zero { color: #888; }
-    @media (max-width: 900px) { .grid4 { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+    .kpi-sub { font-size: 12px; color: var(--muted); margin-top: 4px; }
+    .viz-card-title { display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px; font-size: 13px; color: var(--muted); letter-spacing: 0.35px; }
+    .viz-box { border: 1px solid var(--border); border-radius: 12px; background: rgba(6, 12, 21, 0.58); padding: 8px; min-height: 130px; }
+    .sparkline { width: 100%; height: 110px; }
+    .sparkline path.line { fill: none; stroke: var(--cyan); stroke-width: 2.4; }
+    .sparkline path.fill { fill: rgba(42, 199, 255, 0.14); }
+    .row { display: grid; grid-template-columns: 130px 1fr 44px; align-items: center; gap: 10px; margin-bottom: 8px; font-size: 12px; }
+    .track { width: 100%; height: 10px; border-radius: 999px; background: rgba(127, 156, 191, 0.2); overflow: hidden; }
+    .bar2 { height: 100%; border-radius: inherit; }
+    .b-cyan { background: linear-gradient(90deg, #1da8ff, #2ac7ff); }
+    .b-green2 { background: linear-gradient(90deg, #19bf58, #1dd75f); }
+    .b-red2 { background: linear-gradient(90deg, #ff6d66, #ff4e57); }
+    @media (max-width: 900px) {
+      .grid4 { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+      .grid3 { grid-template-columns: 1fr; }
+    }
   </style>
 </head>
 <body>
@@ -282,10 +320,16 @@ def home():
     </div>
 
     <div class="grid4">
-      <div class="card"><div class="label">Equity</div><div id="equity" class="num">--</div></div>
-      <div class="card"><div class="label">Buying Power</div><div id="buying-power" class="num">--</div></div>
-      <div class="card"><div class="label">Today P&L</div><div id="daily-pnl" class="num">--</div></div>
-      <div class="card"><div class="label">Market Status</div><div id="market-status" class="num">--</div></div>
+      <div class="card strong"><div class="label">Equity</div><div id="equity" class="num">--</div><div class="kpi-sub">Portfolio net liquidation</div></div>
+      <div class="card strong"><div class="label">Buying Power</div><div id="buying-power" class="num">--</div><div class="kpi-sub">Available for entries</div></div>
+      <div class="card strong"><div class="label">Today P&L</div><div id="daily-pnl" class="num">--</div><div class="kpi-sub">Sum of closed trade %</div></div>
+      <div class="card strong"><div class="label">Market Status</div><div id="market-status" class="num">--</div><div class="kpi-sub">Alpaca clock status</div></div>
+    </div>
+
+    <div class="grid3 section">
+      <div class="card"><div class="label">Trades Today</div><div id="trades-today" class="num">--</div></div>
+      <div class="card"><div class="label">Win Rate</div><div id="win-rate" class="num">--</div></div>
+      <div class="card"><div class="label">Open Positions</div><div id="open-positions-count" class="num">--</div></div>
     </div>
 
     <div class="card section">
@@ -297,6 +341,36 @@ def home():
       <div class="bar-wrap">
         <div class="bar-line"><span id="streak-text">Consec. Losses: --</span><span id="streak-pct">--</span></div>
         <div class="bar"><div id="streak-bar" class="fill"></div></div>
+      </div>
+    </div>
+
+    <div class="grid3 section">
+      <div class="card">
+        <div class="viz-card-title">
+          <span>P&L TREND (LAST 10 CLOSED)</span>
+          <span id="trend-last">--</span>
+        </div>
+        <div class="viz-box">
+          <svg id="pnl-sparkline" class="sparkline" viewBox="0 0 320 110" preserveAspectRatio="none"></svg>
+        </div>
+      </div>
+      <div class="card">
+        <div class="viz-card-title">
+          <span>SIGNAL MIX</span>
+          <span id="signal-total">--</span>
+        </div>
+        <div id="signal-mix" class="viz-box">
+          <div class="muted">Loading...</div>
+        </div>
+      </div>
+      <div class="card">
+        <div class="viz-card-title">
+          <span>RISK LOAD</span>
+          <span id="risk-load-pct">--</span>
+        </div>
+        <div id="risk-load" class="viz-box">
+          <div class="muted">Loading...</div>
+        </div>
       </div>
     </div>
 
@@ -319,6 +393,7 @@ def home():
   <script>
     const DAILY_LOSS_LIMIT = {{ daily_loss_limit }};
     const CONSEC_LOSS_LIMIT = {{ consec_limit }};
+    const MAX_POSITIONS = {{ max_positions }};
 
     function fmtMoney(v) {
       const n = Number(v);
@@ -344,6 +419,84 @@ def home():
       if (p < 50) return "#00c853";
       if (p <= 80) return "#ffb300";
       return "#ff1744";
+    }
+    function pct(n, total) {
+      if (!total) return 0;
+      return Math.round((n / total) * 100);
+    }
+    function renderSparkline(trades) {
+      const svg = document.getElementById("pnl-sparkline");
+      const lastEl = document.getElementById("trend-last");
+      if (!svg) return;
+      const rows = Array.isArray(trades) ? trades.slice(0, 10).reverse() : [];
+      const values = rows.map(t => Number(t.pnl_pct || 0) * 100).filter(v => !Number.isNaN(v));
+      if (!values.length) {
+        svg.innerHTML = `<text x="10" y="24" fill="#8fa1b8" font-size="12">No closed trades yet</text>`;
+        lastEl.textContent = "--";
+        return;
+      }
+      const min = Math.min(...values, 0);
+      const max = Math.max(...values, 0);
+      const span = Math.max(max - min, 1);
+      const toX = i => (values.length === 1 ? 160 : (i / (values.length - 1)) * 320);
+      const toY = v => 100 - ((v - min) / span) * 88;
+      const points = values.map((v, i) => `${toX(i)},${toY(v)}`).join(" ");
+      const fill = `M 0 100 L ${points} L 320 100 Z`;
+      const zeroY = toY(0);
+      svg.innerHTML = `
+        <line x1="0" y1="${zeroY}" x2="320" y2="${zeroY}" stroke="rgba(143,161,184,0.35)" stroke-dasharray="3 3"></line>
+        <path class="fill" d="${fill}"></path>
+        <path class="line" d="M ${points}"></path>
+      `;
+      const last = values[values.length - 1];
+      lastEl.textContent = `${last >= 0 ? "+" : ""}${last.toFixed(2)}%`;
+      lastEl.className = pctClass(last);
+    }
+    function renderSignalMix(scanRows) {
+      const el = document.getElementById("signal-mix");
+      const totalEl = document.getElementById("signal-total");
+      if (!el) return;
+      const rows = Array.isArray(scanRows) ? scanRows : [];
+      const calls = rows.filter(r => String(r.direction || "").toLowerCase() === "call").length;
+      const puts = rows.filter(r => String(r.direction || "").toLowerCase() === "put").length;
+      const total = rows.length;
+      totalEl.textContent = total ? `${total} signals` : "No signals";
+      if (!total) {
+        el.innerHTML = `<div class="muted">No passing signals yet</div>`;
+        return;
+      }
+      el.innerHTML = `
+        <div class="row">
+          <span>CALL signals</span>
+          <div class="track"><div class="bar2 b-green2" style="width:${pct(calls, total)}%"></div></div>
+          <span>${calls}</span>
+        </div>
+        <div class="row">
+          <span>PUT signals</span>
+          <div class="track"><div class="bar2 b-red2" style="width:${pct(puts, total)}%"></div></div>
+          <span>${puts}</span>
+        </div>
+      `;
+    }
+    function renderRiskLoad(positions) {
+      const el = document.getElementById("risk-load");
+      const pctEl = document.getElementById("risk-load-pct");
+      if (!el) return;
+      const rows = Array.isArray(positions) ? positions : [];
+      const total = rows.length;
+      const max = Number(MAX_POSITIONS || 0);
+      const p = Math.min(100, Math.round((total / max) * 100));
+      pctEl.textContent = `${p}%`;
+      el.innerHTML = `
+        <div class="row">
+          <span>Slots used</span>
+          <div class="track"><div class="bar2 b-cyan" style="width:${p}%"></div></div>
+          <span>${total}/${max}</span>
+        </div>
+        <div class="muted" style="font-size:12px; margin-top:10px;">
+          Based on MAX_POSITIONS cap in config.
+        </div>
+      `;
     }
 
     function renderPositions(data) {
@@ -461,6 +614,20 @@ def home():
       renderPositions(positions.error ? [] : positions);
       renderTrades(trades.error ? [] : trades);
       renderScan(scanlog.error ? [] : scanlog);
+      renderSparkline(trades.error ? [] : trades);
+      renderSignalMix(scanlog.error ? [] : scanlog);
+      renderRiskLoad(positions.error ? [] : positions);
+
+      const tradesToday = status.error ? 0 : Number(status.trades_today || 0);
+      const wins = status.error ? 0 : Number(status.wins_today || 0);
+      const losses = status.error ? 0 : Number(status.losses_today || 0);
+      const closed = wins + losses;
+      const winRate = closed > 0 ? (wins / closed) * 100 : 0;
+      document.getElementById("trades-today").textContent = String(tradesToday);
+      const wr = document.getElementById("win-rate");
+      wr.textContent = closed > 0 ? `${winRate.toFixed(0)}%` : "--";
+      wr.className = `num ${closed > 0 ? pctClass(winRate - 50) : ""}`;
+      document.getElementById("open-positions-count").textContent = Array.isArray(positions) ? String(positions.length) : "--";
 
       const cb = computeCircuitBreakers(trades.error ? [] : trades);
       const lossPct = DAILY_LOSS_LIMIT > 0 ? Math.min(100, (cb.dailyLoss / DAILY_LOSS_LIMIT) * 100) : 0;
@@ -488,9 +655,11 @@ def home():
         paper=PAPER,
         daily_loss_limit=float(config.DAILY_LOSS_LIMIT_USD),
         consec_limit=int(config.CONSECUTIVE_LOSS_LIMIT),
+        max_positions=int(config.MAX_POSITIONS),
     )
 
 
 if __name__ == "__main__":
-    print("Dashboard running at http://localhost:5000")
-    app.run(host="0.0.0.0", port=5000, debug=False)
+    port = int(os.getenv("PORT", "5000"))
+    print(f"Dashboard running at http://localhost:{port}")
+    app.run(host="0.0.0.0", port=port, debug=False)

@@ -2,8 +2,45 @@
 
 from pathlib import Path
 
-TICKERS = ["SPY", "QQQ", "AAPL", "TSLA"]
-CORE_TICKERS = ["SPY", "QQQ", "AAPL", "TSLA", "NVDA", "MSFT", "AMZN"]
+TICKERS = [
+    "SPY",
+    "QQQ",
+    "IWM",
+    "DIA",
+    "AAPL",
+    "MSFT",
+    "NVDA",
+    "AMZN",
+    "META",
+    "GOOGL",
+    "TSLA",
+    "AMD",
+    "NFLX",
+    "CRM",
+    "INTC",
+]
+CORE_TICKERS = [
+    "SPY",
+    "QQQ",
+    "IWM",
+    "DIA",
+    "AAPL",
+    "MSFT",
+    "NVDA",
+    "AMZN",
+    "META",
+    "GOOGL",
+    "TSLA",
+    "AMD",
+    "NFLX",
+    "CRM",
+    "INTC",
+    "AVGO",
+    "ADBE",
+    "ORCL",
+    "JPM",
+    "XOM",
+]
 BAR_TIMEFRAME = "5Min"
 SIGNAL_LOOKBACK = 20
 MAX_POSITIONS = 2
@@ -47,7 +84,10 @@ MIN_DTE_TRADING_DAYS = 2
 MAX_DTE_TRADING_DAYS = 5
 
 EASTERN_TZ = "US/Eastern"
+CENTRAL_TZ = "US/Central"
 RATE_LIMIT_SLEEP_SECONDS = 0.3
+CLOSED_MIN_SLEEP_SECONDS = 60
+CLOSED_MAX_SLEEP_SECONDS = 900
 TRADES_CSV_PATH = Path(__file__).resolve().parent / "trades.csv"
 
 ALPACA_PAPER_BASE_URL = "https://paper-api.alpaca.markets"

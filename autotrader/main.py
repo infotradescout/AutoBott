@@ -22,6 +22,11 @@ def ts(now_et: datetime | None = None) -> str:
     return now_et.strftime("%Y-%m-%d %H:%M:%S %Z")
 
 
+def ts_ct(now_ct: datetime | None = None) -> str:
+    now_ct = now_ct or datetime.now(pytz.timezone(config.CENTRAL_TZ))
+    return now_ct.strftime("%Y-%m-%d %H:%M:%S %Z")
+
+
 def position_qty_as_int(qty_value) -> int:
     try:
         return int(float(qty_value))
@@ -33,6 +38,24 @@ def _prune_recent_entries(entry_times: list[datetime], now_et: datetime, days: i
     # Rolling calendar-day window used as a conservative throttle for sub-$25k accounts.
     threshold = now_et.timestamp() - (days * 24 * 60 * 60)
     return [dt for dt in entry_times if dt.timestamp() >= threshold]
+
+
+def _closed_market_sleep_seconds(clock) -> int:
+    next_open = getattr(clock, "next_open", None)
+    min_sleep = int(config.CLOSED_MIN_SLEEP_SECONDS)
+    max_sleep = int(config.CLOSED_MAX_SLEEP_SECONDS)
+    if next_open is None:
+        return max(min_sleep, int(config.LOOP_INTERVAL_SECONDS))
+
+    if next_open.tzinfo is None:
+        next_open = pytz.utc.localize(next_open)
+
+    now_utc = datetime.now(pytz.utc)
+    seconds_until_open = int((next_open - now_utc).total_seconds())
+    if seconds_until_open <= 0:
+        return min_sleep
+
+    return max(min_sleep, min(max_sleep, seconds_until_open))
 
 
 def main():
@@ -53,22 +76,44 @@ def main():
     consecutive_losses: int = 0
     loss_counters_day = None
 
-    print(f"[{ts()}] Autotrader started. Waiting for market open.")
+    print(f"[{ts()} | {ts_ct()}] Autotrader started. Waiting for market open.")
     while True:
         clock = broker.get_clock()
         now_et = datetime.now(tz)
+        now_ct = datetime.now(pytz.timezone(config.CENTRAL_TZ))
         if clock.is_open:
             break
-        print(f"[{ts(now_et)}] Market closed. Polling again in 60s.")
-        time.sleep(60)
+        sleep_seconds = _closed_market_sleep_seconds(clock)
+        next_open = getattr(clock, "next_open", None)
+        next_open_ct = ""
+        if next_open is not None:
+            if next_open.tzinfo is None:
+                next_open = pytz.utc.localize(next_open)
+            next_open_ct = next_open.astimezone(pytz.timezone(config.CENTRAL_TZ)).strftime("%Y-%m-%d %H:%M:%S %Z")
+        print(
+            f"[{ts(now_et)} | {ts_ct(now_ct)}] Market closed. "
+            f"Next open (CT): {next_open_ct or 'unknown'}. Sleeping {sleep_seconds}s."
+        )
+        time.sleep(sleep_seconds)
 
-    print(f"[{ts()}] Market open. Starting loop.")
+    print(f"[{ts()} | {ts_ct()}] Market open. Starting loop.")
     while True:
         now_et = datetime.now(tz)
+        now_ct = datetime.now(pytz.timezone(config.CENTRAL_TZ))
         clock = broker.get_clock()
         if not clock.is_open:
-            print(f"[{ts(now_et)}] Market no longer open. Sleeping {config.LOOP_INTERVAL_SECONDS}s.")
-            time.sleep(config.LOOP_INTERVAL_SECONDS)
+            sleep_seconds = _closed_market_sleep_seconds(clock)
+            next_open = getattr(clock, "next_open", None)
+            next_open_ct = ""
+            if next_open is not None:
+                if next_open.tzinfo is None:
+                    next_open = pytz.utc.localize(next_open)
+                next_open_ct = next_open.astimezone(pytz.timezone(config.CENTRAL_TZ)).strftime("%Y-%m-%d %H:%M:%S %Z")
+            print(
+                f"[{ts(now_et)} | {ts_ct(now_ct)}] Market closed. "
+                f"Next open (CT): {next_open_ct or 'unknown'}. Sleeping {sleep_seconds}s."
+            )
+            time.sleep(sleep_seconds)
             continue
         if loss_counters_day != now_et.date():
             # Reset daily counters when market opens (once per session)
