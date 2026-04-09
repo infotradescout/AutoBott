@@ -14,6 +14,11 @@ import config
 
 _EARNINGS_SKIP_SYMBOLS = {str(s).upper() for s in config.EARNINGS_SKIP_SYMBOLS}
 
+# Options contract data is ONLY available on the live API endpoint.
+# Paper trading accounts submit orders via paper-api but must fetch
+# contracts, quotes, and chain data from the live API.
+_LIVE_TRADE_BASE_URL = "https://api.alpaca.markets"
+
 
 class AlpacaDataClient:
     def __init__(self, api_key: str, secret_key: str, paper: bool = True):
@@ -24,6 +29,15 @@ class AlpacaDataClient:
         self.data_base_url = config.ALPACA_DATA_BASE_URL
         self.trade_session = requests.Session()
         self.trade_session.headers.update(
+            {
+                "APCA-API-KEY-ID": api_key,
+                "APCA-API-SECRET-KEY": secret_key,
+                "accept": "application/json",
+            }
+        )
+        # Options contract/quote lookups always use the live endpoint.
+        self.options_session = requests.Session()
+        self.options_session.headers.update(
             {
                 "APCA-API-KEY-ID": api_key,
                 "APCA-API-SECRET-KEY": secret_key,
@@ -192,19 +206,29 @@ class AlpacaDataClient:
         expiration_date_gte: date,
         expiration_date_lte: date,
     ) -> list[dict[str, Any]]:
+        # Options contract data must come from the live API endpoint.
+        # Paper API does not serve options chain data.
         params = {
             "underlying_symbols": underlying_symbol,
             "type": contract_type,
             "expiration_date_gte": expiration_date_gte.isoformat(),
             "expiration_date_lte": expiration_date_lte.isoformat(),
         }
-        resp = self.trade_session.get(f"{self.base_url}/v2/options/contracts", params=params, timeout=15)
+        resp = self.options_session.get(
+            f"{_LIVE_TRADE_BASE_URL}/v2/options/contracts",
+            params=params,
+            timeout=15,
+        )
         resp.raise_for_status()
         body = resp.json()
         return body.get("option_contracts", []) or body.get("contracts", []) or []
 
     def get_option_contract(self, option_symbol: str) -> dict[str, Any]:
-        resp = self.trade_session.get(f"{self.base_url}/v2/options/contracts/{option_symbol}", timeout=15)
+        # Always use live endpoint for contract detail lookups.
+        resp = self.options_session.get(
+            f"{_LIVE_TRADE_BASE_URL}/v2/options/contracts/{option_symbol}",
+            timeout=15,
+        )
         resp.raise_for_status()
         body = resp.json()
         return body.get("option_contract", body)
@@ -215,8 +239,9 @@ class AlpacaDataClient:
         return float(ask) if ask is not None else None
 
     def get_latest_option_quote(self, option_symbol: str) -> dict[str, float | None]:
-        resp = self.trade_session.get(
-            f"{self.base_url}/v2/options/quotes/latest",
+        # Option quotes also require the live endpoint.
+        resp = self.options_session.get(
+            f"{_LIVE_TRADE_BASE_URL}/v2/options/quotes/latest",
             params={"symbols": option_symbol},
             timeout=15,
         )
