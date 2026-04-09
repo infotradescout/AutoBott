@@ -33,6 +33,10 @@ _REVIEW_CACHE: dict[str, Any] = {"ts": None, "payload": None}
 
 app = Flask(__name__)
 
+@app.get("/healthz")
+def healthz():
+    return jsonify({"ok": True, "service": "autobott"})
+
 
 def _now_et() -> datetime:
     return datetime.now(EASTERN)
