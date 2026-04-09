@@ -38,6 +38,15 @@ class AlpacaBroker:
         )
         return self.trading_client.submit_order(order_data=req)
 
+    def place_option_market_buy(self, option_symbol: str, qty: int):
+        req = MarketOrderRequest(
+            symbol=option_symbol,
+            qty=qty,
+            side=OrderSide.BUY,
+            time_in_force=TimeInForce.DAY,
+        )
+        return self.trading_client.submit_order(order_data=req)
+
     def close_option_market(self, option_symbol: str, qty: int):
         req = MarketOrderRequest(
             symbol=option_symbol,

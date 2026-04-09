@@ -706,17 +706,28 @@ def main():
                 order_status = str(getattr(filled_order, "status", "")).lower()
 
                 if order_status not in ("filled", "partially_filled"):
-                    # Did not fill - cancel it and skip
+                    # Did not fill - cancel then try one market-buy fallback.
                     try:
                         broker.cancel_order(order.id)
                     except Exception:
                         pass
-                    print(
-                        f"[{ts(now_et)}] {ticker}: limit order {order.id} did not fill "
-                        f"(status={order_status}). Cancelled."
-                    )
-                    time.sleep(config.RATE_LIMIT_SLEEP_SECONDS)
-                    continue
+                    print(f"[{ts(now_et)}] {ticker}: limit order {order.id} not filled ({order_status}). Trying market buy.")
+                    try:
+                        mkt_order = broker.place_option_market_buy(option_symbol, qty)
+                        time.sleep(3)
+                        filled_order = broker.get_order_status(mkt_order.id)
+                        order_status = str(getattr(filled_order, "status", "")).lower()
+                        if order_status not in ("filled", "partially_filled"):
+                            print(
+                                f"[{ts(now_et)}] {ticker}: market fallback order {mkt_order.id} not filled "
+                                f"(status={order_status}). Skipping."
+                            )
+                            time.sleep(config.RATE_LIMIT_SLEEP_SECONDS)
+                            continue
+                    except Exception as exc:  # noqa: BLE001
+                        print(f"[{ts(now_et)}] {ticker}: market fallback failed: {exc}")
+                        time.sleep(config.RATE_LIMIT_SLEEP_SECONDS)
+                        continue
 
                 filled_avg_price = float(getattr(filled_order, "filled_avg_price", 0) or 0)
                 filled_qty = position_qty_as_int(getattr(filled_order, "filled_qty", qty)) or qty
