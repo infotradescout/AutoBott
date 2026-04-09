@@ -491,6 +491,11 @@ def api_status():
         clock_body = clock.json()
 
         today_rows = _today_trade_rows()
+        now_et = _now_et()
+        now_minutes = (now_et.hour * 60) + now_et.minute
+        entry_open = _clock_hhmm_to_minutes(config.NO_NEW_TRADES_BEFORE)
+        entry_close = _clock_hhmm_to_minutes(config.NO_NEW_TRADES_AFTER)
+        entry_window_open = bool(clock_body.get("is_open", False)) and (entry_open <= now_minutes < entry_close)
         wins = 0
         losses = 0
         total_plpc = 0.0
@@ -506,6 +511,8 @@ def api_status():
             {
                 "market_open": bool(clock_body.get("is_open", False)),
                 "trading_paused": bool(load_trading_control().get("manual_stop", False)),
+                "entry_window_open": entry_window_open,
+                "entry_window_label": f"{config.NO_NEW_TRADES_BEFORE}-{config.NO_NEW_TRADES_AFTER} ET",
                 "last_updated": _now_et().strftime("%Y-%m-%d %H:%M:%S ET"),
                 "trades_today": len(today_rows),
                 "wins_today": wins,
@@ -703,7 +710,7 @@ def home():
       <div class="card strong"><div class="label">Equity</div><div id="equity" class="num">--</div><div class="kpi-sub">Portfolio net liquidation</div></div>
       <div class="card strong"><div class="label">Buying Power</div><div id="buying-power" class="num">--</div><div class="kpi-sub">Available for entries</div></div>
       <div class="card strong"><div class="label">Today P&L</div><div id="daily-pnl" class="num">--</div><div class="kpi-sub">Sum of closed trade %</div></div>
-      <div class="card strong"><div class="label">Market Status</div><div id="market-status" class="num">--</div><div class="kpi-sub">Alpaca clock status</div></div>
+      <div class="card strong"><div class="label">Market Status</div><div id="market-status" class="num">--</div><div id="entry-window-status" class="kpi-sub">Entry Window: --</div></div>
     </div>
 
     <div class="grid3 section">
@@ -1091,6 +1098,13 @@ def home():
       const market = status.error ? "—" : (status.market_open ? "OPEN ●" : "CLOSED ○");
       document.getElementById("market-status").textContent = market;
       document.getElementById("market-status").className = `num ${status.error ? "" : (status.market_open ? "pnl-pos" : "pnl-neg")}`;
+      const entryEl = document.getElementById("entry-window-status");
+      if (entryEl) {
+        const windowLabel = status.error ? "--" : String(status.entry_window_label || "--");
+        const entryState = status.error ? "--" : (status.entry_window_open ? "OPEN" : "CLOSED");
+        entryEl.textContent = `Entry Window: ${entryState} (${windowLabel})`;
+        entryEl.style.color = status.error ? "var(--muted)" : (status.entry_window_open ? "var(--green)" : "var(--yellow)");
+      }
       const paused = !control.error && Boolean(control.manual_stop);
       const controlEl = document.getElementById("trading-control-status");
       if (controlEl) {
