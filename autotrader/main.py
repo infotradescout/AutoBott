@@ -6,6 +6,7 @@ import time
 from datetime import date, datetime
 
 import pytz
+import yfinance as yf
 
 from env_config import get_required_env, load_runtime_env
 load_runtime_env()
@@ -23,7 +24,7 @@ from risk import (
     is_at_or_after,
     position_matches_ticker,
 )
-from scanner import initialize_scanner, run_scan
+from scanner import initialize_scanner, run_observation_phase, run_scan
 from state_store import load_bot_state, save_bot_state
 from trading_control import load_trading_control
 
@@ -111,6 +112,36 @@ def _is_news_block_day(now_et: datetime) -> bool:
     return now_et.date().isoformat() in set(config.NEWS_BLOCK_DATES_ET)
 
 
+def _fetch_vix_level() -> float | None:
+    try:
+        ticker = yf.Ticker("^VIX")
+        fast = getattr(ticker, "fast_info", None)
+        if fast is not None:
+            price = getattr(fast, "last_price", None)
+            if price is None and isinstance(fast, dict):
+                price = fast.get("last_price")
+            if price is not None:
+                value = float(price)
+                if value > 0:
+                    return value
+    except Exception:
+        pass
+    return None
+
+
+def _parse_trade_meta_entry_time(meta: dict) -> datetime | None:
+    raw = str(meta.get("entry_time_iso", "") or "").strip()
+    if not raw:
+        return None
+    try:
+        parsed = datetime.fromisoformat(raw)
+        if parsed.tzinfo is None:
+            return pytz.timezone(config.EASTERN_TZ).localize(parsed)
+        return parsed.astimezone(pytz.timezone(config.EASTERN_TZ))
+    except Exception:
+        return None
+
+
 def _build_scan_universe(data_client: AlpacaDataClient) -> list[str]:
     base = [str(sym).upper() for sym in config.TICKERS if str(sym).strip()]
     combined = list(base)
@@ -158,6 +189,8 @@ def main():
     state = load_bot_state()
     open_trade_meta: dict[str, dict] = dict(state.get("open_trade_meta") or {})
     watchlist: list[str] = []
+    observation_done = bool(state.get("observation_done", False))
+    hot_tickers: list[str] = list(state.get("hot_tickers") or [])
     entry_times_rolling: list[datetime] = [
         dt
         for dt in (_parse_iso_datetime(item) for item in (state.get("entry_times_rolling") or []))
@@ -170,6 +203,7 @@ def main():
     loss_counters_day = date.fromisoformat(loss_counters_day_raw) if loss_counters_day_raw else None
     weekly_loss_key = str(state.get("weekly_loss_key") or _week_key(datetime.now(tz).date()))
     blocked_day_notice = state.get("blocked_day_notice")
+    vix_block_notice = state.get("vix_block_notice")
     next_heartbeat_at = 0.0
     manual_stop_latched = False
 
@@ -178,6 +212,8 @@ def main():
             {
                 "open_trade_meta": open_trade_meta,
                 "watchlist": watchlist,
+                "observation_done": observation_done,
+                "hot_tickers": hot_tickers,
                 "entry_times_rolling": [item.isoformat() for item in entry_times_rolling],
                 "daily_realized_loss_usd": round(daily_realized_loss_usd, 6),
                 "weekly_realized_loss_usd": round(weekly_realized_loss_usd, 6),
@@ -185,6 +221,7 @@ def main():
                 "loss_counters_day": loss_counters_day.isoformat() if loss_counters_day else None,
                 "weekly_loss_key": weekly_loss_key,
                 "blocked_day_notice": blocked_day_notice,
+                "vix_block_notice": vix_block_notice,
             }
         )
 
@@ -322,7 +359,10 @@ def main():
             consecutive_losses = 0
             loss_counters_day = now_et.date()
             watchlist = []
+            observation_done = False
+            hot_tickers = []
             blocked_day_notice = None
+            vix_block_notice = None
 
         option_positions = broker.get_open_option_positions()
         open_count = len(option_positions)
@@ -338,7 +378,28 @@ def main():
             next_heartbeat_at = time.time() + max(30, int(config.HEARTBEAT_SECONDS))
 
         watchlist = _build_scan_universe(data_client)
+        if hot_tickers:
+            watchlist = hot_tickers + [s for s in watchlist if s not in hot_tickers]
         print(f"[{ts(now_et)}] Running full-universe scan on {len(watchlist)} tickers.")
+
+        if (
+            config.OBSERVATION_ENABLED
+            and watchlist
+            and not observation_done
+            and is_at_or_after(now_et, config.SCAN_MORNING_TIME)
+            and not is_at_or_after(now_et, config.OBSERVATION_END_TIME)
+        ):
+            print(f"[{ts(now_et)}] Observation phase: collecting opening range data...")
+            hot_tickers = run_observation_phase(watchlist, data_client, now_et)
+            watchlist = hot_tickers + [s for s in watchlist if s not in hot_tickers]
+            observation_done = True
+
+        if is_at_or_after(now_et, config.OBSERVATION_END_TIME) and not observation_done:
+            if not hot_tickers and watchlist:
+                hot_tickers = run_observation_phase(watchlist, data_client, now_et)
+                watchlist = hot_tickers + [s for s in watchlist if s not in hot_tickers]
+            observation_done = True
+            print(f"[{ts(now_et)}] Observation phase complete. Hot tickers at front of queue: {hot_tickers}")
 
         pdt_allowed, pdt_info = broker.pdt_allows_new_day_trade()
         entry_times_rolling = _prune_recent_entries(entry_times_rolling, now_et, days=5)
@@ -346,6 +407,13 @@ def main():
         under_25k = equity is not None and float(equity) < config.PDT_MIN_EQUITY
         local_trade_budget_hit = under_25k and len(entry_times_rolling) >= config.PDT_MAX_DAY_TRADES_5D
         blocked_day = _is_news_block_day(now_et)
+        vix_value = _fetch_vix_level() if config.ENABLE_VIX_GUARD else None
+        vix_blocked = False
+        if config.ENABLE_VIX_GUARD:
+            if vix_value is None:
+                vix_blocked = True
+            else:
+                vix_blocked = vix_value < float(config.VIX_MIN) or vix_value > float(config.VIX_MAX)
         if blocked_day:
             if blocked_day_notice != now_et.date().isoformat():
                 blocked_day_notice = now_et.date().isoformat()
@@ -360,7 +428,26 @@ def main():
                     dedupe_key=f"event-day-{blocked_day_notice}",
                 )
             signals = []
+        elif vix_blocked:
+            vix_tag = now_et.date().isoformat()
+            if vix_block_notice != vix_tag:
+                vix_block_notice = vix_tag
+                vix_text = "unavailable" if vix_value is None else f"{vix_value:.2f}"
+                print(
+                    f"[{ts(now_et)}] VIX guard blocking entries: VIX={vix_text}, "
+                    f"allowed range {config.VIX_MIN:.2f}-{config.VIX_MAX:.2f}."
+                )
+                alerts.send(
+                    "vix_guard_block",
+                    (
+                        f"VIX guard active. VIX={vix_text}, "
+                        f"range={config.VIX_MIN:.2f}-{config.VIX_MAX:.2f}. New entries paused."
+                    ),
+                    dedupe_key=f"vix-guard-{vix_tag}",
+                )
+            signals = []
         else:
+            vix_block_notice = None
             signals = run_scan(watchlist) if watchlist else []
 
         if not pdt_allowed:
@@ -425,6 +512,9 @@ def main():
                 break
             ticker = signal["symbol"]
             direction = signal["direction"]
+            if not is_at_or_after(now_et, config.NO_NEW_TRADES_BEFORE):
+                print(f"[{ts(now_et)}] Entry window not open yet (before {config.NO_NEW_TRADES_BEFORE} ET).")
+                break
             if is_at_or_after(now_et, config.NO_NEW_TRADES_AFTER):
                 print(f"[{ts(now_et)}] Entry window closed (past {config.NO_NEW_TRADES_AFTER} ET).")
                 break
@@ -548,6 +638,7 @@ def main():
 
                 open_trade_meta[option_symbol] = {
                     "timestamp": ts(now_et),
+                    "entry_time_iso": now_et.isoformat(),
                     "ticker": ticker,
                     "direction": direction,
                     "option_symbol": option_symbol,
@@ -584,6 +675,13 @@ def main():
                 exit_reason = "stop_loss"
             elif is_at_or_after(now_et, config.HARD_CLOSE_TIME):
                 exit_reason = "eod_close"
+            else:
+                meta = open_trade_meta.get(symbol, {})
+                entry_time = _parse_trade_meta_entry_time(meta) if meta else None
+                if entry_time is not None:
+                    held_minutes = int((now_et - entry_time).total_seconds() // 60)
+                    if held_minutes >= int(config.MAX_HOLD_MINUTES):
+                        exit_reason = "time_stop"
 
             if exit_reason:
                 try:

@@ -421,6 +421,44 @@ def api_scanlog():
         return jsonify({"error": str(exc)}), 500
 
 
+@app.route("/api/scanfails")
+def api_scanfails():
+    """Return the last 20 scan failures from scan_log.csv."""
+    try:
+        rows = _read_csv_rows(SCAN_LOG_CSV, limit=200, reverse=True)
+        fails = [r for r in rows if str(r.get("result", "")).lower() == "fail"]
+        return jsonify(fails[:20])
+    except Exception as exc:  # noqa: BLE001
+        return jsonify({"error": str(exc)}), 500
+
+
+@app.route("/api/scansummary")
+def api_scansummary():
+    """Return counts and most common failure reason from the last scan loop."""
+    try:
+        rows = _read_csv_rows(SCAN_LOG_CSV, limit=200, reverse=True)
+        if not rows:
+            return jsonify({"pass_count": 0, "fail_count": 0, "top_reason": "No scan data yet", "last_scan": ""})
+
+        last_ts = rows[0].get("timestamp", "") if rows else ""
+        same_loop = [r for r in rows if r.get("timestamp") == last_ts]
+        pass_count = sum(1 for r in same_loop if r.get("result") == "pass")
+        fail_count = sum(1 for r in same_loop if r.get("result") == "fail")
+        reasons = [r.get("reason", "") for r in same_loop if r.get("result") == "fail"]
+        top_reason = max(set(reasons), key=reasons.count) if reasons else ""
+
+        return jsonify(
+            {
+                "pass_count": pass_count,
+                "fail_count": fail_count,
+                "top_reason": top_reason,
+                "last_scan": last_ts,
+            }
+        )
+    except Exception as exc:  # noqa: BLE001
+        return jsonify({"error": str(exc)}), 500
+
+
 @app.get("/api/status")
 def api_status():
     try:
@@ -660,6 +698,18 @@ def home():
         <div class="bar-line"><span id="streak-text">Consec. Losses: --</span><span id="streak-pct">--</span></div>
         <div class="bar"><div id="streak-bar" class="fill"></div></div>
       </div>
+    </div>
+
+    <div class="card section" id="scan-status-card">
+      <div class="label">SCANNER STATUS</div>
+      <div id="scan-summary">Loading...</div>
+      <div style="margin-top:10px; font-size:12px; color:#888">
+        Last 5 failures:
+      </div>
+      <table id="scan-fails-table">
+        <thead><tr><th>Time</th><th>Symbol</th><th>Reason</th></tr></thead>
+        <tbody id="scan-fails-body"></tbody>
+      </table>
     </div>
 
     <div class="grid3 section">
@@ -993,12 +1043,14 @@ def home():
     }
 
     async function refresh() {
-      const [account, positions, trades, scanlog, status, review, control] = await Promise.all([
+      const [account, positions, trades, scanlog, status, scansummary, scanfails, review, control] = await Promise.all([
         fetchJson("/api/account"),
         fetchJson("/api/positions"),
         fetchJson("/api/trades"),
         fetchJson("/api/scanlog"),
         fetchJson("/api/status"),
+        fetchJson("/api/scansummary"),
+        fetchJson("/api/scanfails"),
         fetchJson("/api/daily-review"),
         fetchJson("/api/trading-control"),
       ]);
@@ -1030,6 +1082,38 @@ def home():
       renderSignalMix(scanlog.error ? [] : scanlog);
       renderRiskLoad(positions.error ? [] : positions);
       renderDailyReview(review);
+
+      const sumEl = document.getElementById("scan-summary");
+      if (sumEl) {
+        if (scansummary && !scansummary.error) {
+          const color = scansummary.pass_count > 0 ? "#00c853" : "#ff9800";
+          sumEl.innerHTML = `
+              <span style="color:${color}">✓ ${scansummary.pass_count} passed</span>
+              &nbsp;|&nbsp;
+              <span style="color:#888">${scansummary.fail_count} failed</span>
+              &nbsp;|&nbsp;
+              Last: ${scansummary.last_scan || "—"}
+              <br><small style="color:#888">Top reason: ${scansummary.top_reason || "—"}</small>
+          `;
+        } else {
+          sumEl.textContent = "No scan data yet";
+        }
+      }
+
+      const failsBody = document.getElementById("scan-fails-body");
+      if (failsBody) {
+        failsBody.innerHTML = "";
+        const failRows = Array.isArray(scanfails) ? scanfails : [];
+        failRows.slice(0, 5).forEach(f => {
+          const row = document.createElement("tr");
+          row.innerHTML = `
+              <td>${(f.timestamp || "").slice(11,16)}</td>
+              <td>${f.symbol || ""}</td>
+              <td style="color:#888; font-size:11px">${f.reason || ""}</td>
+          `;
+          failsBody.appendChild(row);
+        });
+      }
 
       const tradesToday = status.error ? 0 : Number(status.trades_today || 0);
       const wins = status.error ? 0 : Number(status.wins_today || 0);

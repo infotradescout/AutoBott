@@ -19,6 +19,17 @@ from risk import is_at_or_after
 _DEFAULT_SCANNER: "IntradayScanner | None" = None
 SCAN_LOG_PATH = Path(config.SCAN_LOG_CSV_PATH)
 SCAN_LOG_COLUMNS = ["timestamp", "symbol", "result", "direction", "rvol", "rsi", "roc", "iv_rank", "reason"]
+OBSERVATION_LOG_PATH = Path(config.OBSERVATION_LOG_CSV_PATH)
+OBSERVATION_LOG_COLS = [
+    "date",
+    "symbol",
+    "open_range_high",
+    "open_range_low",
+    "open_range_pct",
+    "early_rvol",
+    "early_volume",
+    "hot",
+]
 
 
 def calculate_rsi(closes: pd.Series, period: int = 14) -> float:
@@ -184,7 +195,7 @@ def _scan_ticker_details(
     today_volume: float,
     data_client: AlpacaDataClient,
 ) -> dict[str, Any]:
-    if bars_df is None or bars_df.empty or len(bars_df) < 30:
+    if bars_df is None or bars_df.empty or len(bars_df) < config.SCAN_MIN_BARS:
         return _scan_failure("insufficient intraday bars")
     if daily_bars_df is None or daily_bars_df.empty or len(daily_bars_df) < 20:
         return _scan_failure("insufficient daily bars")
@@ -474,3 +485,70 @@ def run_scan(watchlist: list[str]) -> list[dict]:
 
 def should_build_watchlist(now_et: datetime) -> bool:
     return is_at_or_after(now_et, config.SCAN_MORNING_TIME)
+
+
+def run_observation_phase(watchlist: list[str], data_client: AlpacaDataClient, now_et: datetime) -> list[str]:
+    """
+    Run from 9:30-10:00 ET. Calculates opening range and early RVOL for each ticker.
+    Returns a hot list sorted by RVOL descending and saves observations to CSV.
+    """
+    today_str = now_et.date().isoformat()
+    observations: list[dict[str, Any]] = []
+
+    for symbol in watchlist:
+        try:
+            bars_df = data_client.get_intraday_bars_since_open(symbol=symbol, now_et=now_et, limit=60)
+            if bars_df is None or bars_df.empty or len(bars_df) < 3:
+                time.sleep(config.RATE_LIMIT_SLEEP_SECONDS)
+                continue
+
+            daily_df = data_client.get_stock_daily_bars(symbol, limit=25)
+            or_high = float(bars_df["high"].max())
+            or_low = float(bars_df["low"].min())
+            or_pct = ((or_high - or_low) / or_low * 100) if or_low > 0 else 0.0
+
+            today_vol = float(bars_df["volume"].astype(float).sum())
+            minutes_elapsed = max(1, len(bars_df) * 5)
+            rvol = (
+                calculate_rvol(symbol, today_vol, daily_df, minutes_elapsed)
+                if daily_df is not None and not daily_df.empty
+                else float("nan")
+            )
+            is_hot = (not math.isnan(rvol)) and rvol >= config.RVOL_MIN and or_pct >= config.ATR_PCT_MIN
+
+            observations.append(
+                {
+                    "date": today_str,
+                    "symbol": symbol,
+                    "open_range_high": round(or_high, 4),
+                    "open_range_low": round(or_low, 4),
+                    "open_range_pct": round(or_pct, 2),
+                    "early_rvol": round(rvol, 2) if not math.isnan(rvol) else "",
+                    "early_volume": int(today_vol),
+                    "hot": "yes" if is_hot else "no",
+                }
+            )
+        except Exception:
+            pass
+        time.sleep(config.RATE_LIMIT_SLEEP_SECONDS)
+
+    if observations:
+        import csv
+
+        write_header = not OBSERVATION_LOG_PATH.exists()
+        with OBSERVATION_LOG_PATH.open("a", newline="", encoding="utf-8") as f:
+            writer = csv.DictWriter(f, fieldnames=OBSERVATION_LOG_COLS)
+            if write_header:
+                writer.writeheader()
+            writer.writerows(observations)
+
+    hot = [
+        o["symbol"]
+        for o in sorted(
+            [o for o in observations if o["hot"] == "yes"],
+            key=lambda x: float(x["early_rvol"]) if x["early_rvol"] else 0,
+            reverse=True,
+        )
+    ]
+    print(f"[Observation] {len(hot)} hot tickers: {hot}")
+    return hot
