@@ -439,10 +439,14 @@ def _scan_ticker_details(
         # Pre-strict window or catalyst mode: allow signal flow if all other filters pass.
         rsi = 50.0
     if not (_CATALYST_MODE_ACTIVE and config.CATALYST_DISABLE_RSI):
-        if direction == "call" and not (50 <= rsi <= 72):
-            return _scan_failure(f"RSI {rsi:.0f} outside call range")
-        if direction == "put" and not (28 <= rsi <= 50):
-            return _scan_failure(f"RSI {rsi:.0f} outside put range")
+        if direction == "call" and not (float(config.RSI_CALL_MIN) <= rsi <= float(config.RSI_CALL_MAX)):
+            return _scan_failure(
+                f"RSI {rsi:.0f} outside call range ({float(config.RSI_CALL_MIN):.0f}-{float(config.RSI_CALL_MAX):.0f})"
+            )
+        if direction == "put" and not (float(config.RSI_PUT_MIN) <= rsi <= float(config.RSI_PUT_MAX)):
+            return _scan_failure(
+                f"RSI {rsi:.0f} outside put range ({float(config.RSI_PUT_MIN):.0f}-{float(config.RSI_PUT_MAX):.0f})"
+            )
 
     expiry_gte = _add_trading_days(now_et.date(), config.MIN_DTE_TRADING_DAYS)
     expiry_lte = _add_trading_days(now_et.date(), config.MAX_DTE_TRADING_DAYS)
