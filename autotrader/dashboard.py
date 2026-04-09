@@ -704,7 +704,7 @@ def home():
       <div class="label">SCANNER STATUS</div>
       <div id="scan-summary">Loading...</div>
       <div style="margin-top:10px; font-size:12px; color:#888">
-        Last 5 failures:
+        Last failures (up to 20):
       </div>
       <table id="scan-fails-table">
         <thead><tr><th>Time</th><th>Symbol</th><th>Reason</th></tr></thead>
@@ -1104,7 +1104,7 @@ def home():
       if (failsBody) {
         failsBody.innerHTML = "";
         const failRows = Array.isArray(scanfails) ? scanfails : [];
-        failRows.slice(0, 5).forEach(f => {
+        failRows.slice(0, 20).forEach(f => {
           const row = document.createElement("tr");
           row.innerHTML = `
               <td>${(f.timestamp || "").slice(11,16)}</td>
