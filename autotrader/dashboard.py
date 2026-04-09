@@ -22,11 +22,13 @@ API_KEY = get_required_env("ALPACA_API_KEY")
 SECRET_KEY = get_required_env("ALPACA_SECRET_KEY")
 PAPER = bool(config.PAPER)
 BASE_URL = "https://paper-api.alpaca.markets" if PAPER else "https://api.alpaca.markets"
+DATA_BASE_URL = config.ALPACA_DATA_BASE_URL
 HEADERS = {"APCA-API-KEY-ID": API_KEY or "", "APCA-API-SECRET-KEY": SECRET_KEY or ""}
 
 TRADES_CSV = Path(config.TRADES_CSV_PATH)
 SCAN_LOG_CSV = Path(__file__).resolve().parent / "scan_log.csv"
 EASTERN = pytz.timezone(config.EASTERN_TZ)
+_REVIEW_CACHE: dict[str, Any] = {"ts": None, "payload": None}
 
 app = Flask(__name__)
 
@@ -121,6 +123,231 @@ def _progress_color(pct: float) -> str:
     if pct <= 80:
         return "#ffb300"
     return "#ff1744"
+
+
+def _today_scan_rows() -> list[dict[str, str]]:
+    today = _now_et().date()
+    rows = _read_csv_rows(SCAN_LOG_CSV, limit=10000, reverse=False)
+    out: list[dict[str, str]] = []
+    for row in rows:
+        dt = _parse_ts(row.get("timestamp", ""))
+        if dt and dt.date() == today:
+            out.append(row)
+    return out
+
+
+def _clock_hhmm_to_minutes(hhmm: str) -> int:
+    parts = hhmm.split(":")
+    if len(parts) != 2:
+        return 0
+    try:
+        hour = int(parts[0])
+        minute = int(parts[1])
+    except ValueError:
+        return 0
+    return (hour * 60) + minute
+
+
+def _fetch_snapshots(symbols: list[str]) -> dict[str, dict[str, Any]]:
+    if not symbols:
+        return {}
+    try:
+        resp = requests.get(
+            f"{DATA_BASE_URL}/v2/stocks/snapshots",
+            headers=HEADERS,
+            params={"symbols": ",".join(symbols)},
+            timeout=12,
+        )
+        resp.raise_for_status()
+        body = resp.json()
+        return body if isinstance(body, dict) else {}
+    except Exception:
+        return {}
+
+
+def _build_skipped_review(scan_rows: list[dict[str, str]]) -> dict[str, Any]:
+    failed = [r for r in scan_rows if str(r.get("result", "")).lower() == "fail"]
+    if not failed:
+        return {"items": [], "reason_summary": []}
+
+    per_symbol: dict[str, dict[str, Any]] = {}
+    reason_counts: dict[str, int] = {}
+    for row in failed:
+        symbol = str(row.get("symbol", "")).upper()
+        if not symbol:
+            continue
+        reason = str(row.get("reason", "")).strip() or "unknown"
+        dt = _parse_ts(row.get("timestamp", ""))
+        reason_counts[reason] = reason_counts.get(reason, 0) + 1
+        if symbol not in per_symbol:
+            per_symbol[symbol] = {
+                "symbol": symbol,
+                "fail_count": 0,
+                "first_seen": row.get("timestamp", ""),
+                "last_seen": row.get("timestamp", ""),
+                "last_reason": reason,
+                "_first_dt": dt,
+                "_last_dt": dt,
+            }
+        item = per_symbol[symbol]
+        item["fail_count"] = int(item["fail_count"]) + 1
+        item["last_reason"] = reason
+        if dt is not None:
+            first_dt = item.get("_first_dt")
+            last_dt = item.get("_last_dt")
+            if first_dt is None or dt < first_dt:
+                item["_first_dt"] = dt
+                item["first_seen"] = row.get("timestamp", "")
+            if last_dt is None or dt > last_dt:
+                item["_last_dt"] = dt
+                item["last_seen"] = row.get("timestamp", "")
+
+    ranked = sorted(
+        per_symbol.values(),
+        key=lambda x: (int(x["fail_count"]), str(x["last_seen"])),
+        reverse=True,
+    )[:12]
+    symbols = [str(i["symbol"]) for i in ranked]
+    snapshots = _fetch_snapshots(symbols)
+
+    items: list[dict[str, Any]] = []
+    for item in ranked:
+        symbol = str(item["symbol"])
+        snap = snapshots.get(symbol, {}) if isinstance(snapshots, dict) else {}
+        daily = snap.get("dailyBar", {}) if isinstance(snap, dict) else {}
+        latest_trade = snap.get("latestTrade", {}) if isinstance(snap, dict) else {}
+        minute_bar = snap.get("minuteBar", {}) if isinstance(snap, dict) else {}
+
+        day_open = _safe_float(daily.get("o"), 0.0)
+        latest = _safe_float(latest_trade.get("p"), 0.0)
+        if latest <= 0:
+            latest = _safe_float(minute_bar.get("c"), 0.0)
+        if latest <= 0:
+            latest = _safe_float(daily.get("c"), 0.0)
+        day_high = _safe_float(daily.get("h"), 0.0)
+        day_low = _safe_float(daily.get("l"), 0.0)
+
+        move_pct = ((latest - day_open) / day_open * 100.0) if day_open > 0 and latest > 0 else None
+        range_pct = ((day_high - day_low) / day_open * 100.0) if day_open > 0 and day_high > 0 else None
+
+        items.append(
+            {
+                "symbol": symbol,
+                "fail_count": int(item["fail_count"]),
+                "first_seen": item["first_seen"],
+                "last_seen": item["last_seen"],
+                "last_reason": item["last_reason"],
+                "day_open": round(day_open, 4) if day_open > 0 else None,
+                "latest_price": round(latest, 4) if latest > 0 else None,
+                "day_move_pct": round(move_pct, 2) if move_pct is not None else None,
+                "day_range_pct": round(range_pct, 2) if range_pct is not None else None,
+            }
+        )
+
+    reason_summary = sorted(
+        [{"reason": reason, "count": count} for reason, count in reason_counts.items()],
+        key=lambda x: int(x["count"]),
+        reverse=True,
+    )[:8]
+    return {"items": items, "reason_summary": reason_summary}
+
+
+def _build_logic_checks(scan_rows: list[dict[str, str]], trade_rows: list[dict[str, str]]) -> list[dict[str, str]]:
+    checks: list[dict[str, str]] = []
+    now_et = _now_et()
+    now_minutes = (now_et.hour * 60) + now_et.minute
+    scan_start = _clock_hhmm_to_minutes(config.SCAN_MORNING_TIME)
+    hard_close = _clock_hhmm_to_minutes(config.HARD_CLOSE_TIME)
+
+    if scan_rows:
+        last_scan_dt = _parse_ts(scan_rows[-1].get("timestamp", ""))
+        if last_scan_dt is None:
+            checks.append({"status": "warn", "name": "Scan Timestamps", "detail": "Could not parse last scan timestamp."})
+        else:
+            age_min = int((now_et - last_scan_dt).total_seconds() // 60)
+            market_window = scan_start <= now_minutes <= hard_close
+            if market_window and age_min > 45:
+                checks.append(
+                    {
+                        "status": "warn",
+                        "name": "Scan Freshness",
+                        "detail": f"No scan rows for {age_min} minutes during market hours.",
+                    }
+                )
+            else:
+                checks.append({"status": "ok", "name": "Scan Freshness", "detail": f"Last scan {max(age_min, 0)} minutes ago."})
+    else:
+        checks.append({"status": "warn", "name": "Scan Activity", "detail": "No scan rows for today yet."})
+
+    pass_count = sum(1 for r in scan_rows if str(r.get("result", "")).lower() == "pass")
+    fail_count = sum(1 for r in scan_rows if str(r.get("result", "")).lower() == "fail")
+    total_scans = pass_count + fail_count
+    if total_scans > 0:
+        pass_rate = (pass_count / total_scans) * 100.0
+        checks.append(
+            {
+                "status": "ok" if pass_rate >= 5 else "warn",
+                "name": "Pass Rate",
+                "detail": f"{pass_count}/{total_scans} passed ({pass_rate:.1f}%).",
+            }
+        )
+
+    scan_errors = 0
+    for r in scan_rows:
+        reason = str(r.get("reason", "")).lower()
+        if "scan error" in reason or "unavailable" in reason:
+            scan_errors += 1
+    if scan_errors > 0:
+        checks.append({"status": "warn", "name": "Data Quality", "detail": f"{scan_errors} rows had scanner/data errors."})
+    else:
+        checks.append({"status": "ok", "name": "Data Quality", "detail": "No scanner/data errors detected."})
+
+    today_loss, streak = _daily_loss_and_streak(trade_rows)
+    if today_loss >= float(config.DAILY_LOSS_LIMIT_USD):
+        checks.append(
+            {
+                "status": "warn",
+                "name": "Daily Loss Guard",
+                "detail": f"Loss ${today_loss:.2f} reached/exceeded limit ${float(config.DAILY_LOSS_LIMIT_USD):.2f}.",
+            }
+        )
+    else:
+        checks.append(
+            {
+                "status": "ok",
+                "name": "Daily Loss Guard",
+                "detail": f"Loss ${today_loss:.2f} below limit ${float(config.DAILY_LOSS_LIMIT_USD):.2f}.",
+            }
+        )
+
+    if streak >= int(config.CONSECUTIVE_LOSS_LIMIT):
+        checks.append(
+            {
+                "status": "warn",
+                "name": "Consecutive Loss Guard",
+                "detail": f"Loss streak {streak} reached limit {int(config.CONSECUTIVE_LOSS_LIMIT)}.",
+            }
+        )
+    else:
+        checks.append(
+            {
+                "status": "ok",
+                "name": "Consecutive Loss Guard",
+                "detail": f"Current loss streak {streak}/{int(config.CONSECUTIVE_LOSS_LIMIT)}.",
+            }
+        )
+    return checks
+
+
+def _build_daily_review_payload() -> dict[str, Any]:
+    scan_rows = _today_scan_rows()
+    trade_rows = _today_trade_rows()
+    return {
+        "date": _now_et().strftime("%Y-%m-%d"),
+        "generated_at": _now_et().strftime("%Y-%m-%d %H:%M:%S ET"),
+        "skipped": _build_skipped_review(scan_rows),
+        "checks": _build_logic_checks(scan_rows, trade_rows),
+    }
 
 
 @app.get("/api/account")
@@ -222,6 +449,25 @@ def api_status():
         return jsonify({"error": str(exc)}), 500
 
 
+@app.get("/api/daily-review")
+def api_daily_review():
+    try:
+        now = _now_et()
+        cache_ts = _REVIEW_CACHE.get("ts")
+        cache_payload = _REVIEW_CACHE.get("payload")
+        if cache_ts and cache_payload is not None:
+            age_seconds = (now - cache_ts).total_seconds()
+            if age_seconds < 300:
+                return jsonify(cache_payload)
+
+        payload = _build_daily_review_payload()
+        _REVIEW_CACHE["ts"] = now
+        _REVIEW_CACHE["payload"] = payload
+        return jsonify(payload)
+    except Exception as exc:  # noqa: BLE001
+        return jsonify({"error": str(exc)}), 500
+
+
 @app.get("/")
 def home():
     return render_template_string(
@@ -288,6 +534,7 @@ def home():
     .b-green { color: var(--green); border-color: rgba(0,200,83,0.4); }
     .b-red { color: var(--red); border-color: rgba(255,23,68,0.4); }
     .b-gray { color: #aaa; border-color: #555; }
+    .b-cyan-soft { color: var(--cyan); border-color: rgba(42, 199, 255, 0.45); }
     .pnl-pos { color: var(--green); }
     .pnl-neg { color: var(--red); }
     .pnl-zero { color: #888; }
@@ -387,6 +634,13 @@ def home():
     <div class="card section">
       <h3>SCANNER - Last Passing Signals</h3>
       <div id="scan-wrap" class="muted">Loading...</div>
+    </div>
+
+    <div class="card section">
+      <h3>DAILY REVIEW + SELF CHECK</h3>
+      <div id="review-checks-wrap" class="muted">Loading review checks...</div>
+      <div style="height:10px;"></div>
+      <div id="review-skipped-wrap" class="muted">Loading skipped analysis...</div>
     </div>
   </div>
 
@@ -557,6 +811,64 @@ def home():
       el.innerHTML = `<table><thead><tr><th>Time</th><th>Symbol</th><th>Dir</th><th>RVOL</th><th>RSI</th><th>IVR %</th><th>Reason</th></tr></thead><tbody>${rows}</tbody></table>`;
     }
 
+    function reviewBadge(status) {
+      if (status === "ok") return `<span class="badge b-green">OK</span>`;
+      if (status === "warn") return `<span class="badge b-red">WARN</span>`;
+      return `<span class="badge b-gray">INFO</span>`;
+    }
+
+    function renderDailyReview(review) {
+      const checksEl = document.getElementById("review-checks-wrap");
+      const skippedEl = document.getElementById("review-skipped-wrap");
+      if (!checksEl || !skippedEl) return;
+      if (!review || review.error) {
+        checksEl.innerHTML = `<div class="muted">Daily review unavailable</div>`;
+        skippedEl.innerHTML = "";
+        return;
+      }
+
+      const checks = Array.isArray(review.checks) ? review.checks : [];
+      if (!checks.length) {
+        checksEl.innerHTML = `<div class="muted">No checks available yet.</div>`;
+      } else {
+        const rows = checks.map(c => `
+          <tr>
+            <td>${reviewBadge(String(c.status || ""))}</td>
+            <td>${c.name || "-"}</td>
+            <td>${c.detail || "-"}</td>
+          </tr>`).join("");
+        checksEl.innerHTML = `
+          <table>
+            <thead><tr><th>Status</th><th>Check</th><th>Detail</th></tr></thead>
+            <tbody>${rows}</tbody>
+          </table>`;
+      }
+
+      const skipped = review.skipped || {};
+      const items = Array.isArray(skipped.items) ? skipped.items : [];
+      const reasons = Array.isArray(skipped.reason_summary) ? skipped.reason_summary : [];
+      if (!items.length) {
+        skippedEl.innerHTML = `<div class="muted">No skipped symbols recorded today yet.</div>`;
+        return;
+      }
+      const topReasons = reasons.slice(0, 3).map(r => `<span class="badge b-cyan-soft">${r.reason} (${r.count})</span>`).join(" ");
+      const rows = items.map(i => `
+        <tr>
+          <td>${i.symbol || "-"}</td>
+          <td>${i.fail_count ?? "-"}</td>
+          <td>${i.last_reason || "-"}</td>
+          <td class="${pctClass(Number(i.day_move_pct || 0))}">${i.day_move_pct == null ? "--" : asPct(Number(i.day_move_pct), 2)}</td>
+          <td>${i.day_range_pct == null ? "--" : asPct(Number(i.day_range_pct), 2)}</td>
+          <td>${i.last_seen || "-"}</td>
+        </tr>`).join("");
+      skippedEl.innerHTML = `
+        <div style="margin-bottom:8px;" class="muted">Top fail reasons: ${topReasons || "—"}</div>
+        <table>
+          <thead><tr><th>Symbol</th><th>Fails</th><th>Last Skip Reason</th><th>Day Move</th><th>Day Range</th><th>Last Seen</th></tr></thead>
+          <tbody>${rows}</tbody>
+        </table>`;
+    }
+
     function computeCircuitBreakers(trades) {
       const today = new Date().toLocaleDateString("en-CA");
       const todayRows = (Array.isArray(trades) ? trades : []).filter(t => String(t.timestamp || "").startsWith(today));
@@ -590,12 +902,13 @@ def home():
     }
 
     async function refresh() {
-      const [account, positions, trades, scanlog, status] = await Promise.all([
+      const [account, positions, trades, scanlog, status, review] = await Promise.all([
         fetchJson("/api/account"),
         fetchJson("/api/positions"),
         fetchJson("/api/trades"),
         fetchJson("/api/scanlog"),
         fetchJson("/api/status"),
+        fetchJson("/api/daily-review"),
       ]);
 
       document.getElementById("last-updated").textContent = new Date().toLocaleTimeString();
@@ -617,6 +930,7 @@ def home():
       renderSparkline(trades.error ? [] : trades);
       renderSignalMix(scanlog.error ? [] : scanlog);
       renderRiskLoad(positions.error ? [] : positions);
+      renderDailyReview(review);
 
       const tradesToday = status.error ? 0 : Number(status.trades_today || 0);
       const wins = status.error ? 0 : Number(status.wins_today || 0);
