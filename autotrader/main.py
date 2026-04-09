@@ -16,7 +16,7 @@ from alerts import AlertManager
 from broker import AlpacaBroker
 from data import AlpacaDataClient
 from logger import TradeLogger
-from options import select_atm_option_contract
+from options import select_atm_option_contract_with_reason
 from risk import (
     can_open_new_positions,
     is_at_or_after,
@@ -644,6 +644,9 @@ def main():
                 print(f"[{ts(now_et)}] {ticker}: skip (existing option position).")
                 continue
 
+            # Re-check live position count right before placing a new order.
+            option_positions = broker.get_open_option_positions()
+            open_count = len(option_positions)
             if not can_open_new_positions(open_count, config.MAX_POSITIONS):
                 print(f"[{ts(now_et)}] Max positions reached. Stopping new entries this loop.")
                 break
@@ -657,7 +660,7 @@ def main():
                     time.sleep(config.RATE_LIMIT_SLEEP_SECONDS)
                     continue
 
-                contract = select_atm_option_contract(
+                contract, contract_reason = select_atm_option_contract_with_reason(
                     data_client=data_client,
                     underlying_symbol=ticker,
                     direction=direction,
@@ -665,7 +668,7 @@ def main():
                     now_et=now_et,
                 )
                 if not contract:
-                    print(f"[{ts(now_et)}] {ticker}: skip (no eligible option contract).")
+                    print(f"[{ts(now_et)}] {ticker}: skip (no eligible option contract: {contract_reason}).")
                     time.sleep(config.RATE_LIMIT_SLEEP_SECONDS)
                     continue
 
@@ -679,9 +682,15 @@ def main():
                 initial_chain_ask = float(contract.get("ask_price", ask_price) or ask_price)
                 pre_submit_slippage = _slippage_pct(initial_chain_ask, ask_price)
                 if pre_submit_slippage > config.MAX_ENTRY_SLIPPAGE_PCT:
+                    # Retry quote once before skipping on stale chain snapshot drift.
+                    retry_ask = data_client.get_latest_option_ask(option_symbol)
+                    if retry_ask is not None and retry_ask > 0:
+                        ask_price = retry_ask
+                        pre_submit_slippage = _slippage_pct(initial_chain_ask, ask_price)
+                if pre_submit_slippage > (config.MAX_ENTRY_SLIPPAGE_PCT * 3):
                     print(
                         f"[{ts(now_et)}] {ticker}: skip (entry slippage {pre_submit_slippage:.2f}% > "
-                        f"{config.MAX_ENTRY_SLIPPAGE_PCT:.2f}%)."
+                        f"hard cap {(config.MAX_ENTRY_SLIPPAGE_PCT * 3):.2f}%)."
                     )
                     time.sleep(config.RATE_LIMIT_SLEEP_SECONDS)
                     continue
@@ -695,7 +704,7 @@ def main():
                     f"{option_symbol} qty={qty} limit={ask_price:.2f} order_id={order.id}"
                 )
 
-                time.sleep(5)
+                time.sleep(8)
                 filled_order = broker.get_order_status(order.id)
                 order_status = str(getattr(filled_order, "status", "")).lower()
 
@@ -704,15 +713,30 @@ def main():
                         broker.cancel_order(order.id)
                     except Exception:
                         pass
-                    print(f"[{ts(now_et)}] {ticker}: limit order {order.id} not filled ({order_status}). Trying market buy.")
+                    # Retry once with a slightly more aggressive limit before market fallback.
+                    aggressive_limit = round(float(ask_price) * 1.05, 4)
+                    print(
+                        f"[{ts(now_et)}] {ticker}: limit order {order.id} not filled ({order_status}). "
+                        f"Retry limit={aggressive_limit:.4f}."
+                    )
                     try:
-                        mkt_order = broker.place_option_market_buy(option_symbol, qty)
-                        time.sleep(3)
-                        filled_order = broker.get_order_status(mkt_order.id)
+                        retry_order = broker.place_option_limit_buy(option_symbol, qty, aggressive_limit)
+                        time.sleep(5)
+                        filled_order = broker.get_order_status(retry_order.id)
                         order_status = str(getattr(filled_order, "status", "")).lower()
                         if order_status not in ("filled", "partially_filled"):
+                            try:
+                                broker.cancel_order(retry_order.id)
+                            except Exception:
+                                pass
+                            print(f"[{ts(now_et)}] {ticker}: retry limit not filled ({order_status}). Trying market buy.")
+                            mkt_order = broker.place_option_market_buy(option_symbol, qty)
+                            time.sleep(3)
+                            filled_order = broker.get_order_status(mkt_order.id)
+                            order_status = str(getattr(filled_order, "status", "")).lower()
+                        if order_status not in ("filled", "partially_filled"):
                             print(
-                                f"[{ts(now_et)}] {ticker}: market fallback order {mkt_order.id} not filled "
+                                f"[{ts(now_et)}] {ticker}: market fallback not filled "
                                 f"(status={order_status}). Skipping."
                             )
                             time.sleep(config.RATE_LIMIT_SLEEP_SECONDS)

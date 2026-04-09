@@ -41,6 +41,23 @@ def select_atm_option_contract(
     underlying_price: float,
     now_et: datetime | None = None,
 ) -> dict[str, Any] | None:
+    contract, _reason = select_atm_option_contract_with_reason(
+        data_client=data_client,
+        underlying_symbol=underlying_symbol,
+        direction=direction,
+        underlying_price=underlying_price,
+        now_et=now_et,
+    )
+    return contract
+
+
+def select_atm_option_contract_with_reason(
+    data_client: AlpacaDataClient,
+    underlying_symbol: str,
+    direction: str,
+    underlying_price: float,
+    now_et: datetime | None = None,
+) -> tuple[dict[str, Any] | None, str]:
     now_et = now_et or datetime.now(pytz.timezone(config.EASTERN_TZ))
     today = now_et.date()
     expiry_floor = _add_trading_days(today, config.MIN_DTE_TRADING_DAYS)
@@ -53,9 +70,18 @@ def select_atm_option_contract(
         expiration_date_lte=expiry_ceiling,
     )
     if not contracts:
-        return None
+        return None, (
+            "no contracts in DTE window "
+            f"{config.MIN_DTE_TRADING_DAYS}-{config.MAX_DTE_TRADING_DAYS} trading days"
+        )
 
     filtered: list[dict[str, Any]] = []
+    fail_counts = {
+        "inactive_or_untradable": 0,
+        "missing_fields": 0,
+        "low_open_interest": 0,
+        "low_volume": 0,
+    }
     for contract in contracts:
         active = contract.get("status", "active") == "active"
         tradable = contract.get("tradable", True)
@@ -72,11 +98,17 @@ def select_atm_option_contract(
                 details = contract
             open_interest = _safe_float(details.get("open_interest"))
             volume = _safe_float(details.get("volume") or details.get("daily_volume"))
-        if not active or not tradable or strike is None or not exp or not symbol:
+        if not active or not tradable:
+            fail_counts["inactive_or_untradable"] += 1
+            continue
+        if strike is None or not exp or not symbol:
+            fail_counts["missing_fields"] += 1
             continue
         if open_interest is None or open_interest <= config.MIN_OPTION_OPEN_INTEREST:
+            fail_counts["low_open_interest"] += 1
             continue
         if volume is None or volume <= config.MIN_OPTION_DAILY_VOLUME:
+            fail_counts["low_volume"] += 1
             continue
         if active and tradable and strike is not None and exp and symbol:
             details["open_interest"] = open_interest
@@ -84,7 +116,13 @@ def select_atm_option_contract(
             filtered.append(details)
 
     if not filtered:
-        return None
+        reason = (
+            f"no eligible contracts: inactive={fail_counts['inactive_or_untradable']}, "
+            f"missing={fail_counts['missing_fields']}, "
+            f"low_oi={fail_counts['low_open_interest']}<=min({config.MIN_OPTION_OPEN_INTEREST}), "
+            f"low_vol={fail_counts['low_volume']}<=min({config.MIN_OPTION_DAILY_VOLUME})"
+        )
+        return None, reason
 
     filtered.sort(
         key=lambda c: (
@@ -93,26 +131,39 @@ def select_atm_option_contract(
         )
     )
 
+    quote_fail_counts = {
+        "bad_quote": 0,
+        "nonpositive_mid": 0,
+        "spread_too_wide": 0,
+    }
     for contract in filtered[:25]:
         symbol = contract["symbol"]
         quote = data_client.get_latest_option_quote(symbol)
         bid = _safe_float(quote.get("bid"))
         ask = _safe_float(quote.get("ask"))
         if bid is None or ask is None or bid <= 0 or ask <= 0 or ask < bid:
+            quote_fail_counts["bad_quote"] += 1
             time.sleep(config.RATE_LIMIT_SLEEP_SECONDS)
             continue
         mid = (bid + ask) / 2
         if mid <= 0:
+            quote_fail_counts["nonpositive_mid"] += 1
             time.sleep(config.RATE_LIMIT_SLEEP_SECONDS)
             continue
         spread_pct = ((ask - bid) / mid) * 100
         if spread_pct >= config.MAX_OPTION_SPREAD_PCT:
+            quote_fail_counts["spread_too_wide"] += 1
             time.sleep(config.RATE_LIMIT_SLEEP_SECONDS)
             continue
 
         contract["bid_price"] = bid
         contract["ask_price"] = ask
         contract["spread_pct"] = round(spread_pct, 2)
-        return contract
+        return contract, "ok"
 
-    return None
+    reason = (
+        f"quotes rejected: bad_quote={quote_fail_counts['bad_quote']}, "
+        f"nonpositive_mid={quote_fail_counts['nonpositive_mid']}, "
+        f"spread_too_wide={quote_fail_counts['spread_too_wide']}>=max({config.MAX_OPTION_SPREAD_PCT})"
+    )
+    return None, reason
