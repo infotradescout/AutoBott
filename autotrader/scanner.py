@@ -362,9 +362,12 @@ def _scan_ticker_details(
     )
     if math.isnan(rvol):
         return _scan_failure("rvol unavailable")
-    effective_rvol_min = float(config.CATALYST_RELAXED_RVOL_MIN) if _CATALYST_MODE_ACTIVE else float(config.RVOL_MIN)
-    if rvol < effective_rvol_min:
-        return _scan_failure(f"RVOL {rvol:.1f}x (too low)")
+    if not is_at_or_after(now_et, config.RVOL_IGNORE_AFTER):
+        effective_rvol_min = float(config.CATALYST_RELAXED_RVOL_MIN) if _CATALYST_MODE_ACTIVE else float(config.RVOL_MIN)
+        if is_at_or_after(now_et, config.RVOL_RELAX_AFTER):
+            effective_rvol_min = min(effective_rvol_min, float(config.RVOL_RELAXED_MIN))
+        if rvol < effective_rvol_min:
+            return _scan_failure(f"RVOL {rvol:.1f}x (too low)")
 
     atr = calculate_atr(symbol=symbol, daily_bars_df=daily_bars_df, period=14)
     if math.isnan(atr) or price <= 0:

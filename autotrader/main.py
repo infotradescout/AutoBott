@@ -165,6 +165,63 @@ def _latest_5m_move_pct(data_client: AlpacaDataClient, symbol: str, now_et: date
         return None
 
 
+def _index_regime_bias(data_client: AlpacaDataClient, now_et: datetime) -> str:
+    if not config.ENABLE_INDEX_BIAS_FILTER:
+        return "both"
+    trend_votes: list[str] = []
+    for symbol in ("SPY", "QQQ"):
+        try:
+            bars = data_client.get_stock_bars(
+                symbol=symbol,
+                timeframe=config.INDEX_BIAS_TIMEFRAME,
+                limit=max(25, int(config.INDEX_BIAS_LOOKBACK)),
+            )
+            if bars is None or bars.empty or len(bars) < 21:
+                continue
+            closes = bars["close"].astype(float)
+            ema9 = closes.ewm(span=9, adjust=False).mean()
+            ema21 = closes.ewm(span=21, adjust=False).mean()
+            if ema9.iloc[-1] > ema21.iloc[-1] and ema21.iloc[-1] > ema21.iloc[-2]:
+                trend_votes.append("call")
+            elif ema9.iloc[-1] < ema21.iloc[-1] and ema21.iloc[-1] < ema21.iloc[-2]:
+                trend_votes.append("put")
+            else:
+                trend_votes.append("both")
+        except Exception:
+            trend_votes.append("both")
+    if trend_votes and all(v == "call" for v in trend_votes):
+        return "call"
+    if trend_votes and all(v == "put" for v in trend_votes):
+        return "put"
+    return "both"
+
+
+def _entry_confirmation_passes(
+    data_client: AlpacaDataClient,
+    ticker: str,
+    direction: str,
+    now_et: datetime,
+) -> bool:
+    if not config.ENABLE_ENTRY_CONFIRMATION:
+        return True
+    try:
+        bars = data_client.get_intraday_bars_since_open(
+            symbol=ticker,
+            now_et=now_et,
+            limit=max(3, int(config.ENTRY_CONFIRM_BARS)),
+        )
+        if bars is None or bars.empty or len(bars) < 2:
+            return False
+        closes = bars["close"].astype(float)
+        last_close = float(closes.iloc[-1])
+        prev_close = float(closes.iloc[-2])
+        if direction == "call":
+            return last_close > prev_close
+        return last_close < prev_close
+    except Exception:
+        return False
+
+
 def _detect_catalyst_event(
     data_client: AlpacaDataClient,
     now_et: datetime,
@@ -266,6 +323,18 @@ def main():
     catalyst_mode_active = bool(state.get("catalyst_mode_active", False))
     catalyst_mode_reason = str(state.get("catalyst_mode_reason", "") or "")
     catalyst_mode_until = _parse_state_datetime(state.get("catalyst_mode_until_iso"))
+    ticker_entry_counts: dict[str, int] = {
+        str(k): int(v)
+        for k, v in dict(state.get("ticker_entry_counts") or {}).items()
+    }
+    ticker_reentry_armed: dict[str, bool] = {
+        str(k): bool(v)
+        for k, v in dict(state.get("ticker_reentry_armed") or {}).items()
+    }
+    ticker_reentries_used: dict[str, int] = {
+        str(k): int(v)
+        for k, v in dict(state.get("ticker_reentries_used") or {}).items()
+    }
     next_heartbeat_at = 0.0
     manual_stop_latched = False
     if catalyst_mode_until and datetime.now(tz) >= catalyst_mode_until:
@@ -292,6 +361,9 @@ def main():
                 "catalyst_mode_active": catalyst_mode_active,
                 "catalyst_mode_reason": catalyst_mode_reason,
                 "catalyst_mode_until_iso": catalyst_mode_until.isoformat() if catalyst_mode_until else "",
+                "ticker_entry_counts": ticker_entry_counts,
+                "ticker_reentry_armed": ticker_reentry_armed,
+                "ticker_reentries_used": ticker_reentries_used,
             }
         )
 
@@ -441,6 +513,9 @@ def main():
             catalyst_mode_active = False
             catalyst_mode_reason = ""
             catalyst_mode_until = None
+            ticker_entry_counts = {}
+            ticker_reentry_armed = {}
+            ticker_reentries_used = {}
             set_catalyst_mode(False, "")
 
         option_positions = broker.get_open_option_positions()
@@ -562,6 +637,14 @@ def main():
             vix_block_notice = None
             signals = run_scan(watchlist) if watchlist else []
 
+        index_bias = _index_regime_bias(data_client, now_et)
+        if index_bias in ("call", "put") and signals:
+            before = len(signals)
+            signals = [s for s in signals if str(s.get("direction", "")).lower() == index_bias]
+            print(f"[{ts(now_et)}] Index bias={index_bias.upper()} filtered signals {before}->{len(signals)}.")
+        elif signals:
+            print(f"[{ts(now_et)}] Index bias neutral; keeping both call/put signals.")
+
         if not pdt_allowed:
             print(
                 f"[{ts(now_et)}] PDT broker flag: no new entries reported. "
@@ -642,6 +725,24 @@ def main():
             )
             if has_ticker_position:
                 print(f"[{ts(now_et)}] {ticker}: skip (existing option position).")
+                continue
+
+            prior_entries = int(ticker_entry_counts.get(ticker, 0))
+            reentries_used = int(ticker_reentries_used.get(ticker, 0))
+            reentry_armed = bool(ticker_reentry_armed.get(ticker, False))
+            if prior_entries >= 1:
+                if not reentry_armed:
+                    print(f"[{ts(now_et)}] {ticker}: skip (already traded today; no stop-loss re-entry armed).")
+                    continue
+                if reentries_used >= int(config.MAX_REENTRIES_PER_TICKER):
+                    print(
+                        f"[{ts(now_et)}] {ticker}: skip (max re-entries used "
+                        f"{reentries_used}/{int(config.MAX_REENTRIES_PER_TICKER)})."
+                    )
+                    continue
+
+            if not _entry_confirmation_passes(data_client, ticker, direction, now_et):
+                print(f"[{ts(now_et)}] {ticker}: skip (entry confirmation candle not aligned).")
                 continue
 
             # Re-check live position count right before placing a new order.
@@ -780,7 +881,13 @@ def main():
                     "expiry": contract.get("expiration_date", ""),
                     "qty": filled_qty,
                     "entry_price": filled_avg_price or ask_price,
+                    "stop_floor_plpc": -float(config.STOP_LOSS_PCT),
+                    "max_plpc": 0.0,
                 }
+                if prior_entries >= 1 and reentry_armed:
+                    ticker_reentries_used[ticker] = reentries_used + 1
+                    ticker_reentry_armed[ticker] = False
+                ticker_entry_counts[ticker] = prior_entries + 1
                 open_count += 1
                 entry_times_rolling.append(now_et)
                 _save_runtime_state()
@@ -803,15 +910,27 @@ def main():
             except (TypeError, ValueError):
                 plpc = 0.0
 
+            meta = open_trade_meta.get(symbol, {})
+            dynamic_stop_floor = float(meta.get("stop_floor_plpc", -float(config.STOP_LOSS_PCT)) or -float(config.STOP_LOSS_PCT))
+            max_plpc = float(meta.get("max_plpc", plpc) or plpc)
+            max_plpc = max(max_plpc, plpc)
+            if max_plpc >= float(config.TRAIL_LOCK1_TRIGGER_PCT):
+                dynamic_stop_floor = max(dynamic_stop_floor, float(config.TRAIL_LOCK1_STOP_PCT))
+            if max_plpc >= float(config.TRAIL_LOCK2_TRIGGER_PCT):
+                dynamic_stop_floor = max(dynamic_stop_floor, float(config.TRAIL_LOCK2_STOP_PCT))
+            if meta:
+                meta["stop_floor_plpc"] = dynamic_stop_floor
+                meta["max_plpc"] = max_plpc
+                open_trade_meta[symbol] = meta
+
             exit_reason = None
-            if plpc >= config.PROFIT_TARGET_PCT:
+            if config.ENABLE_FIXED_PROFIT_TARGET and plpc >= config.PROFIT_TARGET_PCT:
                 exit_reason = "profit_target"
-            elif plpc <= -config.STOP_LOSS_PCT:
+            elif plpc <= dynamic_stop_floor:
                 exit_reason = "stop_loss"
             elif is_at_or_after(now_et, config.HARD_CLOSE_TIME):
                 exit_reason = "eod_close"
             else:
-                meta = open_trade_meta.get(symbol, {})
                 entry_time = _parse_trade_meta_entry_time(meta) if meta else None
                 if entry_time is not None:
                     held_minutes = int((now_et - entry_time).total_seconds() // 60)
@@ -849,6 +968,12 @@ def main():
                         consecutive_losses += 1
                     else:
                         consecutive_losses = 0
+
+                    ticker = str(meta.get("ticker", "") or "")
+                    if ticker and exit_reason == "stop_loss":
+                        ticker_reentry_armed[ticker] = True
+                    elif ticker:
+                        ticker_reentry_armed[ticker] = False
 
                     open_trade_meta.pop(symbol, None)
                     _save_runtime_state()

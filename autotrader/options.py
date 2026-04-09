@@ -34,6 +34,34 @@ def _add_trading_days(start: date, days: int) -> date:
     return cursor
 
 
+def _safe_date(value: Any) -> date | None:
+    if value is None:
+        return None
+    if isinstance(value, datetime):
+        return value.date()
+    if isinstance(value, date):
+        return value
+    text = str(value).strip()
+    if not text:
+        return None
+    try:
+        return date.fromisoformat(text[:10])
+    except Exception:
+        return None
+
+
+def _extract_delta(contract: dict[str, Any]) -> float | None:
+    raw = contract.get("delta")
+    if raw is None:
+        greeks = contract.get("greeks")
+        if isinstance(greeks, dict):
+            raw = greeks.get("delta")
+    value = _safe_float(raw)
+    if value is None:
+        return None
+    return abs(value)
+
+
 def select_atm_option_contract(
     data_client: AlpacaDataClient,
     underlying_symbol: str,
@@ -124,19 +152,50 @@ def select_atm_option_contract_with_reason(
         )
         return None, reason
 
-    filtered.sort(
-        key=lambda c: (
-            c["expiration_date"],
-            abs(float(c["strike_price"]) - underlying_price),
+    scored: list[dict[str, Any]] = []
+    for contract in filtered:
+        exp_date = _safe_date(contract.get("expiration_date"))
+        open_interest = _safe_float(contract.get("open_interest")) or 0.0
+        if exp_date == today and open_interest < float(config.MIN_OPTION_OPEN_INTEREST_0DTE):
+            fail_counts["low_open_interest"] += 1
+            continue
+        strike_gap = abs(float(contract["strike_price"]) - underlying_price)
+        delta_abs = _extract_delta(contract)
+        target_delta = float(config.TARGET_DELTA_FALLBACK)
+        if direction == "call":
+            target_delta = max(float(config.TARGET_DELTA_MIN), min(float(config.TARGET_DELTA_MAX), target_delta))
+        if direction == "put":
+            target_delta = max(float(config.TARGET_DELTA_MIN), min(float(config.TARGET_DELTA_MAX), target_delta))
+        if config.ENABLE_DELTA_TARGETING and delta_abs is not None:
+            contract["delta_abs"] = round(delta_abs, 4)
+            # Prefer contracts inside target band; outside still allowed as fallback.
+            in_band = float(config.TARGET_DELTA_MIN) <= delta_abs <= float(config.TARGET_DELTA_MAX)
+            delta_penalty = abs(delta_abs - target_delta) * (1.0 if in_band else 3.0)
+        elif delta_abs is not None:
+            contract["delta_abs"] = round(delta_abs, 4)
+            delta_penalty = abs(delta_abs - target_delta)
+        else:
+            contract["delta_abs"] = ""
+            delta_penalty = 0.25
+        score = (
+            (0 if exp_date is None else (exp_date - today).days) * 0.20
+            + strike_gap * 0.05
+            + delta_penalty
         )
-    )
+        contract["_select_score"] = score
+        scored.append(contract)
+
+    if not scored:
+        return None, "no eligible contracts after 0DTE/quality checks"
+
+    scored.sort(key=lambda c: (float(c.get("_select_score", 99.0)), c.get("expiration_date", "")))
 
     quote_fail_counts = {
         "bad_quote": 0,
         "nonpositive_mid": 0,
         "spread_too_wide": 0,
     }
-    for contract in filtered[:25]:
+    for contract in scored[:40]:
         symbol = contract["symbol"]
         quote = data_client.get_latest_option_quote(symbol)
         bid = _safe_float(quote.get("bid"))
