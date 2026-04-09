@@ -4,7 +4,7 @@ services:
     env: python
     plan: starter
     buildCommand: pip install -r autotrader/requirements.txt
-    startCommand: python autotrader/render_service.py
+    startCommand: python -u autotrader/render_service.py
     healthCheckPath: /api/status
     envVars:
       - key: ALPACA_API_KEY
