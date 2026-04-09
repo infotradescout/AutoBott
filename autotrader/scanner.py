@@ -256,7 +256,6 @@ def _calculate_iv_rank_from_contracts(
         historical RV range as a proxy for true IV Rank.
       - Falls back to 50.0 (neutral) if historical data is unavailable.
     """
-    # Step 1: find ATM IV from today's chain
     closest_iv: float | None = None
     closest_dist = float("inf")
     for contract in contracts:
@@ -272,10 +271,9 @@ def _calculate_iv_rank_from_contracts(
     if closest_iv is None:
         return None, None
 
-    # Step 2: try to compute IV rank from 52-week HV history
     if data_client is not None and symbol is not None:
         try:
-            daily_df = data_client.get_stock_daily_bars(symbol, limit=260)  # ~52 weeks
+            daily_df = data_client.get_stock_daily_bars(symbol, limit=260)
             if daily_df is not None and len(daily_df) >= 30:
                 closes = daily_df["close"].astype(float)
                 log_ret = np.log(closes / closes.shift(1))
@@ -291,7 +289,6 @@ def _calculate_iv_rank_from_contracts(
         except Exception:
             pass
 
-    # Fallback: neutral rank — never block a trade due to missing IV data
     return closest_iv, 50.0
 
 
@@ -383,13 +380,11 @@ def _scan_ticker_details(
     if distance_pct <= config.VWAP_NEUTRAL_BAND_PCT:
         return _scan_failure(f"price near VWAP ({distance_pct:.2f}%)")
 
-    # Relaxed VWAP direction: require 2-of-3 recent bars on the same side.
-    # Previously required all 3, which was too strict on whipsaw/high-vol days.
-    last3 = closes.tail(3)
-    above_vwap = price > vwap and (last3 > vwap).sum() >= 2
-    below_vwap = price < vwap and (last3 < vwap).sum() >= 2
-    if not above_vwap and not below_vwap:
-        return _scan_failure("VWAP direction not clean")
+    # VWAP direction: current price side is sufficient on high-vol days.
+    # Removed multi-bar majority requirement — on explosive moves price
+    # can gap away from VWAP in a single bar and never look back.
+    above_vwap = price > vwap
+    below_vwap = price < vwap
     direction = "call" if above_vwap else "put"
 
     htf_reason = ""
@@ -421,10 +416,11 @@ def _scan_ticker_details(
     ema21 = closes.ewm(span=21, adjust=False).mean()
     if len(ema9) < 3 or len(ema21) < 3:
         return _scan_failure("EMA unavailable")
-    # Reduced EMA slope lookback from 4 bars to 2 bars.
-    # On explosive gap/momentum moves the trend fires within 1-2 bars, not 4.
-    ema_bull = ema9.iloc[-1] > ema21.iloc[-1] and ema9.iloc[-1] > ema9.iloc[-2] and ema21.iloc[-1] > ema21.iloc[-2]
-    ema_bear = ema9.iloc[-1] < ema21.iloc[-1] and ema9.iloc[-1] < ema9.iloc[-2] and ema21.iloc[-1] < ema21.iloc[-2]
+    # EMA check: only require EMA9 on correct side of EMA21.
+    # Removed slope requirement — on violent high-vol days EMAs slope
+    # against the move for 1-2 bars before catching up, killing real signals.
+    ema_bull = ema9.iloc[-1] > ema21.iloc[-1]
+    ema_bear = ema9.iloc[-1] < ema21.iloc[-1]
     if direction == "call" and not ema_bull:
         return _scan_failure("EMA not bullish")
     if direction == "put" and not ema_bear:
@@ -475,13 +471,15 @@ def _scan_ticker_details(
     if iv_rank is None:
         iv_rank = 50.0
 
+    # IV rank upper bound is raised on high-vol days via CATALYST_RELAXED_IV_RANK_MAX.
+    # IV rank lower bound is skipped entirely — on spike days IV is always elevated
+    # and a low IV rank reading simply means the chain data is stale, not that
+    # the trade is invalid.
     effective_iv_rank_max = (
         float(config.CATALYST_RELAXED_IV_RANK_MAX) if _CATALYST_MODE_ACTIVE else float(config.IV_RANK_MAX)
     )
     if iv_rank > effective_iv_rank_max:
-        return _scan_failure(f"IV Rank {iv_rank:.0f}% too high")
-    if iv_rank < config.IV_RANK_MIN:
-        return _scan_failure(f"IV Rank {iv_rank:.0f}% too low")
+        return _scan_failure(f"IV Rank {iv_rank:.0f}% too high (max {effective_iv_rank_max:.0f}%)")
 
     if config.ENABLE_NEWS_EVENT_BLOCK:
         blocked, news_reason = data_client.has_high_impact_news(
