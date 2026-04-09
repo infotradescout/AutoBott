@@ -27,7 +27,7 @@ DATA_BASE_URL = config.ALPACA_DATA_BASE_URL
 HEADERS = {"APCA-API-KEY-ID": API_KEY or "", "APCA-API-SECRET-KEY": SECRET_KEY or ""}
 
 TRADES_CSV = Path(config.TRADES_CSV_PATH)
-SCAN_LOG_CSV = Path(__file__).resolve().parent / "scan_log.csv"
+SCAN_LOG_CSV = Path(config.SCAN_LOG_CSV_PATH)
 EASTERN = pytz.timezone(config.EASTERN_TZ)
 _REVIEW_CACHE: dict[str, Any] = {"ts": None, "payload": None}
 

@@ -39,6 +39,10 @@ def _env_csv_dates(name: str, default: tuple[str, ...] = ()) -> tuple[str, ...]:
     return tuple(item for item in items if item)
 
 
+_DEFAULT_DATA_DIR = Path(__file__).resolve().parent
+_DATA_DIR = Path(os.getenv("DATA_DIR", str(_DEFAULT_DATA_DIR)))
+
+
 TICKERS = [
     "SPY",
     "QQQ",
@@ -137,9 +141,10 @@ CENTRAL_TZ = "US/Central"
 RATE_LIMIT_SLEEP_SECONDS = 0.3
 CLOSED_MIN_SLEEP_SECONDS = _env_int("CLOSED_MIN_SLEEP_SECONDS", 60)
 CLOSED_MAX_SLEEP_SECONDS = _env_int("CLOSED_MAX_SLEEP_SECONDS", 900)
-TRADES_CSV_PATH = Path(__file__).resolve().parent / "trades.csv"
-STATE_JSON_PATH = Path(__file__).resolve().parent / "runtime_state.json"
-TRADING_CONTROL_PATH = Path(__file__).resolve().parent / "trading_control.json"
+TRADES_CSV_PATH = _DATA_DIR / "trades.csv"
+STATE_JSON_PATH = _DATA_DIR / "runtime_state.json"
+SCAN_LOG_CSV_PATH = _DATA_DIR / "scan_log.csv"
+TRADING_CONTROL_PATH = _DATA_DIR / "trading_control.json"
 MANUAL_PAUSE_SLEEP_SECONDS = _env_int("MANUAL_PAUSE_SLEEP_SECONDS", 30)
 HEARTBEAT_SECONDS = _env_int("HEARTBEAT_SECONDS", 300)
 ALERT_COOLDOWN_SECONDS = _env_int("ALERT_COOLDOWN_SECONDS", 300)

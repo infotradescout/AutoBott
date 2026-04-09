@@ -43,3 +43,10 @@ The trader now includes:
 - Optional alerting/heartbeat to Discord and/or a generic webhook.
 
 Configure these in `autotrader/.env` (see `autotrader/.env.example`).
+
+Render note:
+- Attach a persistent disk and set `DATA_DIR=/data` so runtime files survive restarts:
+  - `trades.csv`
+  - `scan_log.csv`
+  - `runtime_state.json`
+  - `trading_control.json`

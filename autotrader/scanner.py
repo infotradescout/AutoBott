@@ -17,7 +17,7 @@ from data import AlpacaDataClient
 from risk import is_at_or_after
 
 _DEFAULT_SCANNER: "IntradayScanner | None" = None
-SCAN_LOG_PATH = Path(__file__).resolve().parent / "scan_log.csv"
+SCAN_LOG_PATH = Path(config.SCAN_LOG_CSV_PATH)
 SCAN_LOG_COLUMNS = ["timestamp", "symbol", "result", "direction", "rvol", "rsi", "roc", "iv_rank", "reason"]
 
 

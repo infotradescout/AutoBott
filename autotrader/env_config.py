@@ -12,8 +12,6 @@ _PROJECT_ROOT = _THIS_DIR.parent
 _ENV_CANDIDATES = (
     _PROJECT_ROOT / ".env",
     _THIS_DIR / ".env",
-    _PROJECT_ROOT / ".env.example",
-    _THIS_DIR / ".env.example",
 )
 _LOADED = False
 
