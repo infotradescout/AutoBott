@@ -710,9 +710,7 @@ def main():
                     # Track realized loss for daily circuit breaker
                     entry_price = float(meta.get("entry_price", getattr(pos, "avg_entry_price", 0) or 0))
                     exit_price = float(getattr(pos, "current_price", 0) or 0)
-                    contracts = qty * 100  # 1 contract = 100 shares
-                    trade_pnl = (exit_price - entry_price) * contracts * (1 if meta.get("direction") == "call" else 1)
-                    # Simpler: use plpc x original premium spent
+                    # Use plpc x original premium spent for realized-loss tracking.
                     premium_spent = entry_price * qty * 100
                     trade_pnl_usd = premium_spent * plpc  # plpc is already a signed fraction
 

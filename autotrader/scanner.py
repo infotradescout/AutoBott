@@ -211,7 +211,6 @@ def _calculate_iv_rank_from_contracts(
             if daily_df is not None and len(daily_df) >= 30:
                 closes = daily_df["close"].astype(float)
                 # 30-day rolling annualized realized volatility
-                log_returns = (closes / closes.shift(1)).apply(lambda x: x**0.5 if x > 0 else float("nan"))
                 log_ret = np.log(closes / closes.shift(1))
                 rv_series = log_ret.rolling(30).std() * (252**0.5)
                 rv_clean = rv_series.dropna()
