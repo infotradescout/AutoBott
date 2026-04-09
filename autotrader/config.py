@@ -118,7 +118,7 @@ PREOPEN_READY_MINUTES = 10
 HARD_CLOSE_TIME = _env_str("HARD_CLOSE_TIME", "15:30")
 NO_NEW_TRADES_BEFORE = _env_str("NO_NEW_TRADES_BEFORE", "09:30")
 NO_NEW_TRADES_AFTER = _env_str("NO_NEW_TRADES_AFTER", "15:30")
-PAPER = _env_bool("PAPER_TRADING", False)
+PAPER = _env_bool("PAPER_TRADING", True)
 LOOP_INTERVAL_SECONDS = _env_int("LOOP_INTERVAL_SECONDS", 30)
 SCAN_MORNING_TIME = "09:30"
 OBSERVATION_END_TIME = "10:00"
@@ -177,7 +177,6 @@ SCAN_MIN_BARS = _env_int("SCAN_MIN_BARS", 5)
 SCAN_DAILY_BARS = 30
 
 # --- Scanner thresholds (all tunable via env vars) ---
-# Defaults tuned to avoid midday over-filtering on active market days.
 RVOL_MIN = _env_float("RVOL_MIN", 0.6)
 RVOL_STRICT_UNTIL = _env_str("RVOL_STRICT_UNTIL", "10:30")
 RVOL_RELAX_AFTER = _env_str("RVOL_RELAX_AFTER", "10:00")
@@ -193,7 +192,6 @@ RSI_EARLY_MIN_PERIOD = _env_int("RSI_EARLY_MIN_PERIOD", 5)
 RSI_STRICT_AFTER_TIME = "10:15"
 ENABLE_RSI_FILTER = _env_bool("ENABLE_RSI_FILTER", False)
 
-# RSI bands — widened and tunable so momentum runs aren't blocked
 RSI_CALL_MIN = _env_float("RSI_CALL_MIN", 45.0)
 RSI_CALL_MAX = _env_float("RSI_CALL_MAX", 80.0)
 RSI_PUT_MIN = _env_float("RSI_PUT_MIN", 20.0)
@@ -212,7 +210,7 @@ PDT_MIN_EQUITY = 25000.0
 PDT_MAX_DAY_TRADES_5D = 3
 ENFORCE_PDT_GUARD = False
 
-# --- Options contract selection --- tuned for 0-2 DTE intraday
+# --- Options contract selection ---
 MIN_OPTION_OPEN_INTEREST = _env_int("MIN_OPTION_OPEN_INTEREST", 50)
 MIN_OPTION_DAILY_VOLUME = _env_int("MIN_OPTION_DAILY_VOLUME", 10)
 MAX_OPTION_SPREAD_PCT = _env_float("MAX_OPTION_SPREAD_PCT", 50.0)
