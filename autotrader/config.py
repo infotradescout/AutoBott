@@ -177,12 +177,13 @@ SCAN_MIN_BARS = _env_int("SCAN_MIN_BARS", 5)
 SCAN_DAILY_BARS = 30
 
 # --- Scanner thresholds (all tunable via env vars) ---
-RVOL_MIN = _env_float("RVOL_MIN", 0.8)
+# Defaults tuned to avoid midday over-filtering on active market days.
+RVOL_MIN = _env_float("RVOL_MIN", 0.6)
 ATR_PCT_MIN = 1.5
 VWAP_NEUTRAL_BAND_PCT = 0.1
 ROC_PERIOD = 10
-ROC_BULL_MIN = _env_float("ROC_BULL_MIN", 0.2)
-ROC_BEAR_MAX = _env_float("ROC_BEAR_MAX", -0.2)
+ROC_BULL_MIN = _env_float("ROC_BULL_MIN", 0.05)
+ROC_BEAR_MAX = _env_float("ROC_BEAR_MAX", -0.05)
 RSI_EARLY_MIN_PERIOD = _env_int("RSI_EARLY_MIN_PERIOD", 5)
 RSI_STRICT_AFTER_TIME = "10:15"
 
