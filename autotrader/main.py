@@ -228,6 +228,12 @@ def main():
         )
 
     mode = "PAPER" if config.PAPER else "LIVE"
+    initial_control = load_trading_control()
+    if bool(initial_control.get("manual_stop", False)):
+        reason = str(initial_control.get("reason", "") or "manual_stop")
+        print(f"[{ts()} | {ts_ct()}] Startup state: KILLSWITCH ACTIVE ({reason}). Trading will remain paused.")
+    else:
+        print(f"[{ts()} | {ts_ct()}] Startup state: KILLSWITCH not active.")
     print(f"[{ts()} | {ts_ct()}] Autotrader started in {mode} mode. Waiting for market open.")
     alerts.send(
         "startup",
@@ -413,7 +419,11 @@ def main():
         vix_blocked = False
         if config.ENABLE_VIX_GUARD:
             if vix_value is None:
-                vix_blocked = True
+                # Fail-open on data fetch issues so missing VIX data does not halt all trading.
+                vix_blocked = False
+                if vix_block_notice != now_et.date().isoformat():
+                    vix_block_notice = now_et.date().isoformat()
+                    print(f"[{ts(now_et)}] VIX data unavailable; guard fail-open (trading not blocked).")
             else:
                 vix_blocked = vix_value < float(config.VIX_MIN) or vix_value > float(config.VIX_MAX)
         if blocked_day:
