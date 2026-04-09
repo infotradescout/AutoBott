@@ -18,8 +18,6 @@ from data import AlpacaDataClient
 from logger import TradeLogger
 from options import select_atm_option_contract
 from risk import (
-    calculate_entry_qty,
-    calculate_position_budget_usd,
     can_open_new_positions,
     is_at_or_after,
     position_matches_ticker,
@@ -688,21 +686,8 @@ def main():
                     time.sleep(config.RATE_LIMIT_SLEEP_SECONDS)
                     continue
 
-                position_budget_usd = calculate_position_budget_usd(
-                    equity=float(equity) if equity is not None else None,
-                    base_position_size_usd=float(config.POSITION_SIZE_USD),
-                    risk_per_trade_pct=float(config.RISK_PER_TRADE_PCT),
-                    max_position_size_usd=float(config.MAX_POSITION_SIZE_USD),
-                    consecutive_losses=consecutive_losses,
-                    reduce_after_consecutive_losses=int(config.DRAWDOWN_REDUCE_AFTER_CONSEC_LOSSES),
-                    drawdown_size_multiplier=float(config.DRAWDOWN_SIZE_MULTIPLIER),
-                )
-                # qty is contracts; ask_price is per-share so multiply by 100 for cost per contract
-                qty = calculate_entry_qty(position_budget_usd, ask_price * 100)
-                if qty < 1:
-                    # Fallback: if budget math still gives 0, force 1 contract
-                    qty = 1
-                    print(f"[{ts(now_et)}] {ticker}: qty forced to 1 (budget=${position_budget_usd:.2f} ask=${ask_price:.2f}).")
+                # Always trade exactly 1 contract
+                qty = 1
 
                 order = broker.place_option_limit_buy(option_symbol, qty, ask_price)
                 print(
