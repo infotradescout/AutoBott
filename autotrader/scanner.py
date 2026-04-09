@@ -278,7 +278,6 @@ def _calculate_iv_rank_from_contracts(
             daily_df = data_client.get_stock_daily_bars(symbol, limit=260)  # ~52 weeks
             if daily_df is not None and len(daily_df) >= 30:
                 closes = daily_df["close"].astype(float)
-                # 30-day rolling annualized realized volatility
                 log_ret = np.log(closes / closes.shift(1))
                 rv_series = log_ret.rolling(30).std() * (252**0.5)
                 rv_clean = rv_series.dropna()
@@ -290,9 +289,9 @@ def _calculate_iv_rank_from_contracts(
                         iv_rank = max(0.0, min(100.0, iv_rank))
                         return closest_iv, round(iv_rank, 2)
         except Exception:
-            pass  # fall through to neutral default
+            pass
 
-    # Fallback: return neutral rank so IV check doesn't block the trade
+    # Fallback: neutral rank — never block a trade due to missing IV data
     return closest_iv, 50.0
 
 
@@ -427,7 +426,6 @@ def _scan_ticker_details(
     rsi_period = 14
     rsi = calculate_rsi(closes, period=rsi_period)
     if math.isnan(rsi):
-        # Early-session fallback: use shorter RSI period when bars are still limited.
         rsi_period = min(14, max(int(config.RSI_EARLY_MIN_PERIOD), len(closes) - 1))
         if rsi_period >= 2:
             rsi = calculate_rsi(closes, period=rsi_period)
@@ -436,7 +434,6 @@ def _scan_ticker_details(
             _CATALYST_MODE_ACTIVE and config.CATALYST_DISABLE_RSI
         ):
             return _scan_failure("RSI unavailable")
-        # Pre-strict window or catalyst mode: allow signal flow if all other filters pass.
         rsi = 50.0
     if not (_CATALYST_MODE_ACTIVE and config.CATALYST_DISABLE_RSI):
         if direction == "call" and not (float(config.RSI_CALL_MIN) <= rsi <= float(config.RSI_CALL_MAX)):
@@ -450,6 +447,8 @@ def _scan_ticker_details(
 
     expiry_gte = _add_trading_days(now_et.date(), config.MIN_DTE_TRADING_DAYS)
     expiry_lte = _add_trading_days(now_et.date(), config.MAX_DTE_TRADING_DAYS)
+    iv_value: float | None = None
+    iv_rank: float | None = None
     try:
         chain = data_client.get_option_contracts(
             underlying_symbol=symbol,
@@ -457,23 +456,18 @@ def _scan_ticker_details(
             expiration_date_gte=expiry_gte,
             expiration_date_lte=expiry_lte,
         )
-    except Exception as exc:  # noqa: BLE001
-        return _scan_failure(f"IV data unavailable: {exc}")
-    if not chain:
-        if _CATALYST_MODE_ACTIVE and config.CATALYST_ALLOW_IV_FALLBACK:
-            iv_value, iv_rank = None, 50.0
-        else:
-            return _scan_failure("no option chain for IV check")
+    except Exception:
+        chain = []
 
     if chain:
         iv_value, iv_rank = _calculate_iv_rank_from_contracts(
             chain, price=price, data_client=data_client, symbol=symbol
         )
+
+    # Always fall back to neutral IV rank — never block a trade due to missing chain/IV data
     if iv_rank is None:
-        if _CATALYST_MODE_ACTIVE and config.CATALYST_ALLOW_IV_FALLBACK:
-            iv_rank = 50.0
-        else:
-            return _scan_failure("IV rank unavailable")
+        iv_rank = 50.0
+
     effective_iv_rank_max = (
         float(config.CATALYST_RELAXED_IV_RANK_MAX) if _CATALYST_MODE_ACTIVE else float(config.IV_RANK_MAX)
     )

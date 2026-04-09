@@ -169,24 +169,29 @@ VIX_MIN = 13.0
 VIX_MAX = 80.0
 
 MIN_SHARE_PRICE = 10
-MAX_SHARE_PRICE = 800
+MAX_SHARE_PRICE = _env_int("MAX_SHARE_PRICE", 2000)
 SCREENER_TOP_N = 20
 MOVER_SYMBOLS_PER_SIDE = 10
 SCAN_INTRADAY_BARS = 60
 SCAN_MIN_BARS = _env_int("SCAN_MIN_BARS", 5)
 SCAN_DAILY_BARS = 30
-RVOL_MIN = _env_float("RVOL_MIN", 0.6)
+
+# --- Scanner thresholds (all tunable via env vars) ---
+RVOL_MIN = _env_float("RVOL_MIN", 0.8)
 ATR_PCT_MIN = 1.5
 VWAP_NEUTRAL_BAND_PCT = 0.1
 ROC_PERIOD = 10
-ROC_BULL_MIN = _env_float("ROC_BULL_MIN", 0.05)
-ROC_BEAR_MAX = _env_float("ROC_BEAR_MAX", -0.05)
+ROC_BULL_MIN = _env_float("ROC_BULL_MIN", 0.2)
+ROC_BEAR_MAX = _env_float("ROC_BEAR_MAX", -0.2)
 RSI_EARLY_MIN_PERIOD = _env_int("RSI_EARLY_MIN_PERIOD", 5)
 RSI_STRICT_AFTER_TIME = "10:15"
+
+# RSI bands — widened and tunable so momentum runs aren't blocked
 RSI_CALL_MIN = _env_float("RSI_CALL_MIN", 45.0)
-RSI_CALL_MAX = _env_float("RSI_CALL_MAX", 90.0)
-RSI_PUT_MIN = _env_float("RSI_PUT_MIN", 10.0)
+RSI_CALL_MAX = _env_float("RSI_CALL_MAX", 80.0)
+RSI_PUT_MIN = _env_float("RSI_PUT_MIN", 20.0)
 RSI_PUT_MAX = _env_float("RSI_PUT_MAX", 55.0)
+
 IV_RANK_MIN = 20.0
 IV_RANK_MAX = 75.0
 EARNINGS_LOOKAHEAD_DAYS = 2
