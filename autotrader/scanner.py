@@ -18,7 +18,19 @@ from risk import is_at_or_after
 
 _DEFAULT_SCANNER: "IntradayScanner | None" = None
 SCAN_LOG_PATH = Path(config.SCAN_LOG_CSV_PATH)
-SCAN_LOG_COLUMNS = ["timestamp", "symbol", "result", "direction", "rvol", "rsi", "roc", "iv_rank", "reason"]
+SCAN_LOG_COLUMNS = [
+    "timestamp",
+    "symbol",
+    "result",
+    "direction",
+    "rvol",
+    "rsi",
+    "roc",
+    "iv_rank",
+    "regime_score",
+    "signal_score",
+    "reason",
+]
 OBSERVATION_LOG_PATH = Path(config.OBSERVATION_LOG_CSV_PATH)
 OBSERVATION_LOG_COLS = [
     "date",
@@ -91,6 +103,57 @@ def calculate_rvol(symbol: str, today_volume: float, daily_bars_df: pd.DataFrame
 
 def _scan_failure(reason: str) -> dict[str, Any]:
     return {"failed": True, "reason": reason}
+
+
+def _historical_regime_score(daily_bars_df: pd.DataFrame) -> tuple[float, str]:
+    if daily_bars_df is None or daily_bars_df.empty or len(daily_bars_df) < 30:
+        return 0.0, "insufficient daily history"
+
+    closes = daily_bars_df["close"].astype(float)
+    highs = daily_bars_df["high"].astype(float)
+    lows = daily_bars_df["low"].astype(float)
+    vols = daily_bars_df["volume"].astype(float)
+    last_close = float(closes.iloc[-1])
+    if last_close <= 0:
+        return 0.0, "invalid daily close"
+
+    sma20 = float(closes.tail(20).mean())
+    sma50 = float(closes.tail(50).mean()) if len(closes) >= 50 else float(closes.mean())
+    trend_strength_pct = abs((sma20 - sma50) / sma50 * 100) if sma50 > 0 else 0.0
+
+    log_ret = np.log(closes / closes.shift(1))
+    rv20 = float(log_ret.tail(20).std() * (252**0.5) * 100) if len(log_ret.dropna()) >= 20 else 0.0
+    range20 = float((((highs - lows) / closes.replace(0, np.nan)) * 100).tail(20).mean())
+    avg_vol20 = float(vols.tail(20).mean())
+
+    score = 0.0
+    if trend_strength_pct >= 0.5:
+        score += 1.0
+    if trend_strength_pct >= 1.0:
+        score += 1.0
+    if 12.0 <= rv20 <= 65.0:
+        score += 1.0
+    if range20 >= 1.0:
+        score += 1.0
+    if avg_vol20 >= 1_000_000:
+        score += 1.0
+
+    reason = (
+        f"trend={trend_strength_pct:.2f}% rv20={rv20:.1f}% "
+        f"range20={range20:.2f}% vol20={avg_vol20:,.0f}"
+    )
+    return round(score, 2), reason
+
+
+def _combined_signal_score(rvol: float, atr_pct: float, roc: float, iv_rank: float, regime_score: float) -> float:
+    score = 0.0
+    score += min(2.0, max(0.0, rvol / 2.0))
+    score += min(1.5, max(0.0, atr_pct / 2.0))
+    score += min(1.5, max(0.0, abs(roc) / 1.5))
+    iv_center_distance = abs(iv_rank - 40.0)
+    score += max(0.0, 1.0 - (iv_center_distance / 40.0))
+    score += min(5.0, max(0.0, regime_score))
+    return round(score, 2)
 
 
 def _safe_float(value: Any) -> float | None:
@@ -308,6 +371,32 @@ def _scan_ticker_details(
     if iv_rank < config.IV_RANK_MIN:
         return _scan_failure(f"IV Rank {iv_rank:.0f}% too low")
 
+    if config.ENABLE_NEWS_EVENT_BLOCK:
+        blocked, news_reason = data_client.has_high_impact_news(
+            symbol=symbol,
+            now_et=now_et,
+            lookback_minutes=int(config.NEWS_LOOKBACK_MINUTES),
+            keywords=tuple(config.NEWS_BLOCK_KEYWORDS),
+        )
+        if blocked:
+            return _scan_failure(f"news/event block: {news_reason}")
+
+    regime_score, regime_reason = _historical_regime_score(daily_bars_df)
+    if config.ENABLE_HISTORICAL_REGIME_SCORE and regime_score < float(config.MIN_HISTORICAL_REGIME_SCORE):
+        return _scan_failure(
+            f"historical regime score {regime_score:.2f} below {config.MIN_HISTORICAL_REGIME_SCORE:.2f}"
+        )
+
+    signal_score = _combined_signal_score(
+        rvol=float(rvol),
+        atr_pct=float(atr_pct),
+        roc=float(roc),
+        iv_rank=float(iv_rank),
+        regime_score=float(regime_score),
+    )
+    if config.ENABLE_SIGNAL_SCORING and signal_score < float(config.MIN_SIGNAL_SCORE):
+        return _scan_failure(f"signal score {signal_score:.2f} below {config.MIN_SIGNAL_SCORE:.2f}")
+
     above_below = "Above VWAP" if direction == "call" else "Below VWAP"
     return {
         "symbol": symbol,
@@ -320,10 +409,13 @@ def _scan_ticker_details(
         "price": round(price, 4),
         "iv": round(iv_value, 4) if iv_value is not None else None,
         "iv_rank": round(iv_rank, 2),
+        "regime_score": round(regime_score, 2),
+        "signal_score": round(signal_score, 2),
         "reason": (
             f"RVOL {rvol:.1f}x | {above_below} | EMA {'bullish' if direction == 'call' else 'bearish'} | "
-            f"ROC {roc:+.2f}% | IVR {iv_rank:.0f}%"
+            f"ROC {roc:+.2f}% | IVR {iv_rank:.0f}% | Regime {regime_score:.2f} | Score {signal_score:.2f}"
         ),
+        "regime_reason": regime_reason,
     }
 
 
@@ -444,6 +536,8 @@ class IntradayScanner:
                         "rsi": item.get("rsi", ""),
                         "roc": item.get("roc", ""),
                         "iv_rank": item.get("iv_rank", ""),
+                        "regime_score": item.get("regime_score", ""),
+                        "signal_score": item.get("signal_score", ""),
                         "reason": item.get("reason", ""),
                     }
                 )
@@ -458,6 +552,8 @@ class IntradayScanner:
                         "rsi": "",
                         "roc": "",
                         "iv_rank": "",
+                        "regime_score": "",
+                        "signal_score": "",
                         "reason": item.get("reason", ""),
                     }
                 )

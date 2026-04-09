@@ -243,3 +243,44 @@ class AlpacaDataClient:
         except Exception:
             # If yfinance fails, do NOT block the trade - log silently
             return False
+
+    def has_high_impact_news(
+        self,
+        symbol: str,
+        now_et: datetime,
+        lookback_minutes: int,
+        keywords: tuple[str, ...],
+    ) -> tuple[bool, str]:
+        """
+        Returns (blocked, reason) if recent high-impact headlines are detected.
+        Uses yfinance news feed as a lightweight proxy.
+        """
+        try:
+            ticker = yf.Ticker(symbol)
+            news_items = getattr(ticker, "news", None) or []
+            if not isinstance(news_items, list):
+                return False, ""
+            cutoff = now_et - timedelta(minutes=max(1, lookback_minutes))
+            keyword_set = tuple(k.lower() for k in keywords if k)
+            for item in news_items[:25]:
+                if not isinstance(item, dict):
+                    continue
+                published_raw = item.get("providerPublishTime")
+                if published_raw is None:
+                    continue
+                try:
+                    published_dt = datetime.fromtimestamp(int(published_raw), tz=pytz.UTC).astimezone(
+                        pytz.timezone(config.EASTERN_TZ)
+                    )
+                except Exception:
+                    continue
+                if published_dt < cutoff:
+                    continue
+                title = str(item.get("title", "") or "")
+                lower_title = title.lower()
+                hit = next((k for k in keyword_set if k and k in lower_title), "")
+                if hit:
+                    return True, f"recent news keyword '{hit}' ({title[:80]})"
+            return False, ""
+        except Exception:
+            return False, ""

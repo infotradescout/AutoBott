@@ -39,6 +39,14 @@ def _env_csv_dates(name: str, default: tuple[str, ...] = ()) -> tuple[str, ...]:
     return tuple(item for item in items if item)
 
 
+def _env_csv_strings(name: str, default: tuple[str, ...] = ()) -> tuple[str, ...]:
+    value = os.getenv(name)
+    if value is None:
+        return default
+    items = [item.strip() for item in value.split(",")]
+    return tuple(item for item in items if item)
+
+
 _DEFAULT_DATA_DIR = Path(__file__).resolve().parent
 _DATA_DIR = Path(os.getenv("DATA_DIR", str(_DEFAULT_DATA_DIR)))
 
@@ -108,6 +116,28 @@ LOOP_INTERVAL_SECONDS = 60
 SCAN_MORNING_TIME = "09:30"
 OBSERVATION_END_TIME = "10:00"
 OBSERVATION_ENABLED = _env_bool("OBSERVATION_ENABLED", True)
+ENABLE_NEWS_EVENT_BLOCK = _env_bool("ENABLE_NEWS_EVENT_BLOCK", True)
+NEWS_LOOKBACK_MINUTES = _env_int("NEWS_LOOKBACK_MINUTES", 90)
+NEWS_BLOCK_KEYWORDS = _env_csv_strings(
+    "NEWS_BLOCK_KEYWORDS",
+    default=(
+        "earnings",
+        "guidance",
+        "sec",
+        "investigation",
+        "lawsuit",
+        "fda",
+        "downgrade",
+        "upgrade",
+        "cpi",
+        "fomc",
+        "fed",
+    ),
+)
+ENABLE_HISTORICAL_REGIME_SCORE = _env_bool("ENABLE_HISTORICAL_REGIME_SCORE", True)
+MIN_HISTORICAL_REGIME_SCORE = _env_float("MIN_HISTORICAL_REGIME_SCORE", 2.0)
+ENABLE_SIGNAL_SCORING = _env_bool("ENABLE_SIGNAL_SCORING", True)
+MIN_SIGNAL_SCORE = _env_float("MIN_SIGNAL_SCORE", 5.0)
 MAX_ENTRY_SLIPPAGE_PCT = _env_float("MAX_ENTRY_SLIPPAGE_PCT", 2.0)
 MAX_FILL_SLIPPAGE_PCT = _env_float("MAX_FILL_SLIPPAGE_PCT", 5.0)
 NEWS_BLOCK_DATES_ET = _env_csv_dates("NEWS_BLOCK_DATES_ET", default=())
