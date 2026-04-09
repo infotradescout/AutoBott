@@ -441,7 +441,7 @@ def _scan_ticker_details(
         ):
             return _scan_failure("RSI unavailable")
         rsi = 50.0
-    if not (_CATALYST_MODE_ACTIVE and config.CATALYST_DISABLE_RSI):
+    if config.ENABLE_RSI_FILTER and not (_CATALYST_MODE_ACTIVE and config.CATALYST_DISABLE_RSI):
         if direction == "call" and not (float(config.RSI_CALL_MIN) <= rsi <= float(config.RSI_CALL_MAX)):
             return _scan_failure(
                 f"RSI {rsi:.0f} outside call range ({float(config.RSI_CALL_MIN):.0f}-{float(config.RSI_CALL_MAX):.0f})"

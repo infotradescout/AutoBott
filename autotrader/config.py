@@ -180,9 +180,9 @@ SCAN_DAILY_BARS = 30
 # Defaults tuned to avoid midday over-filtering on active market days.
 RVOL_MIN = _env_float("RVOL_MIN", 0.6)
 RVOL_STRICT_UNTIL = _env_str("RVOL_STRICT_UNTIL", "10:30")
-RVOL_RELAX_AFTER = _env_str("RVOL_RELAX_AFTER", "11:30")
+RVOL_RELAX_AFTER = _env_str("RVOL_RELAX_AFTER", "10:00")
 RVOL_RELAXED_MIN = _env_float("RVOL_RELAXED_MIN", 0.45)
-RVOL_IGNORE_AFTER = _env_str("RVOL_IGNORE_AFTER", "12:00")
+RVOL_IGNORE_AFTER = _env_str("RVOL_IGNORE_AFTER", "10:30")
 ATR_PCT_MIN = 1.5
 VWAP_NEUTRAL_BAND_PCT = 0.1
 ROC_PERIOD = 10
@@ -191,6 +191,7 @@ ROC_BEAR_MAX = _env_float("ROC_BEAR_MAX", -0.05)
 ENABLE_ROC_FILTER = _env_bool("ENABLE_ROC_FILTER", False)
 RSI_EARLY_MIN_PERIOD = _env_int("RSI_EARLY_MIN_PERIOD", 5)
 RSI_STRICT_AFTER_TIME = "10:15"
+ENABLE_RSI_FILTER = _env_bool("ENABLE_RSI_FILTER", False)
 
 # RSI bands — widened and tunable so momentum runs aren't blocked
 RSI_CALL_MIN = _env_float("RSI_CALL_MIN", 45.0)
@@ -199,7 +200,7 @@ RSI_PUT_MIN = _env_float("RSI_PUT_MIN", 20.0)
 RSI_PUT_MAX = _env_float("RSI_PUT_MAX", 55.0)
 
 IV_RANK_MIN = 20.0
-IV_RANK_MAX = 75.0
+IV_RANK_MAX = _env_float("IV_RANK_MAX", 99.0)
 EARNINGS_LOOKAHEAD_DAYS = 2
 EARNINGS_CHECK_STRICT = False
 EARNINGS_SKIP_SYMBOLS = _env_csv_strings(

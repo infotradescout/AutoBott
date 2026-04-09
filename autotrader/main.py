@@ -417,6 +417,16 @@ def main():
         )
 
     mode = "PAPER" if config.PAPER else "LIVE"
+    try:
+        acct = broker.get_account()
+        print(
+            f"[{ts()} | {ts_ct()}] Account status={getattr(acct, 'status', 'unknown')} "
+            f"trading_blocked={getattr(acct, 'trading_blocked', 'unknown')} "
+            f"options_level={getattr(acct, 'options_trading_level', 'unknown')} "
+            f"options_approved={getattr(acct, 'options_approved_level', 'unknown')}"
+        )
+    except Exception as exc:  # noqa: BLE001
+        print(f"[{ts()} | {ts_ct()}] Account diagnostics unavailable: {exc}")
     initial_control = load_trading_control()
     if bool(initial_control.get("manual_stop", False)):
         reason = str(initial_control.get("reason", "") or "manual_stop")
@@ -946,7 +956,10 @@ def main():
                 _save_runtime_state()
                 time.sleep(config.RATE_LIMIT_SLEEP_SECONDS)
             except Exception as exc:  # noqa: BLE001
-                print(f"[{ts(now_et)}] {ticker}: error during entry flow: {exc}")
+                print(
+                    f"[{ts(now_et)}] {ticker}: error during entry flow "
+                    f"({type(exc).__name__}): {exc!r}"
+                )
                 time.sleep(config.RATE_LIMIT_SLEEP_SECONDS)
 
         # --- Exit management ---
