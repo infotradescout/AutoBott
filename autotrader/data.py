@@ -54,12 +54,13 @@ class AlpacaDataClient:
         )
         self._option_contract_base_candidates = list(
             dict.fromkeys(
-                [
-                    self.base_url,
-                    _LIVE_TRADE_BASE_URL,
-                ]
+                [self.base_url]
             )
         )
+        if (not paper) or bool(getattr(config, "OPTION_CONTRACTS_ALLOW_LIVE_FALLBACK", False)):
+            self._option_contract_base_candidates = list(
+                dict.fromkeys(self._option_contract_base_candidates + [_LIVE_TRADE_BASE_URL])
+            )
 
     def get_stock_bars(
         self,
@@ -365,7 +366,7 @@ class AlpacaDataClient:
             "expiration_date_gte": expiration_date_gte.isoformat(),
             "expiration_date_lte": expiration_date_lte.isoformat(),
         }
-        last_exc: Exception | None = None
+        errors_by_base: list[str] = []
         for base in self._option_contract_base_candidates:
             try:
                 resp = self.options_session.get(
@@ -379,17 +380,17 @@ class AlpacaDataClient:
                 if contracts:
                     return contracts
             except Exception as exc:  # noqa: BLE001
-                last_exc = exc
+                errors_by_base.append(f"{base}: {exc}")
                 continue
-        if last_exc is not None:
+        if errors_by_base:
             print(
                 f"[data] get_option_contracts failed for {underlying_symbol} "
-                f"({contract_type}) across all endpoints: {last_exc}"
+                f"({contract_type}) across endpoints: {' | '.join(errors_by_base)}"
             )
         return []
 
     def get_option_contract(self, option_symbol: str) -> dict[str, Any]:
-        last_exc: Exception | None = None
+        errors_by_base: list[str] = []
         for base in self._option_contract_base_candidates:
             try:
                 resp = self.options_session.get(
@@ -402,10 +403,10 @@ class AlpacaDataClient:
                 if isinstance(payload, dict) and payload:
                     return payload
             except Exception as exc:  # noqa: BLE001
-                last_exc = exc
+                errors_by_base.append(f"{base}: {exc}")
                 continue
-        if last_exc is not None:
-            print(f"[data] get_option_contract failed for {option_symbol}: {last_exc}")
+        if errors_by_base:
+            print(f"[data] get_option_contract failed for {option_symbol}: {' | '.join(errors_by_base)}")
         return {}
 
     def get_latest_option_ask(self, option_symbol: str) -> float | None:
