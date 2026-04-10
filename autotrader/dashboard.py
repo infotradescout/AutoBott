@@ -508,6 +508,17 @@ def api_status():
         catalyst_mode_active = bool(runtime_state.get("catalyst_mode_active", False))
         catalyst_mode_reason = str(runtime_state.get("catalyst_mode_reason", "") or "")
         catalyst_mode_until = str(runtime_state.get("catalyst_mode_until_iso", "") or "")
+        heartbeat_et_raw = str(runtime_state.get("last_trader_heartbeat_et", "") or "")
+        heartbeat_dt = _parse_ts(heartbeat_et_raw)
+        heartbeat_age_seconds = int((now_et - heartbeat_dt).total_seconds()) if heartbeat_dt else None
+        loop_stale_after = max(60, int(config.LOOP_INTERVAL_SECONDS) * 4)
+        trader_loop_alive = heartbeat_age_seconds is not None and heartbeat_age_seconds <= loop_stale_after
+        last_auth_error_et = str(runtime_state.get("last_alpaca_auth_error_et", "") or "")
+        last_auth_error_msg = str(runtime_state.get("last_alpaca_auth_error", "") or "")
+        last_auth_error_dt = _parse_ts(last_auth_error_et)
+        auth_error_recent = False
+        if last_auth_error_dt is not None:
+            auth_error_recent = (now_et - last_auth_error_dt).total_seconds() <= 600
         wins = 0
         losses = 0
         total_plpc = 0.0
@@ -533,6 +544,8 @@ def api_status():
         vix_block_notice = str(runtime_state.get("vix_block_notice", "") or "")
         if vix_block_notice:
             blockers.append(f"vix_guard_block:{vix_block_notice}")
+        if auth_error_recent:
+            blockers.append("alpaca_auth_error_recent")
 
         return jsonify(
             {
@@ -545,6 +558,12 @@ def api_status():
                 "catalyst_mode_until": catalyst_mode_until,
                 "can_enter_now": len(blockers) == 0,
                 "blockers": blockers,
+                "trader_loop_alive": bool(trader_loop_alive),
+                "trader_heartbeat_et": _to_ct_label(heartbeat_dt) if heartbeat_dt else "",
+                "trader_heartbeat_age_seconds": heartbeat_age_seconds,
+                "last_alpaca_auth_error_et": _to_ct_label(last_auth_error_dt) if last_auth_error_dt else "",
+                "last_alpaca_auth_error": last_auth_error_msg,
+                "alpaca_auth_error_recent": auth_error_recent,
                 "last_updated": _now_et().strftime("%Y-%m-%d %H:%M:%S ET"),
                 "trades_today": len(today_rows),
                 "wins_today": wins,

@@ -397,6 +397,9 @@ def main():
         str(k): int(v)
         for k, v in dict(state.get("ticker_reentries_used") or {}).items()
     }
+    last_trader_heartbeat_et = str(state.get("last_trader_heartbeat_et", "") or "")
+    last_alpaca_auth_error_et = str(state.get("last_alpaca_auth_error_et", "") or "")
+    last_alpaca_auth_error = str(state.get("last_alpaca_auth_error", "") or "")
     next_heartbeat_at = 0.0
     manual_stop_latched = False
     if catalyst_mode_until and datetime.now(tz) >= catalyst_mode_until:
@@ -426,15 +429,21 @@ def main():
                 "ticker_entry_counts": ticker_entry_counts,
                 "ticker_reentry_armed": ticker_reentry_armed,
                 "ticker_reentries_used": ticker_reentries_used,
+                "last_trader_heartbeat_et": last_trader_heartbeat_et,
+                "last_alpaca_auth_error_et": last_alpaca_auth_error_et,
+                "last_alpaca_auth_error": last_alpaca_auth_error,
             }
         )
 
     def _safe_get_clock(*, phase: str, now_et: datetime, now_ct: datetime):
+        nonlocal last_alpaca_auth_error_et, last_alpaca_auth_error
         try:
             return broker.get_clock()
         except Exception as exc:  # noqa: BLE001
             retry_sleep = max(5, int(config.LOOP_INTERVAL_SECONDS))
             if _looks_like_auth_error(exc):
+                last_alpaca_auth_error_et = now_et.isoformat()
+                last_alpaca_auth_error = str(exc)[:300]
                 print(
                     f"[{ts(now_et)} | {ts_ct(now_ct)}] Alpaca auth error during {phase} clock lookup: {exc}. "
                     f"Retrying in {retry_sleep}s."
@@ -445,6 +454,7 @@ def main():
                     level="error",
                     dedupe_key=f"alpaca-auth-{int(time.time() // 60)}",
                 )
+                _save_runtime_state()
             else:
                 print(
                     f"[{ts(now_et)} | {ts_ct(now_ct)}] Clock lookup failed during {phase}: {exc}. "
@@ -482,6 +492,7 @@ def main():
     )
 
     while True:
+        last_trader_heartbeat_et = datetime.now(tz).isoformat()
         control_state = load_trading_control()
         manual_stop = bool(control_state.get("manual_stop", False))
         if manual_stop:
@@ -547,6 +558,7 @@ def main():
     while True:
         now_et = datetime.now(tz)
         now_ct = datetime.now(pytz.timezone(config.CENTRAL_TZ))
+        last_trader_heartbeat_et = now_et.isoformat()
         control_state = load_trading_control()
         manual_stop = bool(control_state.get("manual_stop", False))
         if manual_stop:
