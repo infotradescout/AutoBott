@@ -155,7 +155,14 @@ def _historical_regime_score(daily_bars_df: pd.DataFrame) -> tuple[float, str]:
     return round(score, 2), reason
 
 
-def _combined_signal_score(rvol: float, atr_pct: float, roc: float, iv_rank: float, regime_score: float) -> float:
+def _combined_signal_score(
+    rvol: float,
+    atr_pct: float,
+    roc: float,
+    iv_rank: float,
+    regime_score: float,
+    ema_aligned: bool = True,
+) -> float:
     score = 0.0
     score += min(2.0, max(0.0, rvol / 2.0))
     score += min(1.5, max(0.0, atr_pct / 2.0))
@@ -163,6 +170,9 @@ def _combined_signal_score(rvol: float, atr_pct: float, roc: float, iv_rank: flo
     iv_center_distance = abs(iv_rank - 40.0)
     score += max(0.0, 1.0 - (iv_center_distance / 40.0))
     score += min(5.0, max(0.0, regime_score))
+    # EMA alignment is a bonus, not a blocker
+    if ema_aligned:
+        score += 1.0
     return round(score, 2)
 
 
@@ -376,8 +386,9 @@ def _scan_ticker_details(
     vwap = calculate_vwap(bars)
     if math.isnan(vwap) or vwap <= 0:
         return _scan_failure("VWAP unavailable")
+    vwap_band = getattr(config, "VWAP_NEUTRAL_BAND_PCT", 0.05)
     distance_pct = abs(price - vwap) / vwap * 100
-    if distance_pct <= config.VWAP_NEUTRAL_BAND_PCT:
+    if distance_pct <= vwap_band:
         return _scan_failure(f"price near VWAP ({distance_pct:.2f}%)")
 
     above_vwap = price > vwap
@@ -412,20 +423,22 @@ def _scan_ticker_details(
     elif math.isnan(roc):
         roc = 0.0
 
-    # EMA crossover check — skipped entirely in Catalyst Mode.
-    # On violent gap-and-hold moves EMA9 takes several bars to cross EMA21,
-    # filtering out real signals while price is already running.
+    # EMA crossover — soft scored check, not a hard blocker.
+    # EMA9 lags on gap-and-hold moves; removing hard fail lets those signals through
+    # while still rewarding aligned setups via signal_score bonus.
     ema9 = closes.ewm(span=9, adjust=False).mean()
     ema21 = closes.ewm(span=21, adjust=False).mean()
-    if not _CATALYST_MODE_ACTIVE:
-        if len(ema9) < 3 or len(ema21) < 3:
-            return _scan_failure("EMA unavailable")
+    ema_aligned = False
+    ema_note = "EMA N/A"
+    if len(ema9) >= 3 and len(ema21) >= 3:
         ema_bull = ema9.iloc[-1] > ema21.iloc[-1]
         ema_bear = ema9.iloc[-1] < ema21.iloc[-1]
-        if direction == "call" and not ema_bull:
-            return _scan_failure("EMA not bullish")
-        if direction == "put" and not ema_bear:
-            return _scan_failure("EMA not bearish")
+        if direction == "call":
+            ema_aligned = ema_bull
+            ema_note = "EMA bullish" if ema_bull else "EMA not yet crossed (scored)"
+        else:
+            ema_aligned = ema_bear
+            ema_note = "EMA bearish" if ema_bear else "EMA not yet crossed (scored)"
 
     rsi_period = 14
     rsi = calculate_rsi(closes, period=rsi_period)
@@ -499,6 +512,7 @@ def _scan_ticker_details(
         roc=float(roc),
         iv_rank=float(iv_rank),
         regime_score=float(regime_score),
+        ema_aligned=ema_aligned,
     )
     effective_min_signal_score = (
         float(config.CATALYST_RELAXED_MIN_SIGNAL_SCORE) if _CATALYST_MODE_ACTIVE else float(config.MIN_SIGNAL_SCORE)
@@ -524,7 +538,7 @@ def _scan_ticker_details(
         "flow_score": round(flow_score, 4) if flow_score is not None else None,
         "htf_reason": htf_reason,
         "reason": (
-            f"RVOL {rvol:.1f}x | {above_below} | EMA {'bullish' if direction == 'call' else 'bearish'} | "
+            f"RVOL {rvol:.1f}x | {above_below} | {ema_note} | "
             f"ROC {roc:+.2f}% | IVR {iv_rank:.0f}% | Regime {regime_score:.2f} | "
             f"Flow {(flow_score if flow_score is not None else 0):+.2f} | Score {signal_score:.2f}"
         ) + (f" | Catalyst {_CATALYST_MODE_REASON}" if _CATALYST_MODE_ACTIVE and _CATALYST_MODE_REASON else ""),
