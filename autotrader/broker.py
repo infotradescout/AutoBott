@@ -73,6 +73,33 @@ class AlpacaBroker:
         """Cancel a single order by ID."""
         return self.trading_client.cancel_order_by_id(order_id)
 
+    def get_open_orders_for_symbol(self, symbol: str, side: str | None = None) -> list:
+        """Return open orders for a symbol (optionally filtered by side)."""
+        try:
+            from alpaca.trading.enums import QueryOrderStatus
+            from alpaca.trading.requests import GetOrdersRequest
+
+            req = GetOrdersRequest(
+                status=QueryOrderStatus.OPEN,
+                symbols=[symbol],
+                nested=False,
+                limit=50,
+            )
+            orders = self.trading_client.get_orders(filter=req) or []
+            if side is not None:
+                side_lc = str(side).lower()
+                orders = [o for o in orders if str(getattr(o, "side", "")).lower() == side_lc]
+            # Prefer most recently submitted first when available.
+            orders.sort(key=lambda o: str(getattr(o, "submitted_at", "") or ""), reverse=True)
+            return orders
+        except Exception as exc:  # noqa: BLE001
+            print(f"[broker] get_open_orders_for_symbol failed for {symbol}: {exc}")
+            return []
+
+    def has_open_order_for_symbol(self, symbol: str, side: str | None = None) -> bool:
+        """Return True when there is an open order for the symbol (optionally matching side)."""
+        return len(self.get_open_orders_for_symbol(symbol=symbol, side=side)) > 0
+
     def pdt_allows_new_day_trade(self) -> tuple[bool, dict]:
         if not config.ENFORCE_PDT_GUARD:
             return True, {"reason": "pdt_guard_disabled", "equity": None, "daytrade_count": None}

@@ -534,6 +534,7 @@ def api_status():
         catalyst_mode_reason = str(runtime_state.get("catalyst_mode_reason", "") or "")
         catalyst_mode_until = str(runtime_state.get("catalyst_mode_until_iso", "") or "")
         last_entry_debug = runtime_state.get("last_entry_debug", {})
+        last_exit_debug = runtime_state.get("last_exit_debug", {})
         heartbeat_et_raw = str(runtime_state.get("last_trader_heartbeat_et", "") or "")
         heartbeat_dt = _parse_ts(heartbeat_et_raw)
         heartbeat_age_seconds = int((now_et - heartbeat_dt).total_seconds()) if heartbeat_dt else None
@@ -591,6 +592,7 @@ def api_status():
                 "last_alpaca_auth_error": last_auth_error_msg,
                 "alpaca_auth_error_recent": auth_error_recent,
                 "last_entry_debug": last_entry_debug if isinstance(last_entry_debug, dict) else {},
+                "last_exit_debug": last_exit_debug if isinstance(last_exit_debug, dict) else {},
                 "last_updated": _now_et().strftime("%Y-%m-%d %H:%M:%S ET"),
                 "trades_today": len(today_rows),
                 "wins_today": wins,

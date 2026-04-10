@@ -438,6 +438,7 @@ def main():
         for k, v in dict(state.get("ticker_reentries_used") or {}).items()
     }
     last_entry_debug: dict = dict(state.get("last_entry_debug") or {})
+    last_exit_debug: dict = dict(state.get("last_exit_debug") or {})
     last_trader_heartbeat_et = str(state.get("last_trader_heartbeat_et", "") or "")
     last_alpaca_auth_error_et = str(state.get("last_alpaca_auth_error_et", "") or "")
     last_alpaca_auth_error = str(state.get("last_alpaca_auth_error", "") or "")
@@ -472,6 +473,7 @@ def main():
                 "ticker_reentry_expected_direction": ticker_reentry_expected_direction,
                 "ticker_reentries_used": ticker_reentries_used,
                 "last_entry_debug": last_entry_debug,
+                "last_exit_debug": last_exit_debug,
                 "last_trader_heartbeat_et": last_trader_heartbeat_et,
                 "last_alpaca_auth_error_et": last_alpaca_auth_error_et,
                 "last_alpaca_auth_error": last_alpaca_auth_error,
@@ -711,28 +713,71 @@ def main():
         if request_qty <= 0:
             return 0
 
-        def _submit_and_check(close_qty: int) -> int:
-            order = broker.close_option_market(symbol, close_qty)
-            time.sleep(max(1, int(config.ENTRY_MARKET_FALLBACK_WAIT_SECONDS)))
-            status_order = broker.get_order_status(order.id)
-            status = str(getattr(status_order, "status", "")).lower()
-            filled = position_qty_as_int(getattr(status_order, "filled_qty", 0))
-            if status in ("filled", "partially_filled") and filled > 0:
-                return min(close_qty, filled)
-            try:
-                broker.cancel_order(order.id)
-            except Exception:
-                pass
-            return 0
+        poll_seconds = max(1, int(config.EXIT_ORDER_STATUS_POLL_SECONDS))
+        max_wait_seconds = max(poll_seconds, int(config.EXIT_ORDER_MAX_WAIT_SECONDS))
+        retry_attempts = max(1, int(config.EXIT_CLOSE_RETRY_ATTEMPTS))
+        non_fill_terminal = {"canceled", "cancelled", "rejected", "expired", "done_for_day", "stopped", "suspended"}
+
+        def _wait_for_fill(order_id: str, close_qty: int) -> tuple[int, str, bool]:
+            deadline = time.time() + max_wait_seconds
+            observed_filled = 0
+            last_status = ""
+            while time.time() < deadline:
+                try:
+                    status_order = broker.get_order_status(order_id)
+                except Exception as exc:  # noqa: BLE001
+                    print(f"[{ts(now_et)}] {label} {symbol}: order status error for {order_id}: {exc}")
+                    time.sleep(poll_seconds)
+                    continue
+                last_status = str(getattr(status_order, "status", "")).lower()
+                filled_qty = position_qty_as_int(getattr(status_order, "filled_qty", 0))
+                observed_filled = max(observed_filled, filled_qty)
+                if observed_filled > 0 and last_status in ("filled", "partially_filled"):
+                    return min(close_qty, observed_filled), last_status, False
+                if last_status in non_fill_terminal:
+                    break
+                time.sleep(poll_seconds)
+            if observed_filled > 0:
+                return min(close_qty, observed_filled), last_status, False
+            is_still_open = last_status not in non_fill_terminal and last_status not in ("", "filled", "partially_filled")
+            return 0, last_status, is_still_open
 
         try:
-            filled_qty = _submit_and_check(request_qty)
-            if filled_qty > 0:
-                return filled_qty
-            filled_qty = _submit_and_check(request_qty)
-            if filled_qty > 0:
-                return filled_qty
-            print(f"[{ts(now_et)}] {label} {symbol} qty={request_qty}: close not filled after retries.")
+            existing_sells = broker.get_open_orders_for_symbol(symbol=symbol, side="sell")
+            if existing_sells:
+                existing_order_id = str(getattr(existing_sells[0], "id", "") or "")
+                if existing_order_id:
+                    filled_qty, status, still_open = _wait_for_fill(existing_order_id, request_qty)
+                    if filled_qty > 0:
+                        return filled_qty
+                    if still_open:
+                        print(
+                            f"[{ts(now_et)}] {label} {symbol} qty={request_qty}: "
+                            f"existing close order {existing_order_id} still pending ({status or 'unknown'})."
+                        )
+                        return 0
+
+            for attempt in range(1, retry_attempts + 1):
+                order = broker.close_option_market(symbol, request_qty)
+                order_id = str(getattr(order, "id", "") or "")
+                if not order_id:
+                    print(f"[{ts(now_et)}] {label} {symbol} qty={request_qty}: close submitted without order id.")
+                    return 0
+                filled_qty, status, still_open = _wait_for_fill(order_id, request_qty)
+                if filled_qty > 0:
+                    return filled_qty
+                if still_open:
+                    print(
+                        f"[{ts(now_et)}] {label} {symbol} qty={request_qty}: "
+                        f"close order {order_id} still pending ({status or 'unknown'})."
+                    )
+                    return 0
+                if attempt < retry_attempts:
+                    print(
+                        f"[{ts(now_et)}] {label} {symbol} qty={request_qty}: "
+                        f"close attempt {attempt}/{retry_attempts} ended status={status or 'unknown'}, retrying."
+                    )
+            print(f"[{ts(now_et)}] {label} {symbol} qty={request_qty}: close not filled after {retry_attempts} attempt(s).")
             return 0
         except Exception as exc:  # noqa: BLE001
             print(f"[{ts(now_et)}] {label} {symbol} qty={request_qty}: close error: {exc}")
@@ -915,6 +960,10 @@ def main():
         option_positions = broker.get_open_option_positions()
         hydrated_count = _hydrate_missing_position_meta(open_trade_meta, option_positions, now_et)
         if hydrated_count > 0:
+            for meta in open_trade_meta.values():
+                ticker = str(meta.get("ticker", "") or "").upper()
+                if ticker:
+                    ticker_entry_counts[ticker] = max(int(ticker_entry_counts.get(ticker, 0)), 1)
             print(f"[{ts(now_et)}] Hydrated {hydrated_count} externally-opened position(s) into runtime state.")
             _save_runtime_state()
         open_count = len(option_positions)
@@ -1211,6 +1260,24 @@ def main():
                 _mark_skip("max_positions_reached")
                 print(f"[{ts(now_et)}] Max positions reached. Stopping new entries this loop.")
                 break
+            existing_qty_for_ticker = 0
+            for existing_pos in option_positions:
+                existing_qty = position_qty_as_int(getattr(existing_pos, "qty", 0))
+                if existing_qty <= 0:
+                    continue
+                existing_ticker = str(getattr(existing_pos, "underlying_symbol", "") or "").upper()
+                if not existing_ticker:
+                    parsed_ticker, _parsed_direction = _parse_option_symbol(str(getattr(existing_pos, "symbol", "") or ""))
+                    existing_ticker = parsed_ticker.upper()
+                if existing_ticker == ticker:
+                    existing_qty_for_ticker += existing_qty
+            if existing_qty_for_ticker > 0:
+                _mark_skip("ticker_position_already_open")
+                print(
+                    f"[{ts(now_et)}] {ticker}: skip (existing open position qty={existing_qty_for_ticker}; "
+                    "one position per ticker)."
+                )
+                continue
 
             try:
                 print(f"[{ts(now_et)}] {ticker}: scanner signal={direction}. {signal.get('reason', '')}")
@@ -1503,6 +1570,15 @@ def main():
 
             if exit_reason:
                 try:
+                    last_exit_debug = {
+                        "loop_ts_et": ts(now_et),
+                        "symbol": symbol,
+                        "reason": exit_reason,
+                        "requested_qty": close_qty,
+                        "position_qty": qty,
+                        "filled_qty": 0,
+                        "result": "submitted",
+                    }
                     filled_close_qty = _close_position_with_confirmation(
                         symbol=symbol,
                         qty=close_qty,
@@ -1510,7 +1586,11 @@ def main():
                         label=f"EXIT {exit_reason}",
                     )
                     if filled_close_qty <= 0:
+                        last_exit_debug["result"] = "pending_or_not_filled"
+                        _save_runtime_state()
                         continue
+                    last_exit_debug["filled_qty"] = filled_close_qty
+                    last_exit_debug["result"] = "filled"
                     meta = open_trade_meta.get(symbol, {})
                     entry_price = float(meta.get("entry_price", getattr(pos, "avg_entry_price", 0) or 0))
                     exit_price = float(getattr(pos, "current_price", 0) or 0)
@@ -1581,6 +1661,17 @@ def main():
                             reentries_used=reentries_used,
                         )
                 except Exception as exc:  # noqa: BLE001
+                    last_exit_debug = {
+                        "loop_ts_et": ts(now_et),
+                        "symbol": symbol,
+                        "reason": exit_reason,
+                        "requested_qty": close_qty,
+                        "position_qty": qty,
+                        "filled_qty": 0,
+                        "result": "error",
+                        "error": str(exc),
+                    }
+                    _save_runtime_state()
                     print(f"[{ts(now_et)}] {symbol}: error closing position: {exc}")
                 time.sleep(config.RATE_LIMIT_SLEEP_SECONDS)
 
