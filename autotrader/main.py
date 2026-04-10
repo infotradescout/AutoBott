@@ -219,6 +219,16 @@ def _option_expiry_date(meta: dict, option_symbol: str) -> date | None:
     return _parse_option_expiry_from_symbol(option_symbol)
 
 
+def _subtract_trading_days(end_date: date, days: int) -> date:
+    cursor = end_date
+    remaining = max(0, int(days))
+    while remaining > 0:
+        cursor -= timedelta(days=1)
+        if cursor.weekday() < 5:
+            remaining -= 1
+    return cursor
+
+
 def _index_regime_bias(data_client: AlpacaDataClient, now_et: datetime) -> str:
     if not config.ENABLE_INDEX_BIAS_FILTER:
         return "both"
@@ -1405,10 +1415,14 @@ def main():
             else:
                 expiry_date = _option_expiry_date(meta, symbol)
                 if expiry_date is not None:
-                    if now_et.date() > expiry_date:
-                        exit_reason = "expired_contract_guard"
-                    elif now_et.date() == expiry_date and is_at_or_after(now_et, config.OPTION_EXPIRY_EXIT_TIME):
-                        exit_reason = "expiry_day_exit"
+                    cutoff_date = _subtract_trading_days(
+                        expiry_date,
+                        int(config.OPTION_FORCE_EXIT_DAYS_BEFORE_EXPIRY),
+                    )
+                    if now_et.date() > cutoff_date:
+                        exit_reason = "pre_expiry_exit_overdue"
+                    elif now_et.date() == cutoff_date and is_at_or_after(now_et, config.OPTION_EXPIRY_EXIT_TIME):
+                        exit_reason = "pre_expiry_exit"
             if exit_reason is None and is_at_or_after(now_et, config.HARD_CLOSE_TIME):
                 exit_reason = "eod_close"
             if exit_reason is None:
