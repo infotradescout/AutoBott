@@ -372,6 +372,35 @@ def _build_scan_universe(data_client: AlpacaDataClient) -> list[str]:
 
 
 def _flatten_positions_for_killswitch(broker: AlpacaBroker, now_et: datetime, *, label: str = "KILLSWITCH") -> None:
+    poll_seconds = max(1, int(config.EXIT_ORDER_STATUS_POLL_SECONDS))
+    max_wait_seconds = max(poll_seconds, int(config.EXIT_ORDER_MAX_WAIT_SECONDS))
+    retry_attempts = max(1, int(config.EXIT_CLOSE_RETRY_ATTEMPTS))
+    non_fill_terminal = {"canceled", "cancelled", "rejected", "expired", "done_for_day", "stopped", "suspended"}
+
+    def _wait_for_fill(order_id: str, close_qty: int) -> tuple[int, str, bool]:
+        deadline = time.time() + max_wait_seconds
+        observed_filled = 0
+        last_status = ""
+        while time.time() < deadline:
+            try:
+                status_order = broker.get_order_status(order_id)
+            except Exception as exc:  # noqa: BLE001
+                print(f"[{ts(now_et)}] {label} status error for {order_id}: {exc}")
+                time.sleep(poll_seconds)
+                continue
+            last_status = str(getattr(status_order, "status", "")).lower()
+            filled_qty = position_qty_as_int(getattr(status_order, "filled_qty", 0))
+            observed_filled = max(observed_filled, filled_qty)
+            if observed_filled > 0 and last_status in ("filled", "partially_filled"):
+                return min(close_qty, observed_filled), last_status, False
+            if last_status in non_fill_terminal:
+                break
+            time.sleep(poll_seconds)
+        if observed_filled > 0:
+            return min(close_qty, observed_filled), last_status, False
+        is_still_open = last_status not in non_fill_terminal and last_status not in ("", "filled", "partially_filled")
+        return 0, last_status, is_still_open
+
     option_positions = broker.get_open_option_positions()
     for pos in option_positions:
         symbol = str(getattr(pos, "symbol", ""))
@@ -379,8 +408,27 @@ def _flatten_positions_for_killswitch(broker: AlpacaBroker, now_et: datetime, *,
         if qty <= 0:
             continue
         try:
-            broker.close_option_market(symbol, qty)
-            print(f"[{ts(now_et)}] {label} CLOSE {symbol} qty={qty}")
+            filled_qty = 0
+            for attempt in range(1, retry_attempts + 1):
+                order = broker.close_option_market(symbol, qty)
+                order_id = str(getattr(order, "id", "") or "")
+                if not order_id:
+                    print(f"[{ts(now_et)}] {label} {symbol}: close submitted without order id.")
+                    break
+                filled_qty, status, still_open = _wait_for_fill(order_id, qty)
+                if filled_qty > 0:
+                    print(f"[{ts(now_et)}] {label} CLOSE {symbol} qty={filled_qty}/{qty}")
+                    break
+                if still_open:
+                    print(f"[{ts(now_et)}] {label} {symbol}: close pending ({status or 'unknown'}).")
+                    break
+                if attempt < retry_attempts:
+                    print(
+                        f"[{ts(now_et)}] {label} {symbol}: close attempt {attempt}/{retry_attempts} "
+                        f"ended status={status or 'unknown'}, retrying."
+                    )
+            if filled_qty <= 0:
+                print(f"[{ts(now_et)}] {label} {symbol}: close not confirmed.")
         except Exception as exc:  # noqa: BLE001
             print(f"[{ts(now_et)}] {label} close error for {symbol}: {exc}")
         time.sleep(config.RATE_LIMIT_SLEEP_SECONDS)
@@ -414,7 +462,12 @@ def main():
     weekly_realized_loss_usd = float(state.get("weekly_realized_loss_usd", 0.0) or 0.0)
     consecutive_losses = int(state.get("consecutive_losses", 0) or 0)
     loss_counters_day_raw = state.get("loss_counters_day")
-    loss_counters_day = date.fromisoformat(loss_counters_day_raw) if loss_counters_day_raw else None
+    loss_counters_day = None
+    if loss_counters_day_raw:
+        try:
+            loss_counters_day = date.fromisoformat(str(loss_counters_day_raw))
+        except (TypeError, ValueError):
+            print(f"[{ts()}] Invalid loss_counters_day in runtime state: {loss_counters_day_raw!r}. Resetting.")
     weekly_loss_key = str(state.get("weekly_loss_key") or _week_key(datetime.now(tz).date()))
     blocked_day_notice = state.get("blocked_day_notice")
     vix_block_notice = state.get("vix_block_notice")

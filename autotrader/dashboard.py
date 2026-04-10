@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import csv
+import hmac
 import os
 import re
 from datetime import datetime
@@ -32,6 +33,7 @@ SCAN_LOG_CSV = Path(config.SCAN_LOG_CSV_PATH)
 EASTERN = pytz.timezone(config.EASTERN_TZ)
 CENTRAL = pytz.timezone(config.CENTRAL_TZ)
 _REVIEW_CACHE: dict[str, Any] = {"ts": None, "payload": None}
+CONTROL_TOKEN = str(config.DASHBOARD_CONTROL_TOKEN or "").strip()
 
 app = Flask(__name__)
 
@@ -67,6 +69,15 @@ def _safe_float(value: Any, default: float = 0.0) -> float:
         return float(value)
     except (TypeError, ValueError):
         return default
+
+
+def _verify_control_token() -> tuple[bool, str, int]:
+    if not CONTROL_TOKEN:
+        return False, "dashboard control token not configured", 503
+    provided = str(request.headers.get("X-Trade-Control-Token", "") or "").strip()
+    if not provided or not hmac.compare_digest(provided, CONTROL_TOKEN):
+        return False, "unauthorized", 401
+    return True, "", 200
 
 
 def _read_csv_rows(path: Path, limit: int, reverse: bool = True) -> list[dict[str, str]]:
@@ -432,7 +443,13 @@ def api_positions():
                     "unrealized_plpc": round(_safe_float(pos.get("unrealized_plpc"), 0.0) * 100, 2),
                 }
             )
-        return jsonify(rows)
+        return jsonify(
+          {
+            "rows": rows,
+            "broker_ok": True,
+            "broker_error": "",
+          }
+        )
     except Exception as exc:  # noqa: BLE001
         return jsonify(
             {
@@ -622,6 +639,9 @@ def api_trading_control():
 @app.post("/api/trading-control/stop")
 def api_trading_stop():
     try:
+        ok, err, status = _verify_control_token()
+        if not ok:
+            return jsonify({"error": err}), status
         payload = request.get_json(silent=True) or {}
         reason = str(payload.get("reason", "") or "manual_stop_dashboard")
         state = set_manual_stop(True, reason=reason)
@@ -640,6 +660,9 @@ def api_trading_stop():
 @app.post("/api/trading-control/start")
 def api_trading_start():
     try:
+        ok, err, status = _verify_control_token()
+        if not ok:
+            return jsonify({"error": err}), status
         payload = request.get_json(silent=True) or {}
         reason = str(payload.get("reason", "") or "manual_start_dashboard")
         state = set_manual_stop(False, reason=reason)
@@ -1135,10 +1158,24 @@ def home():
 
     async function setTradingControl(action) {
       const endpoint = action === "stop" ? "/api/trading-control/stop" : "/api/trading-control/start";
+      let controlToken = localStorage.getItem("tradeControlToken") || "";
+      if (!controlToken) {
+        controlToken = window.prompt("Enter dashboard control token");
+        if (controlToken) {
+          localStorage.setItem("tradeControlToken", controlToken);
+        }
+      }
+      if (!controlToken) {
+        alert("Control token is required");
+        return;
+      }
       try {
         const res = await fetch(endpoint, {
           method: "POST",
-          headers: {"Content-Type": "application/json"},
+          headers: {
+            "Content-Type": "application/json",
+            "X-Trade-Control-Token": controlToken,
+          },
           body: JSON.stringify({reason: `dashboard_${action}`}),
         });
         const body = await res.json();
@@ -1168,8 +1205,8 @@ def home():
 
       document.getElementById("last-updated").textContent = new Date().toLocaleTimeString();
       const accountOk = !account.error && account.broker_ok !== false;
-      const positionsOk = !positions.error && (Array.isArray(positions) || positions.broker_ok !== false);
-      const positionsRows = Array.isArray(positions) ? positions : (Array.isArray(positions.rows) ? positions.rows : []);
+      const positionsOk = !positions.error && positions.broker_ok !== false;
+      const positionsRows = Array.isArray(positions.rows) ? positions.rows : [];
       document.getElementById("equity").textContent = accountOk ? fmtMoney(account.equity) : "—";
       document.getElementById("buying-power").textContent = accountOk ? fmtMoney(account.buying_power) : "—";
 
@@ -1259,7 +1296,7 @@ def home():
       const wr = document.getElementById("win-rate");
       wr.textContent = closed > 0 ? `${winRate.toFixed(0)}%` : "--";
       wr.className = `num ${closed > 0 ? pctClass(winRate - 50) : ""}`;
-      document.getElementById("open-positions-count").textContent = Array.isArray(positions) ? String(positions.length) : "--";
+      document.getElementById("open-positions-count").textContent = positionsOk ? String(positionsRows.length) : "--";
 
       const cb = computeCircuitBreakers(trades.error ? [] : trades);
       const lossPct = DAILY_LOSS_LIMIT > 0 ? Math.min(100, (cb.dailyLoss / DAILY_LOSS_LIMIT) * 100) : 0;

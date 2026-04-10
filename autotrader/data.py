@@ -132,8 +132,8 @@ class AlpacaDataClient:
                         df["timestamp"] = pd.to_datetime(df["timestamp"], utc=True).dt.tz_convert(tz_et)
                         df = df.tail(limit).reset_index(drop=True)
                         return df[["timestamp", "open", "high", "low", "close", "volume"]]
-            except Exception:
-                pass
+            except Exception as exc:  # noqa: BLE001
+                print(f"[data] get_stock_bars Alpaca failed for {symbol} tf={timeframe}: {exc}")
 
         # Fallback: yfinance
         try:
@@ -183,7 +183,8 @@ class AlpacaDataClient:
             df = df.tail(limit).reset_index(drop=True)
             return df[["timestamp", "open", "high", "low", "close", "volume"]]
 
-        except Exception:
+        except Exception as exc:  # noqa: BLE001
+            print(f"[data] get_stock_bars yfinance failed for {symbol} tf={timeframe}: {exc}")
             return pd.DataFrame()
 
     def get_stock_daily_bars(self, symbol: str, limit: int = 30) -> pd.DataFrame:
@@ -241,8 +242,8 @@ class AlpacaDataClient:
                     df = df.tail(limit).reset_index(drop=True)
                     if not df.empty:
                         return df[["timestamp", "open", "high", "low", "close", "volume"]]
-        except Exception:
-            pass
+        except Exception as exc:  # noqa: BLE001
+            print(f"[data] get_intraday_bars_since_open Alpaca failed for {symbol}: {exc}")
 
         # Fallback: yfinance
         try:
@@ -271,7 +272,8 @@ class AlpacaDataClient:
 
             return df[["timestamp", "open", "high", "low", "close", "volume"]]
 
-        except Exception:
+        except Exception as exc:  # noqa: BLE001
+            print(f"[data] get_intraday_bars_since_open yfinance failed for {symbol}: {exc}")
             return pd.DataFrame()
 
     def get_latest_stock_price(self, symbol: str) -> float | None:
@@ -286,8 +288,8 @@ class AlpacaDataClient:
             trade_price = self.get_latest_stock_trade_price(symbol)
             if trade_price is not None and trade_price > 0:
                 return float(trade_price)
-        except Exception:
-            pass
+        except Exception as exc:  # noqa: BLE001
+            print(f"[data] latest trade lookup failed for {symbol}: {exc}")
 
         try:
             quote = self.get_latest_stock_quote(symbol)
@@ -299,8 +301,8 @@ class AlpacaDataClient:
                 return float(ask)
             if bid is not None and bid > 0:
                 return float(bid)
-        except Exception:
-            pass
+        except Exception as exc:  # noqa: BLE001
+            print(f"[data] latest quote lookup failed for {symbol}: {exc}")
 
         try:
             ticker = yf.Ticker(symbol)
