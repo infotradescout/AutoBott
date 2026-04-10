@@ -106,6 +106,34 @@ def _slippage_pct(reference_price: float, current_price: float) -> float:
     return ((current_price - reference_price) / reference_price) * 100.0
 
 
+def _live_option_mark_and_plpc(
+    data_client: AlpacaDataClient,
+    option_symbol: str,
+    entry_price: float,
+) -> tuple[float | None, float | None]:
+    if entry_price <= 0:
+        return None, None
+    try:
+        quote = data_client.get_latest_option_quote(option_symbol)
+        bid_raw = quote.get("bid")
+        ask_raw = quote.get("ask")
+        bid = float(bid_raw) if bid_raw is not None else 0.0
+        ask = float(ask_raw) if ask_raw is not None else 0.0
+        mark: float | None = None
+        if bid > 0 and ask > 0 and ask >= bid:
+            mark = (bid + ask) / 2.0
+        elif ask > 0:
+            mark = ask
+        elif bid > 0:
+            mark = bid
+        if mark is None or mark <= 0:
+            return None, None
+        return mark, ((mark - entry_price) / entry_price)
+    except Exception as exc:  # noqa: BLE001
+        print(f"[main] live option quote unavailable for {option_symbol}: {exc}")
+        return None, None
+
+
 def _order_reject_reason(order) -> str:
     for field in ("rejected_reason", "cancel_reject_reason", "failed_at"):
         value = getattr(order, field, None)
@@ -1572,12 +1600,22 @@ def main():
             if qty <= 0:
                 continue
 
+            meta = open_trade_meta.get(symbol, {})
+            entry_price_for_monitor = float(meta.get("entry_price", getattr(pos, "avg_entry_price", 0) or 0) or 0)
+            live_mark_price, live_plpc = _live_option_mark_and_plpc(
+                data_client=data_client,
+                option_symbol=symbol,
+                entry_price=entry_price_for_monitor,
+            )
+
             try:
                 plpc = float(getattr(pos, "unrealized_plpc", 0))
             except (TypeError, ValueError):
                 plpc = 0.0
+            # Prefer live quote-derived PLPC when available to avoid stale position snapshots.
+            if live_plpc is not None:
+                plpc = float(live_plpc)
 
-            meta = open_trade_meta.get(symbol, {})
             dynamic_stop_floor = float(meta.get("stop_floor_plpc", -float(config.STOP_LOSS_PCT)) or -float(config.STOP_LOSS_PCT))
             max_plpc = float(meta.get("max_plpc", plpc) or plpc)
             max_plpc = max(max_plpc, plpc)
@@ -1638,6 +1676,8 @@ def main():
                         "requested_qty": close_qty,
                         "position_qty": qty,
                         "filled_qty": 0,
+                        "plpc_used": round(plpc, 6),
+                        "quote_mark_price": round(float(live_mark_price), 6) if live_mark_price else None,
                         "result": "submitted",
                     }
                     filled_close_qty, close_fill_price = _close_position_with_confirmation(
@@ -1656,6 +1696,8 @@ def main():
                     entry_price = float(meta.get("entry_price", getattr(pos, "avg_entry_price", 0) or 0))
                     if close_fill_price is not None and close_fill_price > 0:
                         exit_price = float(close_fill_price)
+                    elif live_mark_price is not None and live_mark_price > 0:
+                        exit_price = float(live_mark_price)
                     else:
                         exit_price = float(getattr(pos, "current_price", 0) or 0)
                     realized_plpc = plpc
