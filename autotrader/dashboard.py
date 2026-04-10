@@ -376,6 +376,13 @@ def api_account():
                 "cash": body.get("cash", "0"),
                 "portfolio_value": body.get("portfolio_value", body.get("equity", "0")),
                 "status": body.get("status", "UNKNOWN"),
+                "trading_blocked": body.get("trading_blocked", False),
+                "account_blocked": body.get("account_blocked", False),
+                "transfers_blocked": body.get("transfers_blocked", False),
+                "trade_suspended_by_user": body.get("trade_suspended_by_user", False),
+                "options_trading_level": body.get("options_trading_level", ""),
+                "options_approved_level": body.get("options_approved_level", ""),
+                "daytrade_count": body.get("daytrade_count", 0),
             }
         )
     except Exception as exc:  # noqa: BLE001
