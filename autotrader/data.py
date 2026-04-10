@@ -62,10 +62,70 @@ class AlpacaDataClient:
         end: datetime | None = None,
     ) -> pd.DataFrame:
         """
-        Fetch OHLCV bars using yfinance.
-        timeframe: yfinance interval string - "5m", "1d", "1h", etc.
+        Fetch OHLCV bars using Alpaca first, then yfinance fallback.
+        timeframe: "1m", "5m", "15m", "30m", "1h", "1d", etc.
         limit: max number of rows to return (most recent).
         """
+        timeframe_map = {
+            "1m": "1Min",
+            "5m": "5Min",
+            "15m": "15Min",
+            "30m": "30Min",
+            "60m": "1Hour",
+            "1h": "1Hour",
+            "1d": "1Day",
+        }
+        tf = str(timeframe or "5m").strip().lower()
+        alpaca_tf = timeframe_map.get(tf)
+        tz_et = pytz.timezone(config.EASTERN_TZ)
+
+        # Primary source: Alpaca bars API (keeps volume basis aligned with intraday feed)
+        if alpaca_tf:
+            try:
+                now_utc = datetime.now(pytz.UTC)
+                if tf in ("1d",):
+                    lookback_days = max(45, int(limit * 2))
+                else:
+                    lookback_days = 10
+                start_utc = (now_utc - timedelta(days=lookback_days)).isoformat().replace("+00:00", "Z")
+                end_utc = now_utc.isoformat().replace("+00:00", "Z")
+                resp = self.data_session.get(
+                    f"{self.data_base_url}/v2/stocks/bars",
+                    params={
+                        "symbols": symbol,
+                        "timeframe": alpaca_tf,
+                        "start": start_utc,
+                        "end": end_utc,
+                        "limit": max(50, int(limit) + 25),
+                        "adjustment": "raw",
+                        "feed": "iex",
+                    },
+                    timeout=15,
+                )
+                resp.raise_for_status()
+                body = resp.json()
+                bars_map = body.get("bars", {}) if isinstance(body, dict) else {}
+                rows = bars_map.get(symbol, []) if isinstance(bars_map, dict) else []
+                if rows:
+                    df = pd.DataFrame(rows)
+                    if not df.empty and {"t", "o", "h", "l", "c", "v"}.issubset(set(df.columns)):
+                        df = df.rename(
+                            columns={
+                                "t": "timestamp",
+                                "o": "open",
+                                "h": "high",
+                                "l": "low",
+                                "c": "close",
+                                "v": "volume",
+                            }
+                        )
+                        df["timestamp"] = pd.to_datetime(df["timestamp"], utc=True).dt.tz_convert(tz_et)
+                        df = df.tail(limit).reset_index(drop=True)
+                        return df[["timestamp", "open", "high", "low", "close", "volume"]]
+            except Exception:
+                pass
+
+        # Fallback: yfinance
         try:
             # Choose a safe period based on timeframe
             if timeframe in ("1m", "2m", "5m", "15m", "30m", "60m", "90m", "1h"):
@@ -95,9 +155,7 @@ class AlpacaDataClient:
                 df = df.rename(columns={ts_col[0]: "timestamp"})
 
             # Ensure timestamp is timezone-aware and in ET
-            df["timestamp"] = pd.to_datetime(df["timestamp"], utc=True).dt.tz_convert(
-                pytz.timezone(config.EASTERN_TZ)
-            )
+            df["timestamp"] = pd.to_datetime(df["timestamp"], utc=True).dt.tz_convert(tz_et)
 
             # Keep only the most recent `limit` rows
             df = df.tail(limit).reset_index(drop=True)
