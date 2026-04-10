@@ -331,7 +331,7 @@ def _scan_ticker_details(
     today_volume: float,
     data_client: AlpacaDataClient,
 ) -> dict[str, Any]:
-    if bars_df is None or bars_df.empty or len(bars_df) < config.SCAN_MIN_BARS:
+    if bars_df is None or bars_df.empty:
         return _scan_failure("insufficient intraday bars")
     if daily_bars_df is None or daily_bars_df.empty or len(daily_bars_df) < 20:
         return _scan_failure("insufficient daily bars")
@@ -353,6 +353,12 @@ def _scan_ticker_details(
     market_open = ts_last_et.replace(hour=9, minute=30, second=0, microsecond=0)
     minutes_since_open = max(1, int((ts_last_et - market_open).total_seconds() // 60))
     now_et = ts_last_et
+    opening_relax = bool(config.ENABLE_OPENING_ENTRY_RELAX) and (
+        minutes_since_open <= int(config.OPENING_ENTRY_RELAX_MINUTES)
+    )
+    min_bars_required = 1 if opening_relax else int(config.SCAN_MIN_BARS)
+    if len(bars_df) < min_bars_required:
+        return _scan_failure(f"insufficient intraday bars ({len(bars_df)}/{min_bars_required})")
 
     try:
         if data_client.has_earnings_within_days(symbol, config.EARNINGS_LOOKAHEAD_DAYS, now_et=now_et):

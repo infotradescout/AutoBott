@@ -118,6 +118,9 @@ class AlpacaDataClient:
         tz_et = pytz.timezone(config.EASTERN_TZ)
         today = now_et.date()
         market_open = tz_et.localize(datetime(today.year, today.month, today.day, 9, 30, 0))
+        minutes_since_open = max(0, int((now_et - market_open).total_seconds() // 60))
+        use_one_minute = minutes_since_open < 5
+        timeframe = "1Min" if use_one_minute else "5Min"
 
         # Primary source: Alpaca bars API (more stable intraday for live trading loops)
         try:
@@ -127,7 +130,7 @@ class AlpacaDataClient:
                 f"{self.data_base_url}/v2/stocks/bars",
                 params={
                     "symbols": symbol,
-                    "timeframe": "5Min",
+                    "timeframe": timeframe,
                     "start": start_utc,
                     "end": end_utc,
                     "limit": max(limit, 500),
@@ -164,7 +167,8 @@ class AlpacaDataClient:
         # Fallback: yfinance
         try:
             ticker = yf.Ticker(symbol)
-            df = ticker.history(period="5d", interval="5m", auto_adjust=True)
+            interval = "1m" if use_one_minute else "5m"
+            df = ticker.history(period="5d", interval=interval, auto_adjust=True)
 
             if df is None or df.empty:
                 return pd.DataFrame()
