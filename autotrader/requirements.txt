@@ -6,3 +6,4 @@ requests>=2.31.0
 pytz>=2024.1
 yfinance>=0.2.40
 flask>=3.0.0
+redis>=5.0.0

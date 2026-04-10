@@ -512,15 +512,32 @@ def api_status():
             elif plpc < 0:
                 losses += 1
 
+        trading_paused = bool(load_trading_control().get("manual_stop", False))
+        blockers: list[str] = []
+        if trading_paused:
+            blockers.append("manual_stop")
+        if not bool(clock_body.get("is_open", False)):
+            blockers.append("market_closed")
+        if not entry_window_open:
+            blockers.append("outside_entry_window")
+        blocked_day_notice = str(runtime_state.get("blocked_day_notice", "") or "")
+        if blocked_day_notice:
+            blockers.append(f"event_day_block:{blocked_day_notice}")
+        vix_block_notice = str(runtime_state.get("vix_block_notice", "") or "")
+        if vix_block_notice:
+            blockers.append(f"vix_guard_block:{vix_block_notice}")
+
         return jsonify(
             {
                 "market_open": bool(clock_body.get("is_open", False)),
-                "trading_paused": bool(load_trading_control().get("manual_stop", False)),
+                "trading_paused": trading_paused,
                 "entry_window_open": entry_window_open,
                 "entry_window_label": f"{config.NO_NEW_TRADES_BEFORE}-{config.NO_NEW_TRADES_AFTER} ET",
                 "catalyst_mode_active": catalyst_mode_active,
                 "catalyst_mode_reason": catalyst_mode_reason,
                 "catalyst_mode_until": catalyst_mode_until,
+                "can_enter_now": len(blockers) == 0,
+                "blockers": blockers,
                 "last_updated": _now_et().strftime("%Y-%m-%d %H:%M:%S ET"),
                 "trades_today": len(today_rows),
                 "wins_today": wins,
