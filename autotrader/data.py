@@ -55,8 +55,8 @@ class AlpacaDataClient:
         self._option_contract_base_candidates = list(
             dict.fromkeys(
                 [
-                    _LIVE_TRADE_BASE_URL,
                     self.base_url,
+                    _LIVE_TRADE_BASE_URL,
                 ]
             )
         )
@@ -399,28 +399,25 @@ class AlpacaDataClient:
 
     def get_latest_option_quote(self, option_symbol: str) -> dict[str, float | None]:
         last_exc: Exception | None = None
-        for base in self._option_contract_base_candidates:
-            try:
-                resp = self.options_session.get(
-                    f"{base}/v2/options/quotes/latest",
-                    params={"symbols": option_symbol},
-                    timeout=15,
-                )
-                resp.raise_for_status()
-                body = resp.json()
-                quote_map = body.get("quotes", {}) if isinstance(body, dict) else {}
-                quote = quote_map.get(option_symbol) if isinstance(quote_map, dict) else None
-                if not quote:
-                    continue
+        try:
+            resp = self.data_session.get(
+                f"{self.data_base_url}/v1beta1/options/quotes/latest",
+                params={"symbols": option_symbol, "feed": "indicative"},
+                timeout=15,
+            )
+            resp.raise_for_status()
+            body = resp.json()
+            quote_map = body.get("quotes", {}) if isinstance(body, dict) else {}
+            quote = quote_map.get(option_symbol) if isinstance(quote_map, dict) else None
+            if quote:
                 bid = quote.get("bp")
                 ask = quote.get("ap")
                 return {
                     "bid": float(bid) if bid is not None else None,
                     "ask": float(ask) if ask is not None else None,
                 }
-            except Exception as exc:  # noqa: BLE001
-                last_exc = exc
-                continue
+        except Exception as exc:  # noqa: BLE001
+            last_exc = exc
         if last_exc is not None:
             print(f"[data] get_latest_option_quote failed for {option_symbol}: {last_exc}")
         return {"bid": None, "ask": None}
