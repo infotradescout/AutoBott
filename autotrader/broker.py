@@ -25,7 +25,11 @@ class AlpacaBroker:
         return self.trading_client.get_all_positions()
 
     def get_open_option_positions(self):
-        positions = self.get_all_positions()
+        try:
+            positions = self.get_all_positions()
+        except Exception as exc:  # noqa: BLE001
+            print(f"[broker] get_all_positions failed: {exc}")
+            return []
         return [p for p in positions if str(getattr(p, "asset_class", "")).lower() in ("us_option", "options")]
 
     def place_option_limit_buy(self, option_symbol: str, qty: int, ask_price: float):
@@ -73,7 +77,11 @@ class AlpacaBroker:
         if not config.ENFORCE_PDT_GUARD:
             return True, {"reason": "pdt_guard_disabled", "equity": None, "daytrade_count": None}
 
-        account = self.get_account()
+        try:
+            account = self.get_account()
+        except Exception as exc:  # noqa: BLE001
+            print(f"[broker] pdt_allows_new_day_trade account lookup failed: {exc}")
+            return True, {"reason": "pdt_check_error", "equity": None, "daytrade_count": None}
         try:
             equity = float(getattr(account, "equity", 0) or 0)
         except (TypeError, ValueError):

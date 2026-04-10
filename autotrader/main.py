@@ -160,6 +160,11 @@ def _parse_state_datetime(value: str | None) -> datetime | None:
         return None
 
 
+def _looks_like_auth_error(exc: Exception) -> bool:
+    text = str(exc).lower()
+    return "401" in text or "unauthorized" in text or "authorization required" in text
+
+
 def _latest_5m_move_pct(data_client: AlpacaDataClient, symbol: str, now_et: datetime) -> float | None:
     try:
         bars = data_client.get_intraday_bars_since_open(symbol=symbol, now_et=now_et, limit=3)
@@ -424,6 +429,30 @@ def main():
             }
         )
 
+    def _safe_get_clock(*, phase: str, now_et: datetime, now_ct: datetime):
+        try:
+            return broker.get_clock()
+        except Exception as exc:  # noqa: BLE001
+            retry_sleep = max(5, int(config.LOOP_INTERVAL_SECONDS))
+            if _looks_like_auth_error(exc):
+                print(
+                    f"[{ts(now_et)} | {ts_ct(now_ct)}] Alpaca auth error during {phase} clock lookup: {exc}. "
+                    f"Retrying in {retry_sleep}s."
+                )
+                alerts.send(
+                    "alpaca_auth_error",
+                    f"Alpaca auth error during {phase} clock lookup. Retrying in {retry_sleep}s.",
+                    level="error",
+                    dedupe_key=f"alpaca-auth-{int(time.time() // 60)}",
+                )
+            else:
+                print(
+                    f"[{ts(now_et)} | {ts_ct(now_ct)}] Clock lookup failed during {phase}: {exc}. "
+                    f"Retrying in {retry_sleep}s."
+                )
+            time.sleep(retry_sleep)
+            return None
+
     mode = "PAPER" if config.PAPER else "LIVE"
     try:
         acct = broker.get_account()
@@ -480,7 +509,9 @@ def main():
                 dedupe_key=f"killswitch-cleared-{now_et.date().isoformat()}",
             )
             manual_stop_latched = False
-        clock = broker.get_clock()
+        clock = _safe_get_clock(phase="pre-open", now_et=now_et, now_ct=now_ct)
+        if clock is None:
+            continue
         now_et = datetime.now(tz)
         now_ct = datetime.now(pytz.timezone(config.CENTRAL_TZ))
         seconds_until_open = _seconds_until_next_open(clock)
@@ -549,7 +580,9 @@ def main():
             weekly_loss_key = week_key_now
             weekly_realized_loss_usd = 0.0
 
-        clock = broker.get_clock()
+        clock = _safe_get_clock(phase="market-loop", now_et=now_et, now_ct=now_ct)
+        if clock is None:
+            continue
         if not clock.is_open:
             sleep_seconds = _closed_market_sleep_seconds(clock, preopen_ready_minutes=config.PREOPEN_READY_MINUTES)
             next_open = getattr(clock, "next_open", None)
@@ -650,7 +683,11 @@ def main():
             print(f"[{ts(now_et)}] Observation phase complete. Hot tickers at front of queue: {hot_tickers}")
 
         # --- PDT / equity checks (log-only, non-blocking) ---
-        pdt_allowed, pdt_info = broker.pdt_allows_new_day_trade()
+        try:
+            pdt_allowed, pdt_info = broker.pdt_allows_new_day_trade()
+        except Exception as exc:  # noqa: BLE001
+            pdt_allowed, pdt_info = True, {"reason": "pdt_check_error", "equity": None, "daytrade_count": None}
+            print(f"[{ts(now_et)} | {ts_ct(now_ct)}] PDT guard check failed (fail-open): {exc}")
         entry_times_rolling = _prune_recent_entries(entry_times_rolling, now_et, days=5)
         equity = pdt_info.get("equity")
         under_25k = equity is not None and float(equity) < config.PDT_MIN_EQUITY
