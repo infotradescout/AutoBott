@@ -700,6 +700,44 @@ def main():
             print(f"[{ts(now_et)}] {ticker}: reversal entry error ({type(exc).__name__}): {exc!r}")
             return False
 
+    def _close_position_with_confirmation(
+        *,
+        symbol: str,
+        qty: int,
+        now_et: datetime,
+        label: str,
+    ) -> int:
+        request_qty = max(0, int(qty))
+        if request_qty <= 0:
+            return 0
+
+        def _submit_and_check(close_qty: int) -> int:
+            order = broker.close_option_market(symbol, close_qty)
+            time.sleep(max(1, int(config.ENTRY_MARKET_FALLBACK_WAIT_SECONDS)))
+            status_order = broker.get_order_status(order.id)
+            status = str(getattr(status_order, "status", "")).lower()
+            filled = position_qty_as_int(getattr(status_order, "filled_qty", 0))
+            if status in ("filled", "partially_filled") and filled > 0:
+                return min(close_qty, filled)
+            try:
+                broker.cancel_order(order.id)
+            except Exception:
+                pass
+            return 0
+
+        try:
+            filled_qty = _submit_and_check(request_qty)
+            if filled_qty > 0:
+                return filled_qty
+            filled_qty = _submit_and_check(request_qty)
+            if filled_qty > 0:
+                return filled_qty
+            print(f"[{ts(now_et)}] {label} {symbol} qty={request_qty}: close not filled after retries.")
+            return 0
+        except Exception as exc:  # noqa: BLE001
+            print(f"[{ts(now_et)}] {label} {symbol} qty={request_qty}: close error: {exc}")
+            return 0
+
     mode = "PAPER" if config.PAPER else "LIVE"
     try:
         acct = broker.get_account()
@@ -1382,6 +1420,23 @@ def main():
         if hydrated_count > 0:
             print(f"[{ts(now_et)}] Hydrated {hydrated_count} externally-opened position(s) before exit management.")
             _save_runtime_state()
+        ticker_total_qty: dict[str, int] = {}
+        ticker_first_symbol: dict[str, str] = {}
+        for p in option_positions:
+            p_symbol = str(getattr(p, "symbol", "") or "")
+            p_qty = position_qty_as_int(getattr(p, "qty", 0))
+            if p_qty <= 0:
+                continue
+            p_meta = open_trade_meta.get(p_symbol, {})
+            p_ticker = str(p_meta.get("ticker", "") or "").upper()
+            if not p_ticker:
+                parsed_ticker, _parsed_dir = _parse_option_symbol(p_symbol)
+                p_ticker = parsed_ticker.upper()
+            if not p_ticker:
+                continue
+            ticker_total_qty[p_ticker] = int(ticker_total_qty.get(p_ticker, 0)) + p_qty
+            if p_ticker not in ticker_first_symbol:
+                ticker_first_symbol[p_ticker] = p_symbol
         for pos in option_positions:
             now_et = datetime.now(tz)
             symbol = str(getattr(pos, "symbol", ""))
@@ -1408,11 +1463,25 @@ def main():
                 open_trade_meta[symbol] = meta
 
             exit_reason = None
-            if config.ENABLE_FIXED_PROFIT_TARGET and plpc >= config.PROFIT_TARGET_PCT:
+            close_qty = qty
+            ticker_for_pos = str(meta.get("ticker", "") or "").upper()
+            if not ticker_for_pos:
+                parsed_ticker, _parsed_dir = _parse_option_symbol(symbol)
+                ticker_for_pos = parsed_ticker.upper()
+            if ticker_for_pos:
+                total_qty_for_ticker = int(ticker_total_qty.get(ticker_for_pos, qty))
+                keep_symbol = str(ticker_first_symbol.get(ticker_for_pos, symbol))
+                if total_qty_for_ticker > 1:
+                    if symbol != keep_symbol:
+                        exit_reason = "exposure_normalize"
+                    elif qty > 1:
+                        exit_reason = "exposure_normalize"
+                        close_qty = qty - 1
+            if exit_reason is None and config.ENABLE_FIXED_PROFIT_TARGET and plpc >= config.PROFIT_TARGET_PCT:
                 exit_reason = "profit_target"
-            elif plpc <= dynamic_stop_floor:
+            elif exit_reason is None and plpc <= dynamic_stop_floor:
                 exit_reason = "stop_loss"
-            else:
+            if exit_reason is None:
                 expiry_date = _option_expiry_date(meta, symbol)
                 if expiry_date is not None:
                     cutoff_date = _subtract_trading_days(
@@ -1434,7 +1503,14 @@ def main():
 
             if exit_reason:
                 try:
-                    broker.close_option_market(symbol, qty)
+                    filled_close_qty = _close_position_with_confirmation(
+                        symbol=symbol,
+                        qty=close_qty,
+                        now_et=now_et,
+                        label=f"EXIT {exit_reason}",
+                    )
+                    if filled_close_qty <= 0:
+                        continue
                     meta = open_trade_meta.get(symbol, {})
                     entry_price = float(meta.get("entry_price", getattr(pos, "avg_entry_price", 0) or 0))
                     exit_price = float(getattr(pos, "current_price", 0) or 0)
@@ -1446,7 +1522,7 @@ def main():
                             "option_symbol": symbol,
                             "strike": meta.get("strike", ""),
                             "expiry": meta.get("expiry", ""),
-                            "qty": qty,
+                            "qty": filled_close_qty,
                             "entry_price": entry_price,
                             "exit_price": exit_price,
                             "pnl_pct": round(plpc, 4),
@@ -1454,7 +1530,7 @@ def main():
                         }
                     )
 
-                    premium_spent = entry_price * qty * 100
+                    premium_spent = entry_price * filled_close_qty * 100
                     trade_pnl_usd = premium_spent * plpc
 
                     if trade_pnl_usd < 0:
@@ -1481,10 +1557,23 @@ def main():
                         ticker_reentry_armed[ticker] = False
                         ticker_reentry_expected_direction[ticker] = ""
 
-                    open_trade_meta.pop(symbol, None)
+                    remaining_qty = max(0, qty - filled_close_qty)
+                    if remaining_qty <= 0:
+                        open_trade_meta.pop(symbol, None)
+                    else:
+                        if symbol in open_trade_meta:
+                            open_trade_meta[symbol]["qty"] = remaining_qty
                     _save_runtime_state()
-                    print(f"[{ts(now_et)}] EXIT {symbol} qty={qty} reason={exit_reason} pnl_pct={plpc:.2%}")
-                    if exit_reason == "stop_loss" and ticker and reversal_direction in ("call", "put"):
+                    print(
+                        f"[{ts(now_et)}] EXIT {symbol} qty={filled_close_qty}/{qty} "
+                        f"reason={exit_reason} pnl_pct={plpc:.2%}"
+                    )
+                    if (
+                        exit_reason == "stop_loss"
+                        and remaining_qty <= 0
+                        and ticker
+                        and reversal_direction in ("call", "put")
+                    ):
                         _attempt_reversal_entry(
                             ticker=ticker,
                             direction=reversal_direction,
