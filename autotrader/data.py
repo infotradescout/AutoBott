@@ -52,6 +52,14 @@ class AlpacaDataClient:
                 "accept": "application/json",
             }
         )
+        self._option_contract_base_candidates = list(
+            dict.fromkeys(
+                [
+                    _LIVE_TRADE_BASE_URL,
+                    self.base_url,
+                ]
+            )
+        )
 
     def get_stock_bars(
         self,
@@ -309,32 +317,51 @@ class AlpacaDataClient:
         expiration_date_gte: date,
         expiration_date_lte: date,
     ) -> list[dict[str, Any]]:
-        # Options contract data must come from the live API endpoint.
-        # Paper API does not serve options chain data.
         params = {
             "underlying_symbols": underlying_symbol,
             "type": contract_type,
             "expiration_date_gte": expiration_date_gte.isoformat(),
             "expiration_date_lte": expiration_date_lte.isoformat(),
         }
-        resp = self.options_session.get(
-            f"{_LIVE_TRADE_BASE_URL}/v2/options/contracts",
-            params=params,
-            timeout=15,
-        )
-        resp.raise_for_status()
-        body = resp.json()
-        return body.get("option_contracts", []) or body.get("contracts", []) or []
+        last_exc: Exception | None = None
+        for base in self._option_contract_base_candidates:
+            try:
+                resp = self.options_session.get(
+                    f"{base}/v2/options/contracts",
+                    params=params,
+                    timeout=15,
+                )
+                resp.raise_for_status()
+                body = resp.json()
+                contracts = body.get("option_contracts", []) or body.get("contracts", []) or []
+                if contracts:
+                    return contracts
+            except Exception as exc:  # noqa: BLE001
+                last_exc = exc
+                continue
+        if last_exc is not None:
+            raise last_exc
+        return []
 
     def get_option_contract(self, option_symbol: str) -> dict[str, Any]:
-        # Always use live endpoint for contract detail lookups.
-        resp = self.options_session.get(
-            f"{_LIVE_TRADE_BASE_URL}/v2/options/contracts/{option_symbol}",
-            timeout=15,
-        )
-        resp.raise_for_status()
-        body = resp.json()
-        return body.get("option_contract", body)
+        last_exc: Exception | None = None
+        for base in self._option_contract_base_candidates:
+            try:
+                resp = self.options_session.get(
+                    f"{base}/v2/options/contracts/{option_symbol}",
+                    timeout=15,
+                )
+                resp.raise_for_status()
+                body = resp.json()
+                payload = body.get("option_contract", body)
+                if isinstance(payload, dict) and payload:
+                    return payload
+            except Exception as exc:  # noqa: BLE001
+                last_exc = exc
+                continue
+        if last_exc is not None:
+            raise last_exc
+        return {}
 
     def get_latest_option_ask(self, option_symbol: str) -> float | None:
         quote = self.get_latest_option_quote(option_symbol)
@@ -342,24 +369,32 @@ class AlpacaDataClient:
         return float(ask) if ask is not None else None
 
     def get_latest_option_quote(self, option_symbol: str) -> dict[str, float | None]:
-        # Option quotes also require the live endpoint.
-        resp = self.options_session.get(
-            f"{_LIVE_TRADE_BASE_URL}/v2/options/quotes/latest",
-            params={"symbols": option_symbol},
-            timeout=15,
-        )
-        resp.raise_for_status()
-        body = resp.json()
-        quote_map = body.get("quotes", {})
-        quote = quote_map.get(option_symbol)
-        if not quote:
-            return {"bid": None, "ask": None}
-        bid = quote.get("bp")
-        ask = quote.get("ap")
-        return {
-            "bid": float(bid) if bid is not None else None,
-            "ask": float(ask) if ask is not None else None,
-        }
+        last_exc: Exception | None = None
+        for base in self._option_contract_base_candidates:
+            try:
+                resp = self.options_session.get(
+                    f"{base}/v2/options/quotes/latest",
+                    params={"symbols": option_symbol},
+                    timeout=15,
+                )
+                resp.raise_for_status()
+                body = resp.json()
+                quote_map = body.get("quotes", {}) if isinstance(body, dict) else {}
+                quote = quote_map.get(option_symbol) if isinstance(quote_map, dict) else None
+                if not quote:
+                    continue
+                bid = quote.get("bp")
+                ask = quote.get("ap")
+                return {
+                    "bid": float(bid) if bid is not None else None,
+                    "ask": float(ask) if ask is not None else None,
+                }
+            except Exception as exc:  # noqa: BLE001
+                last_exc = exc
+                continue
+        if last_exc is not None:
+            raise last_exc
+        return {"bid": None, "ask": None}
 
     def get_top_movers(self, top: int = 20) -> tuple[list[str], list[str]]:
         params = {"top": top, "market_type": "stocks"}

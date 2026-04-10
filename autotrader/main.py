@@ -433,6 +433,10 @@ def main():
             f"options_level={getattr(acct, 'options_trading_level', 'unknown')} "
             f"options_approved={getattr(acct, 'options_approved_level', 'unknown')}"
         )
+        print(
+            f"[{ts()} | {ts_ct()}] Account equity={getattr(acct, 'equity', 'unknown')} "
+            f"daytrade_count={getattr(acct, 'daytrade_count', 'unknown')}"
+        )
     except Exception as exc:  # noqa: BLE001
         print(f"[{ts()} | {ts_ct()}] Account diagnostics unavailable: {exc}")
     initial_control = load_trading_control()
