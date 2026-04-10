@@ -84,6 +84,8 @@ class AlpacaDataClient:
             "1d": "1Day",
         }
         tf = str(timeframe or "5m").strip().lower()
+        if tf.endswith("min"):
+            tf = f"{tf[:-3]}m"
         alpaca_tf = timeframe_map.get(tf)
         tz_et = pytz.timezone(config.EASTERN_TZ)
 
@@ -136,13 +138,25 @@ class AlpacaDataClient:
         # Fallback: yfinance
         try:
             # Choose a safe period based on timeframe
-            if timeframe in ("1m", "2m", "5m", "15m", "30m", "60m", "90m", "1h"):
+            yf_interval = {
+                "1m": "1m",
+                "2m": "2m",
+                "5m": "5m",
+                "15m": "15m",
+                "30m": "30m",
+                "60m": "60m",
+                "90m": "90m",
+                "1h": "1h",
+                "1d": "1d",
+            }.get(tf, tf)
+
+            if yf_interval in ("1m", "2m", "5m", "15m", "30m", "60m", "90m", "1h"):
                 period = "5d"  # yfinance allows up to 60d for minute-level, 5d is safe
             else:
                 period = f"{limit + 10}d"
 
             ticker = yf.Ticker(symbol)
-            df = ticker.history(period=period, interval=timeframe, auto_adjust=True)
+            df = ticker.history(period=period, interval=yf_interval, auto_adjust=True)
 
             if df is None or df.empty:
                 return pd.DataFrame()

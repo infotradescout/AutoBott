@@ -296,8 +296,8 @@ def _calculate_iv_rank_from_contracts(
                         iv_rank = ((closest_iv - rv_min) / (rv_max - rv_min)) * 100
                         iv_rank = max(0.0, min(100.0, iv_rank))
                         return closest_iv, round(iv_rank, 2)
-        except Exception:
-            pass
+        except Exception as exc:
+            print(f"[scanner] IV rank fallback for {symbol} failed: {exc}")
 
     return closest_iv, 50.0
 
@@ -797,8 +797,8 @@ def run_observation_phase(watchlist: list[str], data_client: AlpacaDataClient, n
                     "hot": "yes" if is_hot else "no",
                 }
             )
-        except Exception:
-            pass
+        except Exception as exc:
+            print(f"[Observation] {symbol}: observation step failed: {exc}")
         time.sleep(config.RATE_LIMIT_SLEEP_SECONDS)
 
     if observations:

@@ -179,7 +179,7 @@ def _latest_5m_move_pct(data_client: AlpacaDataClient, symbol: str, now_et: date
         return None
 
 
-_OPTION_SYMBOL_RE = re.compile(r"^([A-Z]+)\d{6}([CP])\d{8}$")
+_OPTION_SYMBOL_RE = re.compile(r"^([A-Z.]+)\d{6}([CP])\d{8}$")
 
 
 def _parse_option_symbol(option_symbol: str) -> tuple[str, str]:
@@ -708,19 +708,20 @@ def main():
         qty: int,
         now_et: datetime,
         label: str,
-    ) -> int:
+    ) -> tuple[int, float | None]:
         request_qty = max(0, int(qty))
         if request_qty <= 0:
-            return 0
+            return 0, None
 
         poll_seconds = max(1, int(config.EXIT_ORDER_STATUS_POLL_SECONDS))
         max_wait_seconds = max(poll_seconds, int(config.EXIT_ORDER_MAX_WAIT_SECONDS))
         retry_attempts = max(1, int(config.EXIT_CLOSE_RETRY_ATTEMPTS))
         non_fill_terminal = {"canceled", "cancelled", "rejected", "expired", "done_for_day", "stopped", "suspended"}
 
-        def _wait_for_fill(order_id: str, close_qty: int) -> tuple[int, str, bool]:
+        def _wait_for_fill(order_id: str, close_qty: int) -> tuple[int, float | None, str, bool]:
             deadline = time.time() + max_wait_seconds
             observed_filled = 0
+            observed_avg_price: float | None = None
             last_status = ""
             while time.time() < deadline:
                 try:
@@ -732,56 +733,63 @@ def main():
                 last_status = str(getattr(status_order, "status", "")).lower()
                 filled_qty = position_qty_as_int(getattr(status_order, "filled_qty", 0))
                 observed_filled = max(observed_filled, filled_qty)
+                avg_price_raw = getattr(status_order, "filled_avg_price", None)
+                try:
+                    avg_price = float(avg_price_raw) if avg_price_raw is not None else None
+                except (TypeError, ValueError):
+                    avg_price = None
+                if avg_price is not None and avg_price > 0:
+                    observed_avg_price = avg_price
                 if observed_filled > 0 and last_status in ("filled", "partially_filled"):
-                    return min(close_qty, observed_filled), last_status, False
+                    return min(close_qty, observed_filled), observed_avg_price, last_status, False
                 if last_status in non_fill_terminal:
                     break
                 time.sleep(poll_seconds)
             if observed_filled > 0:
-                return min(close_qty, observed_filled), last_status, False
+                return min(close_qty, observed_filled), observed_avg_price, last_status, False
             is_still_open = last_status not in non_fill_terminal and last_status not in ("", "filled", "partially_filled")
-            return 0, last_status, is_still_open
+            return 0, None, last_status, is_still_open
 
         try:
             existing_sells = broker.get_open_orders_for_symbol(symbol=symbol, side="sell")
             if existing_sells:
                 existing_order_id = str(getattr(existing_sells[0], "id", "") or "")
                 if existing_order_id:
-                    filled_qty, status, still_open = _wait_for_fill(existing_order_id, request_qty)
+                    filled_qty, filled_avg_price, status, still_open = _wait_for_fill(existing_order_id, request_qty)
                     if filled_qty > 0:
-                        return filled_qty
+                        return filled_qty, filled_avg_price
                     if still_open:
                         print(
                             f"[{ts(now_et)}] {label} {symbol} qty={request_qty}: "
                             f"existing close order {existing_order_id} still pending ({status or 'unknown'})."
                         )
-                        return 0
+                        return 0, None
 
             for attempt in range(1, retry_attempts + 1):
                 order = broker.close_option_market(symbol, request_qty)
                 order_id = str(getattr(order, "id", "") or "")
                 if not order_id:
                     print(f"[{ts(now_et)}] {label} {symbol} qty={request_qty}: close submitted without order id.")
-                    return 0
-                filled_qty, status, still_open = _wait_for_fill(order_id, request_qty)
+                    return 0, None
+                filled_qty, filled_avg_price, status, still_open = _wait_for_fill(order_id, request_qty)
                 if filled_qty > 0:
-                    return filled_qty
+                    return filled_qty, filled_avg_price
                 if still_open:
                     print(
                         f"[{ts(now_et)}] {label} {symbol} qty={request_qty}: "
                         f"close order {order_id} still pending ({status or 'unknown'})."
                     )
-                    return 0
+                    return 0, None
                 if attempt < retry_attempts:
                     print(
                         f"[{ts(now_et)}] {label} {symbol} qty={request_qty}: "
                         f"close attempt {attempt}/{retry_attempts} ended status={status or 'unknown'}, retrying."
                     )
             print(f"[{ts(now_et)}] {label} {symbol} qty={request_qty}: close not filled after {retry_attempts} attempt(s).")
-            return 0
+            return 0, None
         except Exception as exc:  # noqa: BLE001
             print(f"[{ts(now_et)}] {label} {symbol} qty={request_qty}: close error: {exc}")
-            return 0
+            return 0, None
 
     mode = "PAPER" if config.PAPER else "LIVE"
     try:
@@ -1579,7 +1587,7 @@ def main():
                         "filled_qty": 0,
                         "result": "submitted",
                     }
-                    filled_close_qty = _close_position_with_confirmation(
+                    filled_close_qty, close_fill_price = _close_position_with_confirmation(
                         symbol=symbol,
                         qty=close_qty,
                         now_et=now_et,
@@ -1593,7 +1601,13 @@ def main():
                     last_exit_debug["result"] = "filled"
                     meta = open_trade_meta.get(symbol, {})
                     entry_price = float(meta.get("entry_price", getattr(pos, "avg_entry_price", 0) or 0))
-                    exit_price = float(getattr(pos, "current_price", 0) or 0)
+                    if close_fill_price is not None and close_fill_price > 0:
+                        exit_price = float(close_fill_price)
+                    else:
+                        exit_price = float(getattr(pos, "current_price", 0) or 0)
+                    realized_plpc = plpc
+                    if entry_price > 0 and exit_price > 0:
+                        realized_plpc = (exit_price - entry_price) / entry_price
                     trade_logger.log_trade(
                         {
                             "timestamp": ts(now_et),
@@ -1605,13 +1619,12 @@ def main():
                             "qty": filled_close_qty,
                             "entry_price": entry_price,
                             "exit_price": exit_price,
-                            "pnl_pct": round(plpc, 4),
+                            "pnl_pct": round(realized_plpc, 4),
                             "exit_reason": exit_reason,
                         }
                     )
 
-                    premium_spent = entry_price * filled_close_qty * 100
-                    trade_pnl_usd = premium_spent * plpc
+                    trade_pnl_usd = (exit_price - entry_price) * filled_close_qty * 100
 
                     if trade_pnl_usd < 0:
                         daily_realized_loss_usd += abs(trade_pnl_usd)
@@ -1646,7 +1659,7 @@ def main():
                     _save_runtime_state()
                     print(
                         f"[{ts(now_et)}] EXIT {symbol} qty={filled_close_qty}/{qty} "
-                        f"reason={exit_reason} pnl_pct={plpc:.2%}"
+                        f"reason={exit_reason} pnl_pct={realized_plpc:.2%}"
                     )
                     if (
                         exit_reason == "stop_loss"
@@ -1683,8 +1696,16 @@ def main():
                 qty = position_qty_as_int(getattr(pos, "qty", 0))
                 if qty > 0:
                     try:
-                        broker.close_option_market(symbol, qty)
-                        print(f"[{ts(now_et)}] EOD CLOSE {symbol} qty={qty}")
+                        filled_qty, _fill_price = _close_position_with_confirmation(
+                            symbol=symbol,
+                            qty=qty,
+                            now_et=now_et,
+                            label="EOD CLOSE",
+                        )
+                        if filled_qty > 0:
+                            print(f"[{ts(now_et)}] EOD CLOSE {symbol} qty={filled_qty}/{qty}")
+                        else:
+                            print(f"[{ts(now_et)}] EOD CLOSE {symbol} qty={qty} pending/not filled.")
                     except Exception as exc:  # noqa: BLE001
                         print(f"[{ts(now_et)}] {symbol}: EOD close error: {exc}")
                     time.sleep(config.RATE_LIMIT_SLEEP_SECONDS)
