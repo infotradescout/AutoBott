@@ -1338,9 +1338,20 @@ def main():
                     continue
 
             if not _entry_confirmation_passes(data_client, ticker, direction, now_et):
-                _mark_skip("entry_confirmation_mismatch")
-                print(f"[{ts(now_et)}] {ticker}: skip (entry confirmation candle not aligned).")
-                continue
+                signal_score = 0.0
+                try:
+                    signal_score = float(signal.get("signal_score", 0) or 0)
+                except (TypeError, ValueError):
+                    signal_score = 0.0
+                if signal_score >= float(getattr(config, "ENTRY_CONFIRM_BYPASS_MIN_SIGNAL_SCORE", 0.0) or 0.0):
+                    print(
+                        f"[{ts(now_et)}] {ticker}: entry confirmation bypassed "
+                        f"(signal_score={signal_score:.2f} >= {float(config.ENTRY_CONFIRM_BYPASS_MIN_SIGNAL_SCORE):.2f})."
+                    )
+                else:
+                    _mark_skip("entry_confirmation_mismatch")
+                    print(f"[{ts(now_et)}] {ticker}: skip (entry confirmation candle not aligned).")
+                    continue
 
             # Re-check live position count right before placing a new order.
             option_positions = broker.get_open_option_positions()
