@@ -492,6 +492,8 @@ def main():
     )
 
     while True:
+        now_et = datetime.now(tz)
+        now_ct = datetime.now(pytz.timezone(config.CENTRAL_TZ))
         last_trader_heartbeat_et = datetime.now(tz).isoformat()
         control_state = load_trading_control()
         manual_stop = bool(control_state.get("manual_stop", False))
