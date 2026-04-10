@@ -62,6 +62,21 @@ def _extract_delta(contract: dict[str, Any]) -> float | None:
     return abs(value)
 
 
+def _contract_symbol(contract: dict[str, Any]) -> str:
+    return str(contract.get("symbol") or contract.get("option_symbol") or "").strip()
+
+
+def _contract_expiration(contract: dict[str, Any]) -> Any:
+    return contract.get("expiration_date") or contract.get("expiration")
+
+
+def _contract_strike(contract: dict[str, Any]) -> float | None:
+    strike = _safe_float(contract.get("strike_price"))
+    if strike is None:
+        strike = _safe_float(contract.get("strike"))
+    return strike
+
+
 def select_atm_option_contract(
     data_client: AlpacaDataClient,
     underlying_symbol: str,
@@ -111,21 +126,24 @@ def select_atm_option_contract_with_reason(
         "low_volume": 0,
     }
     for contract in contracts:
-        active = contract.get("status", "active") == "active"
-        tradable = contract.get("tradable", True)
-        strike = _safe_float(contract.get("strike_price"))
-        exp = contract.get("expiration_date")
-        symbol = contract.get("symbol")
-        details = contract
+        details = dict(contract)
+        symbol = _contract_symbol(details)
         open_interest = _safe_float(details.get("open_interest"))
         volume = _safe_float(details.get("volume") or details.get("daily_volume"))
         if (open_interest is None or volume is None) and symbol:
             try:
-                details = data_client.get_option_contract(symbol)
+                enriched = data_client.get_option_contract(symbol)
+                if isinstance(enriched, dict):
+                    details.update(enriched)
             except Exception:
-                details = contract
+                pass
             open_interest = _safe_float(details.get("open_interest"))
             volume = _safe_float(details.get("volume") or details.get("daily_volume"))
+        active = str(details.get("status", "active")).lower() == "active"
+        tradable = bool(details.get("tradable", True))
+        strike = _contract_strike(details)
+        exp = _contract_expiration(details)
+        symbol = _contract_symbol(details)
         if not active or not tradable:
             fail_counts["inactive_or_untradable"] += 1
             continue
@@ -139,6 +157,9 @@ def select_atm_option_contract_with_reason(
             fail_counts["low_volume"] += 1
             continue
         if active and tradable and strike is not None and exp and symbol:
+            details["symbol"] = symbol
+            details["expiration_date"] = str(exp)
+            details["strike_price"] = strike
             details["open_interest"] = open_interest
             details["daily_volume"] = volume
             filtered.append(details)
@@ -159,7 +180,11 @@ def select_atm_option_contract_with_reason(
         if (not config.EMERGENCY_EXECUTION_MODE) and exp_date == today and open_interest < float(config.MIN_OPTION_OPEN_INTEREST_0DTE):
             fail_counts["low_open_interest"] += 1
             continue
-        strike_gap = abs(float(contract["strike_price"]) - underlying_price)
+        strike_val = _contract_strike(contract)
+        if strike_val is None:
+            fail_counts["missing_fields"] += 1
+            continue
+        strike_gap = abs(float(strike_val) - underlying_price)
         delta_abs = _extract_delta(contract)
         target_delta = float(config.TARGET_DELTA_FALLBACK)
         if direction == "call":
@@ -190,7 +215,10 @@ def select_atm_option_contract_with_reason(
         # fall back to the already-liquidity-filtered set so entries can proceed.
         scored = list(filtered)
         for contract in scored:
-            strike_gap = abs(float(contract["strike_price"]) - underlying_price)
+            strike_val = _contract_strike(contract)
+            if strike_val is None:
+                continue
+            strike_gap = abs(float(strike_val) - underlying_price)
             contract["_select_score"] = strike_gap * 0.05
         if not scored:
             return None, "no eligible contracts after 0DTE/quality checks"
@@ -203,7 +231,10 @@ def select_atm_option_contract_with_reason(
         "spread_too_wide": 0,
     }
     for contract in scored[:40]:
-        symbol = contract["symbol"]
+        symbol = _contract_symbol(contract)
+        if not symbol:
+            quote_fail_counts["bad_quote"] += 1
+            continue
         quote = data_client.get_latest_option_quote(symbol)
         bid = _safe_float(quote.get("bid"))
         ask = _safe_float(quote.get("ask"))
