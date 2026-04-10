@@ -378,6 +378,8 @@ def _scan_ticker_details(
         return _scan_failure("rvol unavailable")
     if not is_at_or_after(now_et, config.RVOL_IGNORE_AFTER):
         effective_rvol_min = float(config.CATALYST_RELAXED_RVOL_MIN) if _CATALYST_MODE_ACTIVE else float(config.RVOL_MIN)
+        if opening_relax:
+            effective_rvol_min = min(effective_rvol_min, float(config.OPENING_RVOL_MIN))
         if is_at_or_after(now_et, config.RVOL_RELAX_AFTER):
             effective_rvol_min = min(effective_rvol_min, float(config.RVOL_RELAXED_MIN))
         if force_relaxed_rvol:

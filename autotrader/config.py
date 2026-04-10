@@ -216,6 +216,7 @@ SCAN_DAILY_BARS = 30
 
 # --- Scanner thresholds (all tunable via env vars) ---
 RVOL_MIN = _env_float("RVOL_MIN", 0.6)
+OPENING_RVOL_MIN = _env_float("OPENING_RVOL_MIN", 0.05)
 RVOL_STRICT_UNTIL = _env_str("RVOL_STRICT_UNTIL", "10:30")
 RVOL_RELAX_AFTER = _env_str("RVOL_RELAX_AFTER", "10:00")
 RVOL_RELAXED_MIN = _env_float("RVOL_RELAXED_MIN", 0.45)
