@@ -130,8 +130,8 @@ def _fetch_vix_level() -> float | None:
                 value = float(price)
                 if value > 0:
                     return value
-    except Exception:
-        pass
+    except Exception as exc:  # noqa: BLE001
+        print(f"[main] VIX lookup failed: {exc}")
     return None
 
 
@@ -214,8 +214,8 @@ def _option_expiry_date(meta: dict, option_symbol: str) -> date | None:
     if raw:
         try:
             return date.fromisoformat(raw[:10])
-        except Exception:
-            pass
+        except Exception as exc:  # noqa: BLE001
+            print(f"[main] invalid expiry in trade meta for {option_symbol}: {raw!r} ({exc})")
     return _parse_option_expiry_from_symbol(option_symbol)
 
 
@@ -670,8 +670,8 @@ def main():
                 try:
                     if not direct_market_entry:
                         broker.cancel_order(order.id)
-                except Exception:
-                    pass
+                except Exception as exc:  # noqa: BLE001
+                    print(f"[{ts(now_et)}] {ticker}: reversal cancel of {order.id} failed: {exc}")
                 if not direct_market_entry:
                     aggressive_limit = round(float(ask_price) * 1.05, 4)
                     try:
@@ -683,8 +683,8 @@ def main():
                         if order_status not in ("filled", "partially_filled"):
                             try:
                                 broker.cancel_order(retry_order.id)
-                            except Exception:
-                                pass
+                            except Exception as exc:  # noqa: BLE001
+                                print(f"[{ts(now_et)}] {ticker}: reversal retry cancel of {retry_order.id} failed: {exc}")
                             mkt_order = broker.place_option_market_buy(option_symbol, qty)
                             time.sleep(max(1, int(config.ENTRY_MARKET_FALLBACK_WAIT_SECONDS)))
                             filled_order = broker.get_order_status(mkt_order.id)
@@ -1425,8 +1425,8 @@ def main():
                     try:
                         if not direct_market_entry:
                             broker.cancel_order(order.id)
-                    except Exception:
-                        pass
+                    except Exception as exc:  # noqa: BLE001
+                        print(f"[{ts(now_et)}] {ticker}: cancel of {order.id} failed: {exc}")
                     # Retry once with a slightly more aggressive limit before market fallback.
                     if not direct_market_entry:
                         aggressive_limit = round(float(ask_price) * 1.05, 4)
@@ -1443,8 +1443,8 @@ def main():
                             if order_status not in ("filled", "partially_filled"):
                                 try:
                                     broker.cancel_order(retry_order.id)
-                                except Exception:
-                                    pass
+                                except Exception as exc:  # noqa: BLE001
+                                    print(f"[{ts(now_et)}] {ticker}: retry cancel of {retry_order.id} failed: {exc}")
                                 print(f"[{ts(now_et)}] {ticker}: retry limit not filled ({order_status}). Trying market buy.")
                                 mkt_order = broker.place_option_market_buy(option_symbol, qty)
                                 time.sleep(max(1, int(config.ENTRY_MARKET_FALLBACK_WAIT_SECONDS)))

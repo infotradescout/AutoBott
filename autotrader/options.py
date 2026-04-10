@@ -135,8 +135,8 @@ def select_atm_option_contract_with_reason(
                 enriched = data_client.get_option_contract(symbol)
                 if isinstance(enriched, dict):
                     details.update(enriched)
-            except Exception:
-                pass
+            except Exception as exc:  # noqa: BLE001
+                print(f"[options] enrichment failed for {symbol}: {exc}")
             open_interest = _safe_float(details.get("open_interest"))
             volume = _safe_float(details.get("volume") or details.get("daily_volume"))
         active = str(details.get("status", "active")).lower() == "active"
