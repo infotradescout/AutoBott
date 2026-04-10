@@ -113,8 +113,55 @@ class AlpacaDataClient:
     def get_intraday_bars_since_open(self, symbol: str, now_et: datetime, limit: int = 120) -> pd.DataFrame:
         """
         Fetch 5-minute intraday bars from market open (9:30 ET) until now.
-        Uses yfinance - free, no API key required.
+        Uses Alpaca data bars first, with yfinance fallback.
         """
+        tz_et = pytz.timezone(config.EASTERN_TZ)
+        today = now_et.date()
+        market_open = tz_et.localize(datetime(today.year, today.month, today.day, 9, 30, 0))
+
+        # Primary source: Alpaca bars API (more stable intraday for live trading loops)
+        try:
+            start_utc = market_open.astimezone(pytz.UTC).isoformat().replace("+00:00", "Z")
+            end_utc = now_et.astimezone(pytz.UTC).isoformat().replace("+00:00", "Z")
+            resp = self.data_session.get(
+                f"{self.data_base_url}/v2/stocks/bars",
+                params={
+                    "symbols": symbol,
+                    "timeframe": "5Min",
+                    "start": start_utc,
+                    "end": end_utc,
+                    "limit": max(limit, 500),
+                    "adjustment": "raw",
+                    "feed": "iex",
+                },
+                timeout=15,
+            )
+            resp.raise_for_status()
+            body = resp.json()
+            bars_map = body.get("bars", {}) if isinstance(body, dict) else {}
+            rows = bars_map.get(symbol, []) if isinstance(bars_map, dict) else []
+            if rows:
+                df = pd.DataFrame(rows)
+                if not df.empty and {"t", "o", "h", "l", "c", "v"}.issubset(set(df.columns)):
+                    df = df.rename(
+                        columns={
+                            "t": "timestamp",
+                            "o": "open",
+                            "h": "high",
+                            "l": "low",
+                            "c": "close",
+                            "v": "volume",
+                        }
+                    )
+                    df["timestamp"] = pd.to_datetime(df["timestamp"], utc=True).dt.tz_convert(tz_et)
+                    df = df[(df["timestamp"] >= market_open) & (df["timestamp"] <= now_et)]
+                    df = df.tail(limit).reset_index(drop=True)
+                    if not df.empty:
+                        return df[["timestamp", "open", "high", "low", "close", "volume"]]
+        except Exception:
+            pass
+
+        # Fallback: yfinance
         try:
             ticker = yf.Ticker(symbol)
             df = ticker.history(period="5d", interval="5m", auto_adjust=True)
@@ -128,15 +175,9 @@ class AlpacaDataClient:
             if ts_col:
                 df = df.rename(columns={ts_col[0]: "timestamp"})
 
-            df["timestamp"] = pd.to_datetime(df["timestamp"], utc=True).dt.tz_convert(
-                pytz.timezone(config.EASTERN_TZ)
-            )
+            df["timestamp"] = pd.to_datetime(df["timestamp"], utc=True).dt.tz_convert(tz_et)
 
             # Filter to today's session from 9:30 ET onwards
-            today = now_et.date()
-            market_open = pytz.timezone(config.EASTERN_TZ).localize(
-                datetime(today.year, today.month, today.day, 9, 30, 0)
-            )
             df = df[df["timestamp"] >= market_open]
             df = df[df["timestamp"] <= now_et]
             df = df.tail(limit).reset_index(drop=True)
