@@ -397,6 +397,7 @@ def main():
         str(k): int(v)
         for k, v in dict(state.get("ticker_reentries_used") or {}).items()
     }
+    last_entry_debug: dict = dict(state.get("last_entry_debug") or {})
     last_trader_heartbeat_et = str(state.get("last_trader_heartbeat_et", "") or "")
     last_alpaca_auth_error_et = str(state.get("last_alpaca_auth_error_et", "") or "")
     last_alpaca_auth_error = str(state.get("last_alpaca_auth_error", "") or "")
@@ -429,6 +430,7 @@ def main():
                 "ticker_entry_counts": ticker_entry_counts,
                 "ticker_reentry_armed": ticker_reentry_armed,
                 "ticker_reentries_used": ticker_reentries_used,
+                "last_entry_debug": last_entry_debug,
                 "last_trader_heartbeat_et": last_trader_heartbeat_et,
                 "last_alpaca_auth_error_et": last_alpaca_auth_error_et,
                 "last_alpaca_auth_error": last_alpaca_auth_error,
@@ -779,11 +781,30 @@ def main():
                 f"(ENFORCE_PDT_GUARD={config.ENFORCE_PDT_GUARD})"
             )
 
+        entry_debug: dict[str, object] = {
+            "loop_ts_et": ts(now_et),
+            "watchlist_count": len(watchlist),
+            "scan_pass_count": len(signals),
+            "signals_considered": 0,
+            "entry_orders_submitted": 0,
+            "entries_filled": 0,
+            "skips": {},
+        }
+
+        def _mark_skip(reason: str) -> None:
+            skips = entry_debug.get("skips", {})
+            if not isinstance(skips, dict):
+                skips = {}
+            skips[reason] = int(skips.get(reason, 0)) + 1
+            entry_debug["skips"] = skips
+
         for signal in signals:
             now_et = datetime.now(tz)
+            entry_debug["signals_considered"] = int(entry_debug.get("signals_considered", 0)) + 1
 
             # --- Daily loss limit ---
             if daily_realized_loss_usd >= config.DAILY_LOSS_LIMIT_USD:
+                _mark_skip("daily_loss_limit")
                 print(
                     f"[{ts(now_et)}] DAILY LOSS LIMIT hit: "
                     f"${daily_realized_loss_usd:.2f} >= ${config.DAILY_LOSS_LIMIT_USD:.2f}. "
@@ -802,6 +823,7 @@ def main():
 
             # --- Weekly loss limit ---
             if weekly_realized_loss_usd >= config.WEEKLY_LOSS_LIMIT_USD:
+                _mark_skip("weekly_loss_limit")
                 print(
                     f"[{ts(now_et)}] WEEKLY LOSS LIMIT hit: "
                     f"${weekly_realized_loss_usd:.2f} >= ${config.WEEKLY_LOSS_LIMIT_USD:.2f}. "
@@ -820,6 +842,7 @@ def main():
 
             # --- Consecutive loss circuit breaker (only if ENFORCE_PDT_GUARD is on) ---
             if config.ENFORCE_PDT_GUARD and consecutive_losses >= config.CONSECUTIVE_LOSS_LIMIT:
+                _mark_skip("consecutive_loss_limit")
                 print(
                     f"[{ts(now_et)}] {consecutive_losses} consecutive losses. "
                     f"Pausing new entries for the rest of the day."
@@ -828,16 +851,20 @@ def main():
 
             # --- PDT guard (only blocks if ENFORCE_PDT_GUARD=True) ---
             if local_trade_budget_hit:
+                _mark_skip("pdt_local_budget_hit")
                 break
             if config.ENFORCE_PDT_GUARD and not pdt_allowed:
+                _mark_skip("pdt_broker_block")
                 break
 
             ticker = signal["symbol"]
             direction = signal["direction"]
             if not is_at_or_after(now_et, config.NO_NEW_TRADES_BEFORE):
+                _mark_skip("before_entry_window")
                 print(f"[{ts(now_et)}] Entry window not open yet (before {config.NO_NEW_TRADES_BEFORE} ET).")
                 break
             if is_at_or_after(now_et, config.NO_NEW_TRADES_AFTER):
+                _mark_skip("after_entry_window")
                 print(f"[{ts(now_et)}] Entry window closed (past {config.NO_NEW_TRADES_AFTER} ET).")
                 break
 
@@ -850,6 +877,7 @@ def main():
                 for p in option_positions
             )
             if has_ticker_position:
+                _mark_skip("existing_option_position")
                 print(f"[{ts(now_et)}] {ticker}: skip (existing option position).")
                 continue
 
@@ -858,9 +886,11 @@ def main():
             reentry_armed = bool(ticker_reentry_armed.get(ticker, False))
             if prior_entries >= 1:
                 if not reentry_armed:
+                    _mark_skip("already_traded_today")
                     print(f"[{ts(now_et)}] {ticker}: skip (already traded today; no stop-loss re-entry armed).")
                     continue
                 if reentries_used >= int(config.MAX_REENTRIES_PER_TICKER):
+                    _mark_skip("max_reentries_used")
                     print(
                         f"[{ts(now_et)}] {ticker}: skip (max re-entries used "
                         f"{reentries_used}/{int(config.MAX_REENTRIES_PER_TICKER)})."
@@ -868,6 +898,7 @@ def main():
                     continue
 
             if not _entry_confirmation_passes(data_client, ticker, direction, now_et):
+                _mark_skip("entry_confirmation_mismatch")
                 print(f"[{ts(now_et)}] {ticker}: skip (entry confirmation candle not aligned).")
                 continue
 
@@ -875,6 +906,7 @@ def main():
             option_positions = broker.get_open_option_positions()
             open_count = len(option_positions)
             if not can_open_new_positions(open_count, config.MAX_POSITIONS):
+                _mark_skip("max_positions_reached")
                 print(f"[{ts(now_et)}] Max positions reached. Stopping new entries this loop.")
                 break
 
@@ -883,6 +915,7 @@ def main():
 
                 stock_price = data_client.get_latest_stock_price(ticker)
                 if stock_price is None:
+                    _mark_skip("no_stock_quote")
                     print(f"[{ts(now_et)}] {ticker}: skip (no stock quote).")
                     time.sleep(config.RATE_LIMIT_SLEEP_SECONDS)
                     continue
@@ -895,6 +928,7 @@ def main():
                     now_et=now_et,
                 )
                 if not contract:
+                    _mark_skip("no_eligible_option_contract")
                     print(f"[{ts(now_et)}] {ticker}: skip (no eligible option contract: {contract_reason}).")
                     time.sleep(config.RATE_LIMIT_SLEEP_SECONDS)
                     continue
@@ -911,6 +945,7 @@ def main():
                         direct_market_entry = True
                         ask_price = 0.0
                     else:
+                        _mark_skip("no_option_ask")
                         print(f"[{ts(now_et)}] {ticker}: skip (no option ask for {option_symbol}).")
                         time.sleep(config.RATE_LIMIT_SLEEP_SECONDS)
                         continue
@@ -925,6 +960,7 @@ def main():
                             ask_price = retry_ask
                             pre_submit_slippage = _slippage_pct(initial_chain_ask, ask_price)
                     if pre_submit_slippage > (config.MAX_ENTRY_SLIPPAGE_PCT * 3):
+                        _mark_skip("entry_slippage_too_high")
                         print(
                             f"[{ts(now_et)}] {ticker}: skip (entry slippage {pre_submit_slippage:.2f}% > "
                             f"hard cap {(config.MAX_ENTRY_SLIPPAGE_PCT * 3):.2f}%)."
@@ -937,12 +973,14 @@ def main():
 
                 if direct_market_entry:
                     order = broker.place_option_market_buy(option_symbol, qty)
+                    entry_debug["entry_orders_submitted"] = int(entry_debug.get("entry_orders_submitted", 0)) + 1
                     print(
                         f"[{ts(now_et)}] ENTRY {ticker} {direction.upper()} "
                         f"{option_symbol} qty={qty} market order_id={order.id}"
                     )
                 else:
                     order = broker.place_option_limit_buy(option_symbol, qty, ask_price)
+                    entry_debug["entry_orders_submitted"] = int(entry_debug.get("entry_orders_submitted", 0)) + 1
                     print(
                         f"[{ts(now_et)}] ENTRY {ticker} {direction.upper()} "
                         f"{option_symbol} qty={qty} limit={ask_price:.2f} order_id={order.id}"
@@ -985,6 +1023,7 @@ def main():
                                 reject_detail = _order_reject_reason(filled_order)
                             if order_status not in ("filled", "partially_filled"):
                                 extra = f" {reject_detail}" if reject_detail else ""
+                                _mark_skip("entry_not_filled_after_fallback")
                                 print(
                                     f"[{ts(now_et)}] {ticker}: market fallback not filled "
                                     f"(status={order_status}).{extra} Skipping."
@@ -992,11 +1031,13 @@ def main():
                                 time.sleep(config.RATE_LIMIT_SLEEP_SECONDS)
                                 continue
                         except Exception as exc:  # noqa: BLE001
+                            _mark_skip("market_fallback_exception")
                             print(f"[{ts(now_et)}] {ticker}: market fallback failed: {exc}")
                             time.sleep(config.RATE_LIMIT_SLEEP_SECONDS)
                             continue
                     else:
                         extra = f" {reject_detail}" if reject_detail else ""
+                        _mark_skip("direct_market_not_filled")
                         print(
                             f"[{ts(now_et)}] {ticker}: direct market entry not filled "
                             f"(status={order_status}).{extra} Skipping."
@@ -1008,6 +1049,7 @@ def main():
                 filled_qty = position_qty_as_int(getattr(filled_order, "filled_qty", qty)) or qty
                 fill_slippage = _slippage_pct(ask_price, filled_avg_price) if (filled_avg_price > 0 and ask_price > 0) else 0.0
                 if (not direct_market_entry) and fill_slippage > config.MAX_FILL_SLIPPAGE_PCT:
+                    _mark_skip("fill_slippage_too_high")
                     print(
                         f"[{ts(now_et)}] {ticker}: fill slippage {fill_slippage:.2f}% exceeds "
                         f"{config.MAX_FILL_SLIPPAGE_PCT:.2f}%. Closing immediately."
@@ -1047,14 +1089,18 @@ def main():
                 ticker_entry_counts[ticker] = prior_entries + 1
                 open_count += 1
                 entry_times_rolling.append(now_et)
+                entry_debug["entries_filled"] = int(entry_debug.get("entries_filled", 0)) + 1
                 _save_runtime_state()
                 time.sleep(config.RATE_LIMIT_SLEEP_SECONDS)
             except Exception as exc:  # noqa: BLE001
+                _mark_skip("entry_flow_exception")
                 print(
                     f"[{ts(now_et)}] {ticker}: error during entry flow "
                     f"({type(exc).__name__}): {exc!r}"
                 )
                 time.sleep(config.RATE_LIMIT_SLEEP_SECONDS)
+
+        last_entry_debug = entry_debug
 
         # --- Exit management ---
         option_positions = broker.get_open_option_positions()

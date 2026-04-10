@@ -261,7 +261,33 @@ class AlpacaDataClient:
             return pd.DataFrame()
 
     def get_latest_stock_price(self, symbol: str) -> float | None:
-        """Get the latest stock price using yfinance. Free, no API key."""
+        """
+        Get latest stock price.
+        Preference order:
+        1) Alpaca latest trade (IEX)
+        2) Alpaca quote midpoint (IEX)
+        3) yfinance fallback
+        """
+        try:
+            trade_price = self.get_latest_stock_trade_price(symbol)
+            if trade_price is not None and trade_price > 0:
+                return float(trade_price)
+        except Exception:
+            pass
+
+        try:
+            quote = self.get_latest_stock_quote(symbol)
+            bid = quote.get("bid")
+            ask = quote.get("ask")
+            if bid is not None and ask is not None and bid > 0 and ask > 0:
+                return float((bid + ask) / 2.0)
+            if ask is not None and ask > 0:
+                return float(ask)
+            if bid is not None and bid > 0:
+                return float(bid)
+        except Exception:
+            pass
+
         try:
             ticker = yf.Ticker(symbol)
             info = ticker.fast_info
@@ -274,7 +300,7 @@ class AlpacaDataClient:
         try:
             resp = self.data_session.get(
                 f"{self.data_base_url}/v2/stocks/quotes/latest",
-                params={"symbols": symbol},
+                params={"symbols": symbol, "feed": "iex"},
                 timeout=15,
             )
             resp.raise_for_status()
@@ -296,7 +322,7 @@ class AlpacaDataClient:
         try:
             resp = self.data_session.get(
                 f"{self.data_base_url}/v2/stocks/trades/latest",
-                params={"symbols": symbol},
+                params={"symbols": symbol, "feed": "iex"},
                 timeout=15,
             )
             resp.raise_for_status()
