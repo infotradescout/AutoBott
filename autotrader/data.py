@@ -366,7 +366,10 @@ class AlpacaDataClient:
                 last_exc = exc
                 continue
         if last_exc is not None:
-            raise last_exc
+            print(
+                f"[data] get_option_contracts failed for {underlying_symbol} "
+                f"({contract_type}) across all endpoints: {last_exc}"
+            )
         return []
 
     def get_option_contract(self, option_symbol: str) -> dict[str, Any]:
@@ -386,7 +389,7 @@ class AlpacaDataClient:
                 last_exc = exc
                 continue
         if last_exc is not None:
-            raise last_exc
+            print(f"[data] get_option_contract failed for {option_symbol}: {last_exc}")
         return {}
 
     def get_latest_option_ask(self, option_symbol: str) -> float | None:
@@ -419,7 +422,7 @@ class AlpacaDataClient:
                 last_exc = exc
                 continue
         if last_exc is not None:
-            raise last_exc
+            print(f"[data] get_latest_option_quote failed for {option_symbol}: {last_exc}")
         return {"bid": None, "ask": None}
 
     def get_top_movers(self, top: int = 20) -> tuple[list[str], list[str]]:

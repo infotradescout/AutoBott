@@ -789,6 +789,7 @@ def main():
             "entry_orders_submitted": 0,
             "entries_filled": 0,
             "skips": {},
+            "exceptions": [],
         }
 
         def _mark_skip(reason: str) -> None:
@@ -797,6 +798,21 @@ def main():
                 skips = {}
             skips[reason] = int(skips.get(reason, 0)) + 1
             entry_debug["skips"] = skips
+
+        def _record_entry_exception(ticker: str, exc: Exception) -> None:
+            exceptions = entry_debug.get("exceptions", [])
+            if not isinstance(exceptions, list):
+                exceptions = []
+            if len(exceptions) >= 5:
+                return
+            exceptions.append(
+                {
+                    "ticker": ticker,
+                    "type": type(exc).__name__,
+                    "message": str(exc)[:300],
+                }
+            )
+            entry_debug["exceptions"] = exceptions
 
         for signal in signals:
             now_et = datetime.now(tz)
@@ -1094,6 +1110,7 @@ def main():
                 time.sleep(config.RATE_LIMIT_SLEEP_SECONDS)
             except Exception as exc:  # noqa: BLE001
                 _mark_skip("entry_flow_exception")
+                _record_entry_exception(ticker, exc)
                 print(
                     f"[{ts(now_et)}] {ticker}: error during entry flow "
                     f"({type(exc).__name__}): {exc!r}"
