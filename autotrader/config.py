@@ -4,6 +4,42 @@ import os
 from pathlib import Path
 
 
+def _is_writable_dir(path: Path) -> bool:
+    try:
+        path.mkdir(parents=True, exist_ok=True)
+        probe = path / ".write_test"
+        with probe.open("w", encoding="utf-8") as f:
+            f.write("ok")
+        probe.unlink(missing_ok=True)
+        return True
+    except Exception:
+        return False
+
+
+def _resolve_data_dir() -> Path:
+    env_path = os.getenv("DATA_DIR")
+    candidates: list[Path] = []
+    if env_path:
+        candidates.append(Path(env_path))
+    candidates.append(_DEFAULT_DATA_DIR)
+    candidates.append(Path("/tmp/autotrader-data"))
+
+    for candidate in candidates:
+        if _is_writable_dir(candidate):
+            if env_path and str(candidate) != str(Path(env_path)):
+                print(
+                    f"[config] DATA_DIR '{env_path}' is not writable. "
+                    f"Using fallback '{candidate}'."
+                )
+            return candidate
+
+    # Final defensive fallback: current working directory.
+    cwd = Path.cwd()
+    cwd.mkdir(parents=True, exist_ok=True)
+    print(f"[config] No writable data directory candidates found. Using '{cwd}'.")
+    return cwd
+
+
 def _env_bool(name: str, default: bool) -> bool:
     value = os.getenv(name)
     if value is None:
@@ -55,7 +91,7 @@ def _env_str(name: str, default: str) -> str:
 
 
 _DEFAULT_DATA_DIR = Path(__file__).resolve().parent
-_DATA_DIR = Path(os.getenv("DATA_DIR", str(_DEFAULT_DATA_DIR)))
+_DATA_DIR = _resolve_data_dir()
 
 
 TICKERS = [
