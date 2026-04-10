@@ -330,6 +330,7 @@ def _scan_ticker_details(
     daily_bars_df: pd.DataFrame,
     today_volume: float,
     data_client: AlpacaDataClient,
+    force_relaxed_rvol: bool = False,
 ) -> dict[str, Any]:
     if bars_df is None or bars_df.empty:
         return _scan_failure("insufficient intraday bars")
@@ -379,6 +380,8 @@ def _scan_ticker_details(
         effective_rvol_min = float(config.CATALYST_RELAXED_RVOL_MIN) if _CATALYST_MODE_ACTIVE else float(config.RVOL_MIN)
         if is_at_or_after(now_et, config.RVOL_RELAX_AFTER):
             effective_rvol_min = min(effective_rvol_min, float(config.RVOL_RELAXED_MIN))
+        if force_relaxed_rvol:
+            effective_rvol_min = min(effective_rvol_min, 0.05)
         if rvol < effective_rvol_min:
             return _scan_failure(f"RVOL {rvol:.1f}x (too low)")
 
@@ -604,6 +607,7 @@ class IntradayScanner:
         now_et = datetime.now(self.tz)
         passed: list[dict] = []
         failed: list[dict[str, str]] = []
+        cached_inputs: list[tuple[str, pd.DataFrame, pd.DataFrame, float]] = []
 
         for symbol in watchlist:
             try:
@@ -617,6 +621,7 @@ class IntradayScanner:
                     continue
                 daily_df = self.data_client.get_stock_daily_bars(symbol, limit=config.SCAN_DAILY_BARS)
                 today_volume = float(bars_df["volume"].astype(float).sum())
+                cached_inputs.append((symbol, bars_df, daily_df, today_volume))
                 details = _scan_ticker_details(
                     symbol=symbol,
                     bars_df=bars_df,
@@ -632,8 +637,37 @@ class IntradayScanner:
                 failed.append({"symbol": symbol, "reason": f"scan error: {exc}"})
             time.sleep(config.RATE_LIMIT_SLEEP_SECONDS)
 
+        rvol_fail_count = sum(1 for item in failed if "rvol" in str(item.get("reason", "")).lower())
+        failopen_triggered = False
+        if not passed and failed and (rvol_fail_count / max(1, len(failed))) >= 0.70:
+            failopen_triggered = True
+            retry_passed: list[dict] = []
+            retry_failed: list[dict[str, str]] = []
+            for symbol, bars_df, daily_df, today_volume in cached_inputs:
+                try:
+                    details = _scan_ticker_details(
+                        symbol=symbol,
+                        bars_df=bars_df,
+                        daily_bars_df=daily_df,
+                        today_volume=today_volume,
+                        data_client=self.data_client,
+                        force_relaxed_rvol=True,
+                    )
+                    if details.get("failed"):
+                        retry_failed.append({"symbol": symbol, "reason": details["reason"]})
+                    else:
+                        details["reason"] = f"{details.get('reason', '')} | RVOL fail-open".strip()
+                        retry_passed.append(details)
+                except Exception as exc:  # noqa: BLE001
+                    retry_failed.append({"symbol": symbol, "reason": f"scan error: {exc}"})
+                time.sleep(config.RATE_LIMIT_SLEEP_SECONDS)
+            passed = retry_passed
+            failed = retry_failed
+
         passed.sort(key=lambda item: float(item["rvol"]), reverse=True)
         self.last_failures = failed
+        if failopen_triggered:
+            print(f"[{now_et.strftime('%H:%M ET')}] RVOL fail-open engaged: widespread low RVOL detected.")
         self._print_summary(now_et, len(watchlist), passed, failed)
         return passed
 
