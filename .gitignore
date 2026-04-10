@@ -7,3 +7,8 @@ autotrader/.env
 autotrader/.venv/
 autotrader/__pycache__/
 autotrader/*.log
+autotrader/trading_control.json
+autotrader/runtime_state.json
+autotrader/trades.csv
+autotrader/scan_log.csv
+autotrader/observation_log.csv

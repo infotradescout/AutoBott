@@ -897,7 +897,7 @@ def main():
                         f"{option_symbol} qty={qty} limit={ask_price:.2f} order_id={order.id}"
                     )
 
-                time.sleep(8)
+                time.sleep(max(1, int(config.ENTRY_ORDER_STATUS_WAIT_SECONDS)))
                 filled_order = broker.get_order_status(order.id)
                 order_status = str(getattr(filled_order, "status", "")).lower()
                 reject_detail = _order_reject_reason(filled_order)
@@ -917,7 +917,7 @@ def main():
                         )
                         try:
                             retry_order = broker.place_option_limit_buy(option_symbol, qty, aggressive_limit)
-                            time.sleep(5)
+                            time.sleep(max(1, int(config.ENTRY_RETRY_STATUS_WAIT_SECONDS)))
                             filled_order = broker.get_order_status(retry_order.id)
                             order_status = str(getattr(filled_order, "status", "")).lower()
                             reject_detail = _order_reject_reason(filled_order)
@@ -928,7 +928,7 @@ def main():
                                     pass
                                 print(f"[{ts(now_et)}] {ticker}: retry limit not filled ({order_status}). Trying market buy.")
                                 mkt_order = broker.place_option_market_buy(option_symbol, qty)
-                                time.sleep(3)
+                                time.sleep(max(1, int(config.ENTRY_MARKET_FALLBACK_WAIT_SECONDS)))
                                 filled_order = broker.get_order_status(mkt_order.id)
                                 order_status = str(getattr(filled_order, "status", "")).lower()
                                 reject_detail = _order_reject_reason(filled_order)

@@ -16,4 +16,4 @@ services:
       - key: ALPACA_SECRET_KEY
         sync: false
       - key: DATA_DIR
-        value: /tmp/autotrader-data
+        value: /data
