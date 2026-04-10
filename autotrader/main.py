@@ -470,6 +470,200 @@ def main():
             time.sleep(retry_sleep)
             return None
 
+    def _has_ticker_open_meta(ticker: str) -> bool:
+        want = str(ticker or "").upper()
+        if not want:
+            return False
+        for meta in open_trade_meta.values():
+            if str(meta.get("ticker", "") or "").upper() == want:
+                return True
+        return False
+
+    def _attempt_reversal_entry(
+        *,
+        ticker: str,
+        direction: str,
+        now_et: datetime,
+        reentries_used: int,
+    ) -> bool:
+        if direction not in ("call", "put"):
+            return False
+        if not is_at_or_after(now_et, config.NO_NEW_TRADES_BEFORE):
+            print(f"[{ts(now_et)}] {ticker}: reversal skipped (before entry window).")
+            return False
+        if is_at_or_after(now_et, config.NO_NEW_TRADES_AFTER):
+            print(f"[{ts(now_et)}] {ticker}: reversal skipped (after entry window).")
+            return False
+        if reentries_used >= int(config.MAX_REENTRIES_PER_TICKER):
+            print(
+                f"[{ts(now_et)}] {ticker}: reversal skipped "
+                f"(max re-entries used {reentries_used}/{int(config.MAX_REENTRIES_PER_TICKER)})."
+            )
+            return False
+
+        option_positions_now = broker.get_open_option_positions()
+        if not can_open_new_positions(len(option_positions_now), config.MAX_POSITIONS):
+            print(f"[{ts(now_et)}] {ticker}: reversal skipped (max positions reached).")
+            return False
+        if _has_ticker_open_meta(ticker):
+            print(f"[{ts(now_et)}] {ticker}: reversal skipped (ticker already open in runtime state).")
+            return False
+
+        try:
+            stock_price = data_client.get_latest_stock_price(ticker)
+            if stock_price is None:
+                print(f"[{ts(now_et)}] {ticker}: reversal skipped (no stock quote).")
+                return False
+
+            contract, contract_reason = select_atm_option_contract_with_reason(
+                data_client=data_client,
+                underlying_symbol=ticker,
+                direction=direction,
+                underlying_price=stock_price,
+                now_et=now_et,
+            )
+            if not contract:
+                print(f"[{ts(now_et)}] {ticker}: reversal skipped (no eligible contract: {contract_reason}).")
+                return False
+
+            option_symbol = str(contract.get("symbol", "") or "")
+            if not option_symbol:
+                print(f"[{ts(now_et)}] {ticker}: reversal skipped (contract missing symbol).")
+                return False
+
+            ask_price = data_client.get_latest_option_ask(option_symbol)
+            direct_market_entry = False
+            if ask_price is None or ask_price <= 0:
+                if config.EMERGENCY_EXECUTION_MODE and config.ALLOW_MARKET_ENTRY_WITHOUT_QUOTE:
+                    direct_market_entry = True
+                    ask_price = 0.0
+                else:
+                    print(f"[{ts(now_et)}] {ticker}: reversal skipped (no option ask for {option_symbol}).")
+                    return False
+
+            if not direct_market_entry:
+                initial_chain_ask = float(contract.get("ask_price", ask_price) or ask_price)
+                pre_submit_slippage = _slippage_pct(initial_chain_ask, ask_price)
+                if pre_submit_slippage > config.MAX_ENTRY_SLIPPAGE_PCT:
+                    retry_ask = data_client.get_latest_option_ask(option_symbol)
+                    if retry_ask is not None and retry_ask > 0:
+                        ask_price = retry_ask
+                        pre_submit_slippage = _slippage_pct(initial_chain_ask, ask_price)
+                if pre_submit_slippage > (config.MAX_ENTRY_SLIPPAGE_PCT * 3):
+                    print(
+                        f"[{ts(now_et)}] {ticker}: reversal skipped (entry slippage {pre_submit_slippage:.2f}% > "
+                        f"hard cap {(config.MAX_ENTRY_SLIPPAGE_PCT * 3):.2f}%)."
+                    )
+                    return False
+
+            qty = 1
+            if direct_market_entry:
+                order = broker.place_option_market_buy(option_symbol, qty)
+                print(
+                    f"[{ts(now_et)}] REVERSAL ENTRY {ticker} {direction.upper()} "
+                    f"{option_symbol} qty={qty} market order_id={order.id}"
+                )
+            else:
+                order = broker.place_option_limit_buy(option_symbol, qty, ask_price)
+                print(
+                    f"[{ts(now_et)}] REVERSAL ENTRY {ticker} {direction.upper()} "
+                    f"{option_symbol} qty={qty} limit={ask_price:.2f} order_id={order.id}"
+                )
+
+            time.sleep(max(1, int(config.ENTRY_ORDER_STATUS_WAIT_SECONDS)))
+            filled_order = broker.get_order_status(order.id)
+            order_status = str(getattr(filled_order, "status", "")).lower()
+            reject_detail = _order_reject_reason(filled_order)
+
+            if order_status not in ("filled", "partially_filled"):
+                try:
+                    if not direct_market_entry:
+                        broker.cancel_order(order.id)
+                except Exception:
+                    pass
+                if not direct_market_entry:
+                    aggressive_limit = round(float(ask_price) * 1.05, 4)
+                    try:
+                        retry_order = broker.place_option_limit_buy(option_symbol, qty, aggressive_limit)
+                        time.sleep(max(1, int(config.ENTRY_RETRY_STATUS_WAIT_SECONDS)))
+                        filled_order = broker.get_order_status(retry_order.id)
+                        order_status = str(getattr(filled_order, "status", "")).lower()
+                        reject_detail = _order_reject_reason(filled_order)
+                        if order_status not in ("filled", "partially_filled"):
+                            try:
+                                broker.cancel_order(retry_order.id)
+                            except Exception:
+                                pass
+                            mkt_order = broker.place_option_market_buy(option_symbol, qty)
+                            time.sleep(max(1, int(config.ENTRY_MARKET_FALLBACK_WAIT_SECONDS)))
+                            filled_order = broker.get_order_status(mkt_order.id)
+                            order_status = str(getattr(filled_order, "status", "")).lower()
+                            reject_detail = _order_reject_reason(filled_order)
+                    except Exception as exc:  # noqa: BLE001
+                        print(f"[{ts(now_et)}] {ticker}: reversal fallback failed: {exc}")
+                        return False
+                if order_status not in ("filled", "partially_filled"):
+                    extra = f" {reject_detail}" if reject_detail else ""
+                    print(
+                        f"[{ts(now_et)}] {ticker}: reversal not filled "
+                        f"(status={order_status}).{extra}"
+                    )
+                    return False
+
+            filled_avg_price = float(getattr(filled_order, "filled_avg_price", 0) or 0)
+            filled_qty = position_qty_as_int(getattr(filled_order, "filled_qty", qty)) or qty
+            if filled_qty > 1:
+                extra_qty = filled_qty - 1
+                try:
+                    broker.close_option_market(option_symbol, extra_qty)
+                    print(f"[{ts(now_et)}] {ticker}: trimmed reversal fill to 1 contract (closed extra {extra_qty}).")
+                except Exception as exc:  # noqa: BLE001
+                    print(f"[{ts(now_et)}] {ticker}: failed to trim reversal extra qty {extra_qty}: {exc}")
+                filled_qty = 1
+            fill_slippage = (
+                _slippage_pct(ask_price, filled_avg_price) if (filled_avg_price > 0 and ask_price > 0) else 0.0
+            )
+            if (not direct_market_entry) and fill_slippage > config.MAX_FILL_SLIPPAGE_PCT:
+                print(
+                    f"[{ts(now_et)}] {ticker}: reversal fill slippage {fill_slippage:.2f}% exceeds "
+                    f"{config.MAX_FILL_SLIPPAGE_PCT:.2f}%. Closing immediately."
+                )
+                try:
+                    broker.close_option_market(option_symbol, filled_qty)
+                except Exception as exc:  # noqa: BLE001
+                    print(f"[{ts(now_et)}] {ticker}: reversal slippage close failed: {exc}")
+                return False
+
+            prior_entries = int(ticker_entry_counts.get(ticker, 0))
+            open_trade_meta[option_symbol] = {
+                "timestamp": ts(now_et),
+                "entry_time_iso": now_et.isoformat(),
+                "ticker": ticker,
+                "direction": direction,
+                "option_symbol": option_symbol,
+                "strike": contract.get("strike_price", ""),
+                "expiry": contract.get("expiration_date", ""),
+                "qty": filled_qty,
+                "entry_price": filled_avg_price or ask_price,
+                "stop_floor_plpc": -float(config.STOP_LOSS_PCT),
+                "max_plpc": 0.0,
+            }
+            ticker_entry_counts[ticker] = prior_entries + 1
+            ticker_reentries_used[ticker] = reentries_used + 1
+            ticker_reentry_armed[ticker] = False
+            ticker_reentry_expected_direction[ticker] = ""
+            entry_times_rolling.append(now_et)
+            _save_runtime_state()
+            alerts.send(
+                "reversal_entry",
+                f"Reversal entry filled: {ticker} {direction.upper()} {option_symbol}",
+                dedupe_key=f"reversal-{ticker}-{now_et.strftime('%Y%m%d%H%M')}",
+            )
+            return True
+        except Exception as exc:  # noqa: BLE001
+            print(f"[{ts(now_et)}] {ticker}: reversal entry error ({type(exc).__name__}): {exc!r}")
+            return False
+
     mode = "PAPER" if config.PAPER else "LIVE"
     try:
         acct = broker.get_account()
@@ -862,8 +1056,8 @@ def main():
                 )
                 break
 
-            # --- Consecutive loss circuit breaker (only if ENFORCE_PDT_GUARD is on) ---
-            if config.ENFORCE_PDT_GUARD and consecutive_losses >= config.CONSECUTIVE_LOSS_LIMIT:
+            # --- Consecutive loss circuit breaker ---
+            if consecutive_losses >= config.CONSECUTIVE_LOSS_LIMIT:
                 _mark_skip("consecutive_loss_limit")
                 print(
                     f"[{ts(now_et)}] {consecutive_losses} consecutive losses. "
@@ -901,6 +1095,10 @@ def main():
             if has_ticker_position:
                 _mark_skip("existing_option_position")
                 print(f"[{ts(now_et)}] {ticker}: skip (existing option position).")
+                continue
+            if _has_ticker_open_meta(ticker):
+                _mark_skip("existing_ticker_runtime_state")
+                print(f"[{ts(now_et)}] {ticker}: skip (already open in runtime state).")
                 continue
 
             prior_entries = int(ticker_entry_counts.get(ticker, 0))
@@ -1077,6 +1275,14 @@ def main():
 
                 filled_avg_price = float(getattr(filled_order, "filled_avg_price", 0) or 0)
                 filled_qty = position_qty_as_int(getattr(filled_order, "filled_qty", qty)) or qty
+                if filled_qty > 1:
+                    extra_qty = filled_qty - 1
+                    try:
+                        broker.close_option_market(option_symbol, extra_qty)
+                        print(f"[{ts(now_et)}] {ticker}: trimmed fill to 1 contract (closed extra {extra_qty}).")
+                    except Exception as exc:  # noqa: BLE001
+                        print(f"[{ts(now_et)}] {ticker}: failed to trim extra qty {extra_qty}: {exc}")
+                    filled_qty = 1
                 fill_slippage = _slippage_pct(ask_price, filled_avg_price) if (filled_avg_price > 0 and ask_price > 0) else 0.0
                 if (not direct_market_entry) and fill_slippage > config.MAX_FILL_SLIPPAGE_PCT:
                     _mark_skip("fill_slippage_too_high")
@@ -1212,6 +1418,8 @@ def main():
                         consecutive_losses = 0
 
                     ticker = str(meta.get("ticker", "") or "")
+                    reversal_direction = ""
+                    reentries_used = int(ticker_reentries_used.get(ticker, 0)) if ticker else 0
                     if ticker and exit_reason == "stop_loss":
                         ticker_reentry_armed[ticker] = True
                         prior_direction = str(meta.get("direction", "") or "").lower()
@@ -1221,6 +1429,7 @@ def main():
                             ticker_reentry_expected_direction[ticker] = "call"
                         else:
                             ticker_reentry_expected_direction[ticker] = ""
+                        reversal_direction = str(ticker_reentry_expected_direction.get(ticker, "") or "").lower()
                     elif ticker:
                         ticker_reentry_armed[ticker] = False
                         ticker_reentry_expected_direction[ticker] = ""
@@ -1228,6 +1437,13 @@ def main():
                     open_trade_meta.pop(symbol, None)
                     _save_runtime_state()
                     print(f"[{ts(now_et)}] EXIT {symbol} qty={qty} reason={exit_reason} pnl_pct={plpc:.2%}")
+                    if exit_reason == "stop_loss" and ticker and reversal_direction in ("call", "put"):
+                        _attempt_reversal_entry(
+                            ticker=ticker,
+                            direction=reversal_direction,
+                            now_et=now_et,
+                            reentries_used=reentries_used,
+                        )
                 except Exception as exc:  # noqa: BLE001
                     print(f"[{ts(now_et)}] {symbol}: error closing position: {exc}")
                 time.sleep(config.RATE_LIMIT_SLEEP_SECONDS)
