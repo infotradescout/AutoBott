@@ -193,6 +193,32 @@ def _parse_option_symbol(option_symbol: str) -> tuple[str, str]:
     return ticker, direction
 
 
+def _parse_option_expiry_from_symbol(option_symbol: str) -> date | None:
+    symbol = str(option_symbol or "").upper().strip()
+    match = _OPTION_SYMBOL_RE.match(symbol)
+    if not match:
+        return None
+    # OCC format includes YYMMDD immediately after root.
+    date_chunk = symbol[len(match.group(1)) : len(match.group(1)) + 6]
+    try:
+        yy = int(date_chunk[0:2])
+        mm = int(date_chunk[2:4])
+        dd = int(date_chunk[4:6])
+        return date(2000 + yy, mm, dd)
+    except Exception:
+        return None
+
+
+def _option_expiry_date(meta: dict, option_symbol: str) -> date | None:
+    raw = str(meta.get("expiry", "") or "").strip()
+    if raw:
+        try:
+            return date.fromisoformat(raw[:10])
+        except Exception:
+            pass
+    return _parse_option_expiry_from_symbol(option_symbol)
+
+
 def _index_regime_bias(data_client: AlpacaDataClient, now_et: datetime) -> str:
     if not config.ENABLE_INDEX_BIAS_FILTER:
         return "both"
@@ -1376,9 +1402,16 @@ def main():
                 exit_reason = "profit_target"
             elif plpc <= dynamic_stop_floor:
                 exit_reason = "stop_loss"
-            elif is_at_or_after(now_et, config.HARD_CLOSE_TIME):
-                exit_reason = "eod_close"
             else:
+                expiry_date = _option_expiry_date(meta, symbol)
+                if expiry_date is not None:
+                    if now_et.date() > expiry_date:
+                        exit_reason = "expired_contract_guard"
+                    elif now_et.date() == expiry_date and is_at_or_after(now_et, config.OPTION_EXPIRY_EXIT_TIME):
+                        exit_reason = "expiry_day_exit"
+            if exit_reason is None and is_at_or_after(now_et, config.HARD_CLOSE_TIME):
+                exit_reason = "eod_close"
+            if exit_reason is None:
                 entry_time = _parse_trade_meta_entry_time(meta) if meta else None
                 if entry_time is not None:
                     held_minutes = int((now_et - entry_time).total_seconds() // 60)
