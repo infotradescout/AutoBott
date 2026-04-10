@@ -383,10 +383,29 @@ def api_account():
                 "options_trading_level": body.get("options_trading_level", ""),
                 "options_approved_level": body.get("options_approved_level", ""),
                 "daytrade_count": body.get("daytrade_count", 0),
+                "broker_ok": True,
+                "broker_error": "",
             }
         )
     except Exception as exc:  # noqa: BLE001
-        return jsonify({"error": str(exc)}), 500
+        return jsonify(
+            {
+                "equity": "0",
+                "buying_power": "0",
+                "cash": "0",
+                "portfolio_value": "0",
+                "status": "UNAVAILABLE",
+                "trading_blocked": True,
+                "account_blocked": False,
+                "transfers_blocked": False,
+                "trade_suspended_by_user": False,
+                "options_trading_level": "",
+                "options_approved_level": "",
+                "daytrade_count": 0,
+                "broker_ok": False,
+                "broker_error": str(exc),
+            }
+        )
 
 
 @app.get("/api/positions")
@@ -415,7 +434,13 @@ def api_positions():
             )
         return jsonify(rows)
     except Exception as exc:  # noqa: BLE001
-        return jsonify({"error": str(exc)}), 500
+        return jsonify(
+            {
+                "rows": [],
+                "broker_ok": False,
+                "broker_error": str(exc),
+            }
+        )
 
 
 @app.get("/api/trades")
@@ -1138,8 +1163,11 @@ def home():
       ]);
 
       document.getElementById("last-updated").textContent = new Date().toLocaleTimeString();
-      document.getElementById("equity").textContent = account.error ? "—" : fmtMoney(account.equity);
-      document.getElementById("buying-power").textContent = account.error ? "—" : fmtMoney(account.buying_power);
+      const accountOk = !account.error && account.broker_ok !== false;
+      const positionsOk = !positions.error && (Array.isArray(positions) || positions.broker_ok !== false);
+      const positionsRows = Array.isArray(positions) ? positions : (Array.isArray(positions.rows) ? positions.rows : []);
+      document.getElementById("equity").textContent = accountOk ? fmtMoney(account.equity) : "—";
+      document.getElementById("buying-power").textContent = accountOk ? fmtMoney(account.buying_power) : "—";
 
       const dailyPct = status.error ? 0 : Number(status.daily_pnl_pct || 0) * 100;
       const pnlEl = document.getElementById("daily-pnl");
@@ -1178,12 +1206,12 @@ def home():
         controlEl.style.color = paused ? "var(--red)" : "var(--green)";
       }
 
-      renderPositions(positions.error ? [] : positions);
+      renderPositions(positionsOk ? positionsRows : []);
       renderTrades(trades.error ? [] : trades);
       renderScan(scanlog.error ? [] : scanlog);
       renderSparkline(trades.error ? [] : trades);
       renderSignalMix(scanlog.error ? [] : scanlog);
-      renderRiskLoad(positions.error ? [] : positions);
+      renderRiskLoad(positionsOk ? positionsRows : []);
       renderDailyReview(review);
 
       const sumEl = document.getElementById("scan-summary");
