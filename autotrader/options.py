@@ -198,7 +198,7 @@ def select_atm_option_contract_with_reason(
     ):
         base_oi = max(1.0, float(config.MIN_OPTION_OPEN_INTEREST))
         base_vol = max(1.0, float(config.MIN_OPTION_DAILY_VOLUME))
-        for factor, label in ((0.5, "relaxed50"), (0.25, "relaxed25")):
+        for factor, label in ((0.5, "relaxed50"), (0.25, "relaxed25"), (0.1, "relaxed10")):
             relaxed_counts = {
                 "inactive_or_untradable": 0,
                 "missing_fields": 0,
@@ -219,6 +219,29 @@ def select_atm_option_contract_with_reason(
                     f"mode={label} min_oi={max(1.0, base_oi * factor):.0f} min_vol={max(1.0, base_vol * factor):.0f}"
                 )
                 break
+
+        # Final fail-open path: if liquidity thresholds still empty the pool,
+        # keep active/tradable contracts and let quote/spread gates decide safety.
+        if not filtered:
+            failopen_counts = {
+                "inactive_or_untradable": 0,
+                "missing_fields": 0,
+                "low_open_interest": 0,
+                "low_volume": 0,
+            }
+            failopen = _filter_candidates_by_liquidity(
+                liquidity_candidates,
+                min_open_interest=0.0,
+                min_daily_volume=0.0,
+                fail_counts=failopen_counts,
+            )
+            if failopen:
+                filtered = failopen
+                liquidity_mode = "failopen_liquidity"
+                print(
+                    f"[options] fail-open liquidity engaged for {underlying_symbol} {direction}: "
+                    "relying on quote/spread checks."
+                )
 
     if not filtered:
         reason = (
