@@ -37,7 +37,15 @@ def get_required_env(name: str) -> str:
     """Return a required env var or raise with a clear startup error."""
     value = os.getenv(name)
     if value:
-        return value
+        cleaned = value.strip()
+        if (
+            len(cleaned) >= 2
+            and cleaned[0] == cleaned[-1]
+            and cleaned[0] in {"'", '"'}
+        ):
+            cleaned = cleaned[1:-1].strip()
+        if cleaned:
+            return cleaned
     searched = ", ".join(str(path) for path in _ENV_CANDIDATES)
     raise RuntimeError(
         f"Missing required environment variable '{name}'. "
