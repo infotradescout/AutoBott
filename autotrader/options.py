@@ -77,6 +77,46 @@ def _contract_strike(contract: dict[str, Any]) -> float | None:
     return strike
 
 
+def _filter_candidates_by_liquidity(
+    candidates: list[dict[str, Any]],
+    *,
+    min_open_interest: float,
+    min_daily_volume: float,
+    fail_counts: dict[str, int],
+) -> list[dict[str, Any]]:
+    selected: list[dict[str, Any]] = []
+    for details in candidates:
+        active = str(details.get("status", "active")).lower() == "active"
+        tradable = bool(details.get("tradable", True))
+        strike = _contract_strike(details)
+        exp = _contract_expiration(details)
+        symbol = _contract_symbol(details)
+        open_interest = _safe_float(details.get("open_interest"))
+        volume = _safe_float(details.get("volume") or details.get("daily_volume"))
+
+        if not active or not tradable:
+            fail_counts["inactive_or_untradable"] += 1
+            continue
+        if strike is None or not exp or not symbol:
+            fail_counts["missing_fields"] += 1
+            continue
+        if (not config.EMERGENCY_EXECUTION_MODE) and (open_interest is None or open_interest <= min_open_interest):
+            fail_counts["low_open_interest"] += 1
+            continue
+        if (not config.EMERGENCY_EXECUTION_MODE) and (volume is None or volume <= min_daily_volume):
+            fail_counts["low_volume"] += 1
+            continue
+
+        normalized = dict(details)
+        normalized["symbol"] = symbol
+        normalized["expiration_date"] = str(exp)
+        normalized["strike_price"] = strike
+        normalized["open_interest"] = open_interest
+        normalized["daily_volume"] = volume
+        selected.append(normalized)
+    return selected
+
+
 def select_atm_option_contract(
     data_client: AlpacaDataClient,
     underlying_symbol: str,
@@ -118,7 +158,7 @@ def select_atm_option_contract_with_reason(
             f"{config.MIN_DTE_TRADING_DAYS}-{config.MAX_DTE_TRADING_DAYS} trading days"
         )
 
-    filtered: list[dict[str, Any]] = []
+    liquidity_candidates: list[dict[str, Any]] = []
     fail_counts = {
         "inactive_or_untradable": 0,
         "missing_fields": 0,
@@ -139,30 +179,46 @@ def select_atm_option_contract_with_reason(
                 print(f"[options] enrichment failed for {symbol}: {exc}")
             open_interest = _safe_float(details.get("open_interest"))
             volume = _safe_float(details.get("volume") or details.get("daily_volume"))
-        active = str(details.get("status", "active")).lower() == "active"
-        tradable = bool(details.get("tradable", True))
-        strike = _contract_strike(details)
-        exp = _contract_expiration(details)
-        symbol = _contract_symbol(details)
-        if not active or not tradable:
-            fail_counts["inactive_or_untradable"] += 1
-            continue
-        if strike is None or not exp or not symbol:
-            fail_counts["missing_fields"] += 1
-            continue
-        if (not config.EMERGENCY_EXECUTION_MODE) and (open_interest is None or open_interest <= config.MIN_OPTION_OPEN_INTEREST):
-            fail_counts["low_open_interest"] += 1
-            continue
-        if (not config.EMERGENCY_EXECUTION_MODE) and (volume is None or volume <= config.MIN_OPTION_DAILY_VOLUME):
-            fail_counts["low_volume"] += 1
-            continue
-        if active and tradable and strike is not None and exp and symbol:
-            details["symbol"] = symbol
-            details["expiration_date"] = str(exp)
-            details["strike_price"] = strike
-            details["open_interest"] = open_interest
-            details["daily_volume"] = volume
-            filtered.append(details)
+        details["open_interest"] = open_interest
+        details["daily_volume"] = volume
+        liquidity_candidates.append(details)
+
+    liquidity_mode = "strict"
+    filtered = _filter_candidates_by_liquidity(
+        liquidity_candidates,
+        min_open_interest=float(config.MIN_OPTION_OPEN_INTEREST),
+        min_daily_volume=float(config.MIN_OPTION_DAILY_VOLUME),
+        fail_counts=fail_counts,
+    )
+
+    if (
+        (not filtered)
+        and (not config.EMERGENCY_EXECUTION_MODE)
+        and bool(getattr(config, "ENABLE_OPTION_LIQUIDITY_RELAX", True))
+    ):
+        base_oi = max(1.0, float(config.MIN_OPTION_OPEN_INTEREST))
+        base_vol = max(1.0, float(config.MIN_OPTION_DAILY_VOLUME))
+        for factor, label in ((0.5, "relaxed50"), (0.25, "relaxed25")):
+            relaxed_counts = {
+                "inactive_or_untradable": 0,
+                "missing_fields": 0,
+                "low_open_interest": 0,
+                "low_volume": 0,
+            }
+            relaxed = _filter_candidates_by_liquidity(
+                liquidity_candidates,
+                min_open_interest=max(1.0, base_oi * factor),
+                min_daily_volume=max(1.0, base_vol * factor),
+                fail_counts=relaxed_counts,
+            )
+            if relaxed:
+                filtered = relaxed
+                liquidity_mode = label
+                print(
+                    f"[options] liquidity relax engaged for {underlying_symbol} {direction}: "
+                    f"mode={label} min_oi={max(1.0, base_oi * factor):.0f} min_vol={max(1.0, base_vol * factor):.0f}"
+                )
+                break
 
     if not filtered:
         reason = (
@@ -256,7 +312,7 @@ def select_atm_option_contract_with_reason(
         contract["bid_price"] = bid
         contract["ask_price"] = ask
         contract["spread_pct"] = round(spread_pct, 2)
-        return contract, "ok"
+        return contract, f"ok({liquidity_mode})"
 
     if config.EMERGENCY_EXECUTION_MODE and scored:
         fallback = scored[0]
