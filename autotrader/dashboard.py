@@ -590,6 +590,8 @@ def api_status():
             blockers.append(f"vix_guard_block:{vix_block_notice}")
         if auth_error_recent:
             blockers.append("alpaca_auth_error_recent")
+        if not trader_loop_alive:
+          blockers.append("trader_loop_stale")
 
         return jsonify(
             {
@@ -603,6 +605,7 @@ def api_status():
                 "can_enter_now": len(blockers) == 0,
                 "blockers": blockers,
                 "trader_loop_alive": bool(trader_loop_alive),
+                "trader_loop_stale_after_seconds": loop_stale_after,
                 "trader_heartbeat_et": _to_ct_label(heartbeat_dt) if heartbeat_dt else "",
                 "trader_heartbeat_age_seconds": heartbeat_age_seconds,
                 "last_alpaca_auth_error_et": _to_ct_label(last_auth_error_dt) if last_auth_error_dt else "",
@@ -813,7 +816,7 @@ def home():
       <div class="card strong"><div class="label">Equity</div><div id="equity" class="num">--</div><div class="kpi-sub">Portfolio net liquidation</div></div>
       <div class="card strong"><div class="label">Buying Power</div><div id="buying-power" class="num">--</div><div class="kpi-sub">Available for entries</div></div>
       <div class="card strong"><div class="label">Today P&L</div><div id="daily-pnl" class="num">--</div><div class="kpi-sub">Sum of closed trade %</div></div>
-      <div class="card strong"><div class="label">Market Status</div><div id="market-status" class="num">--</div><div id="entry-window-status" class="kpi-sub">Entry Window: --</div><div id="catalyst-mode-status" class="kpi-sub">Catalyst Mode: --</div></div>
+      <div class="card strong"><div class="label">Market Status</div><div id="market-status" class="num">--</div><div id="entry-window-status" class="kpi-sub">Entry Window: --</div><div id="catalyst-mode-status" class="kpi-sub">Catalyst Mode: --</div><div id="trader-loop-status" class="kpi-sub">Trader Loop: --</div><div id="blockers-status" class="kpi-sub">Blockers: --</div></div>
     </div>
 
     <div class="grid3 section">
@@ -1239,12 +1242,57 @@ def home():
           catalystEl.style.color = "var(--muted)";
         }
       }
+      const loopEl = document.getElementById("trader-loop-status");
+      if (loopEl) {
+        if (status.error) {
+          loopEl.textContent = "Trader Loop: --";
+          loopEl.style.color = "var(--muted)";
+        } else if (status.trader_loop_alive) {
+          const age = Number(status.trader_heartbeat_age_seconds || 0);
+          loopEl.textContent = `Trader Loop: RUNNING (${age}s ago)`;
+          loopEl.style.color = "var(--green)";
+        } else {
+          const age = status.trader_heartbeat_age_seconds == null ? "no heartbeat" : `${status.trader_heartbeat_age_seconds}s`;
+          loopEl.textContent = `Trader Loop: NOT RUNNING (${age})`;
+          loopEl.style.color = "var(--red)";
+        }
+      }
+      const blockersEl = document.getElementById("blockers-status");
+      if (blockersEl) {
+        if (status.error) {
+          blockersEl.textContent = "Blockers: status unavailable";
+          blockersEl.style.color = "var(--muted)";
+        } else {
+          const blockers = Array.isArray(status.blockers) ? status.blockers : [];
+          if (!blockers.length) {
+            blockersEl.textContent = "Blockers: none";
+            blockersEl.style.color = "var(--green)";
+          } else {
+            blockersEl.textContent = `Blockers: ${blockers.join(", ")}`;
+            blockersEl.style.color = "var(--yellow)";
+          }
+        }
+      }
       const paused = !control.error && Boolean(control.manual_stop);
       const controlEl = document.getElementById("trading-control-status");
       if (controlEl) {
         const when = !control.error ? String(control.updated_at_et || "") : "";
-        controlEl.textContent = paused ? `Control: PAUSED (${when || "manual"})` : "Control: AUTO";
-        controlEl.style.color = paused ? "var(--red)" : "var(--green)";
+        if (status.error) {
+          controlEl.textContent = paused ? `Control: PAUSED (${when || "manual"})` : "Control: AUTO (status unknown)";
+          controlEl.style.color = "var(--muted)";
+        } else if (paused) {
+          controlEl.textContent = `Control: PAUSED (${when || "manual"})`;
+          controlEl.style.color = "var(--red)";
+        } else if (!status.trader_loop_alive) {
+          controlEl.textContent = "Control: AUTO (trader loop not running)";
+          controlEl.style.color = "var(--yellow)";
+        } else if (!status.can_enter_now) {
+          controlEl.textContent = "Control: AUTO (entries currently blocked)";
+          controlEl.style.color = "var(--yellow)";
+        } else {
+          controlEl.textContent = "Control: AUTO (entries allowed)";
+          controlEl.style.color = "var(--green)";
+        }
       }
 
       renderPositions(positionsOk ? positionsRows : []);
