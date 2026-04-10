@@ -393,6 +393,10 @@ def main():
         str(k): bool(v)
         for k, v in dict(state.get("ticker_reentry_armed") or {}).items()
     }
+    ticker_reentry_expected_direction: dict[str, str] = {
+        str(k): str(v)
+        for k, v in dict(state.get("ticker_reentry_expected_direction") or {}).items()
+    }
     ticker_reentries_used: dict[str, int] = {
         str(k): int(v)
         for k, v in dict(state.get("ticker_reentries_used") or {}).items()
@@ -429,6 +433,7 @@ def main():
                 "catalyst_mode_until_iso": catalyst_mode_until.isoformat() if catalyst_mode_until else "",
                 "ticker_entry_counts": ticker_entry_counts,
                 "ticker_reentry_armed": ticker_reentry_armed,
+                "ticker_reentry_expected_direction": ticker_reentry_expected_direction,
                 "ticker_reentries_used": ticker_reentries_used,
                 "last_entry_debug": last_entry_debug,
                 "last_trader_heartbeat_et": last_trader_heartbeat_et,
@@ -635,6 +640,7 @@ def main():
             catalyst_mode_until = None
             ticker_entry_counts = {}
             ticker_reentry_armed = {}
+            ticker_reentry_expected_direction = {}
             ticker_reentries_used = {}
             set_catalyst_mode(False, "")
 
@@ -900,6 +906,7 @@ def main():
             prior_entries = int(ticker_entry_counts.get(ticker, 0))
             reentries_used = int(ticker_reentries_used.get(ticker, 0))
             reentry_armed = bool(ticker_reentry_armed.get(ticker, False))
+            expected_direction = str(ticker_reentry_expected_direction.get(ticker, "") or "").lower()
             if prior_entries >= 1:
                 if not reentry_armed:
                     _mark_skip("already_traded_today")
@@ -910,6 +917,13 @@ def main():
                     print(
                         f"[{ts(now_et)}] {ticker}: skip (max re-entries used "
                         f"{reentries_used}/{int(config.MAX_REENTRIES_PER_TICKER)})."
+                    )
+                    continue
+                if expected_direction in ("call", "put") and direction != expected_direction:
+                    _mark_skip("waiting_for_reversal_signal")
+                    print(
+                        f"[{ts(now_et)}] {ticker}: waiting for reversal signal "
+                        f"({expected_direction.upper()}); got {direction.upper()}."
                     )
                     continue
 
@@ -1102,6 +1116,7 @@ def main():
                 if prior_entries >= 1 and reentry_armed:
                     ticker_reentries_used[ticker] = reentries_used + 1
                     ticker_reentry_armed[ticker] = False
+                    ticker_reentry_expected_direction[ticker] = ""
                 ticker_entry_counts[ticker] = prior_entries + 1
                 open_count += 1
                 entry_times_rolling.append(now_et)
@@ -1199,8 +1214,16 @@ def main():
                     ticker = str(meta.get("ticker", "") or "")
                     if ticker and exit_reason == "stop_loss":
                         ticker_reentry_armed[ticker] = True
+                        prior_direction = str(meta.get("direction", "") or "").lower()
+                        if prior_direction == "call":
+                            ticker_reentry_expected_direction[ticker] = "put"
+                        elif prior_direction == "put":
+                            ticker_reentry_expected_direction[ticker] = "call"
+                        else:
+                            ticker_reentry_expected_direction[ticker] = ""
                     elif ticker:
                         ticker_reentry_armed[ticker] = False
+                        ticker_reentry_expected_direction[ticker] = ""
 
                     open_trade_meta.pop(symbol, None)
                     _save_runtime_state()
