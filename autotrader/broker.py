@@ -30,7 +30,11 @@ class AlpacaBroker:
         except Exception as exc:  # noqa: BLE001
             print(f"[broker] get_all_positions failed: {exc}")
             return []
-        return [p for p in positions if str(getattr(p, "asset_class", "")).lower() in ("us_option", "options")]
+        return [
+            p
+            for p in positions
+            if str(getattr(p, "asset_class", "")).lower() in ("us_option", "option", "options")
+        ]
 
     def place_option_limit_buy(self, option_symbol: str, qty: int, ask_price: float):
         req = LimitOrderRequest(
