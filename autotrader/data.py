@@ -52,14 +52,14 @@ class AlpacaDataClient:
                 "accept": "application/json",
             }
         )
-        self._option_contract_base_candidates = list(
-            dict.fromkeys(
-                [self.base_url]
-            )
-        )
-        if (not paper) or bool(getattr(config, "OPTION_CONTRACTS_ALLOW_LIVE_FALLBACK", False)):
+        # Options contract/quote data is ONLY available on the live API endpoint.
+        # Paper trading accounts must also use the live endpoint for contract lookups.
+        # Always include the live endpoint; for paper accounts it is the primary source.
+        if paper:
+            self._option_contract_base_candidates = [_LIVE_TRADE_BASE_URL]
+        else:
             self._option_contract_base_candidates = list(
-                dict.fromkeys(self._option_contract_base_candidates + [_LIVE_TRADE_BASE_URL])
+                dict.fromkeys([_LIVE_TRADE_BASE_URL, self.base_url])
             )
 
     def get_stock_bars(
