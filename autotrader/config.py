@@ -127,25 +127,25 @@ MAX_HOLD_MINUTES                   = 90
 # Stop loss & trailing exit ladder
 # ---------------------------------------------------------------------------
 
-# Tight stop — cut losers immediately before they compound
-STOP_LOSS_PCT          = 0.10   # exit at -10% loss
+# Tight stop — exit immediately when trade starts losing
+STOP_LOSS_PCT          = 0.03   # exit at -3% loss — get out fast
 
 # Fixed profit target (disabled — trailing stop rides winners instead)
 ENABLE_FIXED_PROFIT_TARGET = False
 PROFIT_TARGET_PCT          = 0.60   # only used if ENABLE_FIXED_PROFIT_TARGET = True
 
 # Trailing stop ratchet (stop floor only moves UP, never down):
-#   Entry → +15%  : floor = -10%  (cut fast if wrong direction)
-#   +15%  → +30%  : floor = +5%   (locked in a small win)
-#   +30%  → +40%  : floor = +15%  (locked in a solid gain)
-#   +40%+ (deep)  : floor = peak − 8%  (dynamic trail, ride momentum)
-TRAIL_LOCK1_TRIGGER_PCT = 0.15
-TRAIL_LOCK1_STOP_PCT    = 0.05
-TRAIL_LOCK2_TRIGGER_PCT = 0.30
-TRAIL_LOCK2_STOP_PCT    = 0.15
-TRAIL_LOCK3_TRIGGER_PCT = 0.40
-TRAIL_LOCK3_STOP_PCT    = 0.25
-TRAIL_PULLBACK_PCT      = 0.08   # trail 8% below peak when deep in profit
+#   Entry → +8%   : floor = -3%   (cut fast if wrong direction)
+#   +8%   → +20%  : floor = +3%   (locked in a small win)
+#   +20%  → +35%  : floor = +10%  (locked in a solid gain)
+#   +35%+ (deep)  : floor = peak − 6%  (dynamic trail, ride momentum)
+TRAIL_LOCK1_TRIGGER_PCT = 0.08
+TRAIL_LOCK1_STOP_PCT    = 0.03
+TRAIL_LOCK2_TRIGGER_PCT = 0.20
+TRAIL_LOCK2_STOP_PCT    = 0.10
+TRAIL_LOCK3_TRIGGER_PCT = 0.35
+TRAIL_LOCK3_STOP_PCT    = 0.20
+TRAIL_PULLBACK_PCT      = 0.06   # trail 6% below peak when deep in profit
 
 
 # ---------------------------------------------------------------------------
@@ -159,7 +159,7 @@ TRAIL_PULLBACK_PCT      = 0.08   # trail 8% below peak when deep in profit
 # Requires REVERSAL_CONFIRM_SIGNALS of 3 to fire an exit.
 
 ENABLE_REVERSAL_EXIT         = True
-REVERSAL_EXIT_MIN_PROFIT_PCT = 0.10   # only check reversal once trade is up 10%
+REVERSAL_EXIT_MIN_PROFIT_PCT = 0.05   # check for reversal once trade is up 5%
 REVERSAL_ROC_THRESHOLD_PCT   = 0.30   # 0.3% move in 2 bars counts as reversal signal
 REVERSAL_CONFIRM_SIGNALS     = 2      # require 2 of 3 signals to confirm reversal
 

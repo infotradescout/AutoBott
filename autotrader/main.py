@@ -1520,11 +1520,11 @@ def main():
                 if filled_qty > 1:
                     extra_qty = filled_qty - 1
                     try:
-                        broker.close_option_market(option_symbol, extra_qty)
+                        trim_order = broker.close_option_market(option_symbol, extra_qty)
                         print(f"[{ts(now_et)}] {ticker}: trimmed fill to 1 contract (closed extra {extra_qty}).")
                     except Exception as exc:  # noqa: BLE001
-                        print(f"[{ts(now_et)}] {ticker}: failed to trim extra qty {extra_qty}: {exc}")
-                    filled_qty = 1
+                        print(f"[{ts(now_et)}] {ticker}: WARNING — failed to trim extra qty {extra_qty}: {exc}. Recording qty=1 anyway.")
+                    filled_qty = 1  # always track as 1 contract regardless of trim result
                 fill_slippage = _slippage_pct(ask_price, filled_avg_price) if (filled_avg_price > 0 and ask_price > 0) else 0.0
                 if (not direct_market_entry) and fill_slippage > config.MAX_FILL_SLIPPAGE_PCT:
                     _mark_skip("fill_slippage_too_high")
