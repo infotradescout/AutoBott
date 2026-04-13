@@ -267,14 +267,14 @@ ENTRY_CONFIRM_BYPASS_MIN_SIGNAL_SCORE  = 7.5
 # Options contract selection
 # ---------------------------------------------------------------------------
 
-MIN_OPTION_OPEN_INTEREST          = 25
-MIN_OPTION_DAILY_VOLUME           = 5
+MIN_OPTION_OPEN_INTEREST          = 10   # lowered from 25 — TSLA/MSFT were at 24/25 OI
+MIN_OPTION_DAILY_VOLUME           = 3    # lowered from 5
 MAX_OPTION_SPREAD_PCT             = 30.0
 ENABLE_OPTION_LIQUIDITY_RELAX     = True
 OPTION_CONTRACTS_ALLOW_LIVE_FALLBACK = False
 MIN_DTE_TRADING_DAYS              = 1
-MAX_DTE_TRADING_DAYS              = 2
-MIN_OPTION_OPEN_INTEREST_0DTE     = 50
+MAX_DTE_TRADING_DAYS              = 5    # widened from 2 — on Mondays next expiry is Friday (4 days)
+MIN_OPTION_OPEN_INTEREST_0DTE     = 25   # lowered from 50
 ENABLE_DELTA_TARGETING            = True
 TARGET_DELTA_MIN                  = 0.40
 TARGET_DELTA_MAX                  = 0.55
