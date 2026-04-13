@@ -1628,42 +1628,13 @@ def main():
             if live_plpc is not None:
                 plpc = float(live_plpc)
 
-            # --- Momentum-based trailing stop ---
-            # Strategy: cut losers immediately with a tight stop; ride winners by
-            # trailing a stop that locks in more profit as the trade grows.
-            #
-            # The trailing stop distance shrinks as max profit increases:
-            #   - No profit yet          → tight stop at -STOP_LOSS_PCT (default -10%)
-            #   - Profit > TRAIL_LOCK1   → stop locks to +TRAIL_LOCK1_STOP (default +5%)
-            #   - Profit > TRAIL_LOCK2   → stop locks to +TRAIL_LOCK2_STOP (default +15%)
-            #   - Profit > TRAIL_LOCK3   → stop locks to +TRAIL_LOCK3_STOP (default +25%)
-            #   - Beyond that            → trail at TRAIL_PULLBACK_PCT below peak (default 8%)
-            #     so the stop always rises with the trade and never falls.
-            max_plpc = float(meta.get("max_plpc", plpc) or plpc)
-            max_plpc = max(max_plpc, plpc)
-
-            # Base stop: tight immediate cut if trade goes against us
-            dynamic_stop_floor = -float(config.STOP_LOSS_PCT)
-
-            trail_pullback = float(getattr(config, "TRAIL_PULLBACK_PCT", 0.08))
-            lock3_trigger = float(getattr(config, "TRAIL_LOCK3_TRIGGER_PCT", 0.40))
-            lock3_stop = float(getattr(config, "TRAIL_LOCK3_STOP_PCT", 0.25))
-
-            if max_plpc >= lock3_trigger:
-                # Deep in profit: trail dynamically — stop = peak minus pullback
-                dynamic_stop_floor = max(lock3_stop, max_plpc - trail_pullback)
-            elif max_plpc >= float(config.TRAIL_LOCK2_TRIGGER_PCT):
-                dynamic_stop_floor = float(config.TRAIL_LOCK2_STOP_PCT)
-            elif max_plpc >= float(config.TRAIL_LOCK1_TRIGGER_PCT):
-                dynamic_stop_floor = float(config.TRAIL_LOCK1_STOP_PCT)
-
-            # Stop floor can only move up, never down (ratchet)
-            prev_floor = float(meta.get("stop_floor_plpc", dynamic_stop_floor) or dynamic_stop_floor)
-            dynamic_stop_floor = max(dynamic_stop_floor, prev_floor)
+            # --- Exit strategy: two rules only ---
+            # 1. STOP LOSS: exit immediately if the trade is losing money at all.
+            # 2. REVERSAL EXIT: if the trade is profitable, hold until momentum reverses.
+            # No trailing stop ladder — winners ride until reversal is confirmed.
 
             if meta:
-                meta["stop_floor_plpc"] = dynamic_stop_floor
-                meta["max_plpc"] = max_plpc
+                meta["max_plpc"] = max(float(meta.get("max_plpc", plpc) or plpc), plpc)
                 open_trade_meta[symbol] = meta
 
             exit_reason = None
@@ -1681,9 +1652,8 @@ def main():
                     elif qty > 1:
                         exit_reason = "exposure_normalize"
                         close_qty = qty - 1
-            if exit_reason is None and config.ENABLE_FIXED_PROFIT_TARGET and plpc >= config.PROFIT_TARGET_PCT:
-                exit_reason = "profit_target"
-            elif exit_reason is None and plpc <= dynamic_stop_floor:
+            # Rule 1: exit immediately on any loss
+            if exit_reason is None and plpc < -float(config.STOP_LOSS_PCT):
                 exit_reason = "stop_loss"
 
             # --- Reversal detection exit ---
