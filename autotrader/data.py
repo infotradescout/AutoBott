@@ -42,6 +42,11 @@ class AlpacaDataClient:
         live_secret_key = str(getattr(config, "ALPACA_LIVE_SECRET_KEY", "") or "").strip()
         options_key = live_api_key if (paper and live_api_key) else api_key
         options_secret = live_secret_key if (paper and live_secret_key) else secret_key
+        if paper:
+            if live_api_key:
+                print(f"[data] Paper mode: using LIVE key ({live_api_key[:6]}...) for options endpoint.")
+            else:
+                print("[data] WARNING: Paper mode but ALPACA_LIVE_API_KEY not set — options endpoint will 401.")
         self.options_session = requests.Session()
         self.options_session.headers.update(
             {
