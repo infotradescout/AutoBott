@@ -36,11 +36,17 @@ class AlpacaDataClient:
             }
         )
         # Options contract/quote lookups always use the live endpoint.
+        # When running in paper mode, use ALPACA_LIVE_API_KEY / ALPACA_LIVE_SECRET_KEY
+        # if provided, because paper keys are rejected (401) by the live endpoint.
+        live_api_key = str(getattr(config, "ALPACA_LIVE_API_KEY", "") or "").strip()
+        live_secret_key = str(getattr(config, "ALPACA_LIVE_SECRET_KEY", "") or "").strip()
+        options_key = live_api_key if (paper and live_api_key) else api_key
+        options_secret = live_secret_key if (paper and live_secret_key) else secret_key
         self.options_session = requests.Session()
         self.options_session.headers.update(
             {
-                "APCA-API-KEY-ID": api_key,
-                "APCA-API-SECRET-KEY": secret_key,
+                "APCA-API-KEY-ID": options_key,
+                "APCA-API-SECRET-KEY": options_secret,
                 "accept": "application/json",
             }
         )

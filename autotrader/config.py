@@ -311,3 +311,11 @@ TRADES_MAX_ROWS = _env_int("TRADES_MAX_ROWS", 5000)
 
 ALPACA_PAPER_BASE_URL = "https://paper-api.alpaca.markets"
 ALPACA_DATA_BASE_URL = "https://data.alpaca.markets"
+
+# Optional: separate live-account API keys used ONLY for options contract/quote
+# lookups when running in paper mode. Alpaca's live endpoint (api.alpaca.markets)
+# rejects paper keys with a 401. Set these to your live account key pair and
+# the bot will use them exclusively for options data while still placing all
+# orders through the paper account.
+ALPACA_LIVE_API_KEY = os.getenv("ALPACA_LIVE_API_KEY", "")
+ALPACA_LIVE_SECRET_KEY = os.getenv("ALPACA_LIVE_SECRET_KEY", "")

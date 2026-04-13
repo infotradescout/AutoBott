@@ -15,5 +15,9 @@ services:
         sync: false
       - key: ALPACA_SECRET_KEY
         sync: false
+      - key: ALPACA_LIVE_API_KEY
+        sync: false
+      - key: ALPACA_LIVE_SECRET_KEY
+        sync: false
       - key: DATA_DIR
         value: /data
