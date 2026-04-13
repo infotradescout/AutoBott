@@ -100,10 +100,10 @@ def _filter_candidates_by_liquidity(
         if strike is None or not exp or not symbol:
             fail_counts["missing_fields"] += 1
             continue
-        if (not config.EMERGENCY_EXECUTION_MODE) and (open_interest is None or open_interest <= min_open_interest):
+        if (not config.EMERGENCY_EXECUTION_MODE) and (open_interest is not None and open_interest < min_open_interest):
             fail_counts["low_open_interest"] += 1
             continue
-        if (not config.EMERGENCY_EXECUTION_MODE) and (volume is None or volume <= min_daily_volume):
+        if (not config.EMERGENCY_EXECUTION_MODE) and (volume is not None and volume < min_daily_volume):
             fail_counts["low_volume"] += 1
             continue
 
@@ -174,7 +174,7 @@ def select_atm_option_contract_with_reason(
         # from the chain response. This avoids 429 rate-limit errors from making
         # one API call per strike across a full chain (30+ calls for NVDA, etc.).
         # Most chain responses already include open_interest; skip enrichment if so.
-        needs_enrichment = (open_interest is None and volume is None) and symbol
+        needs_enrichment = (open_interest is None) and symbol
         if needs_enrichment:
             try:
                 time.sleep(config.RATE_LIMIT_SLEEP_SECONDS)
