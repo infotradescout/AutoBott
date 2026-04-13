@@ -303,6 +303,17 @@ TRAIL_LOCK3_TRIGGER_PCT = _env_float("TRAIL_LOCK3_TRIGGER_PCT", 0.40)
 TRAIL_LOCK3_STOP_PCT = _env_float("TRAIL_LOCK3_STOP_PCT", 0.25)
 TRAIL_PULLBACK_PCT = _env_float("TRAIL_PULLBACK_PCT", 0.08)  # trail 8% below peak when deep in profit
 
+# --- Reversal detection exit ---
+# Exit a winning trade when the underlying shows confirmed momentum reversal.
+# Requires at least REVERSAL_CONFIRM_SIGNALS out of 3 signals to fire:
+#   1. EMA9 crosses against trade direction
+#   2. Last 2 bars moving against trade direction by >= REVERSAL_ROC_THRESHOLD_PCT
+#   3. Price crosses back through VWAP
+ENABLE_REVERSAL_EXIT = _env_bool("ENABLE_REVERSAL_EXIT", True)
+REVERSAL_EXIT_MIN_PROFIT_PCT = _env_float("REVERSAL_EXIT_MIN_PROFIT_PCT", 0.10)  # only check reversal once trade is up 10%
+REVERSAL_ROC_THRESHOLD_PCT = _env_float("REVERSAL_ROC_THRESHOLD_PCT", 0.3)       # 0.3% move in 2 bars counts as reversal
+REVERSAL_CONFIRM_SIGNALS = _env_int("REVERSAL_CONFIRM_SIGNALS", 2)               # require 2 of 3 signals to confirm
+
 # --- Re-entry ---
 MAX_REENTRIES_PER_TICKER = _env_int("MAX_REENTRIES_PER_TICKER", 1)
 

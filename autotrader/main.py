@@ -1684,6 +1684,72 @@ def main():
                 exit_reason = "profit_target"
             elif exit_reason is None and plpc <= dynamic_stop_floor:
                 exit_reason = "stop_loss"
+
+            # --- Reversal detection exit ---
+            # When the trade is in profit, check if the underlying is reversing.
+            # Exit on confirmed reversal so we keep gains without a fixed cap.
+            # Only triggers when ENABLE_REVERSAL_EXIT=true (default: true) and
+            # the trade has reached a minimum profit threshold first.
+            if (
+                exit_reason is None
+                and bool(getattr(config, "ENABLE_REVERSAL_EXIT", True))
+                and plpc >= float(getattr(config, "REVERSAL_EXIT_MIN_PROFIT_PCT", 0.10))
+                and ticker_for_pos
+            ):
+                try:
+                    rev_bars = data_client.get_intraday_bars_since_open(
+                        symbol=ticker_for_pos, now_et=now_et, limit=12
+                    )
+                    if rev_bars is not None and len(rev_bars) >= 5:
+                        rev_closes = rev_bars["close"].astype(float)
+                        trade_direction = str(meta.get("direction", "") or "").lower()
+
+                        # Signal 1: EMA9 crosses against trade direction
+                        rev_ema9 = rev_closes.ewm(span=9, adjust=False).mean()
+                        rev_ema21 = rev_closes.ewm(span=21, adjust=False).mean()
+                        ema_reversed = False
+                        if len(rev_ema9) >= 3 and len(rev_ema21) >= 3:
+                            if trade_direction == "call" and rev_ema9.iloc[-1] < rev_ema21.iloc[-1]:
+                                ema_reversed = True
+                            elif trade_direction == "put" and rev_ema9.iloc[-1] > rev_ema21.iloc[-1]:
+                                ema_reversed = True
+
+                        # Signal 2: Last 2 bars moving against trade direction
+                        last2_roc = 0.0
+                        if len(rev_closes) >= 3:
+                            prev2 = float(rev_closes.iloc[-3])
+                            curr = float(rev_closes.iloc[-1])
+                            last2_roc = (curr - prev2) / prev2 * 100 if prev2 != 0 else 0.0
+                        roc_reversed = False
+                        reversal_roc_threshold = float(getattr(config, "REVERSAL_ROC_THRESHOLD_PCT", 0.3))
+                        if trade_direction == "call" and last2_roc <= -reversal_roc_threshold:
+                            roc_reversed = True
+                        elif trade_direction == "put" and last2_roc >= reversal_roc_threshold:
+                            roc_reversed = True
+
+                        # Signal 3: Price crossed back through VWAP
+                        from scanner import calculate_vwap
+                        rev_vwap = calculate_vwap(rev_bars)
+                        vwap_flipped = False
+                        if rev_vwap and not (rev_vwap != rev_vwap):  # not nan
+                            curr_price = float(rev_closes.iloc[-1])
+                            if trade_direction == "call" and curr_price < rev_vwap:
+                                vwap_flipped = True
+                            elif trade_direction == "put" and curr_price > rev_vwap:
+                                vwap_flipped = True
+
+                        # Require at least 2 of 3 reversal signals to confirm
+                        reversal_signals = sum([ema_reversed, roc_reversed, vwap_flipped])
+                        reversal_confirm = int(getattr(config, "REVERSAL_CONFIRM_SIGNALS", 2))
+                        if reversal_signals >= reversal_confirm:
+                            exit_reason = f"reversal_detected(ema={int(ema_reversed)},roc={int(roc_reversed)},vwap={int(vwap_flipped)})"
+                            print(
+                                f"[{ts(now_et)}] REVERSAL EXIT {ticker_for_pos} {trade_direction} "
+                                f"plpc={plpc:+.2%} signals={reversal_signals}/3 "
+                                f"[ema={ema_reversed} roc={roc_reversed}({last2_roc:+.2f}%) vwap={vwap_flipped}]"
+                            )
+                except Exception as _rev_exc:  # noqa: BLE001
+                    pass  # reversal check is best-effort; never block exit management
             if exit_reason is None:
                 expiry_date = _option_expiry_date(meta, symbol)
                 if expiry_date is not None:
