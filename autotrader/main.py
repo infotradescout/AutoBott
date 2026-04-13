@@ -956,6 +956,7 @@ def main():
                 dedupe_key=f"heartbeat-{int(time.time() // max(1, config.HEARTBEAT_SECONDS))}",
             )
             next_heartbeat_at = time.time() + max(30, int(config.HEARTBEAT_SECONDS))
+        _save_runtime_state()
         print(
             f"[{ts(now_et)} | {ts_ct(now_ct)}] Market closed. "
             f"Next open (CT): {next_open_ct or 'unknown'}. Sleeping {sleep_seconds}s."

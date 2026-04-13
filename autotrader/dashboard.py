@@ -555,7 +555,13 @@ def api_status():
         heartbeat_et_raw = str(runtime_state.get("last_trader_heartbeat_et", "") or "")
         heartbeat_dt = _parse_ts(heartbeat_et_raw)
         heartbeat_age_seconds = int((now_et - heartbeat_dt).total_seconds()) if heartbeat_dt else None
-        loop_stale_after = max(60, int(config.LOOP_INTERVAL_SECONDS) * 4)
+        # During market hours: stale if no heartbeat for 4 loop intervals (default 60s)
+        # Outside market hours: stale if no heartbeat for 30 minutes (bot sleeps long between loops)
+        market_is_open = bool(clock_body.get("is_open", False))
+        if market_is_open:
+            loop_stale_after = max(60, int(config.LOOP_INTERVAL_SECONDS) * 4)
+        else:
+            loop_stale_after = 1800  # 30 minutes — bot sleeps overnight
         trader_loop_alive = heartbeat_age_seconds is not None and heartbeat_age_seconds <= loop_stale_after
         last_auth_error_et = str(runtime_state.get("last_alpaca_auth_error_et", "") or "")
         last_auth_error_msg = str(runtime_state.get("last_alpaca_auth_error", "") or "")
