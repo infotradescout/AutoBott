@@ -222,6 +222,17 @@ def _parse_option_symbol(option_symbol: str) -> tuple[str, str]:
     return ticker, direction
 
 
+def _is_valid_long_direction(direction: str) -> bool:
+    return str(direction or "").lower() in ("call", "put")
+
+
+def _option_symbol_matches_direction(option_symbol: str, direction: str) -> bool:
+    _ticker, parsed_direction = _parse_option_symbol(option_symbol)
+    if not parsed_direction:
+        return False
+    return parsed_direction == str(direction or "").lower()
+
+
 def _parse_option_expiry_from_symbol(option_symbol: str) -> date | None:
     symbol = str(option_symbol or "").upper().strip()
     match = _OPTION_SYMBOL_RE.match(symbol)
@@ -623,7 +634,7 @@ def main():
         now_et: datetime,
         reentries_used: int,
     ) -> bool:
-        if direction not in ("call", "put"):
+        if not _is_valid_long_direction(direction):
             return False
         if not is_at_or_after(now_et, config.NO_NEW_TRADES_BEFORE):
             print(f"[{ts(now_et)}] {ticker}: reversal skipped (before entry window).")
@@ -666,6 +677,12 @@ def main():
             option_symbol = str(contract.get("symbol", "") or "")
             if not option_symbol:
                 print(f"[{ts(now_et)}] {ticker}: reversal skipped (contract missing symbol).")
+                return False
+            if not _option_symbol_matches_direction(option_symbol, direction):
+                print(
+                    f"[{ts(now_et)}] {ticker}: reversal skipped (symbol direction mismatch "
+                    f"{option_symbol} vs {direction.upper()})."
+                )
                 return False
 
             ask_price = data_client.get_latest_option_ask(option_symbol)
@@ -1314,6 +1331,10 @@ def main():
 
             ticker = signal["symbol"]
             direction = signal["direction"]
+            if not _is_valid_long_direction(direction):
+                _mark_skip("invalid_strategy_direction")
+                print(f"[{ts(now_et)}] {ticker}: skip (invalid direction={direction!r}; only CALL/PUT allowed).")
+                continue
             if not is_at_or_after(now_et, config.NO_NEW_TRADES_BEFORE):
                 _mark_skip("before_entry_window")
                 print(f"[{ts(now_et)}] Entry window not open yet (before {config.NO_NEW_TRADES_BEFORE} ET).")
@@ -1439,6 +1460,13 @@ def main():
                     continue
 
                 option_symbol = contract["symbol"]
+                if not _option_symbol_matches_direction(option_symbol, direction):
+                    _mark_skip("contract_direction_mismatch")
+                    print(
+                        f"[{ts(now_et)}] {ticker}: skip (contract direction mismatch "
+                        f"{option_symbol} vs {direction.upper()})."
+                    )
+                    continue
                 ask_price = data_client.get_latest_option_ask(option_symbol)
                 direct_market_entry = False
                 if ask_price is None or ask_price <= 0:

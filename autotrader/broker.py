@@ -3,12 +3,21 @@
 from __future__ import annotations
 
 from decimal import Decimal
+import re
 
 from alpaca.trading.client import TradingClient
 from alpaca.trading.enums import OrderSide, TimeInForce
 from alpaca.trading.requests import LimitOrderRequest, MarketOrderRequest
 
 import config
+
+_OPTION_SYMBOL_RE = re.compile(r"^[A-Z.]+\d{6}[CP]\d{8}$")
+
+
+def _assert_option_symbol(symbol: str) -> None:
+    normalized = str(symbol or "").upper().strip()
+    if not _OPTION_SYMBOL_RE.match(normalized):
+        raise ValueError(f"invalid option symbol: {symbol!r}")
 
 
 class AlpacaBroker:
@@ -37,6 +46,7 @@ class AlpacaBroker:
         ]
 
     def place_option_limit_buy(self, option_symbol: str, qty: int, ask_price: float):
+        _assert_option_symbol(option_symbol)
         req = LimitOrderRequest(
             symbol=option_symbol,
             qty=qty,
@@ -47,6 +57,7 @@ class AlpacaBroker:
         return self.trading_client.submit_order(order_data=req)
 
     def place_option_market_buy(self, option_symbol: str, qty: int):
+        _assert_option_symbol(option_symbol)
         req = MarketOrderRequest(
             symbol=option_symbol,
             qty=qty,
@@ -56,6 +67,7 @@ class AlpacaBroker:
         return self.trading_client.submit_order(order_data=req)
 
     def close_option_market(self, option_symbol: str, qty: int):
+        _assert_option_symbol(option_symbol)
         req = MarketOrderRequest(
             symbol=option_symbol,
             qty=qty,

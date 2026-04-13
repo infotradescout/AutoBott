@@ -840,6 +840,90 @@ def api_watch_open():
         return jsonify({"error": str(exc)}), 500
 
 
+@app.get("/api/watch/history")
+def api_watch_history():
+    try:
+        rows = _read_csv_rows(TRADES_CSV, limit=5000, reverse=False)
+        cumulative_pnl_usd = 0.0
+        trade_points: list[dict[str, Any]] = []
+        daily_map: dict[str, dict[str, Any]] = {}
+        wins = 0
+        losses = 0
+        total_pnl_usd = 0.0
+        total_trades = 0
+
+        for row in rows:
+            ts_raw = str(row.get("timestamp", "") or "")
+            dt = _parse_ts(ts_raw)
+            if dt is None:
+                continue
+            entry_price = _safe_float(row.get("entry_price"), 0.0)
+            exit_price = _safe_float(row.get("exit_price"), 0.0)
+            qty = int(_safe_float(row.get("qty"), 0))
+            pnl_pct = _safe_float(row.get("pnl_pct"), 0.0) * 100.0
+            pnl_usd = (exit_price - entry_price) * qty * 100.0
+            cumulative_pnl_usd += pnl_usd
+            total_pnl_usd += pnl_usd
+            total_trades += 1
+            if pnl_usd > 0:
+                wins += 1
+            elif pnl_usd < 0:
+                losses += 1
+
+            day_key = dt.strftime("%Y-%m-%d")
+            day_bucket = daily_map.get(day_key)
+            if not isinstance(day_bucket, dict):
+                day_bucket = {"date": day_key, "pnl_usd": 0.0, "trades": 0, "wins": 0, "losses": 0}
+                daily_map[day_key] = day_bucket
+            day_bucket["pnl_usd"] = _safe_float(day_bucket.get("pnl_usd"), 0.0) + pnl_usd
+            day_bucket["trades"] = int(day_bucket.get("trades", 0)) + 1
+            if pnl_usd > 0:
+                day_bucket["wins"] = int(day_bucket.get("wins", 0)) + 1
+            elif pnl_usd < 0:
+                day_bucket["losses"] = int(day_bucket.get("losses", 0)) + 1
+
+            trade_points.append(
+                {
+                    "timestamp": _to_ct_label(dt) or ts_raw,
+                    "ticker": str(row.get("ticker", "") or ""),
+                    "direction": str(row.get("direction", "") or "").upper(),
+                    "entry_price": round(entry_price, 4),
+                    "exit_price": round(exit_price, 4),
+                    "qty": qty,
+                    "pnl_pct": round(pnl_pct, 4),
+                    "pnl_usd": round(pnl_usd, 2),
+                    "cum_pnl_usd": round(cumulative_pnl_usd, 2),
+                    "exit_reason": str(row.get("exit_reason", "") or ""),
+                }
+            )
+
+        daily_series = sorted(daily_map.values(), key=lambda x: str(x.get("date", "")))
+        for day_row in daily_series:
+            day_row["pnl_usd"] = round(_safe_float(day_row.get("pnl_usd"), 0.0), 2)
+
+        avg_trade_pnl = (total_pnl_usd / total_trades) if total_trades > 0 else 0.0
+        win_rate_pct = ((wins / (wins + losses)) * 100.0) if (wins + losses) > 0 else 0.0
+
+        return jsonify(
+            {
+                "summary": {
+                    "total_trades": total_trades,
+                    "wins": wins,
+                    "losses": losses,
+                    "win_rate_pct": round(win_rate_pct, 2),
+                    "total_pnl_usd": round(total_pnl_usd, 2),
+                    "avg_trade_pnl_usd": round(avg_trade_pnl, 2),
+                },
+                "cumulative_series": [{"ts": p["timestamp"], "value": p["cum_pnl_usd"]} for p in trade_points[-800:]],
+                "daily_series": daily_series[-120:],
+                "recent_trades": list(reversed(trade_points[-80:])),
+                "generated_at": _now_et().strftime("%Y-%m-%d %H:%M:%S ET"),
+            }
+        )
+    except Exception as exc:  # noqa: BLE001
+        return jsonify({"error": str(exc)}), 500
+
+
 @app.get("/api/daily-review")
 def api_daily_review():
     try:
@@ -919,12 +1003,26 @@ def watch_page():
     .kpi { display:grid; grid-template-columns:repeat(4, minmax(0,1fr)); gap:8px; margin-bottom:8px; font-size:13px; color:var(--muted); }
     .kpi strong { color:var(--text); font-family:ui-monospace,SFMono-Regular,Menlo,monospace; font-size:15px; }
     svg { width:100%; height:130px; border:1px solid var(--border); border-radius:10px; background:rgba(5,10,17,.6); }
+    .tabs { display:flex; gap:8px; margin-bottom:10px; }
+    .tab { border:1px solid var(--border); border-radius:10px; padding:8px 10px; font-weight:700; cursor:pointer; background:rgba(127,156,191,.15); }
+    .tab.active { background:rgba(42,199,255,.22); border-color:rgba(42,199,255,.45); }
+    .hidden { display:none; }
+    .hist-grid { display:grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap:10px; }
+    .hist-kpi { display:grid; grid-template-columns: repeat(5, minmax(0,1fr)); gap:8px; margin-bottom:10px; }
+    .hist-kpi .card { margin:0; padding:10px; }
+    .label2 { color:var(--muted); font-size:12px; text-transform:uppercase; letter-spacing:.35px; margin-bottom:4px; }
+    .value2 { font-family:ui-monospace,SFMono-Regular,Menlo,monospace; font-size:20px; }
+    table { width:100%; border-collapse: collapse; font-size:13px; }
+    th, td { border-bottom: 1px solid var(--border); padding: 8px 6px; text-align: left; }
+    th { color: var(--muted); font-weight: 600; }
     .pos { color:var(--green); }
     .neg { color:var(--red); }
     .zero { color:var(--muted); }
     @media (max-width: 980px) {
       .grid { grid-template-columns: 1fr; }
       .kpi { grid-template-columns:repeat(2, minmax(0,1fr)); }
+      .hist-grid { grid-template-columns: 1fr; }
+      .hist-kpi { grid-template-columns:repeat(2, minmax(0,1fr)); }
     }
   </style>
 </head>
@@ -940,26 +1038,67 @@ def watch_page():
       </div>
     </div>
 
-    <div class="card">
-      <div style="font-weight:700; margin-bottom:8px;">Watchlist Trading Policy</div>
-      <div class="row">
-        <select id="watch-mode" class="select">
-          <option value="off">Off (No watchlist filter)</option>
-          <option value="only_listed">Trade only listed tickers</option>
-          <option value="exclude_listed">Trade all except listed tickers</option>
-        </select>
-        <input id="watch-input" class="input" style="min-width:320px;" placeholder="Add tickers: AAPL, MSFT, NVDA" />
-        <button class="btn" onclick="saveWatchlist()">Save Watchlist</button>
-      </div>
-      <div class="muted" style="margin-top:8px;">Current list:</div>
-      <div id="watchlist-chips" class="chips"></div>
-      <div id="watch-updated" class="muted" style="margin-top:8px;"></div>
+    <div class="tabs">
+      <button id="tab-open" class="tab active" onclick="setTab('open')">Open Trades</button>
+      <button id="tab-history" class="tab" onclick="setTab('history')">Trade History</button>
     </div>
 
-    <div id="open-rows" class="grid"></div>
+    <div id="panel-open">
+      <div class="card">
+        <div style="font-weight:700; margin-bottom:8px;">Watchlist Trading Policy</div>
+        <div class="row">
+          <select id="watch-mode" class="select">
+            <option value="off">Off (No watchlist filter)</option>
+            <option value="only_listed">Trade only listed tickers</option>
+            <option value="exclude_listed">Trade all except listed tickers</option>
+          </select>
+          <input id="watch-input" class="input" style="min-width:320px;" placeholder="Add tickers: AAPL, MSFT, NVDA" />
+          <button class="btn" onclick="saveWatchlist()">Save Watchlist</button>
+        </div>
+        <div class="muted" style="margin-top:8px;">Current list:</div>
+        <div id="watchlist-chips" class="chips"></div>
+        <div id="watch-updated" class="muted" style="margin-top:8px;"></div>
+      </div>
+      <div id="open-rows" class="grid"></div>
+    </div>
+
+    <div id="panel-history" class="hidden">
+      <div class="hist-kpi">
+        <div class="card"><div class="label2">Total Trades</div><div id="hist-total-trades" class="value2">--</div></div>
+        <div class="card"><div class="label2">Win Rate</div><div id="hist-win-rate" class="value2">--</div></div>
+        <div class="card"><div class="label2">Total P&L</div><div id="hist-total-pnl" class="value2">--</div></div>
+        <div class="card"><div class="label2">Avg / Trade</div><div id="hist-avg-trade" class="value2">--</div></div>
+        <div class="card"><div class="label2">W/L</div><div id="hist-wl" class="value2">--</div></div>
+      </div>
+      <div class="hist-grid">
+        <div class="card">
+          <div class="label2">Cumulative P&L (USD)</div>
+          <svg id="hist-cum-chart" viewBox="0 0 420 120" preserveAspectRatio="none"></svg>
+        </div>
+        <div class="card">
+          <div class="label2">Daily P&L (Last 120 Days)</div>
+          <svg id="hist-daily-chart" viewBox="0 0 420 120" preserveAspectRatio="none"></svg>
+        </div>
+      </div>
+      <div class="card">
+        <div class="label2">Recent Closed Trades</div>
+        <div id="hist-trades-wrap" class="muted">Loading...</div>
+      </div>
+    </div>
   </div>
 
   <script>
+    function setTab(tab) {
+      const open = tab === "open";
+      const openPanel = document.getElementById("panel-open");
+      const historyPanel = document.getElementById("panel-history");
+      const openTab = document.getElementById("tab-open");
+      const historyTab = document.getElementById("tab-history");
+      if (openPanel) openPanel.className = open ? "" : "hidden";
+      if (historyPanel) historyPanel.className = open ? "hidden" : "";
+      if (openTab) openTab.className = open ? "tab active" : "tab";
+      if (historyTab) historyTab.className = open ? "tab" : "tab active";
+    }
     function cls(v) {
       if (v > 0) return "pos";
       if (v < 0) return "neg";
@@ -1011,6 +1150,30 @@ def watch_page():
         .split(/[\s,]+/)
         .map(x => x.trim())
         .filter(Boolean);
+    }
+    function drawDailyBars(svg, values) {
+      if (!svg) return;
+      if (!Array.isArray(values) || !values.length) {
+        svg.innerHTML = `<text x="10" y="22" fill="#8ca2bd" font-size="12">No daily history yet</text>`;
+        return;
+      }
+      const min = Math.min(...values, 0);
+      const max = Math.max(...values, 0);
+      const span = Math.max(1e-6, max - min);
+      const width = 420;
+      const height = 112;
+      const barW = Math.max(1.5, Math.floor(width / Math.max(1, values.length)));
+      const y0 = height - ((0 - min) / span) * 98;
+      let bars = `<line x1="0" y1="${y0}" x2="${width}" y2="${y0}" stroke="rgba(140,162,189,.35)" stroke-dasharray="3 3"></line>`;
+      values.forEach((v, i) => {
+        const x = i * (width / Math.max(1, values.length));
+        const y = height - ((v - min) / span) * 98;
+        const h = Math.abs(y0 - y);
+        const top = Math.min(y0, y);
+        const color = v >= 0 ? "#1dd75f" : "#ff4e57";
+        bars += `<rect x="${x}" y="${top}" width="${barW}" height="${Math.max(1, h)}" fill="${color}" opacity="0.85"></rect>`;
+      });
+      svg.innerHTML = bars;
     }
     async function loadWatchlist() {
       const data = await fetchJson("/api/watchlist-control");
@@ -1083,16 +1246,76 @@ def watch_page():
         drawSeries(document.getElementById(`stk-${i}`), stk, "#f8b739");
       });
     }
+    function renderHistory(data) {
+      if (!data || data.error) return;
+      const summary = data.summary || {};
+      const totalTrades = Number(summary.total_trades || 0);
+      const wins = Number(summary.wins || 0);
+      const losses = Number(summary.losses || 0);
+      const winRate = Number(summary.win_rate_pct || 0);
+      const totalPnl = Number(summary.total_pnl_usd || 0);
+      const avgTrade = Number(summary.avg_trade_pnl_usd || 0);
+
+      const tt = document.getElementById("hist-total-trades");
+      const wr = document.getElementById("hist-win-rate");
+      const tp = document.getElementById("hist-total-pnl");
+      const at = document.getElementById("hist-avg-trade");
+      const wl = document.getElementById("hist-wl");
+      if (tt) tt.textContent = String(totalTrades);
+      if (wr) { wr.textContent = `${winRate.toFixed(1)}%`; wr.className = `value2 ${cls(winRate - 50)}`; }
+      if (tp) { tp.textContent = fmtMoney(totalPnl); tp.className = `value2 ${cls(totalPnl)}`; }
+      if (at) { at.textContent = fmtMoney(avgTrade); at.className = `value2 ${cls(avgTrade)}`; }
+      if (wl) wl.textContent = `${wins}/${losses}`;
+
+      const cumulative = Array.isArray(data.cumulative_series) ? data.cumulative_series.map(x => Number(x.value || 0)) : [];
+      drawSeries(document.getElementById("hist-cum-chart"), cumulative, "#2ac7ff");
+
+      const dailyVals = Array.isArray(data.daily_series) ? data.daily_series.map(x => Number(x.pnl_usd || 0)) : [];
+      drawDailyBars(document.getElementById("hist-daily-chart"), dailyVals);
+
+      const tradesWrap = document.getElementById("hist-trades-wrap");
+      const recent = Array.isArray(data.recent_trades) ? data.recent_trades : [];
+      if (!tradesWrap) return;
+      if (!recent.length) {
+        tradesWrap.textContent = "No closed trades yet.";
+        return;
+      }
+      const rows = recent.slice(0, 60).map(t => `
+        <tr>
+          <td>${t.timestamp || "-"}</td>
+          <td>${t.ticker || "-"}</td>
+          <td>${t.direction || "-"}</td>
+          <td>${fmtMoney(t.entry_price)}</td>
+          <td>${fmtMoney(t.exit_price)}</td>
+          <td class="${cls(Number(t.pnl_usd || 0))}">${fmtMoney(t.pnl_usd)}</td>
+          <td class="${cls(Number(t.pnl_pct || 0))}">${fmtPct(Number(t.pnl_pct || 0))}</td>
+          <td>${t.exit_reason || "-"}</td>
+        </tr>
+      `).join("");
+      tradesWrap.innerHTML = `
+        <table>
+          <thead><tr><th>Time</th><th>Ticker</th><th>Dir</th><th>Entry</th><th>Exit</th><th>P&L $</th><th>P&L %</th><th>Reason</th></tr></thead>
+          <tbody>${rows}</tbody>
+        </table>
+      `;
+    }
     async function refreshOpen() {
       const body = await fetchJson("/api/watch/open");
       if (body.error) return;
       renderOpen(body.rows || []);
     }
+    async function refreshHistory() {
+      const body = await fetchJson("/api/watch/history");
+      if (body.error) return;
+      renderHistory(body);
+    }
     async function refreshAll() {
-      await Promise.all([loadWatchlist(), refreshOpen()]);
+      await Promise.all([loadWatchlist(), refreshOpen(), refreshHistory()]);
     }
     refreshAll();
-    setInterval(refreshOpen, 15000);
+    setInterval(async () => {
+      await Promise.all([refreshOpen(), refreshHistory()]);
+    }, 15000);
   </script>
 </body>
 </html>

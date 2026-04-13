@@ -141,6 +141,10 @@ def select_atm_option_contract_with_reason(
     underlying_price: float,
     now_et: datetime | None = None,
 ) -> tuple[dict[str, Any] | None, str]:
+    direction = str(direction or "").lower().strip()
+    if direction not in ("call", "put"):
+        return None, f"invalid direction={direction!r}; only call/put supported"
+
     now_et = now_et or datetime.now(pytz.timezone(config.EASTERN_TZ))
     today = now_et.date()
     expiry_floor = _add_trading_days(today, config.MIN_DTE_TRADING_DAYS)
