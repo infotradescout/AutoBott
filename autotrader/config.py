@@ -174,26 +174,25 @@ RVOL_STRICT_UNTIL         = "10:30"
 RVOL_RELAX_AFTER          = "10:00"
 RVOL_RELAXED_MIN          = 0.7
 RVOL_IGNORE_AFTER         = "10:30"
-ATR_PCT_MIN               = 1.8
-VWAP_NEUTRAL_BAND_PCT     = 0.15
+ATR_PCT_MIN               = 1.0   # lowered from 1.8 — ETFs like SPY/QQQ have lower ATR
+VWAP_NEUTRAL_BAND_PCT     = 0.05  # tightened from 0.15 — 0.15% was rejecting stocks barely off VWAP
 
 # Direction conviction: minimum weighted-vote score to commit to call/put.
 # 0.0 = any majority; 0.5 = strongly one-sided required.
-# 0.2 means ~60% of weighted votes must agree on direction.
-DIRECTION_CONVICTION_MIN  = 0.2
+DIRECTION_CONVICTION_MIN  = 0.1   # lowered from 0.2 — allows more split-but-leaning signals
 
 ROC_PERIOD                = 10
-ROC_BULL_MIN              = 0.12
-ROC_BEAR_MAX              = -0.12
+ROC_BULL_MIN              = 0.05  # lowered from 0.12 — weak momentum is still momentum
+ROC_BEAR_MAX              = -0.05 # loosened from -0.12
 ENABLE_ROC_FILTER         = True
 
 RSI_EARLY_MIN_PERIOD      = 5
 RSI_STRICT_AFTER_TIME     = "10:15"
 ENABLE_RSI_FILTER         = True
-RSI_CALL_MIN              = 52.0
-RSI_CALL_MAX              = 75.0
-RSI_PUT_MIN               = 25.0
-RSI_PUT_MAX               = 48.0
+RSI_CALL_MIN              = 45.0  # widened from 52 — allow calls when RSI is neutral-to-bullish
+RSI_CALL_MAX              = 85.0  # widened from 75 — don't block strong momentum
+RSI_PUT_MIN               = 15.0  # widened from 25
+RSI_PUT_MAX               = 55.0  # widened from 48 — allow puts when RSI is neutral-to-bearish
 
 IV_RANK_MIN               = 20.0
 IV_RANK_MAX               = 99.0
