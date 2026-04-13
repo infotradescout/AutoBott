@@ -376,6 +376,7 @@ class AlpacaDataClient:
             "type": contract_type,
             "expiration_date_gte": expiration_date_gte.isoformat(),
             "expiration_date_lte": expiration_date_lte.isoformat(),
+            "limit": 200,  # fetch full chain in one call to avoid per-contract enrichment
         }
         errors_by_base: list[str] = []
         for base in self._option_contract_base_candidates:

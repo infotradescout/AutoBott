@@ -170,8 +170,14 @@ def select_atm_option_contract_with_reason(
         symbol = _contract_symbol(details)
         open_interest = _safe_float(details.get("open_interest"))
         volume = _safe_float(details.get("volume") or details.get("daily_volume"))
-        if (open_interest is None or volume is None) and symbol:
+        # Only fetch individual contract detail if both OI and volume are missing
+        # from the chain response. This avoids 429 rate-limit errors from making
+        # one API call per strike across a full chain (30+ calls for NVDA, etc.).
+        # Most chain responses already include open_interest; skip enrichment if so.
+        needs_enrichment = (open_interest is None and volume is None) and symbol
+        if needs_enrichment:
             try:
+                time.sleep(config.RATE_LIMIT_SLEEP_SECONDS)
                 enriched = data_client.get_option_contract(symbol)
                 if isinstance(enriched, dict):
                     details.update(enriched)
