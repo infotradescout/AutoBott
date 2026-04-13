@@ -138,26 +138,32 @@ CORE_TICKERS = [
 ]
 BAR_TIMEFRAME = "5Min"
 SIGNAL_LOOKBACK = 20
+# --- Sub-hour intraday scalping configuration ---
+# Tuned for long call/put momentum trades targeting 20-50 min hold times.
 MAX_POSITIONS = _env_int("MAX_POSITIONS", 2)
 POSITION_SIZE_USD = 500
 RISK_PER_TRADE_PCT = _env_float("RISK_PER_TRADE_PCT", 0.01)
 MAX_POSITION_SIZE_USD = _env_float("MAX_POSITION_SIZE_USD", 700.0)
 DRAWDOWN_REDUCE_AFTER_CONSEC_LOSSES = _env_int("DRAWDOWN_REDUCE_AFTER_CONSEC_LOSSES", 2)
 DRAWDOWN_SIZE_MULTIPLIER = _env_float("DRAWDOWN_SIZE_MULTIPLIER", 0.5)
-PROFIT_TARGET_PCT = _env_float("PROFIT_TARGET_PCT", 0.30)
-STOP_LOSS_PCT = _env_float("STOP_LOSS_PCT", 0.25)
+# Tight stop loss — cut losers immediately before they compound
+PROFIT_TARGET_PCT = _env_float("PROFIT_TARGET_PCT", 0.60)  # only used if ENABLE_FIXED_PROFIT_TARGET=true; prefer trailing
+STOP_LOSS_PCT = _env_float("STOP_LOSS_PCT", 0.10)          # -10%: exit fast if trade goes wrong
 DAILY_LOSS_LIMIT_USD = _env_float("DAILY_LOSS_LIMIT_USD", 150.0)
 WEEKLY_LOSS_LIMIT_USD = _env_float("WEEKLY_LOSS_LIMIT_USD", 900.0)
 CONSECUTIVE_LOSS_LIMIT = _env_int("CONSECUTIVE_LOSS_LIMIT", 3)
 MARKET_OPEN = "09:30"
 PREOPEN_READY_MINUTES = 10
+# Hard close at 15:30; stop new entries at 15:00 to allow time to exit
 HARD_CLOSE_TIME = _env_str("HARD_CLOSE_TIME", "15:30")
 OPTION_EXPIRY_EXIT_TIME = _env_str("OPTION_EXPIRY_EXIT_TIME", "15:00")
 OPTION_FORCE_EXIT_DAYS_BEFORE_EXPIRY = _env_int("OPTION_FORCE_EXIT_DAYS_BEFORE_EXPIRY", 1)
+# No new entries after 15:00 to ensure time to exit before close
 NO_NEW_TRADES_BEFORE = _env_str("NO_NEW_TRADES_BEFORE", "09:30")
-NO_NEW_TRADES_AFTER = _env_str("NO_NEW_TRADES_AFTER", "15:30")
+NO_NEW_TRADES_AFTER = _env_str("NO_NEW_TRADES_AFTER", "15:00")
 PAPER = _env_bool("PAPER_TRADING", True)
-LOOP_INTERVAL_SECONDS = _env_int("LOOP_INTERVAL_SECONDS", 30)
+# Poll every 15s for faster exit execution on scalp trades
+LOOP_INTERVAL_SECONDS = _env_int("LOOP_INTERVAL_SECONDS", 15)
 SCAN_MORNING_TIME = "09:30"
 OBSERVATION_END_TIME = "10:00"
 OBSERVATION_ENABLED = _env_bool("OBSERVATION_ENABLED", True)
@@ -201,7 +207,8 @@ MIN_SIGNAL_SCORE = _env_float("MIN_SIGNAL_SCORE", 5.0)
 MAX_ENTRY_SLIPPAGE_PCT = _env_float("MAX_ENTRY_SLIPPAGE_PCT", 5.0)
 MAX_FILL_SLIPPAGE_PCT = _env_float("MAX_FILL_SLIPPAGE_PCT", 5.0)
 NEWS_BLOCK_DATES_ET = _env_csv_dates("NEWS_BLOCK_DATES_ET", default=())
-MAX_HOLD_MINUTES = _env_int("MAX_HOLD_MINUTES", 15)
+# Allow trades to run up to 90 minutes — trailing stop will exit winners before this
+MAX_HOLD_MINUTES = _env_int("MAX_HOLD_MINUTES", 90)
 ENABLE_VIX_GUARD = False
 VIX_MIN = 13.0
 VIX_MAX = 80.0
@@ -279,12 +286,22 @@ ENABLE_INDEX_BIAS_FILTER = _env_bool("ENABLE_INDEX_BIAS_FILTER", False)
 INDEX_BIAS_TIMEFRAME = _env_str("INDEX_BIAS_TIMEFRAME", "5m")
 INDEX_BIAS_LOOKBACK = _env_int("INDEX_BIAS_LOOKBACK", 30)
 
-# --- Exit behavior ---
-ENABLE_FIXED_PROFIT_TARGET = _env_bool("ENABLE_FIXED_PROFIT_TARGET", True)
-TRAIL_LOCK1_TRIGGER_PCT = _env_float("TRAIL_LOCK1_TRIGGER_PCT", 0.35)
-TRAIL_LOCK1_STOP_PCT = _env_float("TRAIL_LOCK1_STOP_PCT", 0.15)
-TRAIL_LOCK2_TRIGGER_PCT = _env_float("TRAIL_LOCK2_TRIGGER_PCT", 0.55)
-TRAIL_LOCK2_STOP_PCT = _env_float("TRAIL_LOCK2_STOP_PCT", 0.30)
+# --- Momentum-based trailing exit ---
+# Disable fixed profit target — let the trailing stop ride winners.
+ENABLE_FIXED_PROFIT_TARGET = _env_bool("ENABLE_FIXED_PROFIT_TARGET", False)
+#
+# Trailing stop ladder (ratchet — stop only moves up, never down):
+#   Entry to +15%  : stop at -10% (tight cut if trade reverses immediately)
+#   +15% to +30%   : stop locks to +5%  (guaranteed small win)
+#   +30% to +40%   : stop locks to +15% (locked in solid gain)
+#   +40% and above : stop trails 8% below peak (ride the momentum)
+TRAIL_LOCK1_TRIGGER_PCT = _env_float("TRAIL_LOCK1_TRIGGER_PCT", 0.15)
+TRAIL_LOCK1_STOP_PCT = _env_float("TRAIL_LOCK1_STOP_PCT", 0.05)
+TRAIL_LOCK2_TRIGGER_PCT = _env_float("TRAIL_LOCK2_TRIGGER_PCT", 0.30)
+TRAIL_LOCK2_STOP_PCT = _env_float("TRAIL_LOCK2_STOP_PCT", 0.15)
+TRAIL_LOCK3_TRIGGER_PCT = _env_float("TRAIL_LOCK3_TRIGGER_PCT", 0.40)
+TRAIL_LOCK3_STOP_PCT = _env_float("TRAIL_LOCK3_STOP_PCT", 0.25)
+TRAIL_PULLBACK_PCT = _env_float("TRAIL_PULLBACK_PCT", 0.08)  # trail 8% below peak when deep in profit
 
 # --- Re-entry ---
 MAX_REENTRIES_PER_TICKER = _env_int("MAX_REENTRIES_PER_TICKER", 1)
