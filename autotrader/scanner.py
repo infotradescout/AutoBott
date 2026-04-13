@@ -403,8 +403,54 @@ def _scan_ticker_details(
         return _scan_failure(f"price near VWAP ({distance_pct:.2f}%)")
 
     above_vwap = price > vwap
-    below_vwap = price < vwap
-    direction = "call" if above_vwap else "put"
+
+    # --- Multi-factor direction vote ---
+    # Each indicator casts a +1 (bullish/call) or -1 (bearish/put) vote.
+    # The final direction is determined by the weighted sum of votes.
+    # This prevents a single noisy indicator from overriding clear momentum.
+    direction_votes: list[tuple[str, float, float]] = []  # (name, weight, vote)
+
+    # 1. VWAP position (primary anchor — highest weight)
+    direction_votes.append(("vwap", 3.0, 1.0 if above_vwap else -1.0))
+
+    # 2. Rate of Change — actual price momentum over last N bars
+    roc_early = calculate_roc(closes, period=config.ROC_PERIOD)
+    if not math.isnan(roc_early):
+        direction_votes.append(("roc", 2.0, 1.0 if roc_early > 0 else -1.0))
+
+    # 3. EMA9 vs EMA21 crossover — short-term trend
+    ema9_pre = closes.ewm(span=9, adjust=False).mean()
+    ema21_pre = closes.ewm(span=21, adjust=False).mean()
+    if len(ema9_pre) >= 3 and len(ema21_pre) >= 3:
+        direction_votes.append(
+            ("ema", 1.5, 1.0 if ema9_pre.iloc[-1] > ema21_pre.iloc[-1] else -1.0)
+        )
+
+    # 4. RSI momentum (above/below 50 midpoint)
+    rsi_pre = calculate_rsi(closes, period=min(14, max(5, len(closes) - 1)))
+    if not math.isnan(rsi_pre):
+        direction_votes.append(("rsi", 1.0, 1.0 if rsi_pre > 50 else -1.0))
+
+    # 5. Recent bar close vs open (last 3 bars net candle direction)
+    if len(bars) >= 3:
+        recent_move = float(closes.iloc[-1]) - float(bars["open"].astype(float).iloc[-3])
+        direction_votes.append(("candle", 1.0, 1.0 if recent_move > 0 else -1.0))
+
+    total_weight = sum(w for _, w, _ in direction_votes)
+    weighted_sum = sum(w * v for _, w, v in direction_votes)
+    direction_score = weighted_sum / total_weight if total_weight > 0 else 0.0
+
+    # Require a minimum conviction threshold to avoid coin-flip trades.
+    # A score of 0 means indicators are evenly split — skip it.
+    direction_conviction_min = float(getattr(config, "DIRECTION_CONVICTION_MIN", 0.2))
+    if abs(direction_score) < direction_conviction_min:
+        vote_summary = ", ".join(f"{n}={'+' if v > 0 else ''}{v:.0f}" for n, _, v in direction_votes)
+        return _scan_failure(
+            f"direction conviction too low ({direction_score:+.2f}, min {direction_conviction_min:.2f}) [{vote_summary}]"
+        )
+
+    direction = "call" if direction_score > 0 else "put"
+    above_vwap = direction == "call"  # keep downstream logic consistent
 
     htf_reason = ""
     if config.ENABLE_HTF_CONFIRM:
@@ -423,22 +469,17 @@ def _scan_ticker_details(
         if direction == "put" and flow_score > -threshold:
             return _scan_failure(f"order flow weak for put ({flow_score:+.2f})")
 
-    roc = calculate_roc(closes, period=config.ROC_PERIOD)
-    if config.ENABLE_ROC_FILTER:
-        if math.isnan(roc):
-            return _scan_failure("ROC unavailable")
+    # ROC and EMA are already computed above in the direction vote block.
+    # Re-use those values here for downstream filters and scoring.
+    roc = roc_early if not math.isnan(roc_early) else 0.0
+    if config.ENABLE_ROC_FILTER and not math.isnan(roc_early):
         if direction == "call" and roc <= config.ROC_BULL_MIN:
             return _scan_failure(f"ROC {roc:+.2f}% too weak for call")
         if direction == "put" and roc >= config.ROC_BEAR_MAX:
             return _scan_failure(f"ROC {roc:+.2f}% too weak for put")
-    elif math.isnan(roc):
-        roc = 0.0
 
-    # EMA crossover — soft scored check, not a hard blocker.
-    # EMA9 lags on gap-and-hold moves; removing hard fail lets those signals through
-    # while still rewarding aligned setups via signal_score bonus.
-    ema9 = closes.ewm(span=9, adjust=False).mean()
-    ema21 = closes.ewm(span=21, adjust=False).mean()
+    ema9 = ema9_pre
+    ema21 = ema21_pre
     ema_aligned = False
     ema_note = "EMA N/A"
     if len(ema9) >= 3 and len(ema21) >= 3:
@@ -532,9 +573,12 @@ def _scan_ticker_details(
         return _scan_failure(f"signal score {signal_score:.2f} below {effective_min_signal_score:.2f}")
 
     above_below = "Above VWAP" if direction == "call" else "Below VWAP"
+    vote_log = ", ".join(f"{n}={'+' if v > 0 else ''}{v:.0f}" for n, _, v in direction_votes)
     return {
         "symbol": symbol,
         "direction": direction,
+        "direction_score": round(direction_score, 3),
+        "direction_votes": vote_log,
         "rvol": round(rvol, 2),
         "atr_pct": round(atr_pct, 2),
         "rsi": round(rsi, 2),
@@ -549,7 +593,7 @@ def _scan_ticker_details(
         "flow_score": round(flow_score, 4) if flow_score is not None else None,
         "htf_reason": htf_reason,
         "reason": (
-            f"RVOL {rvol:.1f}x | {above_below} | {ema_note} | "
+            f"RVOL {rvol:.1f}x | {above_below} | Dir {direction_score:+.2f} [{vote_log}] | {ema_note} | "
             f"ROC {roc:+.2f}% | IVR {iv_rank:.0f}% | Regime {regime_score:.2f} | "
             f"Flow {(flow_score if flow_score is not None else 0):+.2f} | Score {signal_score:.2f}"
         ) + (f" | Catalyst {_CATALYST_MODE_REASON}" if _CATALYST_MODE_ACTIVE and _CATALYST_MODE_REASON else ""),

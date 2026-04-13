@@ -225,6 +225,10 @@ RVOL_RELAXED_MIN = _env_float("RVOL_RELAXED_MIN", 0.7)
 RVOL_IGNORE_AFTER = _env_str("RVOL_IGNORE_AFTER", "10:30")
 ATR_PCT_MIN = _env_float("ATR_PCT_MIN", 1.8)
 VWAP_NEUTRAL_BAND_PCT = _env_float("VWAP_NEUTRAL_BAND_PCT", 0.15)
+# Minimum weighted-vote score to commit to a direction (0.0-1.0).
+# 0.0 = any majority wins; 0.5 = must be strongly one-sided.
+# Default 0.2 means at least 60% of weighted votes must agree.
+DIRECTION_CONVICTION_MIN = _env_float("DIRECTION_CONVICTION_MIN", 0.2)
 ROC_PERIOD = 10
 ROC_BULL_MIN = _env_float("ROC_BULL_MIN", 0.12)
 ROC_BEAR_MAX = _env_float("ROC_BEAR_MAX", -0.12)
