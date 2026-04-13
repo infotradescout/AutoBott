@@ -26,6 +26,7 @@ from risk import (
 from scanner import initialize_scanner, run_observation_phase, run_scan, set_catalyst_mode
 from state_store import load_bot_state, save_bot_state
 from trading_control import load_trading_control
+from watchlist_control import load_watchlist_control
 
 
 def ts(now_et: datetime | None = None) -> str:
@@ -399,6 +400,17 @@ def _build_scan_universe(data_client: AlpacaDataClient) -> list[str]:
     return deduped[:max_tickers]
 
 
+def _apply_watchlist_mode(universe: list[str], control: dict) -> list[str]:
+    mode = str(control.get("mode", "off") or "off").strip().lower()
+    tickers = [str(s).upper() for s in (control.get("tickers") or []) if str(s).strip()]
+    ticker_set = set(tickers)
+    if mode == "only_listed":
+        return tickers
+    if mode == "exclude_listed" and ticker_set:
+        return [s for s in universe if s not in ticker_set]
+    return universe
+
+
 def _flatten_positions_for_killswitch(broker: AlpacaBroker, now_et: datetime, *, label: str = "KILLSWITCH") -> None:
     poll_seconds = max(1, int(config.EXIT_ORDER_STATUS_POLL_SECONDS))
     max_wait_seconds = max(poll_seconds, int(config.EXIT_ORDER_MAX_WAIT_SECONDS))
@@ -520,6 +532,10 @@ def main():
     }
     last_entry_debug: dict = dict(state.get("last_entry_debug") or {})
     last_exit_debug: dict = dict(state.get("last_exit_debug") or {})
+    open_position_pl_history: dict[str, list[dict[str, float | str | None]]] = dict(
+        state.get("open_position_pl_history") or {}
+    )
+    watchlist_control_state: dict = dict(state.get("watchlist_control") or {})
     last_trader_heartbeat_et = str(state.get("last_trader_heartbeat_et", "") or "")
     last_alpaca_auth_error_et = str(state.get("last_alpaca_auth_error_et", "") or "")
     last_alpaca_auth_error = str(state.get("last_alpaca_auth_error", "") or "")
@@ -555,6 +571,8 @@ def main():
                 "ticker_reentries_used": ticker_reentries_used,
                 "last_entry_debug": last_entry_debug,
                 "last_exit_debug": last_exit_debug,
+                "open_position_pl_history": open_position_pl_history,
+                "watchlist_control": watchlist_control_state,
                 "last_trader_heartbeat_et": last_trader_heartbeat_et,
                 "last_alpaca_auth_error_et": last_alpaca_auth_error_et,
                 "last_alpaca_auth_error": last_alpaca_auth_error,
@@ -1068,10 +1086,16 @@ def main():
             )
             next_heartbeat_at = time.time() + max(30, int(config.HEARTBEAT_SECONDS))
 
+        watchlist_control_state = load_watchlist_control()
+        watchlist_mode = str(watchlist_control_state.get("mode", "off") or "off").lower()
         watchlist = _build_scan_universe(data_client)
+        watchlist = _apply_watchlist_mode(watchlist, watchlist_control_state)
         if hot_tickers:
             watchlist = hot_tickers + [s for s in watchlist if s not in hot_tickers]
-        print(f"[{ts(now_et)}] Running full-universe scan on {len(watchlist)} tickers.")
+        print(
+            f"[{ts(now_et)}] Running scan on {len(watchlist)} tickers "
+            f"(watchlist mode={watchlist_mode})."
+        )
 
         if catalyst_mode_active and catalyst_mode_until and now_et >= catalyst_mode_until:
             catalyst_mode_active = False
@@ -1197,6 +1221,8 @@ def main():
         entry_debug: dict[str, object] = {
             "loop_ts_et": ts(now_et),
             "watchlist_count": len(watchlist),
+            "watchlist_mode": watchlist_mode,
+            "watchlist_tickers": list(watchlist_control_state.get("tickers") or []),
             "scan_pass_count": len(signals),
             "signals_considered": 0,
             "entry_orders_submitted": 0,
@@ -1654,6 +1680,19 @@ def main():
                 meta["max_plpc"] = max(float(meta.get("max_plpc", plpc) or plpc), plpc)
                 open_trade_meta[symbol] = meta
 
+            history_rows = open_position_pl_history.get(symbol)
+            if not isinstance(history_rows, list):
+                history_rows = []
+            history_rows.append(
+                {
+                    "ts": now_et.isoformat(),
+                    "plpc": round(float(plpc) * 100.0, 4),
+                    "mark": round(float(live_mark_price), 6) if live_mark_price is not None else None,
+                }
+            )
+            # Keep only the most recent ~3 hours at 15s loop cadence.
+            open_position_pl_history[symbol] = history_rows[-800:]
+
             exit_reason = None
             close_qty = qty
             ticker_for_pos = str(meta.get("ticker", "") or "").upper()
@@ -1873,6 +1912,15 @@ def main():
                     _save_runtime_state()
                     print(f"[{ts(now_et)}] {symbol}: error closing position: {exc}")
                 time.sleep(config.RATE_LIMIT_SLEEP_SECONDS)
+
+        live_symbols = {
+            str(getattr(p, "symbol", "") or "")
+            for p in option_positions
+            if position_qty_as_int(getattr(p, "qty", 0)) > 0
+        }
+        stale_history_symbols = [sym for sym in open_position_pl_history.keys() if sym not in live_symbols]
+        for stale_sym in stale_history_symbols:
+            open_position_pl_history.pop(stale_sym, None)
 
         # Check hard close time again after exit loop — catches cases where the loop
         # was mid-iteration when the close window opened.

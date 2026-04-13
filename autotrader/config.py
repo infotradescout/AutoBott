@@ -340,6 +340,7 @@ STATE_JSON_PATH          = _DATA_DIR / "runtime_state.json"
 SCAN_LOG_CSV_PATH        = _DATA_DIR / "scan_log.csv"
 OBSERVATION_LOG_CSV_PATH = _DATA_DIR / "observation_log.csv"
 TRADING_CONTROL_PATH     = _DATA_DIR / "trading_control.json"
+WATCHLIST_CONTROL_PATH   = _DATA_DIR / "watchlist_control.json"
 
 
 # ---------------------------------------------------------------------------

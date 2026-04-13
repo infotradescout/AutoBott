@@ -6,7 +6,7 @@ import csv
 import hmac
 import os
 import re
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -18,6 +18,7 @@ import config
 from env_config import get_required_env, load_runtime_env
 from state_store import load_bot_state
 from trading_control import load_trading_control, set_manual_stop
+from watchlist_control import load_watchlist_control, update_watchlist_control
 
 load_runtime_env()
 
@@ -185,6 +186,51 @@ def _fetch_snapshots(symbols: list[str]) -> dict[str, dict[str, Any]]:
         resp.raise_for_status()
         body = resp.json()
         return body if isinstance(body, dict) else {}
+    except Exception:
+        return {}
+
+
+def _fetch_intraday_stock_series(symbols: list[str], limit: int = 78) -> dict[str, list[dict[str, Any]]]:
+    clean_symbols = [str(s).upper() for s in symbols if str(s).strip()]
+    if not clean_symbols:
+        return {}
+    now_et = _now_et()
+    start_et = now_et - timedelta(hours=8)
+    try:
+        resp = requests.get(
+            f"{DATA_BASE_URL}/v2/stocks/bars",
+            headers=HEADERS,
+            params={
+                "symbols": ",".join(clean_symbols),
+                "timeframe": "5Min",
+                "start": start_et.astimezone(pytz.UTC).isoformat().replace("+00:00", "Z"),
+                "end": now_et.astimezone(pytz.UTC).isoformat().replace("+00:00", "Z"),
+                "limit": max(50, int(limit)),
+                "adjustment": "raw",
+                "feed": "iex",
+            },
+            timeout=12,
+        )
+        resp.raise_for_status()
+        body = resp.json()
+        bars_map = body.get("bars", {}) if isinstance(body, dict) else {}
+        out: dict[str, list[dict[str, Any]]] = {}
+        if not isinstance(bars_map, dict):
+            return out
+        for symbol in clean_symbols:
+            rows = bars_map.get(symbol, [])
+            if not isinstance(rows, list):
+                out[symbol] = []
+                continue
+            points: list[dict[str, Any]] = []
+            for item in rows[-limit:]:
+                ts_raw = item.get("t")
+                close = _safe_float(item.get("c"), 0.0)
+                if not ts_raw or close <= 0:
+                    continue
+                points.append({"ts": str(ts_raw), "close": round(close, 4)})
+            out[symbol] = points
+        return out
     except Exception:
         return {}
 
@@ -687,6 +733,113 @@ def api_trading_start():
         return jsonify({"error": str(exc)}), 500
 
 
+@app.get("/api/watchlist-control")
+def api_watchlist_control():
+    try:
+        state = load_watchlist_control()
+        return jsonify(
+            {
+                "mode": str(state.get("mode", "off")),
+                "tickers": list(state.get("tickers") or []),
+                "updated_at_et": str(state.get("updated_at_et", "")),
+                "reason": str(state.get("reason", "")),
+            }
+        )
+    except Exception as exc:  # noqa: BLE001
+        return jsonify({"error": str(exc)}), 500
+
+
+@app.post("/api/watchlist-control")
+def api_watchlist_control_update():
+    try:
+        ok, err, status = _verify_control_token()
+        if not ok:
+            return jsonify({"error": err}), status
+        payload = request.get_json(silent=True) or {}
+        mode_raw = payload.get("mode")
+        mode = str(mode_raw or "").strip().lower() if mode_raw is not None else None
+        tickers_raw = payload.get("tickers")
+        tickers: list[str] | None = None
+        if isinstance(tickers_raw, list):
+            tickers = [str(t).upper() for t in tickers_raw]
+        elif isinstance(tickers_raw, str):
+            tickers = [chunk.strip().upper() for chunk in re.split(r"[\s,]+", tickers_raw) if chunk.strip()]
+        state = update_watchlist_control(mode=mode, tickers=tickers, reason="dashboard_watchlist_update")
+        return jsonify(
+            {
+                "ok": True,
+                "mode": str(state.get("mode", "off")),
+                "tickers": list(state.get("tickers") or []),
+                "updated_at_et": str(state.get("updated_at_et", "")),
+                "reason": str(state.get("reason", "")),
+            }
+        )
+    except Exception as exc:  # noqa: BLE001
+        return jsonify({"error": str(exc)}), 500
+
+
+@app.get("/api/watch/open")
+def api_watch_open():
+    try:
+        resp = requests.get(f"{BASE_URL}/v2/positions", headers=HEADERS, timeout=10)
+        resp.raise_for_status()
+        state = load_bot_state()
+        open_meta = dict(state.get("open_trade_meta") or {})
+        pl_history = dict(state.get("open_position_pl_history") or {})
+        option_rows = []
+        underlyings: list[str] = []
+        for pos in resp.json():
+            asset_class = str(pos.get("asset_class", "")).lower()
+            if asset_class not in ("us_option", "option"):
+                continue
+            symbol = str(pos.get("symbol", "") or "")
+            if not symbol:
+                continue
+            underlying = _extract_underlying(symbol)
+            if underlying:
+                underlyings.append(underlying)
+            meta = open_meta.get(symbol, {})
+            option_rows.append(
+                {
+                    "symbol": symbol,
+                    "underlying": underlying,
+                    "direction": _extract_direction(symbol),
+                    "qty": int(_safe_float(pos.get("qty"), 0)),
+                    "entry_price": _safe_float(pos.get("avg_entry_price"), 0.0),
+                    "current_price": _safe_float(pos.get("current_price"), 0.0),
+                    "unrealized_plpc": round(_safe_float(pos.get("unrealized_plpc"), 0.0) * 100.0, 4),
+                    "entry_time": str(meta.get("entry_time_iso", "") or ""),
+                }
+            )
+
+        stock_series_map = _fetch_intraday_stock_series(list(dict.fromkeys(underlyings)), limit=96)
+        payload_rows = []
+        for row in option_rows:
+            symbol = str(row.get("symbol", ""))
+            underlying = str(row.get("underlying", ""))
+            raw_series = pl_history.get(symbol, [])
+            pnl_series: list[dict[str, Any]] = []
+            if isinstance(raw_series, list):
+                for point in raw_series[-240:]:
+                    if not isinstance(point, dict):
+                        continue
+                    ts_raw = point.get("ts")
+                    plpc_raw = point.get("plpc")
+                    if ts_raw is None or plpc_raw is None:
+                        continue
+                    pnl_series.append({"ts": str(ts_raw), "plpc": _safe_float(plpc_raw)})
+            payload_rows.append(
+                {
+                    **row,
+                    "pnl_series": pnl_series,
+                    "stock_series": stock_series_map.get(underlying, []),
+                }
+            )
+        return jsonify({"rows": payload_rows, "generated_at": _now_et().strftime("%Y-%m-%d %H:%M:%S ET")})
+    except Exception as exc:  # noqa: BLE001
+        return jsonify({"error": str(exc)}), 500
+
+
 @app.get("/api/daily-review")
 def api_daily_review():
     try:
@@ -704,6 +857,247 @@ def api_daily_review():
         return jsonify(payload)
     except Exception as exc:  # noqa: BLE001
         return jsonify({"error": str(exc)}), 500
+
+
+@app.get("/watch")
+def watch_page():
+    return render_template_string(
+        """
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Trade Watch</title>
+  <style>
+    :root {
+      --bg:#0a0f16;
+      --card:rgba(17,26,39,.88);
+      --text:#e8f1fa;
+      --muted:#8ca2bd;
+      --border:rgba(124,155,189,.3);
+      --green:#1dd75f;
+      --red:#ff4e57;
+      --cyan:#2ac7ff;
+      --yellow:#f8b739;
+    }
+    * { box-sizing:border-box; }
+    body {
+      margin:0; color:var(--text);
+      font-family:"Segoe UI",Tahoma,Geneva,Verdana,sans-serif;
+      background:
+        radial-gradient(1200px 500px at 100% -20%, rgba(42,199,255,.12), transparent 45%),
+        radial-gradient(900px 420px at 0% -10%, rgba(29,215,95,.1), transparent 40%),
+        linear-gradient(150deg, #060b12 0%, #0d1726 50%, #0a1019 100%);
+      min-height:100vh;
+    }
+    .wrap { max-width:1300px; margin:0 auto; padding:16px; }
+    .top { display:flex; justify-content:space-between; align-items:center; gap:12px; flex-wrap:wrap; margin-bottom:12px; }
+    .title { font-size:24px; font-weight:800; }
+    .muted { color:var(--muted); }
+    .btn {
+      border:1px solid var(--border); border-radius:10px; padding:8px 10px;
+      background:rgba(127,156,191,.15); color:var(--text); font-weight:700; cursor:pointer;
+      text-decoration:none;
+    }
+    .card {
+      background:var(--card); border:1px solid var(--border);
+      border-radius:14px; padding:12px; margin-bottom:10px;
+    }
+    .row { display:flex; flex-wrap:wrap; gap:10px; align-items:center; }
+    .input, .select {
+      background:#0a1321; color:var(--text); border:1px solid var(--border);
+      border-radius:10px; padding:8px 10px;
+    }
+    .select { min-width:190px; }
+    .chips { display:flex; flex-wrap:wrap; gap:7px; margin-top:8px; }
+    .chip {
+      border:1px solid var(--border); border-radius:999px; padding:4px 8px;
+      font-size:12px; color:var(--text);
+    }
+    .grid { display:grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap:10px; }
+    .kpi { display:grid; grid-template-columns:repeat(4, minmax(0,1fr)); gap:8px; margin-bottom:8px; font-size:13px; color:var(--muted); }
+    .kpi strong { color:var(--text); font-family:ui-monospace,SFMono-Regular,Menlo,monospace; font-size:15px; }
+    svg { width:100%; height:130px; border:1px solid var(--border); border-radius:10px; background:rgba(5,10,17,.6); }
+    .pos { color:var(--green); }
+    .neg { color:var(--red); }
+    .zero { color:var(--muted); }
+    @media (max-width: 980px) {
+      .grid { grid-template-columns: 1fr; }
+      .kpi { grid-template-columns:repeat(2, minmax(0,1fr)); }
+    }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <div class="top">
+      <div>
+        <div class="title">Open Trade Watch</div>
+        <div class="muted">Track live open trade P&L and intraday stock movement.</div>
+      </div>
+      <div class="row">
+        <a class="btn" href="/">Dashboard</a>
+      </div>
+    </div>
+
+    <div class="card">
+      <div style="font-weight:700; margin-bottom:8px;">Watchlist Trading Policy</div>
+      <div class="row">
+        <select id="watch-mode" class="select">
+          <option value="off">Off (No watchlist filter)</option>
+          <option value="only_listed">Trade only listed tickers</option>
+          <option value="exclude_listed">Trade all except listed tickers</option>
+        </select>
+        <input id="watch-input" class="input" style="min-width:320px;" placeholder="Add tickers: AAPL, MSFT, NVDA" />
+        <button class="btn" onclick="saveWatchlist()">Save Watchlist</button>
+      </div>
+      <div class="muted" style="margin-top:8px;">Current list:</div>
+      <div id="watchlist-chips" class="chips"></div>
+      <div id="watch-updated" class="muted" style="margin-top:8px;"></div>
+    </div>
+
+    <div id="open-rows" class="grid"></div>
+  </div>
+
+  <script>
+    function cls(v) {
+      if (v > 0) return "pos";
+      if (v < 0) return "neg";
+      return "zero";
+    }
+    function fmtPct(v) {
+      const n = Number(v);
+      if (Number.isNaN(n)) return "--";
+      return `${n >= 0 ? "+" : ""}${n.toFixed(2)}%`;
+    }
+    function fmtMoney(v) {
+      const n = Number(v);
+      if (Number.isNaN(n)) return "--";
+      return n.toLocaleString(undefined, {style:"currency", currency:"USD", maximumFractionDigits:2});
+    }
+    function drawSeries(svg, values, color) {
+      if (!svg) return;
+      if (!Array.isArray(values) || !values.length) {
+        svg.innerHTML = `<text x="10" y="22" fill="#8ca2bd" font-size="12">No series yet</text>`;
+        return;
+      }
+      const min = Math.min(...values, 0);
+      const max = Math.max(...values, 0);
+      const span = Math.max(1e-6, max - min);
+      const toX = i => values.length === 1 ? 210 : (i / (values.length - 1)) * 420;
+      const toY = v => 112 - ((v - min) / span) * 98;
+      const points = values.map((v, i) => `${toX(i)},${toY(v)}`).join(" ");
+      const zeroY = toY(0);
+      const fill = `M 0 112 L ${points} L 420 112 Z`;
+      svg.innerHTML = `
+        <line x1="0" y1="${zeroY}" x2="420" y2="${zeroY}" stroke="rgba(140,162,189,.35)" stroke-dasharray="3 3"></line>
+        <path d="${fill}" fill="${color}22"></path>
+        <path d="M ${points}" fill="none" stroke="${color}" stroke-width="2.3"></path>
+      `;
+    }
+    async function fetchJson(url, options) {
+      try {
+        const res = await fetch(url, options);
+        const body = await res.json();
+        if (!res.ok) return { error: body.error || "request failed" };
+        return body;
+      } catch {
+        return { error: "request failed" };
+      }
+    }
+    function parseTickerInput(raw) {
+      return String(raw || "")
+        .toUpperCase()
+        .split(/[\s,]+/)
+        .map(x => x.trim())
+        .filter(Boolean);
+    }
+    async function loadWatchlist() {
+      const data = await fetchJson("/api/watchlist-control");
+      if (data.error) return;
+      const modeEl = document.getElementById("watch-mode");
+      if (modeEl) modeEl.value = String(data.mode || "off");
+      const chips = document.getElementById("watchlist-chips");
+      if (chips) {
+        const tickers = Array.isArray(data.tickers) ? data.tickers : [];
+        chips.innerHTML = tickers.length ? tickers.map(t => `<span class="chip">${t}</span>`).join("") : `<span class="muted">No tickers saved</span>`;
+      }
+      const upd = document.getElementById("watch-updated");
+      if (upd) upd.textContent = data.updated_at_et ? `Updated: ${data.updated_at_et}` : "";
+    }
+    async function saveWatchlist() {
+      const mode = document.getElementById("watch-mode").value;
+      const tickers = parseTickerInput(document.getElementById("watch-input").value);
+      let controlToken = localStorage.getItem("tradeControlToken") || "";
+      if (!controlToken) {
+        controlToken = window.prompt("Enter dashboard control token");
+        if (controlToken) localStorage.setItem("tradeControlToken", controlToken);
+      }
+      if (!controlToken) {
+        alert("Control token required");
+        return;
+      }
+      const body = await fetchJson("/api/watchlist-control", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "X-Trade-Control-Token": controlToken,
+        },
+        body: JSON.stringify({ mode, tickers }),
+      });
+      if (body.error) {
+        alert(`Watchlist update failed: ${body.error}`);
+        return;
+      }
+      document.getElementById("watch-input").value = "";
+      await loadWatchlist();
+    }
+    function renderOpen(rows) {
+      const wrap = document.getElementById("open-rows");
+      if (!wrap) return;
+      const data = Array.isArray(rows) ? rows : [];
+      if (!data.length) {
+        wrap.innerHTML = `<div class="card muted">No open option trades right now.</div>`;
+        return;
+      }
+      wrap.innerHTML = data.map((r, i) => `
+        <div class="card">
+          <div style="font-weight:700; margin-bottom:8px;">${r.underlying || "-"} <span class="${cls(Number(r.unrealized_plpc || 0))}">(${fmtPct(Number(r.unrealized_plpc || 0))})</span></div>
+          <div class="kpi">
+            <div>Option<br><strong>${r.symbol || "-"}</strong></div>
+            <div>Direction<br><strong>${r.direction || "-"}</strong></div>
+            <div>Entry<br><strong>${fmtMoney(r.entry_price)}</strong></div>
+            <div>Now<br><strong>${fmtMoney(r.current_price)}</strong></div>
+          </div>
+          <div class="muted" style="font-size:12px; margin-bottom:6px;">Open P&L % (loop samples)</div>
+          <svg id="pnl-${i}" viewBox="0 0 420 120" preserveAspectRatio="none"></svg>
+          <div class="muted" style="font-size:12px; margin:8px 0 6px;">Underlying Stock Price (5m)</div>
+          <svg id="stk-${i}" viewBox="0 0 420 120" preserveAspectRatio="none"></svg>
+        </div>
+      `).join("");
+
+      data.forEach((r, i) => {
+        const pnl = Array.isArray(r.pnl_series) ? r.pnl_series.map(p => Number(p.plpc || 0)).filter(v => !Number.isNaN(v)) : [];
+        const stk = Array.isArray(r.stock_series) ? r.stock_series.map(p => Number(p.close || 0)).filter(v => !Number.isNaN(v) && v > 0) : [];
+        drawSeries(document.getElementById(`pnl-${i}`), pnl, "#2ac7ff");
+        drawSeries(document.getElementById(`stk-${i}`), stk, "#f8b739");
+      });
+    }
+    async function refreshOpen() {
+      const body = await fetchJson("/api/watch/open");
+      if (body.error) return;
+      renderOpen(body.rows || []);
+    }
+    async function refreshAll() {
+      await Promise.all([loadWatchlist(), refreshOpen()]);
+    }
+    refreshAll();
+    setInterval(refreshOpen, 15000);
+  </script>
+</body>
+</html>
+        """
+    )
 
 
 @app.get("/")
@@ -806,7 +1200,10 @@ def home():
         <div class="title">Alpaca Options Autotrader Dashboard</div>
         <div class="muted">Last updated: <span id="last-updated">--</span> | Auto-refresh: 30s</div>
       </div>
-      <div class="paper">{{ "PAPER MODE" if paper else "LIVE MODE" }}</div>
+      <div style="display:flex; align-items:center; gap:8px;">
+        <a href="/watch" class="ctrl-btn" style="text-decoration:none;">WATCH PAGE</a>
+        <div class="paper">{{ "PAPER MODE" if paper else "LIVE MODE" }}</div>
+      </div>
     </div>
 
     <div class="card section">
