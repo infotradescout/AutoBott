@@ -1361,6 +1361,9 @@ def main():
                 _mark_skip("max_positions_reached")
                 print(f"[{ts(now_et)}] Max positions reached. Stopping new entries this loop.")
                 break
+
+            # Check both live Alpaca positions AND in-memory open_trade_meta to prevent
+            # duplicate entries when Alpaca API returns stale data right after an order fill.
             existing_qty_for_ticker = 0
             for existing_pos in option_positions:
                 existing_qty = position_qty_as_int(getattr(existing_pos, "qty", 0))
@@ -1372,11 +1375,17 @@ def main():
                     existing_ticker = parsed_ticker.upper()
                 if existing_ticker == ticker:
                     existing_qty_for_ticker += existing_qty
+            # Also check in-memory meta (catches positions placed this same loop iteration)
+            if existing_qty_for_ticker == 0:
+                for sym, m in open_trade_meta.items():
+                    if str(m.get("ticker", "") or "").upper() == ticker:
+                        existing_qty_for_ticker += int(m.get("qty", 1) or 1)
+                        break
             if existing_qty_for_ticker > 0:
                 _mark_skip("ticker_position_already_open")
                 print(
                     f"[{ts(now_et)}] {ticker}: skip (existing open position qty={existing_qty_for_ticker}; "
-                    "one position per ticker)."
+                    "one position per ticker.)"
                 )
                 continue
 
@@ -1620,11 +1629,19 @@ def main():
                 entry_price=entry_price_for_monitor,
             )
 
+            # Calculate P&L from position data directly — most reliable source.
+            # Use current_price vs avg_entry_price from the position object first,
+            # then override with live quote if available.
             try:
-                plpc = float(getattr(pos, "unrealized_plpc", 0))
+                pos_current = float(getattr(pos, "current_price", 0) or 0)
+                pos_entry = float(getattr(pos, "avg_entry_price", 0) or 0)
+                if pos_entry > 0 and pos_current > 0:
+                    plpc = (pos_current - pos_entry) / pos_entry
+                else:
+                    plpc = float(getattr(pos, "unrealized_plpc", 0) or 0)
             except (TypeError, ValueError):
                 plpc = 0.0
-            # Prefer live quote-derived PLPC when available to avoid stale position snapshots.
+            # Override with live quote if available (more real-time than position snapshot)
             if live_plpc is not None:
                 plpc = float(live_plpc)
 
@@ -1857,6 +1874,9 @@ def main():
                     print(f"[{ts(now_et)}] {symbol}: error closing position: {exc}")
                 time.sleep(config.RATE_LIMIT_SLEEP_SECONDS)
 
+        # Check hard close time again after exit loop — catches cases where the loop
+        # was mid-iteration when the close window opened.
+        now_et = datetime.now(tz)
         if is_at_or_after(now_et, config.HARD_CLOSE_TIME):
             print(f"[{ts(now_et)}] Hard close time reached. Flattening and shutting down.")
             option_positions = broker.get_open_option_positions()
