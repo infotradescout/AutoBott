@@ -955,45 +955,47 @@ def watch_page():
   <title>Trade Watch</title>
   <style>
     :root {
-      --bg:#0a0f16;
-      --card:rgba(17,26,39,.88);
-      --text:#e8f1fa;
-      --muted:#8ca2bd;
-      --border:rgba(124,155,189,.3);
-      --green:#1dd75f;
-      --red:#ff4e57;
-      --cyan:#2ac7ff;
-      --yellow:#f8b739;
+      --bg:#09111a;
+      --card:rgba(16, 25, 38, .88);
+      --text:#eaf3fc;
+      --muted:#97aec7;
+      --border:rgba(126,159,194,.3);
+      --green:#25d366;
+      --red:#ff5d66;
+      --cyan:#31cbff;
+      --yellow:#ffbf4a;
+      --radius:14px;
     }
     * { box-sizing:border-box; }
     body {
       margin:0; color:var(--text);
-      font-family:"Segoe UI",Tahoma,Geneva,Verdana,sans-serif;
+      font-family:"Avenir Next","Nunito Sans","Segoe UI",Tahoma,sans-serif;
       background:
-        radial-gradient(1200px 500px at 100% -20%, rgba(42,199,255,.12), transparent 45%),
-        radial-gradient(900px 420px at 0% -10%, rgba(29,215,95,.1), transparent 40%),
-        linear-gradient(150deg, #060b12 0%, #0d1726 50%, #0a1019 100%);
+        radial-gradient(1200px 500px at 100% -20%, rgba(49,203,255,.14), transparent 45%),
+        radial-gradient(900px 420px at 0% -10%, rgba(37,211,102,.1), transparent 40%),
+        linear-gradient(150deg, #060b12 0%, #0d1726 50%, #0a111b 100%);
       min-height:100vh;
     }
     .wrap { max-width:1300px; margin:0 auto; padding:16px; }
     .top { display:flex; justify-content:space-between; align-items:center; gap:12px; flex-wrap:wrap; margin-bottom:12px; }
-    .title { font-size:24px; font-weight:800; }
+    .title { font-size:clamp(20px, 2.2vw, 30px); font-weight:800; }
     .muted { color:var(--muted); }
     .btn {
-      border:1px solid var(--border); border-radius:10px; padding:8px 10px;
+      border:1px solid var(--border); border-radius:12px; padding:10px 12px;
       background:rgba(127,156,191,.15); color:var(--text); font-weight:700; cursor:pointer;
       text-decoration:none;
     }
     .card {
       background:var(--card); border:1px solid var(--border);
-      border-radius:14px; padding:12px; margin-bottom:10px;
+      border-radius:var(--radius); padding:12px; margin-bottom:10px;
     }
     .row { display:flex; flex-wrap:wrap; gap:10px; align-items:center; }
     .input, .select {
       background:#0a1321; color:var(--text); border:1px solid var(--border);
-      border-radius:10px; padding:8px 10px;
+      border-radius:10px; padding:10px;
     }
     .select { min-width:190px; }
+    .watch-input { min-width:320px; }
     .chips { display:flex; flex-wrap:wrap; gap:7px; margin-top:8px; }
     .chip {
       border:1px solid var(--border); border-radius:999px; padding:4px 8px;
@@ -1013,16 +1015,27 @@ def watch_page():
     .label2 { color:var(--muted); font-size:12px; text-transform:uppercase; letter-spacing:.35px; margin-bottom:4px; }
     .value2 { font-family:ui-monospace,SFMono-Regular,Menlo,monospace; font-size:20px; }
     table { width:100%; border-collapse: collapse; font-size:13px; }
-    th, td { border-bottom: 1px solid var(--border); padding: 8px 6px; text-align: left; }
+    th, td { border-bottom: 1px solid var(--border); padding: 8px 6px; text-align: left; white-space: nowrap; }
     th { color: var(--muted); font-weight: 600; }
     .pos { color:var(--green); }
     .neg { color:var(--red); }
     .zero { color:var(--muted); }
+    #hist-trades-wrap { overflow-x:auto; -webkit-overflow-scrolling: touch; }
+    #hist-trades-wrap table { min-width: 720px; }
     @media (max-width: 980px) {
       .grid { grid-template-columns: 1fr; }
       .kpi { grid-template-columns:repeat(2, minmax(0,1fr)); }
       .hist-grid { grid-template-columns: 1fr; }
       .hist-kpi { grid-template-columns:repeat(2, minmax(0,1fr)); }
+    }
+    @media (max-width: 640px) {
+      .wrap { padding:12px; }
+      .tabs { width:100%; }
+      .tab { flex:1 1 140px; text-align:center; }
+      .watch-input, .select, .btn { width:100%; min-width:0; }
+      .btn { min-height:40px; }
+      .kpi { grid-template-columns:1fr; gap:6px; }
+      svg { height:120px; }
     }
   </style>
 </head>
@@ -1052,7 +1065,7 @@ def watch_page():
             <option value="only_listed">Trade only listed tickers</option>
             <option value="exclude_listed">Trade all except listed tickers</option>
           </select>
-          <input id="watch-input" class="input" style="min-width:320px;" placeholder="Add tickers: AAPL, MSFT, NVDA" />
+          <input id="watch-input" class="input watch-input" placeholder="Add tickers: AAPL, MSFT, NVDA" />
           <button class="btn" onclick="saveWatchlist()">Save Watchlist</button>
         </div>
         <div class="muted" style="margin-top:8px;">Current list:</div>
@@ -1335,61 +1348,125 @@ def home():
   <title>Alpaca Options Dashboard</title>
   <style>
     :root {
-      --bg: #070b11;
-      --card: rgba(15, 23, 36, 0.82);
-      --card-strong: rgba(20, 31, 49, 0.95);
-      --text: #e9f0f7;
-      --muted: #8fa1b8;
-      --green: #1dd75f;
-      --red: #ff4e57;
-      --yellow: #f8b739;
-      --cyan: #2ac7ff;
-      --border: rgba(127, 156, 191, 0.25);
-      --shadow: 0 12px 30px rgba(2, 8, 20, 0.45);
+      --bg: #071018;
+      --card: rgba(15, 23, 35, 0.84);
+      --card-strong: rgba(24, 38, 58, 0.96);
+      --text: #ebf3fb;
+      --muted: #9ab0c8;
+      --green: #25d366;
+      --red: #ff5d66;
+      --yellow: #ffbf4a;
+      --cyan: #31cbff;
+      --border: rgba(141, 172, 206, 0.26);
+      --shadow: 0 14px 34px rgba(2, 8, 20, 0.45);
+      --radius: 16px;
     }
     * { box-sizing: border-box; }
     body {
       margin: 0;
       color: var(--text);
-      font-family: "Segoe UI", Tahoma, Geneva, Verdana, sans-serif;
+      font-family: "Avenir Next", "Nunito Sans", "Segoe UI", Tahoma, sans-serif;
       background:
-        radial-gradient(1200px 500px at -10% -20%, rgba(42, 199, 255, 0.16), transparent 45%),
-        radial-gradient(1000px 450px at 110% -10%, rgba(29, 215, 95, 0.12), transparent 45%),
-        linear-gradient(140deg, #05080f 0%, #0a1220 45%, #090f19 100%);
+        radial-gradient(1200px 500px at -10% -20%, rgba(49, 203, 255, 0.18), transparent 45%),
+        radial-gradient(1000px 450px at 110% -10%, rgba(37, 211, 102, 0.13), transparent 45%),
+        linear-gradient(140deg, #050a11 0%, #0b1524 45%, #0a111d 100%);
       min-height: 100vh;
     }
-    .wrap { max-width: 1200px; margin: 0 auto; padding: 16px; }
-    .header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 14px; padding: 8px 2px; }
-    .title { font-size: 24px; font-weight: 750; letter-spacing: 0.2px; }
-    .paper { color: #111; background: linear-gradient(180deg, #ffd773 0%, #f8b739 100%); padding: 5px 10px; border-radius: 999px; font-size: 12px; font-weight: 800; }
+    .wrap { max-width: 1260px; margin: 0 auto; padding: 16px; }
+    .header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      gap: 12px;
+      margin-bottom: 14px;
+      padding: 10px 4px;
+    }
+    .title {
+      font-size: clamp(19px, 2.4vw, 30px);
+      font-weight: 800;
+      line-height: 1.1;
+      letter-spacing: 0.2px;
+    }
+    .paper {
+      color: #101214;
+      background: linear-gradient(180deg, #ffd773 0%, #ffbf4a 100%);
+      padding: 6px 10px;
+      border-radius: 999px;
+      font-size: 12px;
+      font-weight: 800;
+      white-space: nowrap;
+    }
     .ctrl { display:flex; gap:8px; align-items:center; flex-wrap:wrap; }
-    .ctrl-btn { border: 1px solid var(--border); border-radius: 10px; padding: 8px 10px; font-weight: 700; cursor: pointer; color: var(--text); background: rgba(127, 156, 191, 0.15); }
+    .ctrl-btn {
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      padding: 10px 12px;
+      min-height: 40px;
+      font-weight: 700;
+      cursor: pointer;
+      color: var(--text);
+      background: rgba(127, 156, 191, 0.15);
+      transition: transform .15s ease, filter .15s ease;
+      -webkit-tap-highlight-color: transparent;
+    }
+    .ctrl-btn:hover { filter: brightness(1.07); transform: translateY(-1px); }
+    .ctrl-btn:active { transform: translateY(0); }
     .ctrl-btn.stop { background: rgba(255, 78, 87, 0.2); border-color: rgba(255, 78, 87, 0.45); }
     .ctrl-btn.start { background: rgba(29, 215, 95, 0.2); border-color: rgba(29, 215, 95, 0.45); }
     .ctrl-state { font-size: 13px; color: var(--muted); }
     .muted { color: var(--muted); }
-    .grid4 { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 10px; }
-    .grid3 { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; }
+    .grid4 { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 11px; }
+    .grid3 { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 11px; }
     .card {
       background: var(--card);
       border: 1px solid var(--border);
-      border-radius: 14px;
-      padding: 12px;
+      border-radius: var(--radius);
+      padding: 13px;
       box-shadow: var(--shadow);
-      backdrop-filter: blur(3px);
+      backdrop-filter: blur(4px);
     }
     .card.strong { background: var(--card-strong); }
-    .label { font-size: 12px; color: var(--muted); margin-bottom: 6px; text-transform: uppercase; letter-spacing: 0.4px; }
-    .num { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 22px; }
+    .label {
+      font-size: 11px;
+      color: var(--muted);
+      margin-bottom: 6px;
+      text-transform: uppercase;
+      letter-spacing: 0.8px;
+      font-weight: 700;
+    }
+    .num {
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      font-size: clamp(20px, 3vw, 25px);
+      line-height: 1.1;
+      font-weight: 700;
+    }
     .section { margin-top: 12px; }
-    .section h3 { margin: 0 0 8px 0; font-size: 14px; color: var(--muted); letter-spacing: 0.4px; }
+    .section h3 { margin: 0 0 8px 0; font-size: 13px; color: var(--muted); letter-spacing: 0.65px; }
     .bar-wrap { margin-bottom: 10px; }
-    .bar-line { display:flex; justify-content:space-between; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 13px; }
+    .bar-line { display:flex; justify-content:space-between; gap:8px; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 13px; }
     .bar { height: 10px; background: #0b1016; border: 1px solid var(--border); border-radius: 999px; overflow: hidden; margin-top: 4px; }
     .fill { height: 100%; width: 0%; background: var(--green); transition: width .2s; }
+    #positions-wrap, #trades-wrap, #scan-wrap, #review-checks-wrap, #review-skipped-wrap, #scan-fails-table {
+      overflow-x: auto;
+      -webkit-overflow-scrolling: touch;
+    }
     table { width: 100%; border-collapse: collapse; font-size: 13px; }
-    th, td { border-bottom: 1px solid var(--border); padding: 8px 6px; text-align: left; }
-    th { color: var(--muted); font-weight: 600; }
+    th, td {
+      border-bottom: 1px solid var(--border);
+      padding: 9px 6px;
+      text-align: left;
+      vertical-align: top;
+      white-space: nowrap;
+    }
+    th { color: var(--muted); font-weight: 700; font-size: 12px; letter-spacing: 0.35px; }
+    #positions-wrap table,
+    #trades-wrap table,
+    #scan-wrap table,
+    #review-checks-wrap table,
+    #review-skipped-wrap table,
+    #scan-fails-table table {
+      min-width: 720px;
+    }
     .badge { font-size: 11px; padding: 2px 7px; border-radius: 999px; border: 1px solid var(--border); }
     .b-green { color: var(--green); border-color: rgba(0,200,83,0.4); }
     .b-red { color: var(--red); border-color: rgba(255,23,68,0.4); }
@@ -1410,9 +1487,55 @@ def home():
     .b-cyan { background: linear-gradient(90deg, #1da8ff, #2ac7ff); }
     .b-green2 { background: linear-gradient(90deg, #19bf58, #1dd75f); }
     .b-red2 { background: linear-gradient(90deg, #ff6d66, #ff4e57); }
-    @media (max-width: 900px) {
+    .head-actions { display:flex; align-items:center; gap:8px; }
+    .spacer-sm { height: 10px; }
+    .mobile-list { display: grid; gap: 8px; }
+    .mobile-item {
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      background: rgba(7, 14, 24, 0.62);
+      padding: 10px;
+    }
+    .mobile-title {
+      font-size: 13px;
+      font-weight: 700;
+      margin-bottom: 6px;
+      display: flex;
+      justify-content: space-between;
+      gap: 8px;
+      align-items: center;
+    }
+    .mobile-grid {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 6px 10px;
+      font-size: 12px;
+    }
+    .mobile-k { color: var(--muted); }
+    .mobile-v { color: var(--text); font-weight: 600; }
+    @media (max-width: 1120px) {
       .grid4 { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    }
+    @media (max-width: 900px) {
       .grid3 { grid-template-columns: 1fr; }
+      .wrap { padding: 12px; }
+      .header { flex-direction: column; align-items: flex-start; }
+      .head-actions { width: 100%; justify-content: space-between; }
+      .ctrl { width: 100%; }
+      .ctrl-btn { flex: 1 1 160px; justify-content: center; }
+      .card { padding: 12px; border-radius: 14px; }
+      .row { grid-template-columns: 92px 1fr 36px; gap: 8px; font-size: 11px; }
+    }
+    @media (max-width: 640px) {
+      .grid4 { grid-template-columns: 1fr; }
+      .title { font-size: 21px; }
+      .paper { font-size: 11px; padding: 5px 8px; }
+      .num { font-size: 22px; }
+      .kpi-sub { font-size: 11px; line-height: 1.3; }
+      .section { margin-top: 10px; }
+      .viz-box { min-height: 116px; }
+      .bar-line { font-size: 12px; }
+      .mobile-grid { grid-template-columns: 1fr; gap: 5px; }
     }
   </style>
 </head>
@@ -1423,7 +1546,7 @@ def home():
         <div class="title">Alpaca Options Autotrader Dashboard</div>
         <div class="muted">Last updated: <span id="last-updated">--</span> | Auto-refresh: 30s</div>
       </div>
-      <div style="display:flex; align-items:center; gap:8px;">
+      <div class="head-actions">
         <a href="/watch" class="ctrl-btn" style="text-decoration:none;">WATCH PAGE</a>
         <div class="paper">{{ "PAPER MODE" if paper else "LIVE MODE" }}</div>
       </div>
@@ -1523,7 +1646,7 @@ def home():
     <div class="card section">
       <h3>DAILY REVIEW + SELF CHECK</h3>
       <div id="review-checks-wrap" class="muted">Loading review checks...</div>
-      <div style="height:10px;"></div>
+      <div class="spacer-sm"></div>
       <div id="review-skipped-wrap" class="muted">Loading skipped analysis...</div>
     </div>
   </div>
@@ -1557,6 +1680,9 @@ def home():
       if (p < 50) return "#00c853";
       if (p <= 80) return "#ffb300";
       return "#ff1744";
+    }
+    function isMobileView() {
+      return window.matchMedia("(max-width: 640px)").matches;
     }
     function pct(n, total) {
       if (!total) return 0;
@@ -1641,6 +1767,24 @@ def home():
       const el = document.getElementById("positions-wrap");
       if (!Array.isArray(data)) { el.textContent = "—"; return; }
       if (data.length === 0) { el.textContent = "No open positions"; return; }
+      if (isMobileView()) {
+        const cards = data.map(p => `
+          <div class="mobile-item">
+            <div class="mobile-title">
+              <span>${p.underlying || "-"}</span>
+              <span class="${pctClass(Number(p.unrealized_plpc || 0))}">${asPct(Number(p.unrealized_plpc || 0), 1)}</span>
+            </div>
+            <div class="mobile-grid">
+              <div><span class="mobile-k">Dir</span> <span class="mobile-v">${p.direction || "-"}</span></div>
+              <div><span class="mobile-k">Qty</span> <span class="mobile-v">${p.qty ?? "-"}</span></div>
+              <div><span class="mobile-k">Entry</span> <span class="mobile-v">${fmtMoney(p.entry_price)}</span></div>
+              <div><span class="mobile-k">Now</span> <span class="mobile-v">${fmtMoney(p.current_price)}</span></div>
+            </div>
+          </div>
+        `).join("");
+        el.innerHTML = `<div class="mobile-list">${cards}</div>`;
+        return;
+      }
       let rows = data.map(p => `
         <tr>
           <td>${p.underlying || "-"}</td>
@@ -1662,6 +1806,27 @@ def home():
       if (!Array.isArray(data)) { el.textContent = "—"; return; }
       const slice = data.slice(0, 10);
       if (slice.length === 0) { el.textContent = "No trades yet"; return; }
+      if (isMobileView()) {
+        const cards = slice.map(t => {
+          const pl = Number(t.pnl_pct || 0) * 100;
+          return `
+            <div class="mobile-item">
+              <div class="mobile-title">
+                <span>${t.ticker || "-"}</span>
+                <span class="${pctClass(pl)}">${asPct(pl, 2)}</span>
+              </div>
+              <div class="mobile-grid">
+                <div><span class="mobile-k">Time</span> <span class="mobile-v">${t.timestamp || "-"}</span></div>
+                <div><span class="mobile-k">Dir</span> <span class="mobile-v">${(t.direction || "-").toUpperCase()}</span></div>
+                <div><span class="mobile-k">Entry</span> <span class="mobile-v">${fmtMoney(t.entry_price)}</span></div>
+                <div><span class="mobile-k">Exit</span> <span class="mobile-v">${fmtMoney(t.exit_price)}</span></div>
+                <div><span class="mobile-k">Reason</span> <span class="mobile-v">${t.exit_reason || "manual"}</span></div>
+              </div>
+            </div>`;
+        }).join("");
+        el.innerHTML = `<div class="mobile-list">${cards}</div>`;
+        return;
+      }
       const rows = slice.map(t => {
         const pl = Number(t.pnl_pct || 0) * 100;
         return `<tr>
@@ -1682,6 +1847,25 @@ def home():
       if (!Array.isArray(data)) { el.textContent = "—"; return; }
       const slice = data.slice(0, 10);
       if (slice.length === 0) { el.textContent = "No passing scan signals yet"; return; }
+      if (isMobileView()) {
+        const cards = slice.map(s => `
+          <div class="mobile-item">
+            <div class="mobile-title">
+              <span>${s.symbol || "-"}</span>
+              <span class="badge ${String(s.direction || "").toLowerCase() === "call" ? "b-green" : "b-red"}">${String(s.direction || "-").toUpperCase()}</span>
+            </div>
+            <div class="mobile-grid">
+              <div><span class="mobile-k">Time</span> <span class="mobile-v">${s.timestamp || "-"}</span></div>
+              <div><span class="mobile-k">RVOL</span> <span class="mobile-v">${s.rvol || "-"}</span></div>
+              <div><span class="mobile-k">RSI</span> <span class="mobile-v">${s.rsi || "-"}</span></div>
+              <div><span class="mobile-k">IVR</span> <span class="mobile-v">${s.iv_rank || "-"}</span></div>
+              <div><span class="mobile-k">Reason</span> <span class="mobile-v">${s.reason || "-"}</span></div>
+            </div>
+          </div>
+        `).join("");
+        el.innerHTML = `<div class="mobile-list">${cards}</div>`;
+        return;
+      }
       const rows = slice.map(s => `
         <tr>
           <td>${s.timestamp || "-"}</td>
@@ -1715,6 +1899,20 @@ def home():
       if (!checks.length) {
         checksEl.innerHTML = `<div class="muted">No checks available yet.</div>`;
       } else {
+        if (isMobileView()) {
+          const cards = checks.map(c => `
+            <div class="mobile-item">
+              <div class="mobile-title">
+                <span>${c.name || "-"}</span>
+                <span>${reviewBadge(String(c.status || ""))}</span>
+              </div>
+              <div class="mobile-grid">
+                <div><span class="mobile-k">Detail</span> <span class="mobile-v">${c.detail || "-"}</span></div>
+              </div>
+            </div>
+          `).join("");
+          checksEl.innerHTML = `<div class="mobile-list">${cards}</div>`;
+        } else {
         const rows = checks.map(c => `
           <tr>
             <td>${reviewBadge(String(c.status || ""))}</td>
@@ -1726,6 +1924,7 @@ def home():
             <thead><tr><th>Status</th><th>Check</th><th>Detail</th></tr></thead>
             <tbody>${rows}</tbody>
           </table>`;
+        }
       }
 
       const skipped = review.skipped || {};
@@ -1736,6 +1935,27 @@ def home():
         return;
       }
       const topReasons = reasons.slice(0, 3).map(r => `<span class="badge b-cyan-soft">${r.reason} (${r.count})</span>`).join(" ");
+      if (isMobileView()) {
+        const cards = items.map(i => `
+          <div class="mobile-item">
+            <div class="mobile-title">
+              <span>${i.symbol || "-"}</span>
+              <span>${i.fail_count ?? "-" } fails</span>
+            </div>
+            <div class="mobile-grid">
+              <div><span class="mobile-k">Last Reason</span> <span class="mobile-v">${i.last_reason || "-"}</span></div>
+              <div><span class="mobile-k">Day Move</span> <span class="mobile-v ${pctClass(Number(i.day_move_pct || 0))}">${i.day_move_pct == null ? "--" : asPct(Number(i.day_move_pct), 2)}</span></div>
+              <div><span class="mobile-k">Day Range</span> <span class="mobile-v">${i.day_range_pct == null ? "--" : asPct(Number(i.day_range_pct), 2)}</span></div>
+              <div><span class="mobile-k">Last Seen</span> <span class="mobile-v">${i.last_seen || "-"}</span></div>
+            </div>
+          </div>
+        `).join("");
+        skippedEl.innerHTML = `
+          <div style="margin-bottom:8px;" class="muted">Top fail reasons: ${topReasons || "—"}</div>
+          <div class="mobile-list">${cards}</div>
+        `;
+        return;
+      }
       const rows = items.map(i => `
         <tr>
           <td>${i.symbol || "-"}</td>
@@ -1991,6 +2211,11 @@ def home():
 
     refresh();
     setInterval(refresh, 30000);
+    let resizeTimer = null;
+    window.addEventListener("resize", () => {
+      if (resizeTimer) clearTimeout(resizeTimer);
+      resizeTimer = setTimeout(() => { refresh(); }, 250);
+    });
   </script>
 </body>
 </html>
