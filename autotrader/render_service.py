@@ -164,20 +164,22 @@ def _run_trader_forever() -> None:
 
 
 def _run_independent_stoploss_guard() -> None:
+    guard_sleep_seconds = max(1, int(getattr(config, "INDEPENDENT_STOPLOSS_INTERVAL_SECONDS", 2) or 2))
+    require_stale_loop = bool(getattr(config, "INDEPENDENT_STOPLOSS_REQUIRE_STALE_LOOP", False))
     while True:
         try:
             runtime_state = load_bot_state()
             if not isinstance(runtime_state, dict):
                 runtime_state = {}
-            if not _is_trader_loop_stale(runtime_state):
-                time.sleep(5)
+            if require_stale_loop and (not _is_trader_loop_stale(runtime_state)):
+                time.sleep(guard_sleep_seconds)
                 continue
 
             broker = _broker()
             positions = broker.get_open_option_positions()
             stop_cap = abs(float(getattr(config, "STOP_LOSS_USD", 10.0) or 10.0))
             if stop_cap <= 0:
-                time.sleep(5)
+                time.sleep(guard_sleep_seconds)
                 continue
 
             for pos in positions:
@@ -218,7 +220,7 @@ def _run_independent_stoploss_guard() -> None:
                     print(f"[render_service] independent stop-loss close failed for {symbol}: {exc}")
         except Exception as exc:  # noqa: BLE001
             print(f"[render_service] independent stop-loss guard error: {exc}")
-        time.sleep(5)
+        time.sleep(guard_sleep_seconds)
 
 
 if __name__ == "__main__":

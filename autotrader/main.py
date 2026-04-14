@@ -1001,14 +1001,26 @@ def main():
         qty: int,
         now_et: datetime,
         label: str,
+        poll_seconds_override: int | None = None,
+        max_wait_seconds_override: int | None = None,
+        retry_attempts_override: int | None = None,
     ) -> tuple[int, float | None]:
         request_qty = max(0, int(qty))
         if request_qty <= 0:
             return 0, None
 
-        poll_seconds = max(1, int(config.EXIT_ORDER_STATUS_POLL_SECONDS))
-        max_wait_seconds = max(poll_seconds, int(config.EXIT_ORDER_MAX_WAIT_SECONDS))
-        retry_attempts = max(1, int(config.EXIT_CLOSE_RETRY_ATTEMPTS))
+        if poll_seconds_override is None:
+            poll_seconds = max(1, int(config.EXIT_ORDER_STATUS_POLL_SECONDS))
+        else:
+            poll_seconds = max(1, int(poll_seconds_override))
+        if max_wait_seconds_override is None:
+            max_wait_seconds = max(poll_seconds, int(config.EXIT_ORDER_MAX_WAIT_SECONDS))
+        else:
+            max_wait_seconds = max(poll_seconds, int(max_wait_seconds_override))
+        if retry_attempts_override is None:
+            retry_attempts = max(1, int(config.EXIT_CLOSE_RETRY_ATTEMPTS))
+        else:
+            retry_attempts = max(1, int(retry_attempts_override))
         non_fill_terminal = {"canceled", "cancelled", "rejected", "expired", "done_for_day", "stopped", "suspended"}
 
         def _wait_for_fill(order_id: str, close_qty: int) -> tuple[int, float | None, str, bool]:
@@ -2212,11 +2224,27 @@ def main():
                         "quote_mark_price": round(float(live_mark_price), 6) if live_mark_price else None,
                         "result": "submitted",
                     }
+                    close_poll_override = None
+                    close_wait_override = None
+                    close_retry_override = None
+                    if exit_reason == "stop_loss":
+                        close_poll_override = int(
+                            getattr(config, "STOPLOSS_EXIT_ORDER_STATUS_POLL_SECONDS", 1) or 1
+                        )
+                        close_wait_override = int(
+                            getattr(config, "STOPLOSS_EXIT_ORDER_MAX_WAIT_SECONDS", 3) or 3
+                        )
+                        close_retry_override = int(
+                            getattr(config, "STOPLOSS_EXIT_CLOSE_RETRY_ATTEMPTS", 1) or 1
+                        )
                     filled_close_qty, close_fill_price = _close_position_with_confirmation(
                         symbol=symbol,
                         qty=close_qty,
                         now_et=now_et,
                         label=f"EXIT {exit_reason}",
+                        poll_seconds_override=close_poll_override,
+                        max_wait_seconds_override=close_wait_override,
+                        retry_attempts_override=close_retry_override,
                     )
                     if filled_close_qty <= 0:
                         last_exit_debug["result"] = "pending_or_not_filled"

@@ -335,6 +335,13 @@ ENTRY_MARKET_FALLBACK_WAIT_SECONDS = 3
 EXIT_ORDER_STATUS_POLL_SECONDS     = 2
 EXIT_ORDER_MAX_WAIT_SECONDS        = 20
 EXIT_CLOSE_RETRY_ATTEMPTS          = 2
+# Faster close profile for hard stop-loss exits.
+STOPLOSS_EXIT_ORDER_STATUS_POLL_SECONDS = 1
+STOPLOSS_EXIT_ORDER_MAX_WAIT_SECONDS    = 3
+STOPLOSS_EXIT_CLOSE_RETRY_ATTEMPTS      = 1
+# Independent stop-loss watchdog runs even when trader loop is healthy.
+INDEPENDENT_STOPLOSS_INTERVAL_SECONDS    = 2
+INDEPENDENT_STOPLOSS_REQUIRE_STALE_LOOP  = False
 TRADES_MAX_ROWS                    = 5000
 
 PAPER = True   # paper trading — set to False only when ready for live
