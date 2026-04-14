@@ -92,6 +92,34 @@ def _seconds_until_next_open(clock) -> int | None:
     return int((next_open - now_utc).total_seconds())
 
 
+def _minutes_from_hhmm(value: str) -> int:
+    raw = str(value or "").strip()
+    parts = raw.split(":", 1)
+    if len(parts) != 2:
+        raise ValueError(f"invalid HH:MM value: {value!r}")
+    hour = int(parts[0])
+    minute = int(parts[1])
+    if not (0 <= hour <= 23 and 0 <= minute <= 59):
+        raise ValueError(f"invalid HH:MM value: {value!r}")
+    return hour * 60 + minute
+
+
+def _closed_market_lead_minutes() -> int:
+    lead_minutes = max(0, int(config.PREOPEN_READY_MINUTES))
+    if not bool(getattr(config, "ENABLE_PREMARKET_OPENING_SIGNALS", False)):
+        return lead_minutes
+
+    try:
+        premarket_start_minutes = _minutes_from_hhmm(str(getattr(config, "PREMARKET_SIGNAL_WINDOW_START", "")))
+        entry_open_minutes = _minutes_from_hhmm(str(getattr(config, "NO_NEW_TRADES_BEFORE", config.MARKET_OPEN)))
+    except ValueError:
+        return lead_minutes
+
+    if premarket_start_minutes >= entry_open_minutes:
+        return lead_minutes
+    return max(lead_minutes, entry_open_minutes - premarket_start_minutes)
+
+
 def _parse_iso_datetime(value: str | None) -> datetime | None:
     if not value:
         return None
@@ -113,6 +141,275 @@ def _slippage_pct(reference_price: float, current_price: float) -> float:
     if reference_price <= 0 or current_price <= 0:
         return 0.0
     return ((current_price - reference_price) / reference_price) * 100.0
+
+
+def _quote_midpoint(bid: float | None, ask: float | None) -> float | None:
+    bid_value = float(bid or 0.0)
+    ask_value = float(ask or 0.0)
+    if bid_value > 0 and ask_value > 0 and ask_value >= bid_value:
+        return (bid_value + ask_value) / 2.0
+    if ask_value > 0:
+        return ask_value
+    if bid_value > 0:
+        return bid_value
+    return None
+
+
+def _quote_spread_pct(bid: float | None, ask: float | None) -> float:
+    bid_value = float(bid or 0.0)
+    ask_value = float(ask or 0.0)
+    midpoint = _quote_midpoint(bid_value, ask_value)
+    if midpoint is None or midpoint <= 0 or ask_value < bid_value or bid_value <= 0:
+        return 0.0
+    return ((ask_value - bid_value) / midpoint) * 100.0
+
+
+def _option_quote_snapshot(data_client: AlpacaDataClient, option_symbol: str) -> dict[str, float | None]:
+    quote = data_client.get_latest_option_quote(option_symbol)
+    bid_raw = quote.get("bid")
+    ask_raw = quote.get("ask")
+    bid = float(bid_raw) if bid_raw is not None else None
+    ask = float(ask_raw) if ask_raw is not None else None
+    midpoint = _quote_midpoint(bid, ask)
+    return {
+        "bid": bid,
+        "ask": ask,
+        "midpoint": midpoint,
+        "spread_pct": round(_quote_spread_pct(bid, ask), 4),
+    }
+
+
+def _runtime_entry_max_quote_spread_pct(
+    now_et: datetime,
+    *,
+    strategy_profile: str | None = None,
+) -> float:
+    base = float(getattr(config, "ENTRY_MAX_QUOTE_SPREAD_PCT", getattr(config, "MAX_OPTION_SPREAD_PCT", 30.0)))
+    opening_base = float(getattr(config, "OPENING_ENTRY_MAX_QUOTE_SPREAD_PCT", base))
+
+    try:
+        entry_open_minutes = _minutes_from_hhmm(str(getattr(config, "NO_NEW_TRADES_BEFORE", config.MARKET_OPEN)))
+        now_minutes = (now_et.hour * 60) + now_et.minute
+        minutes_since_open = max(0, now_minutes - entry_open_minutes)
+    except ValueError:
+        minutes_since_open = 10**6
+
+    if bool(getattr(config, "ENABLE_OPENING_ENTRY_RELAX", False)) and minutes_since_open <= int(getattr(config, "OPENING_ENTRY_RELAX_MINUTES", 0) or 0):
+        base = max(base, opening_base)
+
+    if not is_enabled("FEATURE_STRATEGY_PROFILES", False):
+        return base
+    overrides = get_profile_overrides(strategy_profile)
+    override = overrides.get("entry_max_quote_spread_pct")
+    if override is None:
+        return base
+    return float(override)
+
+
+def _runtime_entry_blocked_hours_et(*, strategy_profile: str | None = None) -> set[int]:
+    raw_hours = getattr(config, "ENTRY_BLOCKED_HOURS_ET", ())
+    if is_enabled("FEATURE_STRATEGY_PROFILES", False):
+        overrides = get_profile_overrides(strategy_profile)
+        override = overrides.get("entry_blocked_hours_et")
+        if override is not None:
+            raw_hours = override
+
+    hours: set[int] = set()
+    if not isinstance(raw_hours, (list, tuple, set)):
+        return hours
+    for value in raw_hours:
+        try:
+            hour = int(value)
+        except (TypeError, ValueError):
+            continue
+        if 0 <= hour <= 23:
+            hours.add(hour)
+    return hours
+
+
+def _is_entry_hour_blocked(now_et: datetime, *, strategy_profile: str | None = None) -> bool:
+    return now_et.hour in _runtime_entry_blocked_hours_et(strategy_profile=strategy_profile)
+
+
+def _entry_quote_spread_gate(
+    *,
+    option_symbol: str,
+    entry_quote: dict[str, float | None],
+    now_et: datetime,
+    strategy_profile: str | None = None,
+) -> tuple[bool, str]:
+    ask_price = float(entry_quote.get("ask") or 0.0)
+    if ask_price <= 0:
+        return False, f"no option ask for {option_symbol}"
+
+    spread_pct = float(entry_quote.get("spread_pct") or 0.0)
+    max_spread_pct = _runtime_entry_max_quote_spread_pct(now_et, strategy_profile=strategy_profile)
+    if spread_pct > max_spread_pct:
+        return False, f"live spread {spread_pct:.2f}% > max {max_spread_pct:.2f}%"
+
+    return True, ""
+
+
+def _buy_fill_slippage_vs_ask_pct(ask_price: float | None, fill_price: float | None) -> float:
+    ask_value = float(ask_price or 0.0)
+    fill_value = float(fill_price or 0.0)
+    if ask_value <= 0 or fill_value <= 0:
+        return 0.0
+    return ((fill_value - ask_value) / ask_value) * 100.0
+
+
+def _sell_fill_slippage_vs_bid_pct(bid_price: float | None, fill_price: float | None) -> float:
+    bid_value = float(bid_price or 0.0)
+    fill_value = float(fill_price or 0.0)
+    if bid_value <= 0 or fill_value <= 0:
+        return 0.0
+    return ((bid_value - fill_value) / bid_value) * 100.0
+
+
+def _paper_execution_friction_usd(qty: int, sides: int = 2) -> float:
+    contracts = max(0, int(qty))
+    side_count = max(0, int(sides))
+    return contracts * side_count * float(getattr(config, "PAPER_EXECUTION_FRICTION_PER_CONTRACT", 0.0) or 0.0)
+
+
+def _conservative_executable_pnl(
+    *,
+    entry_ask_price: float | None,
+    exit_bid_price: float | None,
+    qty: int,
+) -> tuple[float, float]:
+    entry_value = float(entry_ask_price or 0.0)
+    exit_value = float(exit_bid_price or 0.0)
+    contracts = max(0, int(qty))
+    if entry_value <= 0 or exit_value <= 0 or contracts <= 0:
+        return 0.0, 0.0
+    gross_usd = (exit_value - entry_value) * contracts * 100.0
+    net_usd = gross_usd - _paper_execution_friction_usd(contracts, sides=2)
+    basis = entry_value * contracts * 100.0
+    net_pct = (net_usd / basis) * 100.0 if basis > 0 else 0.0
+    return round(net_usd, 2), round(net_pct, 4)
+
+
+def _await_order_fill(
+    broker: AlpacaBroker,
+    *,
+    order_id: str,
+    requested_qty: int,
+    now_et: datetime,
+    label: str,
+    poll_seconds: int,
+    max_wait_seconds: int,
+) -> tuple[int, float | None, str, bool]:
+    deadline = time.time() + max_wait_seconds
+    observed_filled = 0
+    observed_avg_price: float | None = None
+    last_status = ""
+    non_fill_terminal = {"canceled", "cancelled", "rejected", "expired", "done_for_day", "stopped", "suspended"}
+
+    while time.time() < deadline:
+        try:
+            status_order = broker.get_order_status(order_id)
+        except Exception as exc:  # noqa: BLE001
+            print(f"[{ts(now_et)}] {label}: order status error for {order_id}: {exc}")
+            time.sleep(poll_seconds)
+            continue
+
+        last_status = str(getattr(status_order, "status", "") or "").lower()
+        filled_qty = position_qty_as_int(getattr(status_order, "filled_qty", 0))
+        observed_filled = max(observed_filled, filled_qty)
+        avg_price_raw = getattr(status_order, "filled_avg_price", None)
+        try:
+            avg_price = float(avg_price_raw) if avg_price_raw is not None else None
+        except (TypeError, ValueError):
+            avg_price = None
+        if avg_price is not None and avg_price > 0:
+            observed_avg_price = avg_price
+        if observed_filled > 0 and last_status in ("filled", "partially_filled"):
+            return min(max(0, int(requested_qty)), observed_filled), observed_avg_price, last_status, False
+        if last_status in non_fill_terminal:
+            break
+        time.sleep(poll_seconds)
+
+    if observed_filled > 0:
+        return min(max(0, int(requested_qty)), observed_filled), observed_avg_price, last_status, False
+    is_still_open = last_status not in non_fill_terminal and last_status not in ("", "filled", "partially_filled")
+    return 0, None, last_status, is_still_open
+
+
+def _execute_limit_entry(
+    *,
+    broker: AlpacaBroker,
+    data_client: AlpacaDataClient,
+    option_symbol: str,
+    qty: int,
+    now_et: datetime,
+    label: str,
+    initial_quote: dict[str, float | None] | None = None,
+) -> dict[str, object]:
+    quote_snapshot = dict(initial_quote or _option_quote_snapshot(data_client, option_symbol))
+    ask_price = float(quote_snapshot.get("ask") or 0.0)
+    if ask_price <= 0:
+        return {"filled": False, "status": "no_ask", "attempts": 0}
+
+    attempt_quotes = [quote_snapshot]
+    retry_quote = _option_quote_snapshot(data_client, option_symbol)
+    retry_ask = float(retry_quote.get("ask") or 0.0)
+    if retry_ask > 0:
+        attempt_quotes.append(retry_quote)
+    else:
+        attempt_quotes.append(quote_snapshot)
+
+    for attempt_index, submit_quote in enumerate(attempt_quotes, start=1):
+        submit_ask = float(submit_quote.get("ask") or 0.0)
+        if submit_ask <= 0:
+            continue
+        if attempt_index == 1:
+            limit_price = round(submit_ask, 4)
+            wait_seconds = max(1, int(config.ENTRY_ORDER_STATUS_WAIT_SECONDS))
+        else:
+            retry_pct = max(0.0, float(getattr(config, "ENTRY_RETRY_LIMIT_PCT", 0.02) or 0.02))
+            limit_price = round(max(submit_ask, submit_ask * (1.0 + retry_pct)), 4)
+            wait_seconds = max(1, int(config.ENTRY_RETRY_STATUS_WAIT_SECONDS))
+
+        submit_ts = time.time()
+        order = broker.place_option_limit_buy(option_symbol, qty, limit_price)
+        filled_qty, fill_price, status, still_open = _await_order_fill(
+            broker,
+            order_id=str(getattr(order, "id", "") or ""),
+            requested_qty=qty,
+            now_et=now_et,
+            label=f"{label} attempt {attempt_index}",
+            poll_seconds=1,
+            max_wait_seconds=wait_seconds,
+        )
+        fill_seconds = max(0.0, time.time() - submit_ts)
+        if filled_qty > 0:
+            return {
+                "filled": True,
+                "status": status,
+                "filled_qty": filled_qty,
+                "filled_price": fill_price,
+                "attempts": attempt_index,
+                "submit_bid": submit_quote.get("bid"),
+                "submit_ask": submit_quote.get("ask"),
+                "submit_midpoint": submit_quote.get("midpoint"),
+                "submit_spread_pct": submit_quote.get("spread_pct"),
+                "intended_limit": limit_price,
+                "fill_seconds": round(fill_seconds, 3),
+                "fill_slippage_vs_ask_pct": round(_buy_fill_slippage_vs_ask_pct(submit_quote.get("ask"), fill_price), 4),
+                "order_id": str(getattr(order, "id", "") or ""),
+            }
+
+        order_id = str(getattr(order, "id", "") or "")
+        if order_id:
+            try:
+                broker.cancel_order(order_id)
+            except Exception as exc:  # noqa: BLE001
+                print(f"[{ts(now_et)}] {label}: cancel entry order {order_id} failed: {exc}")
+        if still_open:
+            time.sleep(1)
+
+    return {"filled": False, "status": "not_filled", "attempts": len(attempt_quotes)}
 
 
 def _position_plpc_snapshot(pos) -> float | None:
@@ -158,21 +455,11 @@ def _live_option_mark_and_plpc(
     if entry_price <= 0:
         return None, None
     try:
-        quote = data_client.get_latest_option_quote(option_symbol)
-        bid_raw = quote.get("bid")
-        ask_raw = quote.get("ask")
-        bid = float(bid_raw) if bid_raw is not None else 0.0
-        ask = float(ask_raw) if ask_raw is not None else 0.0
-        mark: float | None = None
-        if bid > 0 and ask > 0 and ask >= bid:
-            mark = (bid + ask) / 2.0
-        elif ask > 0:
-            mark = ask
-        elif bid > 0:
-            mark = bid
-        if mark is None or mark <= 0:
+        quote = _option_quote_snapshot(data_client, option_symbol)
+        bid = float(quote.get("bid") or 0.0)
+        if bid <= 0:
             return None, None
-        return mark, ((mark - entry_price) / entry_price)
+        return bid, ((bid - entry_price) / entry_price)
     except Exception as exc:  # noqa: BLE001
         print(f"[main] live option quote unavailable for {option_symbol}: {exc}")
         return None, None
@@ -829,6 +1116,9 @@ def main():
         if is_at_or_after(now_et, config.NO_NEW_TRADES_AFTER):
             print(f"[{ts(now_et)}] {ticker}: reversal skipped (after entry window).")
             return False
+        if _is_entry_hour_blocked(now_et, strategy_profile=strategy_profile):
+            print(f"[{ts(now_et)}] {ticker}: reversal skipped (hour {now_et.hour:02d}:00 ET blocked by config).")
+            return False
         if reentries_used >= int(config.MAX_REENTRIES_PER_TICKER):
             print(
                 f"[{ts(now_et)}] {ticker}: reversal skipped "
@@ -872,87 +1162,62 @@ def main():
                 )
                 return False
 
-            ask_price = data_client.get_latest_option_ask(option_symbol)
-            direct_market_entry = False
-            if ask_price is None or ask_price <= 0:
-                if config.EMERGENCY_EXECUTION_MODE and config.ALLOW_MARKET_ENTRY_WITHOUT_QUOTE:
-                    direct_market_entry = True
-                    ask_price = 0.0
-                else:
-                    print(f"[{ts(now_et)}] {ticker}: reversal skipped (no option ask for {option_symbol}).")
-                    return False
+            entry_quote = _option_quote_snapshot(data_client, option_symbol)
+            spread_ok, spread_reason = _entry_quote_spread_gate(
+                option_symbol=option_symbol,
+                entry_quote=entry_quote,
+                now_et=now_et,
+                strategy_profile=strategy_profile,
+            )
+            if not spread_ok:
+                print(f"[{ts(now_et)}] {ticker}: reversal skipped ({spread_reason}).")
+                return False
+            ask_price = float(entry_quote.get("ask") or 0.0)
 
-            if not direct_market_entry:
-                initial_chain_ask = float(contract.get("ask_price", ask_price) or ask_price)
-                pre_submit_slippage = _slippage_pct(initial_chain_ask, ask_price)
-                if pre_submit_slippage > config.MAX_ENTRY_SLIPPAGE_PCT:
-                    retry_ask = data_client.get_latest_option_ask(option_symbol)
-                    if retry_ask is not None and retry_ask > 0:
-                        ask_price = retry_ask
-                        pre_submit_slippage = _slippage_pct(initial_chain_ask, ask_price)
-                if pre_submit_slippage > (config.MAX_ENTRY_SLIPPAGE_PCT * 3):
-                    print(
-                        f"[{ts(now_et)}] {ticker}: reversal skipped (entry slippage {pre_submit_slippage:.2f}% > "
-                        f"hard cap {(config.MAX_ENTRY_SLIPPAGE_PCT * 3):.2f}%)."
-                    )
+            initial_chain_ask = float(contract.get("ask_price", ask_price) or ask_price)
+            pre_submit_slippage = _slippage_pct(initial_chain_ask, ask_price)
+            if pre_submit_slippage > config.MAX_ENTRY_SLIPPAGE_PCT:
+                retry_quote = _option_quote_snapshot(data_client, option_symbol)
+                retry_ok, retry_reason = _entry_quote_spread_gate(
+                    option_symbol=option_symbol,
+                    entry_quote=retry_quote,
+                    now_et=now_et,
+                    strategy_profile=strategy_profile,
+                )
+                retry_ask = float(retry_quote.get("ask") or 0.0)
+                if retry_ok and retry_ask > 0:
+                    entry_quote = retry_quote
+                    ask_price = retry_ask
+                    pre_submit_slippage = _slippage_pct(initial_chain_ask, ask_price)
+                elif not retry_ok:
+                    print(f"[{ts(now_et)}] {ticker}: reversal skipped ({retry_reason}).")
                     return False
+            if pre_submit_slippage > (config.MAX_ENTRY_SLIPPAGE_PCT * 3):
+                print(
+                    f"[{ts(now_et)}] {ticker}: reversal skipped (entry slippage {pre_submit_slippage:.2f}% > "
+                    f"hard cap {(config.MAX_ENTRY_SLIPPAGE_PCT * 3):.2f}%)."
+                )
+                return False
 
             qty = 1
-            if direct_market_entry:
-                order = broker.place_option_market_buy(option_symbol, qty)
+            entry_result = _execute_limit_entry(
+                broker=broker,
+                data_client=data_client,
+                option_symbol=option_symbol,
+                qty=qty,
+                now_et=now_et,
+                label=f"REVERSAL ENTRY {ticker}",
+                initial_quote=entry_quote,
+            )
+            if not bool(entry_result.get("filled", False)):
                 print(
-                    f"[{ts(now_et)}] REVERSAL ENTRY {ticker} {direction.upper()} "
-                    f"{option_symbol} qty={qty} market order_id={order.id}"
+                    f"[{ts(now_et)}] {ticker}: reversal not filled "
+                    f"(status={entry_result.get('status', 'unknown')})."
                 )
-            else:
-                order = broker.place_option_limit_buy(option_symbol, qty, ask_price)
-                print(
-                    f"[{ts(now_et)}] REVERSAL ENTRY {ticker} {direction.upper()} "
-                    f"{option_symbol} qty={qty} limit={ask_price:.2f} order_id={order.id}"
-                )
+                return False
 
-            time.sleep(max(1, int(config.ENTRY_ORDER_STATUS_WAIT_SECONDS)))
-            filled_order = broker.get_order_status(order.id)
-            order_status = str(getattr(filled_order, "status", "")).lower()
-            reject_detail = _order_reject_reason(filled_order)
-
-            if order_status not in ("filled", "partially_filled"):
-                try:
-                    if not direct_market_entry:
-                        broker.cancel_order(order.id)
-                except Exception as exc:  # noqa: BLE001
-                    print(f"[{ts(now_et)}] {ticker}: reversal cancel of {order.id} failed: {exc}")
-                if not direct_market_entry:
-                    aggressive_limit = round(float(ask_price) * 1.05, 4)
-                    try:
-                        retry_order = broker.place_option_limit_buy(option_symbol, qty, aggressive_limit)
-                        time.sleep(max(1, int(config.ENTRY_RETRY_STATUS_WAIT_SECONDS)))
-                        filled_order = broker.get_order_status(retry_order.id)
-                        order_status = str(getattr(filled_order, "status", "")).lower()
-                        reject_detail = _order_reject_reason(filled_order)
-                        if order_status not in ("filled", "partially_filled"):
-                            try:
-                                broker.cancel_order(retry_order.id)
-                            except Exception as exc:  # noqa: BLE001
-                                print(f"[{ts(now_et)}] {ticker}: reversal retry cancel of {retry_order.id} failed: {exc}")
-                            mkt_order = broker.place_option_market_buy(option_symbol, qty)
-                            time.sleep(max(1, int(config.ENTRY_MARKET_FALLBACK_WAIT_SECONDS)))
-                            filled_order = broker.get_order_status(mkt_order.id)
-                            order_status = str(getattr(filled_order, "status", "")).lower()
-                            reject_detail = _order_reject_reason(filled_order)
-                    except Exception as exc:  # noqa: BLE001
-                        print(f"[{ts(now_et)}] {ticker}: reversal fallback failed: {exc}")
-                        return False
-                if order_status not in ("filled", "partially_filled"):
-                    extra = f" {reject_detail}" if reject_detail else ""
-                    print(
-                        f"[{ts(now_et)}] {ticker}: reversal not filled "
-                        f"(status={order_status}).{extra}"
-                    )
-                    return False
-
-            filled_avg_price = float(getattr(filled_order, "filled_avg_price", 0) or 0)
-            filled_qty = position_qty_as_int(getattr(filled_order, "filled_qty", qty)) or qty
+            filled_avg_price = float(entry_result.get("filled_price") or 0.0)
+            filled_qty = position_qty_as_int(entry_result.get("filled_qty", qty)) or qty
             if filled_qty > 1:
                 extra_qty = filled_qty - 1
                 try:
@@ -961,10 +1226,8 @@ def main():
                 except Exception as exc:  # noqa: BLE001
                     print(f"[{ts(now_et)}] {ticker}: failed to trim reversal extra qty {extra_qty}: {exc}")
                 filled_qty = 1
-            fill_slippage = (
-                _slippage_pct(ask_price, filled_avg_price) if (filled_avg_price > 0 and ask_price > 0) else 0.0
-            )
-            if (not direct_market_entry) and fill_slippage > config.MAX_FILL_SLIPPAGE_PCT:
+            fill_slippage = float(entry_result.get("fill_slippage_vs_ask_pct", 0.0) or 0.0)
+            if fill_slippage > config.MAX_FILL_SLIPPAGE_PCT:
                 print(
                     f"[{ts(now_et)}] {ticker}: reversal fill slippage {fill_slippage:.2f}% exceeds "
                     f"{config.MAX_FILL_SLIPPAGE_PCT:.2f}%. Closing immediately."
@@ -986,9 +1249,26 @@ def main():
                 "expiry": contract.get("expiration_date", ""),
                 "qty": filled_qty,
                 "entry_price": filled_avg_price or ask_price,
+                "signal_score": 0.0,
+                "direction_score": 0.0,
+                "rvol": 0.0,
+                "rsi": 0.0,
+                "roc": 0.0,
+                "iv_rank": 0.0,
+                "contract_spread_pct": round(float(entry_result.get("submit_spread_pct", 0.0) or 0.0), 4),
+                "entry_bid_submit": entry_result.get("submit_bid"),
+                "entry_ask_submit": entry_result.get("submit_ask"),
+                "entry_midpoint_submit": entry_result.get("submit_midpoint"),
+                "entry_intended_limit": entry_result.get("intended_limit"),
+                "entry_filled_price": filled_avg_price or ask_price,
+                "entry_spread_pct": entry_result.get("submit_spread_pct"),
+                "entry_fill_slippage_vs_ask_pct": entry_result.get("fill_slippage_vs_ask_pct"),
+                "entry_fill_seconds": entry_result.get("fill_seconds"),
+                "entry_attempts": entry_result.get("attempts", 0),
                 "stop_floor_plpc": -float(config.STOP_LOSS_PCT),
                 "stop_loss_usd": _runtime_stop_loss_usd(),
                 "max_plpc": 0.0,
+                "min_plpc": 0.0,
             }
             ticker_entry_counts[ticker] = prior_entries + 1
             ticker_reentries_used[ticker] = reentries_used + 1
@@ -1012,13 +1292,14 @@ def main():
         qty: int,
         now_et: datetime,
         label: str,
+        exit_reason: str | None = None,
         poll_seconds_override: int | None = None,
         max_wait_seconds_override: int | None = None,
         retry_attempts_override: int | None = None,
-    ) -> tuple[int, float | None]:
+    ) -> tuple[int, float | None, dict[str, object]]:
         request_qty = max(0, int(qty))
         if request_qty <= 0:
-            return 0, None
+            return 0, None, {}
 
         if poll_seconds_override is None:
             poll_seconds = max(1, int(config.EXIT_ORDER_STATUS_POLL_SECONDS))
@@ -1028,101 +1309,136 @@ def main():
             max_wait_seconds = max(poll_seconds, int(config.EXIT_ORDER_MAX_WAIT_SECONDS))
         else:
             max_wait_seconds = max(poll_seconds, int(max_wait_seconds_override))
-        if retry_attempts_override is None:
-            retry_attempts = max(1, int(config.EXIT_CLOSE_RETRY_ATTEMPTS))
-        else:
-            retry_attempts = max(1, int(retry_attempts_override))
-        non_fill_terminal = {"canceled", "cancelled", "rejected", "expired", "done_for_day", "stopped", "suspended"}
 
-        def _wait_for_fill(order_id: str, close_qty: int) -> tuple[int, float | None, str, bool]:
-            deadline = time.time() + max_wait_seconds
-            observed_filled = 0
-            observed_avg_price: float | None = None
-            last_status = ""
-            while time.time() < deadline:
-                try:
-                    status_order = broker.get_order_status(order_id)
-                except Exception as exc:  # noqa: BLE001
-                    print(f"[{ts(now_et)}] {label} {symbol}: order status error for {order_id}: {exc}")
-                    time.sleep(poll_seconds)
-                    continue
-                last_status = str(getattr(status_order, "status", "")).lower()
-                filled_qty = position_qty_as_int(getattr(status_order, "filled_qty", 0))
-                observed_filled = max(observed_filled, filled_qty)
-                avg_price_raw = getattr(status_order, "filled_avg_price", None)
-                try:
-                    avg_price = float(avg_price_raw) if avg_price_raw is not None else None
-                except (TypeError, ValueError):
-                    avg_price = None
-                if avg_price is not None and avg_price > 0:
-                    observed_avg_price = avg_price
-                if observed_filled > 0 and last_status in ("filled", "partially_filled"):
-                    return min(close_qty, observed_filled), observed_avg_price, last_status, False
-                if last_status in non_fill_terminal:
-                    break
-                time.sleep(poll_seconds)
-            if observed_filled > 0:
-                return min(close_qty, observed_filled), observed_avg_price, last_status, False
-            is_still_open = last_status not in non_fill_terminal and last_status not in ("", "filled", "partially_filled")
-            return 0, None, last_status, is_still_open
+        critical_exit_reasons = {
+            "stop_loss",
+            "eod_close",
+            "overnight_forced_close",
+            "pre_expiry_exit",
+            "pre_expiry_exit_overdue",
+        }
+        is_critical = str(exit_reason or "").lower() in critical_exit_reasons
+        wait_seconds = max_wait_seconds
+        if poll_seconds_override is None and max_wait_seconds_override is None:
+            if is_critical:
+                wait_seconds = max(poll_seconds, int(getattr(config, "SMART_EXIT_CRITICAL_WAIT_SECONDS", 3) or 3))
+            else:
+                wait_seconds = max(poll_seconds, int(getattr(config, "SMART_EXIT_NORMAL_WAIT_SECONDS", 6) or 6))
+
+        execution_meta: dict[str, object] = {
+            "attempts": 0,
+            "submit_mode": "",
+            "submit_bid": None,
+            "submit_ask": None,
+            "submit_midpoint": None,
+            "submit_spread_pct": 0.0,
+            "intended_limit": None,
+            "fill_seconds": 0.0,
+            "fill_slippage_vs_bid_pct": 0.0,
+            "used_market_fallback": False,
+            "status": "",
+        }
 
         try:
             existing_sells = broker.get_open_orders_for_symbol(symbol=symbol, side="sell")
-            if existing_sells:
-                existing_order_id = str(getattr(existing_sells[0], "id", "") or "")
-                if existing_order_id:
-                    filled_qty, filled_avg_price, status, still_open = _wait_for_fill(existing_order_id, request_qty)
-                    if filled_qty > 0:
-                        return filled_qty, filled_avg_price
-                    if still_open:
-                        print(
-                            f"[{ts(now_et)}] {label} {symbol} qty={request_qty}: "
-                            f"existing close order {existing_order_id} still pending ({status or 'unknown'}); "
-                            "attempting cancel-and-replace."
-                        )
-                        try:
-                            broker.cancel_order(existing_order_id)
-                        except Exception as exc:  # noqa: BLE001
-                            print(
-                                f"[{ts(now_et)}] {label} {symbol} qty={request_qty}: "
-                                f"cancel existing close order {existing_order_id} failed: {exc}"
-                            )
-                        time.sleep(poll_seconds)
-
-            for attempt in range(1, retry_attempts + 1):
-                order = broker.close_option_market(symbol, request_qty)
-                order_id = str(getattr(order, "id", "") or "")
-                if not order_id:
-                    print(f"[{ts(now_et)}] {label} {symbol} qty={request_qty}: close submitted without order id.")
-                    return 0, None
-                filled_qty, filled_avg_price, status, still_open = _wait_for_fill(order_id, request_qty)
-                if filled_qty > 0:
-                    return filled_qty, filled_avg_price
-                if still_open:
+            for existing in existing_sells:
+                existing_order_id = str(getattr(existing, "id", "") or "")
+                if not existing_order_id:
+                    continue
+                try:
+                    broker.cancel_order(existing_order_id)
+                except Exception as exc:  # noqa: BLE001
                     print(
                         f"[{ts(now_et)}] {label} {symbol} qty={request_qty}: "
-                        f"close order {order_id} still pending ({status or 'unknown'})."
+                        f"cancel existing close order {existing_order_id} failed: {exc}"
                     )
+
+            quote_snapshot = _option_quote_snapshot(data_client, symbol)
+            bid_price = float(quote_snapshot.get("bid") or 0.0)
+            ask_price = float(quote_snapshot.get("ask") or 0.0)
+            execution_meta["submit_bid"] = quote_snapshot.get("bid")
+            execution_meta["submit_ask"] = quote_snapshot.get("ask")
+            execution_meta["submit_midpoint"] = quote_snapshot.get("midpoint")
+            execution_meta["submit_spread_pct"] = quote_snapshot.get("spread_pct")
+
+            if bid_price > 0:
+                spread = max(0.0, ask_price - bid_price) if ask_price > 0 else 0.0
+                reprice_pct = float(
+                    getattr(
+                        config,
+                        "SMART_EXIT_CRITICAL_REPRICE_PCT" if is_critical else "SMART_EXIT_NORMAL_REPRICE_PCT",
+                        0.10 if is_critical else 0.35,
+                    )
+                    or (0.10 if is_critical else 0.35)
+                )
+                limit_price = round(bid_price + (spread * max(0.0, reprice_pct)), 4)
+                execution_meta["intended_limit"] = limit_price
+                execution_meta["submit_mode"] = "limit"
+                execution_meta["attempts"] = 1
+                submit_ts = time.time()
+                order = broker.place_option_limit_sell(symbol, request_qty, limit_price)
+                order_id = str(getattr(order, "id", "") or "")
+                if not order_id:
+                    print(f"[{ts(now_et)}] {label} {symbol} qty={request_qty}: limit close submitted without order id.")
+                    return 0, None, execution_meta
+                filled_qty, filled_avg_price, status, still_open = _await_order_fill(
+                    broker,
+                    order_id=order_id,
+                    requested_qty=request_qty,
+                    now_et=now_et,
+                    label=f"{label} {symbol}",
+                    poll_seconds=poll_seconds,
+                    max_wait_seconds=wait_seconds,
+                )
+                execution_meta["fill_seconds"] = round(max(0.0, time.time() - submit_ts), 3)
+                execution_meta["status"] = status
+                if filled_qty > 0:
+                    execution_meta["fill_slippage_vs_bid_pct"] = round(
+                        _sell_fill_slippage_vs_bid_pct(bid_price, filled_avg_price),
+                        4,
+                    )
+                    return filled_qty, filled_avg_price, execution_meta
+                if still_open:
                     try:
                         broker.cancel_order(order_id)
                     except Exception as exc:  # noqa: BLE001
-                        print(
-                            f"[{ts(now_et)}] {label} {symbol} qty={request_qty}: "
-                            f"cancel close order {order_id} failed: {exc}"
-                        )
-                    if attempt < retry_attempts:
-                        continue
-                    return 0, None
-                if attempt < retry_attempts:
-                    print(
-                        f"[{ts(now_et)}] {label} {symbol} qty={request_qty}: "
-                        f"close attempt {attempt}/{retry_attempts} ended status={status or 'unknown'}, retrying."
-                    )
-            print(f"[{ts(now_et)}] {label} {symbol} qty={request_qty}: close not filled after {retry_attempts} attempt(s).")
-            return 0, None
+                        print(f"[{ts(now_et)}] {label} {symbol}: cancel close order {order_id} failed: {exc}")
+
+            if not is_critical:
+                print(f"[{ts(now_et)}] {label} {symbol} qty={request_qty}: executable limit exit not filled; will retry next loop.")
+                return 0, None, execution_meta
+
+            execution_meta["submit_mode"] = "market"
+            execution_meta["attempts"] = int(execution_meta.get("attempts", 0) or 0) + 1
+            execution_meta["used_market_fallback"] = True
+            submit_ts = time.time()
+            order = broker.close_option_market(symbol, request_qty)
+            order_id = str(getattr(order, "id", "") or "")
+            if not order_id:
+                print(f"[{ts(now_et)}] {label} {symbol} qty={request_qty}: market close submitted without order id.")
+                return 0, None, execution_meta
+            filled_qty, filled_avg_price, status, _still_open = _await_order_fill(
+                broker,
+                order_id=order_id,
+                requested_qty=request_qty,
+                now_et=now_et,
+                label=f"{label} {symbol} market",
+                poll_seconds=poll_seconds,
+                max_wait_seconds=max_wait_seconds,
+            )
+            execution_meta["fill_seconds"] = round(max(0.0, time.time() - submit_ts), 3)
+            execution_meta["status"] = status
+            if filled_qty > 0:
+                execution_meta["fill_slippage_vs_bid_pct"] = round(
+                    _sell_fill_slippage_vs_bid_pct(bid_price if bid_price > 0 else None, filled_avg_price),
+                    4,
+                )
+                return filled_qty, filled_avg_price, execution_meta
+            print(f"[{ts(now_et)}] {label} {symbol} qty={request_qty}: critical exit not filled.")
+            return 0, None, execution_meta
         except Exception as exc:  # noqa: BLE001
             print(f"[{ts(now_et)}] {label} {symbol} qty={request_qty}: close error: {exc}")
-            return 0, None
+            return 0, None, execution_meta
 
     def _force_normalize_ticker_exposure(option_positions: list, now_et: datetime) -> int:
         ticker_positions: dict[str, list[tuple[str, int]]] = {}
@@ -1157,11 +1473,12 @@ def main():
 
         total_filled = 0
         for symbol, close_qty, ticker in close_actions:
-            filled_qty, _fill_price = _close_position_with_confirmation(
+            filled_qty, _fill_price, _close_meta = _close_position_with_confirmation(
                 symbol=symbol,
                 qty=close_qty,
                 now_et=now_et,
                 label="EXPOSURE_GUARD",
+                exit_reason="exposure_normalize",
             )
             if filled_qty <= 0:
                 continue
@@ -1202,9 +1519,10 @@ def main():
     else:
         print(f"[{ts()} | {ts_ct()}] Startup state: KILLSWITCH not active.")
     print(f"[{ts()} | {ts_ct()}] Autotrader started in {mode} mode. Waiting for market open.")
+    closed_market_lead_minutes = _closed_market_lead_minutes()
     alerts.send(
         "startup",
-        f"Autotrader online ({mode}). Pre-open readiness: {config.PREOPEN_READY_MINUTES}m.",
+        f"Autotrader online ({mode}). Closed-market workflow starts {closed_market_lead_minutes}m before open.",
         dedupe_key="startup",
     )
 
@@ -1247,12 +1565,12 @@ def main():
         now_et = datetime.now(tz)
         now_ct = datetime.now(pytz.timezone(config.CENTRAL_TZ))
         seconds_until_open = _seconds_until_next_open(clock)
-        preopen_window_seconds = int(config.PREOPEN_READY_MINUTES) * 60
+        preopen_window_seconds = int(closed_market_lead_minutes) * 60
         if clock.is_open or (
             seconds_until_open is not None and 0 < seconds_until_open <= preopen_window_seconds
         ):
             break
-        sleep_seconds = _closed_market_sleep_seconds(clock, preopen_ready_minutes=config.PREOPEN_READY_MINUTES)
+        sleep_seconds = _closed_market_sleep_seconds(clock, preopen_ready_minutes=closed_market_lead_minutes)
         next_open = getattr(clock, "next_open", None)
         next_open_ct = ""
         if next_open is not None:
@@ -1275,7 +1593,7 @@ def main():
 
     print(
         f"[{ts()} | {ts_ct()}] Pre-open readiness window reached "
-        f"({config.PREOPEN_READY_MINUTES}m before open) or market already open. Starting loop."
+        f"({closed_market_lead_minutes}m before open) or market already open. Starting loop."
     )
     while True:
         now_et = datetime.now(tz)
@@ -1320,7 +1638,7 @@ def main():
         if clock is None:
             continue
         if not clock.is_open:
-            sleep_seconds = _closed_market_sleep_seconds(clock, preopen_ready_minutes=config.PREOPEN_READY_MINUTES)
+            sleep_seconds = _closed_market_sleep_seconds(clock, preopen_ready_minutes=closed_market_lead_minutes)
             next_open = getattr(clock, "next_open", None)
             next_open_ct = ""
             if next_open is not None:
@@ -1707,6 +2025,10 @@ def main():
                 _mark_skip("after_entry_window")
                 print(f"[{ts(now_et)}] Entry window closed (past {config.NO_NEW_TRADES_AFTER} ET).")
                 break
+            if _is_entry_hour_blocked(now_et, strategy_profile=strategy_profile):
+                _mark_skip("blocked_entry_hour")
+                print(f"[{ts(now_et)}] {ticker}: skip (hour {now_et.hour:02d}:00 ET blocked by config).")
+                continue
 
             has_ticker_position = any(
                 position_matches_ticker(
@@ -1838,119 +2160,71 @@ def main():
                         f"{option_symbol} vs {direction.upper()})."
                     )
                     continue
-                ask_price = data_client.get_latest_option_ask(option_symbol)
-                direct_market_entry = False
-                if ask_price is None or ask_price <= 0:
-                    if config.EMERGENCY_EXECUTION_MODE and config.ALLOW_MARKET_ENTRY_WITHOUT_QUOTE:
-                        print(
-                            f"[{ts(now_et)}] {ticker}: no option ask for {option_symbol}; "
-                            "emergency mode using direct market entry."
-                        )
-                        direct_market_entry = True
-                        ask_price = 0.0
-                    else:
-                        _mark_skip("no_option_ask")
-                        print(f"[{ts(now_et)}] {ticker}: skip (no option ask for {option_symbol}).")
+                entry_quote = _option_quote_snapshot(data_client, option_symbol)
+                spread_ok, spread_reason = _entry_quote_spread_gate(
+                    option_symbol=option_symbol,
+                    entry_quote=entry_quote,
+                    now_et=now_et,
+                    strategy_profile=strategy_profile,
+                )
+                if not spread_ok:
+                    _mark_skip("quote_spread_too_wide" if "spread" in spread_reason else "no_option_ask")
+                    print(f"[{ts(now_et)}] {ticker}: skip ({spread_reason}).")
+                    time.sleep(config.RATE_LIMIT_SLEEP_SECONDS)
+                    continue
+                ask_price = float(entry_quote.get("ask") or 0.0)
+
+                initial_chain_ask = float(contract.get("ask_price", ask_price) or ask_price)
+                pre_submit_slippage = _slippage_pct(initial_chain_ask, ask_price)
+                if pre_submit_slippage > config.MAX_ENTRY_SLIPPAGE_PCT:
+                    retry_quote = _option_quote_snapshot(data_client, option_symbol)
+                    retry_ok, retry_reason = _entry_quote_spread_gate(
+                        option_symbol=option_symbol,
+                        entry_quote=retry_quote,
+                        now_et=now_et,
+                        strategy_profile=strategy_profile,
+                    )
+                    retry_ask = float(retry_quote.get("ask") or 0.0)
+                    if retry_ok and retry_ask > 0:
+                        entry_quote = retry_quote
+                        ask_price = retry_ask
+                        pre_submit_slippage = _slippage_pct(initial_chain_ask, ask_price)
+                    elif not retry_ok:
+                        _mark_skip("quote_spread_too_wide" if "spread" in retry_reason else "no_option_ask")
+                        print(f"[{ts(now_et)}] {ticker}: skip ({retry_reason}).")
                         time.sleep(config.RATE_LIMIT_SLEEP_SECONDS)
                         continue
+                if pre_submit_slippage > (config.MAX_ENTRY_SLIPPAGE_PCT * 3):
+                    _mark_skip("entry_slippage_too_high")
+                    print(
+                        f"[{ts(now_et)}] {ticker}: skip (entry slippage {pre_submit_slippage:.2f}% > "
+                        f"hard cap {(config.MAX_ENTRY_SLIPPAGE_PCT * 3):.2f}%)."
+                    )
+                    time.sleep(config.RATE_LIMIT_SLEEP_SECONDS)
+                    continue
 
-                if not direct_market_entry:
-                    initial_chain_ask = float(contract.get("ask_price", ask_price) or ask_price)
-                    pre_submit_slippage = _slippage_pct(initial_chain_ask, ask_price)
-                    if pre_submit_slippage > config.MAX_ENTRY_SLIPPAGE_PCT:
-                        # Retry quote once before skipping on stale chain snapshot drift.
-                        retry_ask = data_client.get_latest_option_ask(option_symbol)
-                        if retry_ask is not None and retry_ask > 0:
-                            ask_price = retry_ask
-                            pre_submit_slippage = _slippage_pct(initial_chain_ask, ask_price)
-                    if pre_submit_slippage > (config.MAX_ENTRY_SLIPPAGE_PCT * 3):
-                        _mark_skip("entry_slippage_too_high")
-                        print(
-                            f"[{ts(now_et)}] {ticker}: skip (entry slippage {pre_submit_slippage:.2f}% > "
-                            f"hard cap {(config.MAX_ENTRY_SLIPPAGE_PCT * 3):.2f}%)."
-                        )
-                        time.sleep(config.RATE_LIMIT_SLEEP_SECONDS)
-                        continue
-
-                # Always trade exactly 1 contract
                 qty = 1
-
-                if direct_market_entry:
-                    order = broker.place_option_market_buy(option_symbol, qty)
-                    entry_debug["entry_orders_submitted"] = int(entry_debug.get("entry_orders_submitted", 0)) + 1
+                entry_result = _execute_limit_entry(
+                    broker=broker,
+                    data_client=data_client,
+                    option_symbol=option_symbol,
+                    qty=qty,
+                    now_et=now_et,
+                    label=f"ENTRY {ticker}",
+                    initial_quote=entry_quote,
+                )
+                entry_debug["entry_orders_submitted"] = int(entry_debug.get("entry_orders_submitted", 0)) + int(entry_result.get("attempts", 0) or 0)
+                if not bool(entry_result.get("filled", False)):
+                    _mark_skip("entry_not_filled_after_retry")
                     print(
-                        f"[{ts(now_et)}] ENTRY {ticker} {direction.upper()} "
-                        f"{option_symbol} qty={qty} market order_id={order.id}"
+                        f"[{ts(now_et)}] {ticker}: entry not filled "
+                        f"(status={entry_result.get('status', 'unknown')}). Skipping."
                     )
-                else:
-                    order = broker.place_option_limit_buy(option_symbol, qty, ask_price)
-                    entry_debug["entry_orders_submitted"] = int(entry_debug.get("entry_orders_submitted", 0)) + 1
-                    print(
-                        f"[{ts(now_et)}] ENTRY {ticker} {direction.upper()} "
-                        f"{option_symbol} qty={qty} limit={ask_price:.2f} order_id={order.id}"
-                    )
+                    time.sleep(config.RATE_LIMIT_SLEEP_SECONDS)
+                    continue
 
-                time.sleep(max(1, int(config.ENTRY_ORDER_STATUS_WAIT_SECONDS)))
-                filled_order = broker.get_order_status(order.id)
-                order_status = str(getattr(filled_order, "status", "")).lower()
-                reject_detail = _order_reject_reason(filled_order)
-
-                if order_status not in ("filled", "partially_filled"):
-                    try:
-                        if not direct_market_entry:
-                            broker.cancel_order(order.id)
-                    except Exception as exc:  # noqa: BLE001
-                        print(f"[{ts(now_et)}] {ticker}: cancel of {order.id} failed: {exc}")
-                    # Retry once with a slightly more aggressive limit before market fallback.
-                    if not direct_market_entry:
-                        aggressive_limit = round(float(ask_price) * 1.05, 4)
-                        print(
-                            f"[{ts(now_et)}] {ticker}: limit order {order.id} not filled ({order_status}). "
-                            f"Retry limit={aggressive_limit:.4f}."
-                        )
-                        try:
-                            retry_order = broker.place_option_limit_buy(option_symbol, qty, aggressive_limit)
-                            time.sleep(max(1, int(config.ENTRY_RETRY_STATUS_WAIT_SECONDS)))
-                            filled_order = broker.get_order_status(retry_order.id)
-                            order_status = str(getattr(filled_order, "status", "")).lower()
-                            reject_detail = _order_reject_reason(filled_order)
-                            if order_status not in ("filled", "partially_filled"):
-                                try:
-                                    broker.cancel_order(retry_order.id)
-                                except Exception as exc:  # noqa: BLE001
-                                    print(f"[{ts(now_et)}] {ticker}: retry cancel of {retry_order.id} failed: {exc}")
-                                print(f"[{ts(now_et)}] {ticker}: retry limit not filled ({order_status}). Trying market buy.")
-                                mkt_order = broker.place_option_market_buy(option_symbol, qty)
-                                time.sleep(max(1, int(config.ENTRY_MARKET_FALLBACK_WAIT_SECONDS)))
-                                filled_order = broker.get_order_status(mkt_order.id)
-                                order_status = str(getattr(filled_order, "status", "")).lower()
-                                reject_detail = _order_reject_reason(filled_order)
-                            if order_status not in ("filled", "partially_filled"):
-                                extra = f" {reject_detail}" if reject_detail else ""
-                                _mark_skip("entry_not_filled_after_fallback")
-                                print(
-                                    f"[{ts(now_et)}] {ticker}: market fallback not filled "
-                                    f"(status={order_status}).{extra} Skipping."
-                                )
-                                time.sleep(config.RATE_LIMIT_SLEEP_SECONDS)
-                                continue
-                        except Exception as exc:  # noqa: BLE001
-                            _mark_skip("market_fallback_exception")
-                            print(f"[{ts(now_et)}] {ticker}: market fallback failed: {exc}")
-                            time.sleep(config.RATE_LIMIT_SLEEP_SECONDS)
-                            continue
-                    else:
-                        extra = f" {reject_detail}" if reject_detail else ""
-                        _mark_skip("direct_market_not_filled")
-                        print(
-                            f"[{ts(now_et)}] {ticker}: direct market entry not filled "
-                            f"(status={order_status}).{extra} Skipping."
-                        )
-                        time.sleep(config.RATE_LIMIT_SLEEP_SECONDS)
-                        continue
-
-                filled_avg_price = float(getattr(filled_order, "filled_avg_price", 0) or 0)
-                filled_qty = position_qty_as_int(getattr(filled_order, "filled_qty", qty)) or qty
+                filled_avg_price = float(entry_result.get("filled_price") or 0.0)
+                filled_qty = position_qty_as_int(entry_result.get("filled_qty", qty)) or qty
                 if filled_qty > 1:
                     extra_qty = filled_qty - 1
                     try:
@@ -1958,9 +2232,9 @@ def main():
                         print(f"[{ts(now_et)}] {ticker}: trimmed fill to 1 contract (closed extra {extra_qty}).")
                     except Exception as exc:  # noqa: BLE001
                         print(f"[{ts(now_et)}] {ticker}: WARNING — failed to trim extra qty {extra_qty}: {exc}. Recording qty=1 anyway.")
-                    filled_qty = 1  # always track as 1 contract regardless of trim result
-                fill_slippage = _slippage_pct(ask_price, filled_avg_price) if (filled_avg_price > 0 and ask_price > 0) else 0.0
-                if (not direct_market_entry) and fill_slippage > config.MAX_FILL_SLIPPAGE_PCT:
+                    filled_qty = 1
+                fill_slippage = float(entry_result.get("fill_slippage_vs_ask_pct", 0.0) or 0.0)
+                if fill_slippage > config.MAX_FILL_SLIPPAGE_PCT:
                     _mark_skip("fill_slippage_too_high")
                     _record_bad_fill_event(ticker, now_et, fill_slippage)
                     print(
@@ -1993,9 +2267,26 @@ def main():
                     "expiry": contract.get("expiration_date", ""),
                     "qty": filled_qty,
                     "entry_price": filled_avg_price or ask_price,
+                    "signal_score": round(float(signal.get("signal_score", 0.0) or 0.0), 4),
+                    "direction_score": round(float(signal.get("direction_score", 0.0) or 0.0), 4),
+                    "rvol": round(float(signal.get("rvol", 0.0) or 0.0), 4),
+                    "rsi": round(float(signal.get("rsi", 0.0) or 0.0), 4),
+                    "roc": round(float(signal.get("roc", 0.0) or 0.0), 4),
+                    "iv_rank": round(float(signal.get("iv_rank", 0.0) or 0.0), 4),
+                    "contract_spread_pct": round(float(entry_result.get("submit_spread_pct", 0.0) or 0.0), 4),
+                    "entry_bid_submit": entry_result.get("submit_bid"),
+                    "entry_ask_submit": entry_result.get("submit_ask"),
+                    "entry_midpoint_submit": entry_result.get("submit_midpoint"),
+                    "entry_intended_limit": entry_result.get("intended_limit"),
+                    "entry_filled_price": filled_avg_price or ask_price,
+                    "entry_spread_pct": entry_result.get("submit_spread_pct"),
+                    "entry_fill_slippage_vs_ask_pct": entry_result.get("fill_slippage_vs_ask_pct"),
+                    "entry_fill_seconds": entry_result.get("fill_seconds"),
+                    "entry_attempts": entry_result.get("attempts", 0),
                     "stop_floor_plpc": -float(config.STOP_LOSS_PCT),
                     "stop_loss_usd": _runtime_stop_loss_usd(),
                     "max_plpc": 0.0,
+                    "min_plpc": 0.0,
                 }
                 if prior_entries >= 1 and reentry_armed:
                     ticker_reentries_used[ticker] = reentries_used + 1
@@ -2085,6 +2376,7 @@ def main():
 
             if meta:
                 meta["max_plpc"] = max(float(meta.get("max_plpc", plpc) or plpc), plpc)
+                meta["min_plpc"] = min(float(meta.get("min_plpc", plpc) or plpc), plpc)
                 open_trade_meta[symbol] = meta
 
             history_rows = open_position_pl_history.get(symbol)
@@ -2255,16 +2547,17 @@ def main():
                         close_retry_override = int(
                             getattr(config, "STOPLOSS_EXIT_CLOSE_RETRY_ATTEMPTS", 1) or 1
                         )
-                    filled_close_qty, close_fill_price = _close_position_with_confirmation(
+                    filled_close_qty, close_fill_price, close_execution = _close_position_with_confirmation(
                         symbol=symbol,
                         qty=close_qty,
                         now_et=now_et,
                         label=f"EXIT {exit_reason}",
+                        exit_reason=exit_reason,
                         poll_seconds_override=close_poll_override,
                         max_wait_seconds_override=close_wait_override,
                         retry_attempts_override=close_retry_override,
                     )
-                    if filled_close_qty <= 0:
+                    if filled_close_qty <= 0 or close_fill_price is None or close_fill_price <= 0:
                         last_exit_debug["result"] = "pending_or_not_filled"
                         _save_runtime_state()
                         continue
@@ -2272,32 +2565,76 @@ def main():
                     last_exit_debug["result"] = "filled"
                     meta = open_trade_meta.get(symbol, {})
                     entry_price = float(meta.get("entry_price", getattr(pos, "avg_entry_price", 0) or 0))
-                    if close_fill_price is not None and close_fill_price > 0:
-                        exit_price = float(close_fill_price)
-                    elif live_mark_price is not None and live_mark_price > 0:
-                        exit_price = float(live_mark_price)
-                    else:
-                        exit_price = float(getattr(pos, "current_price", 0) or 0)
-                    realized_plpc = plpc
+                    exit_price = float(close_fill_price)
+                    realized_plpc = 0.0
                     if entry_price > 0 and exit_price > 0:
                         realized_plpc = (exit_price - entry_price) / entry_price
+                    trade_pnl_usd = (exit_price - entry_price) * filled_close_qty * 100
+                    hold_seconds = 0
+                    if entry_time is not None:
+                        hold_seconds = max(0, int((now_et - entry_time).total_seconds()))
+                    conservative_pnl_usd, conservative_pnl_pct = _conservative_executable_pnl(
+                        entry_ask_price=meta.get("entry_ask_submit"),
+                        exit_bid_price=close_execution.get("submit_bid"),
+                        qty=filled_close_qty,
+                    )
+                    paper_reported_pnl_usd = round(trade_pnl_usd, 2)
+                    paper_reported_pnl_pct = round(realized_plpc * 100.0, 4)
+                    max_favorable_excursion_pct = round(float(meta.get("max_plpc", 0.0) or 0.0) * 100.0, 4)
+                    max_adverse_excursion_pct = round(float(meta.get("min_plpc", 0.0) or 0.0) * 100.0, 4)
                     trade_logger.log_trade(
                         {
                             "timestamp": ts(now_et),
+                            "date": now_et.date().isoformat(),
                             "ticker": meta.get("ticker", ""),
                             "direction": meta.get("direction", ""),
                             "option_symbol": symbol,
                             "strike": meta.get("strike", ""),
                             "expiry": meta.get("expiry", ""),
                             "qty": filled_close_qty,
+                            "signal_score": meta.get("signal_score", ""),
+                            "direction_score": meta.get("direction_score", ""),
+                            "rvol": meta.get("rvol", ""),
+                            "rsi": meta.get("rsi", ""),
+                            "roc": meta.get("roc", ""),
+                            "iv_rank": meta.get("iv_rank", ""),
+                            "contract_spread_pct": meta.get("contract_spread_pct", ""),
+                            "entry_time": meta.get("entry_time_iso", ""),
+                            "exit_time": now_et.isoformat(),
+                            "hold_seconds": hold_seconds,
                             "entry_price": entry_price,
                             "exit_price": exit_price,
+                            "realized_pnl_usd": round(trade_pnl_usd, 2),
                             "pnl_pct": round(realized_plpc, 4),
+                            "paper_reported_pnl_usd": paper_reported_pnl_usd,
+                            "paper_reported_pnl_pct": paper_reported_pnl_pct,
+                            "conservative_executable_pnl_usd": conservative_pnl_usd,
+                            "conservative_executable_pnl_pct": conservative_pnl_pct,
+                            "max_favorable_excursion_pct": max_favorable_excursion_pct,
+                            "max_adverse_excursion_pct": max_adverse_excursion_pct,
+                            "entry_underlying_symbol": meta.get("ticker", ""),
+                            "entry_bid_submit": meta.get("entry_bid_submit", ""),
+                            "entry_ask_submit": meta.get("entry_ask_submit", ""),
+                            "entry_midpoint_submit": meta.get("entry_midpoint_submit", ""),
+                            "entry_intended_limit": meta.get("entry_intended_limit", ""),
+                            "entry_filled_price": meta.get("entry_filled_price", entry_price),
+                            "entry_spread_pct": meta.get("entry_spread_pct", ""),
+                            "entry_fill_slippage_vs_ask_pct": meta.get("entry_fill_slippage_vs_ask_pct", ""),
+                            "entry_fill_seconds": meta.get("entry_fill_seconds", ""),
+                            "entry_attempts": meta.get("entry_attempts", ""),
+                            "exit_underlying_symbol": meta.get("ticker", ""),
+                            "exit_bid_submit": close_execution.get("submit_bid", ""),
+                            "exit_ask_submit": close_execution.get("submit_ask", ""),
+                            "exit_midpoint_submit": close_execution.get("submit_midpoint", ""),
+                            "exit_intended_limit": close_execution.get("intended_limit", ""),
+                            "exit_filled_price": exit_price,
+                            "exit_spread_pct": close_execution.get("submit_spread_pct", ""),
+                            "exit_fill_slippage_vs_bid_pct": close_execution.get("fill_slippage_vs_bid_pct", ""),
+                            "exit_fill_seconds": close_execution.get("fill_seconds", ""),
+                            "exit_attempts": close_execution.get("attempts", ""),
                             "exit_reason": exit_reason,
                         }
                     )
-
-                    trade_pnl_usd = (exit_price - entry_price) * filled_close_qty * 100
 
                     if trade_pnl_usd < 0:
                         daily_realized_loss_usd += abs(trade_pnl_usd)
@@ -2381,11 +2718,12 @@ def main():
                 qty = position_qty_as_int(getattr(pos, "qty", 0))
                 if qty > 0:
                     try:
-                        filled_qty, _fill_price = _close_position_with_confirmation(
+                        filled_qty, _fill_price, _close_meta = _close_position_with_confirmation(
                             symbol=symbol,
                             qty=qty,
                             now_et=now_et,
                             label="EOD CLOSE",
+                            exit_reason="eod_close",
                         )
                         if filled_qty > 0:
                             print(f"[{ts(now_et)}] EOD CLOSE {symbol} qty={filled_qty}/{qty}")

@@ -116,8 +116,9 @@ SCAN_MORNING_TIME                  = "09:30"
 OBSERVATION_END_TIME               = "10:00"
 OBSERVATION_ENABLED                = True
 ENABLE_PREMARKET_OPENING_SIGNALS   = True
-PREMARKET_SIGNAL_WINDOW_START      = "09:20"
+PREMARKET_SIGNAL_WINDOW_START      = "08:00"
 PREMARKET_SIGNAL_WINDOW_END        = "09:30"
+PREMARKET_REPORT_READY_TIME        = "08:20"
 PREMARKET_LOOKBACK_MINUTES         = 75
 PREMARKET_MAX_SIGNALS              = 6
 PREMARKET_APPLY_UNTIL              = "09:35"
@@ -212,6 +213,15 @@ IV_RANK_MAX               = 99.0
 
 ENABLE_SIGNAL_SCORING     = True
 MIN_SIGNAL_SCORE          = 5.0
+
+# Phase 3 enforcement knobs driven by review.py output.
+# Use blocked hours after you identify weak entry windows from analytics.
+ENTRY_BLOCKED_HOURS_ET    = ()
+
+# Execution-time spread gate using the live quote right before order submission.
+# Keep this tighter than MAX_OPTION_SPREAD_PCT, which is only used during chain selection.
+ENTRY_MAX_QUOTE_SPREAD_PCT         = 18.0
+OPENING_ENTRY_MAX_QUOTE_SPREAD_PCT = 24.0
 
 MAX_ENTRY_SLIPPAGE_PCT    = 5.0
 MAX_FILL_SLIPPAGE_PCT     = 5.0
@@ -336,9 +346,14 @@ ALERT_COOLDOWN_SECONDS             = 300
 ENTRY_ORDER_STATUS_WAIT_SECONDS    = 8
 ENTRY_RETRY_STATUS_WAIT_SECONDS    = 5
 ENTRY_MARKET_FALLBACK_WAIT_SECONDS = 3
+ENTRY_RETRY_LIMIT_PCT              = 0.02
 EXIT_ORDER_STATUS_POLL_SECONDS     = 2
 EXIT_ORDER_MAX_WAIT_SECONDS        = 20
 EXIT_CLOSE_RETRY_ATTEMPTS          = 2
+SMART_EXIT_NORMAL_WAIT_SECONDS     = 6
+SMART_EXIT_CRITICAL_WAIT_SECONDS   = 3
+SMART_EXIT_NORMAL_REPRICE_PCT      = 0.35
+SMART_EXIT_CRITICAL_REPRICE_PCT    = 0.10
 # Faster close profile for hard stop-loss exits.
 STOPLOSS_EXIT_ORDER_STATUS_POLL_SECONDS = 1
 STOPLOSS_EXIT_ORDER_MAX_WAIT_SECONDS    = 3
@@ -346,6 +361,7 @@ STOPLOSS_EXIT_CLOSE_RETRY_ATTEMPTS      = 1
 # Independent stop-loss watchdog runs even when trader loop is healthy.
 INDEPENDENT_STOPLOSS_INTERVAL_SECONDS    = 2
 INDEPENDENT_STOPLOSS_REQUIRE_STALE_LOOP  = False
+PAPER_EXECUTION_FRICTION_PER_CONTRACT    = 1.0
 TRADES_MAX_ROWS                    = 5000
 
 PAPER = True   # paper trading — set to False only when ready for live
