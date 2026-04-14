@@ -2483,7 +2483,15 @@ def home():
           alert(`Close all positions failed: ${body.error || "request failed"}`);
           return;
         }
-        alert(`Success: ${body.message}\n\nDetails:\n${body.results.map(r => r.symbol + (r.error ? ` (ERROR: ${r.error})` : " closed")).join("\n")}`);
+        const resultRows = Array.isArray(body.results)
+          ? body.results.map((r) => {
+              const symbol = String((r && r.symbol) || "unknown");
+              if (r && r.error) return symbol + " (ERROR: " + String(r.error) + ")";
+              return symbol + " closed";
+            })
+          : [];
+        const detailText = resultRows.length ? resultRows.join("\n") : "No position details returned";
+        alert("Success: " + String(body.message || "request completed") + "\n\nDetails:\n" + detailText);
       } catch (e) {
         alert(`Close all positions request failed: ${e.message}`);
         return;
