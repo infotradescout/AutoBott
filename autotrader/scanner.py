@@ -357,7 +357,11 @@ def _scan_ticker_details(
     opening_relax = bool(config.ENABLE_OPENING_ENTRY_RELAX) and (
         minutes_since_open <= int(config.OPENING_ENTRY_RELAX_MINUTES)
     )
-    min_bars_required = 1 if opening_relax else int(config.SCAN_MIN_BARS)
+    base_min_bars = max(1, int(config.SCAN_MIN_BARS))
+    # In the early session, only a small number of completed 5m bars can exist.
+    # Keep the gate realistic so we do not block scans on impossible counts.
+    completed_5m_bars = max(1, minutes_since_open // 5)
+    min_bars_required = 1 if opening_relax else min(base_min_bars, completed_5m_bars)
     if len(bars_df) < min_bars_required:
         return _scan_failure(f"insufficient intraday bars ({len(bars_df)}/{min_bars_required})")
 
