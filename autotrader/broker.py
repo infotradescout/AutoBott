@@ -116,6 +116,42 @@ class AlpacaBroker:
         """Return True when there is an open order for the symbol (optionally matching side)."""
         return len(self.get_open_orders_for_symbol(symbol=symbol, side=side)) > 0
 
+    def close_all_positions(self) -> tuple[int, int, list[dict]]:
+        """Close all open positions with market sell orders. Returns (total, closed, results)."""
+        results = []
+        try:
+            positions = self.get_open_option_positions()
+        except Exception as exc:  # noqa: BLE001
+            print(f"[broker] close_all_positions failed to fetch positions: {exc}")
+            return 0, 0, [{"error": str(exc)}]
+        
+        total = len(positions)
+        closed = 0
+        
+        for pos in positions:
+            try:
+                symbol = str(getattr(pos, "symbol", ""))
+                qty = int(float(getattr(pos, "qty", 0) or 0))
+                if symbol and qty > 0:
+                    order = self.close_option_market(symbol, qty)
+                    order_id = str(getattr(order, "id", "unknown"))
+                    results.append({
+                        "symbol": symbol,
+                        "qty": qty,
+                        "order_id": order_id,
+                        "status": "submitted"
+                    })
+                    closed += 1
+            except Exception as exc:  # noqa: BLE001
+                symbol = str(getattr(pos, "symbol", "unknown"))
+                results.append({
+                    "symbol": symbol,
+                    "error": str(exc),
+                    "status": "failed"
+                })
+        
+        return total, closed, results
+
     def pdt_allows_new_day_trade(self) -> tuple[bool, dict]:
         if not config.ENFORCE_PDT_GUARD:
             return True, {"reason": "pdt_guard_disabled", "equity": None, "daytrade_count": None}

@@ -841,6 +841,28 @@ def api_runtime_control_update():
         return jsonify({"error": str(exc)}), 500
 
 
+@app.post("/api/control/close-all-positions")
+def api_close_all_positions():
+    try:
+        ok, err, status = _verify_control_token()
+        if not ok:
+            return jsonify({"error": err}), status
+        
+        from broker import AlpacaBroker
+        broker = AlpacaBroker(API_KEY, SECRET_KEY, PAPER)
+        total, closed, results = broker.close_all_positions()
+        
+        return jsonify({
+            "ok": True,
+            "total_positions": total,
+            "closed_count": closed,
+            "results": results,
+            "message": f"Closed {closed} of {total} positions"
+        })
+    except Exception as exc:  # noqa: BLE001
+        return jsonify({"error": str(exc)}), 500
+
+
 @app.get("/api/watchlist-control")
 def api_watchlist_control():
     try:
@@ -1904,6 +1926,7 @@ def home():
       <div class="ctrl">
         <button class="ctrl-btn stop" onclick="setTradingControl('stop')">STOP TRADING</button>
         <button class="ctrl-btn start" onclick="setTradingControl('start')">START TRADING</button>
+        <button class="ctrl-btn" style="background-color: #d32f2f;" onclick="closeAllPositions()">CLOSE ALL POSITIONS</button>
         <span id="trading-control-status" class="ctrl-state">Control: --</span>
       </div>
     </div>
@@ -2424,6 +2447,45 @@ def home():
         }
       } catch {
         alert("Trading control request failed");
+        return;
+      }
+      await refresh();
+    }
+
+    async function closeAllPositions() {
+      let controlToken = localStorage.getItem("tradeControlToken") || "";
+      if (!controlToken) {
+        controlToken = window.prompt("Enter dashboard control token");
+        if (controlToken) {
+          localStorage.setItem("tradeControlToken", controlToken);
+        }
+      }
+      if (!controlToken) {
+        alert("Control token is required");
+        return;
+      }
+      
+      const confirmed = window.confirm("Are you sure you want to close ALL positions? This action cannot be undone.");
+      if (!confirmed) {
+        return;
+      }
+      
+      try {
+        const res = await fetch("/api/control/close-all-positions", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            "X-Trade-Control-Token": controlToken,
+          },
+        });
+        const body = await res.json();
+        if (!res.ok || body.error) {
+          alert(`Close all positions failed: ${body.error || "request failed"}`);
+          return;
+        }
+        alert(`Success: ${body.message}\n\nDetails:\n${body.results.map(r => r.symbol + (r.error ? ` (ERROR: ${r.error})` : " closed")).join("\n")}`);
+      } catch (e) {
+        alert(`Close all positions request failed: ${e.message}`);
         return;
       }
       await refresh();
