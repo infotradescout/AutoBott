@@ -203,7 +203,13 @@ class AlpacaDataClient:
         """Fetch daily OHLCV bars using yfinance."""
         return self.get_stock_bars(symbol=symbol, limit=limit, timeframe="1d")
 
-    def get_intraday_bars_since_open(self, symbol: str, now_et: datetime, limit: int = 120) -> pd.DataFrame:
+    def get_intraday_bars_since_open(
+        self,
+        symbol: str,
+        now_et: datetime,
+        limit: int = 120,
+        bar_timeframe: str | None = None,
+    ) -> pd.DataFrame:
         """
         Fetch 5-minute intraday bars from market open (9:30 ET) until now.
         Uses Alpaca data bars first, with yfinance fallback.
@@ -212,8 +218,14 @@ class AlpacaDataClient:
         today = now_et.date()
         market_open = tz_et.localize(datetime(today.year, today.month, today.day, 9, 30, 0))
         minutes_since_open = max(0, int((now_et - market_open).total_seconds() // 60))
-        use_one_minute = minutes_since_open < 5
-        timeframe = "1Min" if use_one_minute else "5Min"
+        normalized_tf = str(bar_timeframe or "").strip().lower()
+        if normalized_tf in ("1min", "1m"):
+            timeframe = "1Min"
+        elif normalized_tf in ("5min", "5m"):
+            timeframe = "5Min"
+        else:
+            use_one_minute = minutes_since_open < 5
+            timeframe = "1Min" if use_one_minute else "5Min"
 
         # Primary source: Alpaca bars API (more stable intraday for live trading loops)
         try:
@@ -260,7 +272,7 @@ class AlpacaDataClient:
         # Fallback: yfinance
         try:
             ticker = yf.Ticker(symbol)
-            interval = "1m" if use_one_minute else "5m"
+            interval = "1m" if timeframe == "1Min" else "5m"
             df = ticker.history(period="5d", interval=interval, auto_adjust=True)
 
             if df is None or df.empty:

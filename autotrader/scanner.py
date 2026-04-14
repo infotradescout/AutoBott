@@ -358,10 +358,16 @@ def _scan_ticker_details(
         minutes_since_open <= int(config.OPENING_ENTRY_RELAX_MINUTES)
     )
     base_min_bars = max(1, int(config.SCAN_MIN_BARS))
-    # In the early session, only a small number of completed 5m bars can exist.
-    # Keep the gate realistic so we do not block scans on impossible counts.
-    completed_5m_bars = max(1, minutes_since_open // 5)
-    min_bars_required = 1 if opening_relax else min(base_min_bars, completed_5m_bars)
+    bar_interval_minutes = 1
+    if len(bars_df) >= 2:
+        ts_series = pd.to_datetime(bars_df["timestamp"], errors="coerce")
+        deltas = ts_series.diff().dt.total_seconds().dropna()
+        if not deltas.empty:
+            median_delta_sec = float(deltas.median())
+            if median_delta_sec > 0:
+                bar_interval_minutes = max(1, int(round(median_delta_sec / 60.0)))
+    completed_bars = max(1, minutes_since_open // max(1, bar_interval_minutes))
+    min_bars_required = 1 if opening_relax else min(base_min_bars, completed_bars)
     if len(bars_df) < min_bars_required:
         return _scan_failure(f"insufficient intraday bars ({len(bars_df)}/{min_bars_required})")
 
@@ -681,6 +687,7 @@ class IntradayScanner:
                         symbol=symbol,
                         now_et=now_et,
                         limit=config.SCAN_INTRADAY_BARS,
+                        bar_timeframe="1Min",
                     )
                 if bars_df.empty:
                     no_bars_reason = "no premarket bars" if premarket_mode else "no intraday bars"
