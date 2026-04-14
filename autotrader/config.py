@@ -139,6 +139,10 @@ MAX_HOLD_MINUTES                   = 90
 STOP_LOSS_USD          = 10.0   # exit if unrealized P&L is <= -$10 per trade
 STOP_LOSS_PCT          = 0.03   # legacy fallback reference for older state/debug fields
 
+# Immediate winner lock: exit as soon as gain reaches this fraction.
+# 1.0 = +100% (option price doubled from entry).
+IMMEDIATE_TAKE_PROFIT_PCT = 1.0
+
 # Fixed profit target (disabled — trailing stop rides winners instead)
 ENABLE_FIXED_PROFIT_TARGET = False
 PROFIT_TARGET_PCT          = 0.60   # only used if ENABLE_FIXED_PROFIT_TARGET = True

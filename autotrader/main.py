@@ -2065,10 +2065,10 @@ def main():
                 if unrealized_usd is None and entry_price_for_monitor > 0:
                     unrealized_usd = float(plpc) * float(entry_price_for_monitor) * qty * 100.0
 
-            # --- Exit strategy: two rules only ---
+            # --- Exit strategy ---
             # 1. STOP LOSS: exit immediately at/through the per-trade USD loss cap.
-            # 2. REVERSAL EXIT: if the trade is profitable, hold until momentum reverses.
-            # No trailing stop ladder — winners ride until reversal is confirmed.
+            # 2. IMMEDIATE TAKE PROFIT: exit instantly once gain reaches configured cap.
+            # 3. REVERSAL EXIT: otherwise, if profitable, hold until momentum reverses.
 
             if meta:
                 meta["max_plpc"] = max(float(meta.get("max_plpc", plpc) or plpc), plpc)
@@ -2109,6 +2109,11 @@ def main():
             stop_loss_usd_cap = _runtime_stop_loss_usd()
             if exit_reason is None and should_trigger_stop_loss(unrealized_usd, stop_loss_usd_cap):
                 exit_reason = "stop_loss"
+
+            # Rule 2: immediate take-profit once the option has doubled (or configured threshold).
+            immediate_take_profit_pct = float(getattr(config, "IMMEDIATE_TAKE_PROFIT_PCT", 1.0) or 1.0)
+            if exit_reason is None and plpc >= immediate_take_profit_pct:
+                exit_reason = "immediate_take_profit"
 
             # --- Reversal detection exit ---
             # When the trade is in profit, check if the underlying is reversing.
