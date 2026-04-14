@@ -20,6 +20,18 @@ def _assert_option_symbol(symbol: str) -> None:
         raise ValueError(f"invalid option symbol: {symbol!r}")
 
 
+def _normalize_asset_class(raw_asset_class) -> str:
+    """Normalize SDK/rest asset_class values into a lowercase label."""
+    try:
+        value = getattr(raw_asset_class, "value", raw_asset_class)
+    except Exception:  # noqa: BLE001
+        value = raw_asset_class
+    text = str(value or "").strip().lower()
+    if "." in text:
+        text = text.split(".")[-1]
+    return text
+
+
 class AlpacaBroker:
     def __init__(self, api_key: str, secret_key: str, paper: bool = True):
         self.trading_client = TradingClient(api_key, secret_key, paper=paper)
@@ -39,10 +51,11 @@ class AlpacaBroker:
         except Exception as exc:  # noqa: BLE001
             print(f"[broker] get_all_positions failed: {exc}")
             return []
+        option_asset_classes = {"us_option", "option", "options"}
         return [
             p
             for p in positions
-            if str(getattr(p, "asset_class", "")).lower() in ("us_option", "option", "options")
+            if _normalize_asset_class(getattr(p, "asset_class", "")) in option_asset_classes
         ]
 
     def place_option_limit_buy(self, option_symbol: str, qty: int, ask_price: float):
