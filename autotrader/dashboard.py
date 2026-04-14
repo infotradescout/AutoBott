@@ -82,7 +82,11 @@ def _safe_float(value: Any, default: float = 0.0) -> float:
 
 def _verify_control_token() -> tuple[bool, str, int]:
     if not CONTROL_TOKEN:
-        return False, "dashboard control token not configured", 503
+    # In paper mode, allow controls even without a configured token so
+    # emergency actions (like close-all) still work during setup.
+    if PAPER:
+      return True, "", 200
+    return False, "dashboard control token not configured", 503
     provided = str(request.headers.get("X-Trade-Control-Token", "") or "").strip()
     if not provided or not hmac.compare_digest(provided, CONTROL_TOKEN):
         return False, "unauthorized", 401
@@ -2454,17 +2458,7 @@ def home():
 
     async function closeAllPositions() {
       let controlToken = localStorage.getItem("tradeControlToken") || "";
-      if (!controlToken) {
-        controlToken = window.prompt("Enter dashboard control token");
-        if (controlToken) {
-          localStorage.setItem("tradeControlToken", controlToken);
-        }
-      }
-      if (!controlToken) {
-        alert("Control token is required");
-        return;
-      }
-      
+
       const confirmed = window.confirm("Are you sure you want to close ALL positions? This action cannot be undone.");
       if (!confirmed) {
         return;
@@ -2480,6 +2474,33 @@ def home():
         });
         const body = await res.json();
         if (!res.ok || body.error) {
+          if ((res.status === 401 || res.status === 403) && !controlToken) {
+            controlToken = window.prompt("Enter dashboard control token") || "";
+            if (controlToken) {
+              localStorage.setItem("tradeControlToken", controlToken);
+              const retryRes = await fetch("/api/control/close-all-positions", {
+                method: "POST",
+                headers: {
+                  "Content-Type": "application/json",
+                  "X-Trade-Control-Token": controlToken,
+                },
+              });
+              const retryBody = await retryRes.json();
+              if (retryRes.ok && !retryBody.error) {
+                const retryRows = Array.isArray(retryBody.results)
+                  ? retryBody.results.map((r) => {
+                      const symbol = String((r && r.symbol) || "unknown");
+                      if (r && r.error) return symbol + " (ERROR: " + String(r.error) + ")";
+                      return symbol + " closed";
+                    })
+                  : [];
+                const retryDetails = retryRows.length ? retryRows.join("\\n") : "No position details returned";
+                alert("Success: " + String(retryBody.message || "request completed") + "\\n\\nDetails:\\n" + retryDetails);
+                await refresh();
+                return;
+              }
+            }
+          }
           alert(`Close all positions failed: ${body.error || "request failed"}`);
           return;
         }
