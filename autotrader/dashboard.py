@@ -205,6 +205,18 @@ def _watch_stock_window_config(window_key: str) -> dict[str, Any]:
     return dict(presets.get(key, presets["1D"]))
 
 
+def _watch_history_window_config(window_key: str) -> dict[str, Any]:
+    key = str(window_key or "1M").upper()
+    presets = {
+        "1H": {"key": "1H", "lookback_minutes": 60, "label": "Last 1 hour"},
+        "1D": {"key": "1D", "lookback_minutes": 1440, "label": "Last 1 day"},
+        "1W": {"key": "1W", "lookback_minutes": 10080, "label": "Last 1 week"},
+        "1M": {"key": "1M", "lookback_minutes": 43200, "label": "Last 1 month"},
+        "ALL": {"key": "ALL", "lookback_minutes": None, "label": "All history"},
+    }
+    return dict(presets.get(key, presets["1M"]))
+
+
 def _fetch_intraday_stock_series(
     symbols: list[str],
     limit: int = 360,
@@ -997,6 +1009,9 @@ def api_watch_open():
 
 @app.get("/api/watch/history")
 def api_watch_history():
+    history_window = _watch_history_window_config(request.args.get("window", "1M"))
+    lookback_minutes = history_window.get("lookback_minutes")
+    now_et = _now_et()
     try:
         rows = _read_csv_rows(TRADES_CSV, limit=5000, reverse=False)
         cumulative_pnl_usd = 0.0
@@ -1012,6 +1027,10 @@ def api_watch_history():
             dt = _parse_ts(ts_raw)
             if dt is None:
                 continue
+            if lookback_minutes is not None:
+                age_minutes = (now_et - dt).total_seconds() / 60.0
+                if age_minutes > float(lookback_minutes):
+                    continue
             entry_price = _safe_float(row.get("entry_price"), 0.0)
             exit_price = _safe_float(row.get("exit_price"), 0.0)
             qty = int(_safe_float(row.get("qty"), 0))
@@ -1072,6 +1091,7 @@ def api_watch_history():
                 "cumulative_series": [{"ts": p["timestamp"], "value": p["cum_pnl_usd"]} for p in trade_points[-800:]],
                 "daily_series": daily_series[-120:],
                 "recent_trades": list(reversed(trade_points[-80:])),
+                "history_window": history_window,
                 "generated_at": _now_et().strftime("%Y-%m-%d %H:%M:%S ET"),
             }
         )
@@ -1490,6 +1510,16 @@ def watch_page():
     </div>
 
     <div id="panel-history" class="hidden">
+      <div class="card">
+        <div class="muted" style="margin-bottom:8px;">Trade history range:</div>
+        <div class="range-tabs" id="history-range-tabs">
+          <button class="range-btn" data-window="1H" onclick="setHistoryWindow('1H')">1H</button>
+          <button class="range-btn" data-window="1D" onclick="setHistoryWindow('1D')">1D</button>
+          <button class="range-btn" data-window="1W" onclick="setHistoryWindow('1W')">1W</button>
+          <button class="range-btn" data-window="1M" onclick="setHistoryWindow('1M')">1M</button>
+          <button class="range-btn" data-window="ALL" onclick="setHistoryWindow('ALL')">ALL</button>
+        </div>
+      </div>
       <div class="hist-kpi">
         <div class="card"><div class="label2">Total Trades</div><div id="hist-total-trades" class="value2">--</div></div>
         <div class="card"><div class="label2">Win Rate</div><div id="hist-win-rate" class="value2">--</div></div>
@@ -1517,6 +1547,7 @@ def watch_page():
   <script>
     let watchStockWindow = localStorage.getItem("watchStockWindow") || "1D";
     let watchStockWindowLabel = "5m, 1 day";
+    let watchHistoryWindow = localStorage.getItem("watchHistoryWindow") || "1M";
 
     function applyWatchWindowButtons() {
       const buttons = Array.from(document.querySelectorAll("#watch-range-tabs .range-btn"));
@@ -1531,6 +1562,21 @@ def watch_page():
       localStorage.setItem("watchStockWindow", watchStockWindow);
       applyWatchWindowButtons();
       refreshOpen();
+    }
+
+    function applyHistoryWindowButtons() {
+      const buttons = Array.from(document.querySelectorAll("#history-range-tabs .range-btn"));
+      buttons.forEach((btn) => {
+        const key = String(btn.getAttribute("data-window") || "").toUpperCase();
+        btn.className = key === watchHistoryWindow ? "range-btn active" : "range-btn";
+      });
+    }
+
+    function setHistoryWindow(windowKey) {
+      watchHistoryWindow = String(windowKey || "1M").toUpperCase();
+      localStorage.setItem("watchHistoryWindow", watchHistoryWindow);
+      applyHistoryWindowButtons();
+      refreshHistory();
     }
 
     function setTab(tab) {
@@ -1745,14 +1791,18 @@ def watch_page():
       renderOpen(body.rows || []);
     }
     async function refreshHistory() {
-      const body = await fetchJson("/api/watch/history");
+      const body = await fetchJson(`/api/watch/history?window=${encodeURIComponent(watchHistoryWindow)}`);
       if (body.error) return;
+      const historyWindow = body.history_window || {};
+      watchHistoryWindow = String(historyWindow.key || watchHistoryWindow || "1M").toUpperCase();
+      applyHistoryWindowButtons();
       renderHistory(body);
     }
     async function refreshAll() {
       await Promise.all([loadWatchlist(), refreshOpen(), refreshHistory()]);
     }
     applyWatchWindowButtons();
+    applyHistoryWindowButtons();
     refreshAll();
     setInterval(async () => {
       await Promise.all([refreshOpen(), refreshHistory()]);
