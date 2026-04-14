@@ -98,21 +98,47 @@ def _read_csv_rows(path: Path, limit: int, reverse: bool = True) -> list[dict[st
 def _parse_ts(value: str) -> datetime | None:
     if not value:
         return None
+
+    raw = str(value).strip()
+
+    # Fast path: ISO strings, including UTC Z suffix.
+    try:
+        dt = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+        if dt.tzinfo is None:
+            dt = EASTERN.localize(dt)
+        return dt.astimezone(EASTERN)
+    except ValueError:
+        pass
+
+    # Handle common log timestamps like "2026-04-14 12:14:12 EDT".
+    tz_match = re.match(r"^(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})(?:\s+([A-Za-z]{2,5}))?$", raw)
+    if tz_match:
+        base_text = str(tz_match.group(1) or "")
+        tz_abbrev = str(tz_match.group(2) or "").upper()
+        try:
+            base_dt = datetime.strptime(base_text, "%Y-%m-%d %H:%M:%S")
+            tz_map = {
+                "EDT": EASTERN,
+                "EST": EASTERN,
+                "CDT": CENTRAL,
+                "CST": CENTRAL,
+                "UTC": pytz.UTC,
+                "GMT": pytz.UTC,
+            }
+            tzinfo = tz_map.get(tz_abbrev, EASTERN)
+            return tzinfo.localize(base_dt).astimezone(EASTERN)
+        except ValueError:
+            pass
+
     for fmt in ("%Y-%m-%d %H:%M:%S %Z", "%Y-%m-%d %H:%M:%S"):
         try:
-            dt = datetime.strptime(value, fmt)
+            dt = datetime.strptime(raw, fmt)
             if dt.tzinfo is None:
                 dt = EASTERN.localize(dt)
             return dt.astimezone(EASTERN)
         except ValueError:
             continue
-    try:
-        dt = datetime.fromisoformat(value)
-        if dt.tzinfo is None:
-            dt = EASTERN.localize(dt)
-        return dt.astimezone(EASTERN)
-    except ValueError:
-        return None
+    return None
 
 
 def _today_trade_rows() -> list[dict[str, str]]:
