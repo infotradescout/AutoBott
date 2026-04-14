@@ -8,8 +8,10 @@ import time
 import traceback
 from datetime import datetime
 from pathlib import Path
+import math
 
-from env_config import load_runtime_env
+from env_config import get_required_env, load_runtime_env
+import config
 
 load_runtime_env()
 
@@ -40,6 +42,7 @@ def _force_writable_data_dir() -> None:
 _force_writable_data_dir()
 
 from alerts import AlertManager
+from broker import AlpacaBroker
 from dashboard import app
 from main import main as trader_main
 from state_store import load_bot_state, save_bot_state
@@ -50,6 +53,61 @@ except Exception:  # noqa: BLE001
     pytz = None
 
 ALERTS = AlertManager()
+BROKER: AlpacaBroker | None = None
+
+
+def _position_qty_as_int(qty_value) -> int:
+    try:
+        return int(float(qty_value))
+    except (TypeError, ValueError):
+        return 0
+
+
+def _parse_iso_datetime(value: str | None) -> datetime | None:
+    if not value:
+        return None
+    try:
+        return datetime.fromisoformat(str(value))
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def _is_trader_loop_stale(runtime_state: dict) -> bool:
+    heartbeat_raw = str(runtime_state.get("last_trader_heartbeat_et", "") or "")
+    heartbeat_dt = _parse_iso_datetime(heartbeat_raw)
+    if heartbeat_dt is None:
+        return True
+    now_dt = datetime.now(heartbeat_dt.tzinfo) if heartbeat_dt.tzinfo is not None else datetime.now()
+    heartbeat_age_seconds = int((now_dt - heartbeat_dt).total_seconds())
+    stale_after = max(60, int(config.LOOP_INTERVAL_SECONDS) * 4)
+    return heartbeat_age_seconds > stale_after
+
+
+def _position_unrealized_usd(pos) -> float | None:
+    try:
+        pl_raw = float(getattr(pos, "unrealized_pl", 0) or 0)
+        if math.isfinite(pl_raw):
+            return pl_raw
+    except (TypeError, ValueError):
+        pass
+    try:
+        qty = _position_qty_as_int(getattr(pos, "qty", 0))
+        entry = float(getattr(pos, "avg_entry_price", 0) or 0)
+        current = float(getattr(pos, "current_price", 0) or 0)
+        if qty > 0 and entry > 0 and current > 0:
+            return (current - entry) * qty * 100.0
+    except (TypeError, ValueError):
+        pass
+    return None
+
+
+def _broker() -> AlpacaBroker:
+    global BROKER
+    if BROKER is None:
+        api_key = get_required_env("ALPACA_API_KEY")
+        secret_key = get_required_env("ALPACA_SECRET_KEY")
+        BROKER = AlpacaBroker(api_key, secret_key, paper=config.PAPER)
+    return BROKER
 
 
 def _now_et_iso() -> str:
@@ -105,9 +163,69 @@ def _run_trader_forever() -> None:
         time.sleep(30)
 
 
+def _run_independent_stoploss_guard() -> None:
+    while True:
+        try:
+            runtime_state = load_bot_state()
+            if not isinstance(runtime_state, dict):
+                runtime_state = {}
+            if not _is_trader_loop_stale(runtime_state):
+                time.sleep(5)
+                continue
+
+            broker = _broker()
+            positions = broker.get_open_option_positions()
+            stop_cap = abs(float(getattr(config, "STOP_LOSS_USD", 10.0) or 10.0))
+            if stop_cap <= 0:
+                time.sleep(5)
+                continue
+
+            for pos in positions:
+                symbol = str(getattr(pos, "symbol", "") or "")
+                qty = _position_qty_as_int(getattr(pos, "qty", 0))
+                if not symbol or qty <= 0:
+                    continue
+                unrealized_usd = _position_unrealized_usd(pos)
+                if unrealized_usd is None or unrealized_usd > -stop_cap:
+                    continue
+                if broker.has_open_order_for_symbol(symbol=symbol, side="sell"):
+                    continue
+
+                try:
+                    broker.close_option_market(symbol, qty)
+                    _patch_runtime_state(
+                        {
+                            "independent_stoploss_last_trigger_et": _now_et_iso(),
+                            "independent_stoploss_last_symbol": symbol,
+                            "independent_stoploss_last_unrealized_usd": round(float(unrealized_usd), 4),
+                            "independent_stoploss_last_qty": qty,
+                        }
+                    )
+                    print(
+                        f"[render_service] INDEPENDENT_STOPLOSS closed {symbol} qty={qty} "
+                        f"unrealized_usd={unrealized_usd:.2f} cap=-{stop_cap:.2f}"
+                    )
+                    ALERTS.send(
+                        "independent_stoploss",
+                        (
+                            f"Independent stop-loss closed {symbol} qty={qty} "
+                            f"unrealized=${unrealized_usd:.2f} (cap -${stop_cap:.2f})."
+                        ),
+                        level="warning",
+                        dedupe_key=f"independent-stoploss-{symbol}-{int(time.time() // 30)}",
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    print(f"[render_service] independent stop-loss close failed for {symbol}: {exc}")
+        except Exception as exc:  # noqa: BLE001
+            print(f"[render_service] independent stop-loss guard error: {exc}")
+        time.sleep(5)
+
+
 if __name__ == "__main__":
     trader_thread = threading.Thread(target=_run_trader_forever, daemon=True)
     trader_thread.start()
+    stoploss_guard_thread = threading.Thread(target=_run_independent_stoploss_guard, daemon=True)
+    stoploss_guard_thread.start()
 
     port = int(os.getenv("PORT", "5000"))
     print(f"[render_service] Starting dashboard on 0.0.0.0:{port}")
