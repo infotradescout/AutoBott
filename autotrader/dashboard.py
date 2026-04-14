@@ -623,6 +623,14 @@ def api_status():
         trader_thread_last_crash_raw = str(runtime_state.get("trader_thread_last_crash_et", "") or "")
         trader_thread_last_crash_dt = _parse_ts(trader_thread_last_crash_raw)
         trader_thread_last_crash_msg = str(runtime_state.get("trader_thread_last_crash", "") or "")
+        independent_stoploss_last_trigger_raw = str(runtime_state.get("independent_stoploss_last_trigger_et", "") or "")
+        independent_stoploss_last_trigger_dt = _parse_ts(independent_stoploss_last_trigger_raw)
+        independent_stoploss_last_symbol = str(runtime_state.get("independent_stoploss_last_symbol", "") or "")
+        independent_stoploss_last_unrealized_usd = _safe_float(
+          runtime_state.get("independent_stoploss_last_unrealized_usd"),
+          0.0,
+        )
+        independent_stoploss_last_qty = int(_safe_float(runtime_state.get("independent_stoploss_last_qty"), 0))
         last_auth_error_et = str(runtime_state.get("last_alpaca_auth_error_et", "") or "")
         last_auth_error_msg = str(runtime_state.get("last_alpaca_auth_error", "") or "")
         last_auth_error_dt = _parse_ts(last_auth_error_et)
@@ -682,6 +690,12 @@ def api_status():
                 "trader_heartbeat_age_seconds": heartbeat_age_seconds,
                 "trader_thread_last_crash_et": _to_ct_label(trader_thread_last_crash_dt) if trader_thread_last_crash_dt else "",
                 "trader_thread_last_crash": trader_thread_last_crash_msg,
+                "independent_stoploss_last_trigger_et": (
+                  _to_ct_label(independent_stoploss_last_trigger_dt) if independent_stoploss_last_trigger_dt else ""
+                ),
+                "independent_stoploss_last_symbol": independent_stoploss_last_symbol,
+                "independent_stoploss_last_unrealized_usd": independent_stoploss_last_unrealized_usd,
+                "independent_stoploss_last_qty": independent_stoploss_last_qty,
                 "last_alpaca_auth_error_et": _to_ct_label(last_auth_error_dt) if last_auth_error_dt else "",
                 "last_alpaca_auth_error": last_auth_error_msg,
                 "alpaca_auth_error_recent": auth_error_recent,
@@ -718,6 +732,10 @@ def api_status():
                 "trader_heartbeat_age_seconds": None,
                 "trader_thread_last_crash_et": "",
                 "trader_thread_last_crash": "",
+                "independent_stoploss_last_trigger_et": "",
+                "independent_stoploss_last_symbol": "",
+                "independent_stoploss_last_unrealized_usd": 0.0,
+                "independent_stoploss_last_qty": 0,
                 "last_alpaca_auth_error_et": "",
                 "last_alpaca_auth_error": "",
                 "alpaca_auth_error_recent": False,
@@ -1912,7 +1930,7 @@ def home():
       <div class="card strong"><div class="label">Equity</div><div id="equity" class="num">--</div><div class="kpi-sub">Portfolio net liquidation</div></div>
       <div class="card strong"><div class="label">Buying Power</div><div id="buying-power" class="num">--</div><div class="kpi-sub">Available for entries</div></div>
       <div class="card strong"><div class="label">Today P&L</div><div id="daily-pnl" class="num">--</div><div class="kpi-sub">Sum of closed trade %</div></div>
-      <div class="card strong"><div class="label">Market Status</div><div id="market-status" class="num">--</div><div id="entry-window-status" class="kpi-sub">Entry Window: --</div><div id="catalyst-mode-status" class="kpi-sub">Catalyst Mode: --</div><div id="trader-loop-status" class="kpi-sub">Trader Loop: --</div><div id="blockers-status" class="kpi-sub">Blockers: --</div></div>
+      <div class="card strong"><div class="label">Market Status</div><div id="market-status" class="num">--</div><div id="entry-window-status" class="kpi-sub">Entry Window: --</div><div id="catalyst-mode-status" class="kpi-sub">Catalyst Mode: --</div><div id="trader-loop-status" class="kpi-sub">Trader Loop: --</div><div id="independent-stoploss-status" class="kpi-sub">Independent SL: --</div><div id="blockers-status" class="kpi-sub">Blockers: --</div></div>
     </div>
 
     <div class="grid3 section">
@@ -2687,6 +2705,27 @@ def home():
           } else {
             blockersEl.textContent = `Blockers: ${blockers.join(", ")}`;
             blockersEl.style.color = "var(--yellow)";
+          }
+        }
+      }
+      const independentStoplossEl = document.getElementById("independent-stoploss-status");
+      if (independentStoplossEl) {
+        if (status.error) {
+          independentStoplossEl.textContent = "Independent SL: status unavailable";
+          independentStoplossEl.style.color = "var(--muted)";
+        } else {
+          const triggerAt = String(status.independent_stoploss_last_trigger_et || "").trim();
+          const symbol = String(status.independent_stoploss_last_symbol || "").trim();
+          const qty = Number(status.independent_stoploss_last_qty || 0);
+          const lossUsd = Number(status.independent_stoploss_last_unrealized_usd || 0);
+          if (triggerAt && symbol) {
+            independentStoplossEl.textContent = (
+              `Independent SL: ${symbol} qty=${qty} loss=${fmtMoney(lossUsd)} at ${triggerAt}`
+            );
+            independentStoplossEl.style.color = "var(--yellow)";
+          } else {
+            independentStoplossEl.textContent = "Independent SL: no trigger recorded";
+            independentStoplossEl.style.color = "var(--muted)";
           }
         }
       }
