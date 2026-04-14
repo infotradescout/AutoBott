@@ -195,37 +195,37 @@ def _fetch_snapshots(symbols: list[str]) -> dict[str, dict[str, Any]]:
 
 
 def _watch_stock_window_config(window_key: str) -> dict[str, Any]:
-  key = str(window_key or "1D").upper()
-  presets = {
-    "1H": {"key": "1H", "timeframe": "1Min", "lookback_minutes": 60, "limit": 120, "label": "1m, last 1h"},
-    "1D": {"key": "1D", "timeframe": "5Min", "lookback_minutes": 390, "limit": 120, "label": "5m, 1 day"},
-    "1W": {"key": "1W", "timeframe": "15Min", "lookback_minutes": 1950, "limit": 160, "label": "15m, 1 week"},
-    "1M": {"key": "1M", "timeframe": "1Hour", "lookback_minutes": 11700, "limit": 260, "label": "1h, 1 month"},
-  }
-  return dict(presets.get(key, presets["1D"]))
+    key = str(window_key or "1D").upper()
+    presets = {
+        "1H": {"key": "1H", "timeframe": "1Min", "lookback_minutes": 60, "limit": 120, "label": "1m, last 1h"},
+        "1D": {"key": "1D", "timeframe": "5Min", "lookback_minutes": 390, "limit": 120, "label": "5m, 1 day"},
+        "1W": {"key": "1W", "timeframe": "15Min", "lookback_minutes": 1950, "limit": 160, "label": "15m, 1 week"},
+        "1M": {"key": "1M", "timeframe": "1Hour", "lookback_minutes": 11700, "limit": 260, "label": "1h, 1 month"},
+    }
+    return dict(presets.get(key, presets["1D"]))
 
 
 def _fetch_intraday_stock_series(
-  symbols: list[str],
-  limit: int = 360,
-  timeframe: str = "1Min",
-  lookback_minutes: int = 360,
+    symbols: list[str],
+    limit: int = 360,
+    timeframe: str = "1Min",
+    lookback_minutes: int = 360,
 ) -> dict[str, list[dict[str, Any]]]:
     clean_symbols = [str(s).upper() for s in symbols if str(s).strip()]
     if not clean_symbols:
         return {}
     now_et = _now_et()
-  start_et = now_et - timedelta(minutes=max(15, int(lookback_minutes)))
+    start_et = now_et - timedelta(minutes=max(15, int(lookback_minutes)))
     try:
         resp = requests.get(
             f"{DATA_BASE_URL}/v2/stocks/bars",
             headers=HEADERS,
             params={
                 "symbols": ",".join(clean_symbols),
-        "timeframe": str(timeframe or "1Min"),
+              "timeframe": str(timeframe or "1Min"),
                 "start": start_et.astimezone(pytz.UTC).isoformat().replace("+00:00", "Z"),
                 "end": now_et.astimezone(pytz.UTC).isoformat().replace("+00:00", "Z"),
-        "limit": max(60, int(limit)),
+              "limit": max(60, int(limit)),
                 "adjustment": "raw",
                 "feed": "iex",
             },
@@ -922,77 +922,77 @@ def api_watchlist_control_update():
 
 @app.get("/api/watch/open")
 def api_watch_open():
-    try:
-    stock_window = _watch_stock_window_config(request.args.get("window", "1D"))
-        resp = requests.get(f"{BASE_URL}/v2/positions", headers=HEADERS, timeout=10)
-        resp.raise_for_status()
-        state = load_bot_state()
-        open_meta = dict(state.get("open_trade_meta") or {})
-        pl_history = dict(state.get("open_position_pl_history") or {})
-        option_rows = []
-        underlyings: list[str] = []
-        for pos in resp.json():
-            asset_class = str(pos.get("asset_class", "")).lower()
-            if asset_class not in ("us_option", "option"):
-                continue
-            symbol = str(pos.get("symbol", "") or "")
-            if not symbol:
-                continue
-            underlying = _extract_underlying(symbol)
-            if underlying:
-                underlyings.append(underlying)
-            meta = open_meta.get(symbol, {})
-            option_rows.append(
-                {
-                    "symbol": symbol,
-                    "underlying": underlying,
-                    "direction": _extract_direction(symbol),
-                    "qty": int(_safe_float(pos.get("qty"), 0)),
-                    "entry_price": _safe_float(pos.get("avg_entry_price"), 0.0),
-                    "current_price": _safe_float(pos.get("current_price"), 0.0),
-                    "unrealized_plpc": round(_safe_float(pos.get("unrealized_plpc"), 0.0) * 100.0, 4),
-                  "entry_time": str(meta.get("entry_time_iso", "") or ""),
-                  "entry_time_label": _to_ct_label(_parse_ts(str(meta.get("entry_time_iso", "") or ""))),
-                }
-            )
+  stock_window = _watch_stock_window_config(request.args.get("window", "1D"))
+  try:
+    resp = requests.get(f"{BASE_URL}/v2/positions", headers=HEADERS, timeout=10)
+    resp.raise_for_status()
+    state = load_bot_state()
+    open_meta = dict(state.get("open_trade_meta") or {})
+    pl_history = dict(state.get("open_position_pl_history") or {})
+    option_rows = []
+    underlyings: list[str] = []
+    for pos in resp.json():
+      asset_class = str(pos.get("asset_class", "")).lower()
+      if asset_class not in ("us_option", "option"):
+        continue
+      symbol = str(pos.get("symbol", "") or "")
+      if not symbol:
+        continue
+      underlying = _extract_underlying(symbol)
+      if underlying:
+        underlyings.append(underlying)
+      meta = open_meta.get(symbol, {})
+      option_rows.append(
+        {
+          "symbol": symbol,
+          "underlying": underlying,
+          "direction": _extract_direction(symbol),
+          "qty": int(_safe_float(pos.get("qty"), 0)),
+          "entry_price": _safe_float(pos.get("avg_entry_price"), 0.0),
+          "current_price": _safe_float(pos.get("current_price"), 0.0),
+          "unrealized_plpc": round(_safe_float(pos.get("unrealized_plpc"), 0.0) * 100.0, 4),
+          "entry_time": str(meta.get("entry_time_iso", "") or ""),
+          "entry_time_label": _to_ct_label(_parse_ts(str(meta.get("entry_time_iso", "") or ""))),
+        }
+      )
 
-        stock_series_map = _fetch_intraday_stock_series(
-              list(dict.fromkeys(underlyings)),
-              limit=int(stock_window.get("limit", 120)),
-              timeframe=str(stock_window.get("timeframe", "5Min")),
-              lookback_minutes=int(stock_window.get("lookback_minutes", 390)),
-        )
-        payload_rows = []
-        for row in option_rows:
-            symbol = str(row.get("symbol", ""))
-            underlying = str(row.get("underlying", ""))
-            raw_series = pl_history.get(symbol, [])
-            pnl_series: list[dict[str, Any]] = []
-            if isinstance(raw_series, list):
-                for point in raw_series[-240:]:
-                    if not isinstance(point, dict):
-                        continue
-                    ts_raw = point.get("ts")
-                    plpc_raw = point.get("plpc")
-                    if ts_raw is None or plpc_raw is None:
-                        continue
-                    pnl_series.append({"ts": str(ts_raw), "plpc": _safe_float(plpc_raw)})
-            payload_rows.append(
-                {
-                    **row,
-                    "pnl_series": pnl_series,
-                    "stock_series": stock_series_map.get(underlying, []),
-                }
-            )
-        return jsonify(
-          {
-            "rows": payload_rows,
-            "generated_at": _now_et().strftime("%Y-%m-%d %H:%M:%S ET"),
-            "stock_window": stock_window,
-          }
-        )
-    except Exception as exc:  # noqa: BLE001
-        return jsonify({"error": str(exc)}), 500
+    stock_series_map = _fetch_intraday_stock_series(
+      list(dict.fromkeys(underlyings)),
+      limit=int(stock_window.get("limit", 120)),
+      timeframe=str(stock_window.get("timeframe", "5Min")),
+      lookback_minutes=int(stock_window.get("lookback_minutes", 390)),
+    )
+    payload_rows = []
+    for row in option_rows:
+      symbol = str(row.get("symbol", ""))
+      underlying = str(row.get("underlying", ""))
+      raw_series = pl_history.get(symbol, [])
+      pnl_series: list[dict[str, Any]] = []
+      if isinstance(raw_series, list):
+        for point in raw_series[-240:]:
+          if not isinstance(point, dict):
+            continue
+          ts_raw = point.get("ts")
+          plpc_raw = point.get("plpc")
+          if ts_raw is None or plpc_raw is None:
+            continue
+          pnl_series.append({"ts": str(ts_raw), "plpc": _safe_float(plpc_raw)})
+      payload_rows.append(
+        {
+          **row,
+          "pnl_series": pnl_series,
+          "stock_series": stock_series_map.get(underlying, []),
+        }
+      )
+    return jsonify(
+      {
+        "rows": payload_rows,
+        "generated_at": _now_et().strftime("%Y-%m-%d %H:%M:%S ET"),
+        "stock_window": stock_window,
+      }
+    )
+  except Exception as exc:  # noqa: BLE001
+    return jsonify({"error": str(exc)}), 500
 
 
 @app.get("/api/watch/history")
