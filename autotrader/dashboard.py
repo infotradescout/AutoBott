@@ -517,15 +517,15 @@ def api_positions():
 @app.get("/api/trades")
 def api_trades():
     try:
-    rows = _read_csv_rows(TRADES_CSV, limit=50, reverse=True)
-    out: list[dict[str, Any]] = []
-    for row in rows:
-      ts_raw = str(row.get("timestamp", "") or "")
-      ts_dt = _parse_ts(ts_raw)
-      patched = dict(row)
-      patched["timestamp"] = _to_ct_label(ts_dt) or ts_raw
-      out.append(patched)
-    return jsonify(out)
+        rows = _read_csv_rows(TRADES_CSV, limit=50, reverse=True)
+        out: list[dict[str, Any]] = []
+        for row in rows:
+            ts_raw = str(row.get("timestamp", "") or "")
+            ts_dt = _parse_ts(ts_raw)
+            patched = dict(row)
+            patched["timestamp"] = _to_ct_label(ts_dt) or ts_raw
+            out.append(patched)
+        return jsonify(out)
     except Exception as exc:  # noqa: BLE001
         return jsonify({"error": str(exc)}), 500
 
