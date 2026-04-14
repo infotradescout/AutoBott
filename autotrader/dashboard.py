@@ -194,6 +194,17 @@ def _fetch_snapshots(symbols: list[str]) -> dict[str, dict[str, Any]]:
         return {}
 
 
+def _watch_stock_window_config(window_key: str) -> dict[str, Any]:
+  key = str(window_key or "1D").upper()
+  presets = {
+    "1H": {"key": "1H", "timeframe": "1Min", "lookback_minutes": 60, "limit": 120, "label": "1m, last 1h"},
+    "1D": {"key": "1D", "timeframe": "5Min", "lookback_minutes": 390, "limit": 120, "label": "5m, 1 day"},
+    "1W": {"key": "1W", "timeframe": "15Min", "lookback_minutes": 1950, "limit": 160, "label": "15m, 1 week"},
+    "1M": {"key": "1M", "timeframe": "1Hour", "lookback_minutes": 11700, "limit": 260, "label": "1h, 1 month"},
+  }
+  return dict(presets.get(key, presets["1D"]))
+
+
 def _fetch_intraday_stock_series(
   symbols: list[str],
   limit: int = 360,
@@ -912,6 +923,7 @@ def api_watchlist_control_update():
 @app.get("/api/watch/open")
 def api_watch_open():
     try:
+    stock_window = _watch_stock_window_config(request.args.get("window", "1D"))
         resp = requests.get(f"{BASE_URL}/v2/positions", headers=HEADERS, timeout=10)
         resp.raise_for_status()
         state = load_bot_state()
@@ -939,16 +951,16 @@ def api_watch_open():
                     "entry_price": _safe_float(pos.get("avg_entry_price"), 0.0),
                     "current_price": _safe_float(pos.get("current_price"), 0.0),
                     "unrealized_plpc": round(_safe_float(pos.get("unrealized_plpc"), 0.0) * 100.0, 4),
-                "entry_time": str(meta.get("entry_time_iso", "") or ""),
-                "entry_time_label": _to_ct_label(_parse_ts(str(meta.get("entry_time_iso", "") or ""))),
+                  "entry_time": str(meta.get("entry_time_iso", "") or ""),
+                  "entry_time_label": _to_ct_label(_parse_ts(str(meta.get("entry_time_iso", "") or ""))),
                 }
             )
 
         stock_series_map = _fetch_intraday_stock_series(
-          list(dict.fromkeys(underlyings)),
-          limit=360,
-          timeframe="1Min",
-          lookback_minutes=360,
+              list(dict.fromkeys(underlyings)),
+              limit=int(stock_window.get("limit", 120)),
+              timeframe=str(stock_window.get("timeframe", "5Min")),
+              lookback_minutes=int(stock_window.get("lookback_minutes", 390)),
         )
         payload_rows = []
         for row in option_rows:
@@ -972,7 +984,13 @@ def api_watch_open():
                     "stock_series": stock_series_map.get(underlying, []),
                 }
             )
-        return jsonify({"rows": payload_rows, "generated_at": _now_et().strftime("%Y-%m-%d %H:%M:%S ET")})
+        return jsonify(
+          {
+            "rows": payload_rows,
+            "generated_at": _now_et().strftime("%Y-%m-%d %H:%M:%S ET"),
+            "stock_window": stock_window,
+          }
+        )
     except Exception as exc:  # noqa: BLE001
         return jsonify({"error": str(exc)}), 500
 
@@ -1375,6 +1393,21 @@ def watch_page():
       border:1px solid var(--border); border-radius:999px; padding:4px 8px;
       font-size:12px; color:var(--text);
     }
+    .range-tabs { display:flex; flex-wrap:wrap; gap:8px; margin-top:10px; }
+    .range-btn {
+      border:1px solid var(--border);
+      border-radius:10px;
+      padding:6px 10px;
+      font-weight:700;
+      font-size:12px;
+      cursor:pointer;
+      background:rgba(127,156,191,.15);
+      color:var(--text);
+    }
+    .range-btn.active {
+      background:rgba(42,199,255,.22);
+      border-color:rgba(42,199,255,.45);
+    }
     .grid { display:grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap:10px; }
     .kpi { display:grid; grid-template-columns:repeat(4, minmax(0,1fr)); gap:8px; margin-bottom:8px; font-size:13px; color:var(--muted); }
     .kpi strong { color:var(--text); font-family:ui-monospace,SFMono-Regular,Menlo,monospace; font-size:15px; }
@@ -1445,6 +1478,13 @@ def watch_page():
         <div class="muted" style="margin-top:8px;">Current list:</div>
         <div id="watchlist-chips" class="chips"></div>
         <div id="watch-updated" class="muted" style="margin-top:8px;"></div>
+        <div class="muted" style="margin-top:10px;">Stock chart range:</div>
+        <div class="range-tabs" id="watch-range-tabs">
+          <button class="range-btn" data-window="1H" onclick="setWatchWindow('1H')">1H</button>
+          <button class="range-btn" data-window="1D" onclick="setWatchWindow('1D')">1D</button>
+          <button class="range-btn" data-window="1W" onclick="setWatchWindow('1W')">1W</button>
+          <button class="range-btn" data-window="1M" onclick="setWatchWindow('1M')">1M</button>
+        </div>
       </div>
       <div id="open-rows" class="grid"></div>
     </div>
@@ -1475,6 +1515,24 @@ def watch_page():
   </div>
 
   <script>
+    let watchStockWindow = localStorage.getItem("watchStockWindow") || "1D";
+    let watchStockWindowLabel = "5m, 1 day";
+
+    function applyWatchWindowButtons() {
+      const buttons = Array.from(document.querySelectorAll("#watch-range-tabs .range-btn"));
+      buttons.forEach((btn) => {
+        const key = String(btn.getAttribute("data-window") || "").toUpperCase();
+        btn.className = key === watchStockWindow ? "range-btn active" : "range-btn";
+      });
+    }
+
+    function setWatchWindow(windowKey) {
+      watchStockWindow = String(windowKey || "1D").toUpperCase();
+      localStorage.setItem("watchStockWindow", watchStockWindow);
+      applyWatchWindowButtons();
+      refreshOpen();
+    }
+
     function setTab(tab) {
       const open = tab === "open";
       const openPanel = document.getElementById("panel-open");
@@ -1612,7 +1670,7 @@ def watch_page():
           </div>
           <div class="muted" style="font-size:12px; margin-bottom:6px;">Open P&L % (loop samples)</div>
           <svg id="pnl-${i}" viewBox="0 0 420 120" preserveAspectRatio="none"></svg>
-          <div class="muted" style="font-size:12px; margin:8px 0 6px;">Underlying Stock Price (1m, last 6h)</div>
+          <div class="muted" style="font-size:12px; margin:8px 0 6px;">Underlying Stock Price (${watchStockWindowLabel})</div>
           <svg id="stk-${i}" viewBox="0 0 420 120" preserveAspectRatio="none"></svg>
         </div>
       `).join("");
@@ -1678,8 +1736,12 @@ def watch_page():
       `;
     }
     async function refreshOpen() {
-      const body = await fetchJson("/api/watch/open");
+      const body = await fetchJson(`/api/watch/open?window=${encodeURIComponent(watchStockWindow)}`);
       if (body.error) return;
+      const stockWindow = body.stock_window || {};
+      watchStockWindowLabel = String(stockWindow.label || watchStockWindowLabel || "stock");
+      watchStockWindow = String(stockWindow.key || watchStockWindow || "1D").toUpperCase();
+      applyWatchWindowButtons();
       renderOpen(body.rows || []);
     }
     async function refreshHistory() {
@@ -1690,6 +1752,7 @@ def watch_page():
     async function refreshAll() {
       await Promise.all([loadWatchlist(), refreshOpen(), refreshHistory()]);
     }
+    applyWatchWindowButtons();
     refreshAll();
     setInterval(async () => {
       await Promise.all([refreshOpen(), refreshHistory()]);
