@@ -2490,8 +2490,8 @@ def home():
               return symbol + " closed";
             })
           : [];
-        const detailText = resultRows.length ? resultRows.join("\n") : "No position details returned";
-        alert("Success: " + String(body.message || "request completed") + "\n\nDetails:\n" + detailText);
+        const detailText = resultRows.length ? resultRows.join("\\n") : "No position details returned";
+        alert("Success: " + String(body.message || "request completed") + "\\n\\nDetails:\\n" + detailText);
       } catch (e) {
         alert(`Close all positions request failed: ${e.message}`);
         return;
