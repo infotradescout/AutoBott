@@ -517,7 +517,15 @@ def api_positions():
 @app.get("/api/trades")
 def api_trades():
     try:
-        return jsonify(_read_csv_rows(TRADES_CSV, limit=50, reverse=True))
+    rows = _read_csv_rows(TRADES_CSV, limit=50, reverse=True)
+    out: list[dict[str, Any]] = []
+    for row in rows:
+      ts_raw = str(row.get("timestamp", "") or "")
+      ts_dt = _parse_ts(ts_raw)
+      patched = dict(row)
+      patched["timestamp"] = _to_ct_label(ts_dt) or ts_raw
+      out.append(patched)
+    return jsonify(out)
     except Exception as exc:  # noqa: BLE001
         return jsonify({"error": str(exc)}), 500
 
@@ -883,7 +891,8 @@ def api_watch_open():
                     "entry_price": _safe_float(pos.get("avg_entry_price"), 0.0),
                     "current_price": _safe_float(pos.get("current_price"), 0.0),
                     "unrealized_plpc": round(_safe_float(pos.get("unrealized_plpc"), 0.0) * 100.0, 4),
-                    "entry_time": str(meta.get("entry_time_iso", "") or ""),
+                "entry_time": str(meta.get("entry_time_iso", "") or ""),
+                "entry_time_label": _to_ct_label(_parse_ts(str(meta.get("entry_time_iso", "") or ""))),
                 }
             )
 
@@ -1556,6 +1565,7 @@ def watch_page():
             <div>Direction<br><strong>${r.direction || "-"}</strong></div>
             <div>Entry<br><strong>${fmtMoney(r.entry_price)}</strong></div>
             <div>Now<br><strong>${fmtMoney(r.current_price)}</strong></div>
+            <div>Opened<br><strong>${r.entry_time_label || r.entry_time || "-"}</strong></div>
           </div>
           <div class="muted" style="font-size:12px; margin-bottom:6px;">Open P&L % (loop samples)</div>
           <svg id="pnl-${i}" viewBox="0 0 420 120" preserveAspectRatio="none"></svg>

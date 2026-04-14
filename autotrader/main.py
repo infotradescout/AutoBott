@@ -26,6 +26,11 @@ from risk import (
     position_matches_ticker,
 )
 from scanner import initialize_scanner, run_observation_phase, run_scan, set_catalyst_mode
+from session_rules import (
+    premarket_scan_decision,
+    should_force_same_day_exit,
+    should_trigger_stop_loss,
+)
 from strategy_profiles import get_profile_overrides, normalize_profile_name
 from state_store import load_bot_state, save_bot_state
 from trading_control import load_trading_control
@@ -1049,9 +1054,17 @@ def main():
                     if still_open:
                         print(
                             f"[{ts(now_et)}] {label} {symbol} qty={request_qty}: "
-                            f"existing close order {existing_order_id} still pending ({status or 'unknown'})."
+                            f"existing close order {existing_order_id} still pending ({status or 'unknown'}); "
+                            "attempting cancel-and-replace."
                         )
-                        return 0, None
+                        try:
+                            broker.cancel_order(existing_order_id)
+                        except Exception as exc:  # noqa: BLE001
+                            print(
+                                f"[{ts(now_et)}] {label} {symbol} qty={request_qty}: "
+                                f"cancel existing close order {existing_order_id} failed: {exc}"
+                            )
+                        time.sleep(poll_seconds)
 
             for attempt in range(1, retry_attempts + 1):
                 order = broker.close_option_market(symbol, request_qty)
@@ -1067,6 +1080,15 @@ def main():
                         f"[{ts(now_et)}] {label} {symbol} qty={request_qty}: "
                         f"close order {order_id} still pending ({status or 'unknown'})."
                     )
+                    try:
+                        broker.cancel_order(order_id)
+                    except Exception as exc:  # noqa: BLE001
+                        print(
+                            f"[{ts(now_et)}] {label} {symbol} qty={request_qty}: "
+                            f"cancel close order {order_id} failed: {exc}"
+                        )
+                    if attempt < retry_attempts:
+                        continue
                     return 0, None
                 if attempt < retry_attempts:
                     print(
@@ -1228,25 +1250,23 @@ def main():
                 next_open_ct = next_open.astimezone(pytz.timezone(config.CENTRAL_TZ)).strftime("%Y-%m-%d %H:%M:%S %Z")
 
             if bool(getattr(config, "ENABLE_PREMARKET_OPENING_SIGNALS", False)):
-                today_tag = now_et.date().isoformat()
-                premarket_window_open = (
-                    is_at_or_after(now_et, config.PREMARKET_SIGNAL_WINDOW_START)
-                    and not is_at_or_after(now_et, config.PREMARKET_SIGNAL_WINDOW_END)
+                decision = premarket_scan_decision(
+                    now_et,
+                    signals_day=premarket_signals_day,
+                    last_scan_at=premarket_last_scan_at,
+                    scan_runs=premarket_scan_runs,
+                    max_runs=max(0, int(getattr(config, "PREMARKET_SCAN_MAX_RUNS", 0))),
+                    interval_seconds=max(15, int(getattr(config, "PREMARKET_SCAN_INTERVAL_SECONDS", 120))),
+                    window_start=config.PREMARKET_SIGNAL_WINDOW_START,
+                    window_end=config.PREMARKET_SIGNAL_WINDOW_END,
+                    entry_open_time=config.NO_NEW_TRADES_BEFORE,
                 )
-                before_entry_open = not is_at_or_after(now_et, config.NO_NEW_TRADES_BEFORE)
-                if premarket_signals_day != today_tag:
+                if bool(decision["reset_day"]):
                     premarket_opening_signals = []
-                    premarket_signals_day = today_tag
-                    premarket_scan_runs = 0
-                    premarket_last_scan_at = None
-                interval_seconds = max(15, int(getattr(config, "PREMARKET_SCAN_INTERVAL_SECONDS", 120)))
-                max_runs = max(0, int(getattr(config, "PREMARKET_SCAN_MAX_RUNS", 0)))
-                run_budget_ok = (max_runs == 0) or (premarket_scan_runs < max_runs)
-                run_due = (
-                    premarket_last_scan_at is None
-                    or int((now_et - premarket_last_scan_at).total_seconds()) >= interval_seconds
-                )
-                if premarket_window_open and before_entry_open and run_budget_ok and run_due:
+                premarket_signals_day = str(decision["today_tag"])
+                premarket_scan_runs = int(decision["effective_scan_runs"])
+                premarket_last_scan_at = decision["effective_last_scan_at"]
+                if bool(decision["should_scan"]):
                     watchlist_control_state = load_watchlist_control()
                     watchlist_mode = str(watchlist_control_state.get("mode", "off") or "off").lower()
                     premarket_watchlist = _build_scan_universe(data_client)
@@ -2012,11 +2032,11 @@ def main():
                     elif qty > 1:
                         exit_reason = "exposure_normalize"
                         close_qty = qty - 1
-            if exit_reason is None and entry_time is not None and entry_time.date() < now_et.date():
+            if exit_reason is None and should_force_same_day_exit(entry_time, now_et):
                 exit_reason = "overnight_forced_close"
             # Rule 1: fixed-dollar stop loss
             stop_loss_usd_cap = _runtime_stop_loss_usd()
-            if exit_reason is None and unrealized_usd is not None and unrealized_usd <= -abs(stop_loss_usd_cap):
+            if exit_reason is None and should_trigger_stop_loss(unrealized_usd, stop_loss_usd_cap):
                 exit_reason = "stop_loss"
 
             # --- Reversal detection exit ---
