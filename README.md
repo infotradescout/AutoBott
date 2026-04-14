@@ -47,6 +47,27 @@ The trader now includes:
 
 Configure these in `autotrader/.env` (see `autotrader/.env.example`).
 
+## Trade Analytics
+
+Run the terminal report:
+
+```powershell
+python autotrader/review.py
+```
+
+Emit structured JSON instead of terminal text:
+
+```powershell
+python autotrader/review.py --format json
+python autotrader/review.py --format json --output autotrader\trade_report.json
+```
+
+Export grouped CSV breakdowns for comparisons or downstream tooling:
+
+```powershell
+python autotrader/review.py --export-csv-dir autotrader\reports
+```
+
 Render note:
 - Attach a persistent disk and set `DATA_DIR=/data` so runtime files survive restarts:
   - `trades.csv`
