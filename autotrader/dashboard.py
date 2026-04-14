@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import csv
+import hashlib
 import hmac
+import json
 import os
 import re
 from datetime import datetime, timedelta
@@ -12,7 +14,7 @@ from typing import Any
 
 import pytz
 import requests
-from flask import Flask, jsonify, render_template_string, request
+from flask import Flask, Response, jsonify, render_template_string, request
 
 import config
 from env_config import get_required_env, load_runtime_env
@@ -39,6 +41,10 @@ HEADERS = {"APCA-API-KEY-ID": API_KEY or "", "APCA-API-SECRET-KEY": SECRET_KEY o
 
 TRADES_CSV = Path(config.TRADES_CSV_PATH)
 SCAN_LOG_CSV = Path(config.SCAN_LOG_CSV_PATH)
+DASHBOARD_DIR = Path(__file__).resolve().parent
+LISA_FEED_JSON_PATH = DASHBOARD_DIR / "autobott_lisa_feed.json"
+LISA_FEED_NDJSON_PATH = DASHBOARD_DIR / "autobott_lisa_feed.ndjson"
+LISA_FEED_PUBLISHED_PATH = DASHBOARD_DIR / "autobott_lisa_feed_published.json"
 EASTERN = pytz.timezone(config.EASTERN_TZ)
 CENTRAL = pytz.timezone(config.CENTRAL_TZ)
 _REVIEW_CACHE: dict[str, Any] = {"ts": None, "payload": None}
@@ -768,6 +774,723 @@ def _build_evening_report_payload() -> dict[str, Any]:
         "daily_review": daily_review,
         "recommendations": _evening_recommendations(trade_summary, scan_summary),
     }
+
+
+def _json_read(path: Path) -> dict[str, Any] | None:
+    try:
+        if not path.exists():
+            return None
+        return json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return None
+
+
+def _resolve_existing_path(candidates: list[Path]) -> Path | None:
+    for candidate in candidates:
+        try:
+            if candidate.exists():
+                return candidate
+        except Exception:
+            continue
+    return None
+
+
+def _load_latest_trade_report() -> dict[str, Any]:
+    candidates = [
+        DASHBOARD_DIR / "trade_report.json",
+        DASHBOARD_DIR / "autotrader" / "trade_report.json",
+        Path("autotrader") / "trade_report.json",
+        Path("trade_report.json"),
+    ]
+    found = _resolve_existing_path(candidates)
+    if found is None:
+        return {"metadata": {}, "overall": {}, "joint_tradeability": {}, "stop_loss_geometry": {}}
+    payload = _json_read(found)
+    if isinstance(payload, dict):
+        return payload
+    return {"metadata": {}, "overall": {}, "joint_tradeability": {}, "stop_loss_geometry": {}}
+
+
+def _load_report_csv(filename: str) -> list[dict[str, str]]:
+    candidates = [
+        DASHBOARD_DIR / "reports" / filename,
+        DASHBOARD_DIR / "autotrader" / "reports" / filename,
+        Path("autotrader") / "reports" / filename,
+    ]
+    found = _resolve_existing_path(candidates)
+    if found is None:
+        return []
+    try:
+        with found.open("r", newline="", encoding="utf-8") as handle:
+            return list(csv.DictReader(handle))
+    except Exception:
+        return []
+
+
+def _signal_key(signal_type: str, symbol: str, title: str) -> str:
+    base = f"{signal_type}|{symbol}|{title}"
+    return hashlib.sha1(base.encode("utf-8")).hexdigest()[:16]
+
+
+def _clamp(v: float, lo: float, hi: float) -> float:
+    return max(lo, min(hi, v))
+
+
+def _confidence_from_n(n: int, *, base: float = 0.35) -> float:
+    return round(_clamp(base + (min(20, max(0, n)) * 0.025), 0.20, 0.95), 3)
+
+
+def _severity_label(score: float) -> str:
+    if score >= 0.8:
+        return "high"
+    if score >= 0.5:
+        return "medium"
+    return "low"
+
+
+def _published_signal_keys() -> set[str]:
+    payload = _json_read(LISA_FEED_PUBLISHED_PATH)
+    if not isinstance(payload, dict):
+        return set()
+    keys = payload.get("signal_keys")
+    if not isinstance(keys, list):
+        return set()
+    return {str(k) for k in keys if str(k).strip()}
+
+
+def _build_knowledge_signal(
+    *,
+    signal_type: str,
+    source_type: str,
+    symbol: str,
+    lane: str,
+    category: str,
+    title: str,
+    summary: str,
+    evidence: dict[str, Any],
+    metrics: dict[str, Any],
+    recommended_action: str,
+    tags: list[str],
+    severity_score: float,
+    time_scope: dict[str, Any],
+    published_keys: set[str],
+) -> dict[str, Any]:
+    key = _signal_key(signal_type, symbol, title)
+    novelty = 0.25 if key in published_keys else 0.85
+    n = int(_safe_float(evidence.get("trades", 0), 0))
+    confidence = _confidence_from_n(n, base=0.40 if novelty >= 0.8 else 0.30)
+    return {
+        "signal_id": key,
+        "signal_type": signal_type,
+        "source_system": "autobott",
+        "source_type": source_type,
+        "generated_at": _now_et().strftime("%Y-%m-%d %H:%M:%S ET"),
+        "symbol": symbol,
+        "lane": lane,
+        "category": category,
+        "title": title,
+        "summary": summary,
+        "evidence": evidence,
+        "metrics": metrics,
+        "confidence": confidence,
+        "novelty": novelty,
+        "severity": _severity_label(severity_score),
+        "severity_score": round(_clamp(severity_score, 0.0, 1.0), 3),
+        "time_scope": time_scope,
+        "recommended_action": recommended_action,
+        "tags": tags,
+    }
+
+
+def _synthesize_lisa_signals() -> dict[str, Any]:
+    report = _load_latest_trade_report()
+    runtime_state = load_bot_state()
+    published_keys = _published_signal_keys()
+
+    signals: list[dict[str, Any]] = []
+    now_label = _now_et().strftime("%Y-%m-%d %H:%M:%S ET")
+
+    joint = report.get("joint_tradeability") if isinstance(report, dict) else {}
+    if not isinstance(joint, dict):
+        joint = {}
+
+    for row in list(joint.get("ticker_x_hour") or []):
+        n = int(_safe_float(row.get("n"), 0))
+        exp = _safe_float(row.get("conservative_expectancy_usd"), 0.0)
+        symbol = str(row.get("ticker", "") or "")
+        hour = str(row.get("entry_hour", "") or "")
+        if n < 4 or not symbol:
+            continue
+        stop_rate = _safe_float(row.get("stop_loss_rate"), 0.0)
+        if exp < 0:
+            sev = _clamp((abs(exp) / 20.0) + stop_rate, 0.2, 1.0)
+            signals.append(
+                _build_knowledge_signal(
+                    signal_type="symbol_hour_tradeability_warning",
+                    source_type="trade_review",
+                    symbol=symbol,
+                    lane="market",
+                    category="execution_knowledge",
+                    title=f"{symbol} hour {hour}: negative conservative expectancy",
+                    summary=(
+                        f"{symbol} in hour {hour} shows negative conservative expectancy with stop-loss concentration."
+                    ),
+                    evidence={"trades": n, "hour_et": hour},
+                    metrics={
+                        "conservative_expectancy_usd": exp,
+                        "stop_loss_rate": stop_rate,
+                        "conservative_win_rate": _safe_float(row.get("conservative_win_rate"), None),
+                    },
+                    recommended_action="block_hour_for_symbol",
+                    tags=["tradeability", "symbol_hour", "negative_expectancy"],
+                    severity_score=sev,
+                    time_scope={"window": "rolling", "as_of": now_label},
+                    published_keys=published_keys,
+                )
+            )
+        elif exp > 0 and n >= 6:
+            sev = _clamp((exp / 25.0), 0.15, 0.8)
+            signals.append(
+                _build_knowledge_signal(
+                    signal_type="positive_tradeability_pocket",
+                    source_type="trade_review",
+                    symbol=symbol,
+                    lane="market",
+                    category="execution_knowledge",
+                    title=f"{symbol} hour {hour}: positive conservative pocket",
+                    summary=f"{symbol} in hour {hour} remains positive after conservative accounting.",
+                    evidence={"trades": n, "hour_et": hour},
+                    metrics={
+                        "conservative_expectancy_usd": exp,
+                        "stop_loss_rate": stop_rate,
+                    },
+                    recommended_action="prefer_symbol_hour_bucket",
+                    tags=["tradeability", "symbol_hour", "positive_pocket"],
+                    severity_score=sev,
+                    time_scope={"window": "rolling", "as_of": now_label},
+                    published_keys=published_keys,
+                )
+            )
+
+    for row in list(joint.get("spread_quartile_x_score_bucket") or []):
+        n = int(_safe_float(row.get("n"), 0))
+        exp = _safe_float(row.get("conservative_expectancy_usd"), 0.0)
+        spread = str(row.get("spread_quartile", "") or "")
+        bucket = str(row.get("score_bucket", "") or "")
+        if n < 4:
+            continue
+        stop_rate = _safe_float(row.get("stop_loss_rate"), 0.0)
+        if exp < 0:
+            sev = _clamp((abs(exp) / 18.0) + stop_rate, 0.2, 1.0)
+            signals.append(
+                _build_knowledge_signal(
+                    signal_type="spread_regime_failure_pattern",
+                    source_type="signal_diagnostic",
+                    symbol="ALL",
+                    lane="market",
+                    category="signal_knowledge",
+                    title=f"Spread {spread} x score {bucket}: underperformance",
+                    summary=(
+                        f"Score bucket {bucket} under spread regime {spread} is negative after conservative accounting."
+                    ),
+                    evidence={"trades": n, "spread_quartile": spread, "score_bucket": bucket},
+                    metrics={
+                        "conservative_expectancy_usd": exp,
+                        "stop_loss_rate": stop_rate,
+                    },
+                    recommended_action="raise_score_floor_or_block_spread_regime",
+                    tags=["spread", "score_bucket", "negative_expectancy"],
+                    severity_score=sev,
+                    time_scope={"window": "rolling", "as_of": now_label},
+                    published_keys=published_keys,
+                )
+            )
+
+    stop_ticker_rows = list(joint.get("stop_loss_x_ticker") or [])
+    for row in stop_ticker_rows:
+        symbol = str(row.get("ticker", "") or "")
+        n = int(_safe_float(row.get("n"), 0))
+        if n < 3 or not symbol:
+            continue
+        stop_rate = _safe_float(row.get("stop_loss_rate"), 0.0)
+        exp = _safe_float(row.get("conservative_expectancy_usd"), 0.0)
+        if stop_rate >= 0.55:
+            sev = _clamp(stop_rate + (abs(min(exp, 0.0)) / 20.0), 0.25, 1.0)
+            signals.append(
+                _build_knowledge_signal(
+                    signal_type="stop_loss_cluster_by_symbol",
+                    source_type="risk_diagnostic",
+                    symbol=symbol,
+                    lane="risk",
+                    category="risk_knowledge",
+                    title=f"Stop-loss cluster detected on {symbol}",
+                    summary=f"Stop-loss exits are concentrated on {symbol}; cut symbol first before widening global stops.",
+                    evidence={"trades": n},
+                    metrics={"stop_loss_rate": stop_rate, "conservative_expectancy_usd": exp},
+                    recommended_action="deprioritize_or_block_symbol",
+                    tags=["stop_loss", "symbol_cluster", "risk"],
+                    severity_score=sev,
+                    time_scope={"window": "rolling", "as_of": now_label},
+                    published_keys=published_keys,
+                )
+            )
+
+    stop_hour_rows = list(joint.get("stop_loss_x_hour") or [])
+    for row in stop_hour_rows:
+        hour = str(row.get("entry_hour", "") or "")
+        n = int(_safe_float(row.get("n"), 0))
+        if n < 3:
+            continue
+        stop_rate = _safe_float(row.get("stop_loss_rate"), 0.0)
+        exp = _safe_float(row.get("conservative_expectancy_usd"), 0.0)
+        if stop_rate >= 0.55:
+            sev = _clamp(stop_rate + (abs(min(exp, 0.0)) / 22.0), 0.25, 1.0)
+            signals.append(
+                _build_knowledge_signal(
+                    signal_type="stop_loss_cluster_by_hour",
+                    source_type="risk_diagnostic",
+                    symbol="ALL",
+                    lane="risk",
+                    category="risk_knowledge",
+                    title=f"Stop-loss cluster in hour {hour}",
+                    summary="Stop-loss exits cluster in this hour; block hour first before changing stop geometry globally.",
+                    evidence={"trades": n, "hour_et": hour},
+                    metrics={"stop_loss_rate": stop_rate, "conservative_expectancy_usd": exp},
+                    recommended_action="block_hour_globally_or_per_symbol",
+                    tags=["stop_loss", "hour_cluster", "risk"],
+                    severity_score=sev,
+                    time_scope={"window": "rolling", "as_of": now_label},
+                    published_keys=published_keys,
+                )
+            )
+
+    stop_geometry = report.get("stop_loss_geometry") if isinstance(report, dict) else {}
+    if isinstance(stop_geometry, dict):
+        stop_count = int(_safe_float(stop_geometry.get("stop_loss_trade_count"), 0))
+        cfg_stop = _safe_float(stop_geometry.get("configured_stop_loss_usd"), _safe_float(getattr(config, "STOP_LOSS_USD", 10.0), 10.0))
+        est_mae = stop_geometry.get("estimated_mae_usd_1c") if isinstance(stop_geometry.get("estimated_mae_usd_1c"), dict) else {}
+        med_mae = _safe_float(est_mae.get("median"), 0.0)
+        if stop_count >= 5 and cfg_stop > 0 and med_mae > (cfg_stop * 1.25):
+            sev = _clamp((med_mae / cfg_stop) - 1.0, 0.3, 1.0)
+            signals.append(
+                _build_knowledge_signal(
+                    signal_type="stop_loss_geometry_misalignment",
+                    source_type="risk_diagnostic",
+                    symbol="ALL",
+                    lane="risk",
+                    category="risk_knowledge",
+                    title="Empirical MAE suggests stop geometry is too tight",
+                    summary=(
+                        "Median estimated MAE at stop-loss exits exceeds configured stop by material margin after cluster-aware filtering."
+                    ),
+                    evidence={"trades": stop_count},
+                    metrics={"configured_stop_loss_usd": cfg_stop, "median_estimated_mae_usd": med_mae},
+                    recommended_action="consider_stop_adjustment_after_selection_cuts",
+                    tags=["stop_geometry", "mae", "risk"],
+                    severity_score=sev,
+                    time_scope={"window": "rolling", "as_of": now_label},
+                    published_keys=published_keys,
+                )
+            )
+
+    bad_fill_tracker = runtime_state.get("bad_fill_tracker") if isinstance(runtime_state, dict) else {}
+    if isinstance(bad_fill_tracker, dict):
+        for symbol, info in bad_fill_tracker.items():
+            if not isinstance(info, dict):
+                continue
+            count = int(_safe_float(info.get("count"), 0))
+            blocked_until = str(info.get("blocked_until_iso", "") or "")
+            last_slip = _safe_float(info.get("last_slippage_pct"), 0.0)
+            if count <= 0 and not blocked_until:
+                continue
+            sev = _clamp((count * 0.2) + (last_slip / 12.0), 0.2, 0.95)
+            signals.append(
+                _build_knowledge_signal(
+                    signal_type="execution_slippage_cluster",
+                    source_type="execution_diagnostic",
+                    symbol=str(symbol).upper(),
+                    lane="market",
+                    category="runtime_system_knowledge",
+                    title=f"Bad-fill pattern observed for {str(symbol).upper()}",
+                    summary="Bad-fill tracker indicates repeated or recent slippage stress for this symbol.",
+                    evidence={"trades": max(1, count), "blocked_until": blocked_until},
+                    metrics={"last_slippage_pct": last_slip, "bad_fill_count": count},
+                    recommended_action="tighten_symbol_spread_filter_or_cooldown",
+                    tags=["bad_fill", "slippage", "runtime"],
+                    severity_score=sev,
+                    time_scope={"window": "runtime_recent", "as_of": now_label},
+                    published_keys=published_keys,
+                )
+            )
+
+    signals.sort(
+        key=lambda s: (
+            float(s.get("severity_score", 0.0)),
+            float(s.get("confidence", 0.0)),
+            float(s.get("novelty", 0.0)),
+        ),
+        reverse=True,
+    )
+    return {
+        "feed_name": "autobott_lisa_feed",
+        "schema_version": "1.0.0",
+        "generated_at": now_label,
+        "source_system": "autobott",
+        "signal_count": len(signals),
+        "signals": signals,
+    }
+
+
+def _persist_lisa_feed(payload: dict[str, Any]) -> dict[str, Any]:
+    LISA_FEED_JSON_PATH.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+    ndjson_lines = [json.dumps(signal, ensure_ascii=False) for signal in list(payload.get("signals") or [])]
+    LISA_FEED_NDJSON_PATH.write_text("\n".join(ndjson_lines) + ("\n" if ndjson_lines else ""), encoding="utf-8")
+    return {
+        "json_path": str(LISA_FEED_JSON_PATH),
+        "ndjson_path": str(LISA_FEED_NDJSON_PATH),
+        "signal_count": int(_safe_float(payload.get("signal_count"), 0)),
+    }
+
+
+def _filtered_payload_delta(payload: dict[str, Any]) -> dict[str, Any]:
+    published = _published_signal_keys()
+    if not published:
+        return payload
+    rows = list(payload.get("signals") or [])
+    filtered = [row for row in rows if str(row.get("signal_id", "")) not in published]
+    out = dict(payload)
+    out["signals"] = filtered
+    out["signal_count"] = len(filtered)
+    out["delta_from_last_publish"] = True
+    return out
+
+
+@app.get("/api/lisa/feed")
+def api_lisa_feed():
+    try:
+        payload = _synthesize_lisa_signals()
+        if str(request.args.get("delta", "0")) == "1":
+            payload = _filtered_payload_delta(payload)
+        if str(request.args.get("persist", "0")) == "1":
+            _persist_lisa_feed(payload)
+        return jsonify(payload)
+    except Exception as exc:  # noqa: BLE001
+        return jsonify({"error": str(exc)}), 500
+
+
+@app.post("/api/lisa/feed/generate")
+def api_lisa_feed_generate():
+    try:
+        payload = _synthesize_lisa_signals()
+        if str(request.args.get("delta", "0")) == "1":
+            payload = _filtered_payload_delta(payload)
+        details = _persist_lisa_feed(payload)
+        return jsonify({"ok": True, "details": details, "generated_at": payload.get("generated_at")})
+    except Exception as exc:  # noqa: BLE001
+        return jsonify({"error": str(exc)}), 500
+
+
+@app.get("/api/lisa/feed/export")
+def api_lisa_feed_export():
+    try:
+        fmt = str(request.args.get("format", "json") or "json").lower()
+        payload = _synthesize_lisa_signals()
+        if str(request.args.get("delta", "0")) == "1":
+            payload = _filtered_payload_delta(payload)
+
+        if fmt == "ndjson":
+            body = "\n".join(json.dumps(row, ensure_ascii=False) for row in list(payload.get("signals") or []))
+            if body:
+                body += "\n"
+            response = Response(body, mimetype="application/x-ndjson")
+            response.headers["Content-Disposition"] = "attachment; filename=autobott_lisa_feed.ndjson"
+            return response
+
+        body = json.dumps(payload, indent=2)
+        response = Response(body + "\n", mimetype="application/json")
+        response.headers["Content-Disposition"] = "attachment; filename=autobott_lisa_feed.json"
+        return response
+    except Exception as exc:  # noqa: BLE001
+        return jsonify({"error": str(exc)}), 500
+
+
+@app.post("/api/lisa/feed/publish")
+def api_lisa_feed_publish():
+    try:
+        payload = _synthesize_lisa_signals()
+        payload = _filtered_payload_delta(payload) if str(request.args.get("delta", "0")) == "1" else payload
+        _persist_lisa_feed(payload)
+        signal_keys = [str(row.get("signal_id", "")) for row in list(payload.get("signals") or []) if str(row.get("signal_id", "")).strip()]
+        publish_payload = {
+            "published_at": _now_et().strftime("%Y-%m-%d %H:%M:%S ET"),
+            "signal_count": len(signal_keys),
+            "signal_keys": signal_keys,
+        }
+        LISA_FEED_PUBLISHED_PATH.write_text(json.dumps(publish_payload, indent=2) + "\n", encoding="utf-8")
+        return jsonify({"ok": True, "published": publish_payload})
+    except Exception as exc:  # noqa: BLE001
+        return jsonify({"error": str(exc)}), 500
+
+
+@app.get("/lisa-feed")
+def lisa_feed_page():
+    return render_template_string(
+        """
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>LISA Feed</title>
+  <style>
+    :root {
+      --bg:#081019;
+      --panel:rgba(14,23,35,.88);
+      --panel-strong:rgba(21,34,51,.96);
+      --text:#ebf3fb;
+      --muted:#95abc1;
+      --border:rgba(141,172,206,.25);
+      --green:#25d366;
+      --red:#ff5d66;
+      --yellow:#ffbf4a;
+      --cyan:#31cbff;
+      --radius:16px;
+      --shadow:0 14px 34px rgba(2,8,20,.45);
+    }
+    * { box-sizing:border-box; }
+    body {
+      margin:0;
+      color:var(--text);
+      font-family:"Avenir Next","Nunito Sans","Segoe UI",Tahoma,sans-serif;
+      background:
+        radial-gradient(1200px 500px at -10% -20%, rgba(49,203,255,.16), transparent 45%),
+        radial-gradient(900px 420px at 110% -10%, rgba(37,211,102,.12), transparent 45%),
+        linear-gradient(145deg, #050a11 0%, #0b1524 45%, #0a111d 100%);
+      min-height:100vh;
+    }
+    .wrap { max-width:1320px; margin:0 auto; padding:16px; }
+    .header { display:flex; justify-content:space-between; align-items:center; gap:12px; flex-wrap:wrap; margin-bottom:14px; }
+    .title { font-size:clamp(20px, 2.5vw, 31px); font-weight:800; line-height:1.1; }
+    .muted { color:var(--muted); }
+    .actions { display:flex; gap:8px; flex-wrap:wrap; }
+    .btn {
+      border:1px solid var(--border);
+      border-radius:12px;
+      padding:10px 12px;
+      color:var(--text);
+      text-decoration:none;
+      font-weight:700;
+      background:rgba(127,156,191,.15);
+      cursor:pointer;
+    }
+    .grid { display:grid; grid-template-columns:repeat(3, minmax(0, 1fr)); gap:12px; margin-bottom:12px; }
+    .card {
+      background:var(--panel);
+      border:1px solid var(--border);
+      border-radius:var(--radius);
+      padding:14px;
+      box-shadow:var(--shadow);
+      backdrop-filter:blur(4px);
+    }
+    .card.strong { background:var(--panel-strong); }
+    .pill {
+      border:1px solid var(--border);
+      border-radius:999px;
+      padding:3px 8px;
+      font-size:11px;
+      text-transform:uppercase;
+      letter-spacing:.4px;
+    }
+    .sev-high { color:var(--red); border-color:rgba(255,93,102,.45); }
+    .sev-medium { color:var(--yellow); border-color:rgba(255,191,74,.45); }
+    .sev-low { color:var(--green); border-color:rgba(37,211,102,.45); }
+    .toolbar { display:flex; flex-wrap:wrap; gap:8px; margin-bottom:10px; }
+    .cols { display:grid; grid-template-columns:repeat(2, minmax(0, 1fr)); gap:12px; }
+    .signal-list { display:grid; gap:8px; }
+    .signal-card {
+      border:1px solid var(--border);
+      border-radius:12px;
+      padding:10px;
+      background:rgba(7,14,24,.56);
+    }
+    .signal-head { display:flex; justify-content:space-between; gap:8px; align-items:flex-start; margin-bottom:6px; }
+    .signal-title { font-weight:800; }
+    textarea {
+      width:100%;
+      min-height:380px;
+      border:1px solid var(--border);
+      border-radius:12px;
+      background:rgba(5,10,17,.7);
+      color:var(--text);
+      padding:10px;
+      font-family:ui-monospace,SFMono-Regular,Menlo,monospace;
+      font-size:12px;
+      resize:vertical;
+    }
+    .small { font-size:12px; }
+    @media (max-width: 980px) {
+      .grid { grid-template-columns:1fr; }
+      .cols { grid-template-columns:1fr; }
+    }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <div class="header">
+      <div>
+        <div class="title">LISA Feed</div>
+        <div class="muted">AutoBott knowledge synthesis feed for upstream LISA ingestion.</div>
+      </div>
+      <div class="actions">
+        <a class="btn" href="/">Dashboard</a>
+        <a class="btn" href="/reports">Reports</a>
+      </div>
+    </div>
+
+    <div class="toolbar">
+      <button class="btn" onclick="generateFeed()">Generate Latest Feed</button>
+      <button class="btn" onclick="downloadJson()">Export JSON</button>
+      <button class="btn" onclick="downloadNdjson()">Export NDJSON</button>
+      <button class="btn" onclick="savePacket()">Save Latest Packet To Disk</button>
+      <button class="btn" onclick="publishFeed()">Mark As Published</button>
+      <button class="btn" onclick="refreshFeed(true)">Load Unpublished Only</button>
+    </div>
+
+    <div class="grid">
+      <div class="card strong"><div class="muted small">Feed Name</div><div id="feed-name">--</div></div>
+      <div class="card strong"><div class="muted small">Generated At</div><div id="feed-time">--</div></div>
+      <div class="card strong"><div class="muted small">Signal Count</div><div id="feed-count">0</div></div>
+    </div>
+
+    <div class="cols">
+      <div class="card">
+        <div class="muted" style="margin-bottom:8px;">Section A — LISA-ready signals</div>
+        <div id="signals" class="signal-list"></div>
+      </div>
+
+      <div class="card">
+        <div class="muted" style="margin-bottom:8px;">Section B — Raw machine payload</div>
+        <textarea id="payload" readonly></textarea>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    let latestPayload = null;
+
+    function esc(v) {
+      return String(v || "")
+        .replace(/&/g, "&amp;")
+        .replace(/</g, "&lt;")
+        .replace(/>/g, "&gt;")
+        .replace(/\"/g, "&quot;")
+        .replace(/'/g, "&#39;");
+    }
+
+    async function fetchJson(url, opts) {
+      try {
+        const res = await fetch(url, opts || {});
+        const body = await res.json();
+        if (!res.ok) return { error: body.error || "request failed" };
+        return body;
+      } catch {
+        return { error: "request failed" };
+      }
+    }
+
+    function severityClass(sev) {
+      const v = String(sev || "").toLowerCase();
+      if (v === "high") return "sev-high";
+      if (v === "medium") return "sev-medium";
+      return "sev-low";
+    }
+
+    function metricPairs(metrics) {
+      const src = metrics && typeof metrics === "object" ? metrics : {};
+      const keys = Object.keys(src).slice(0, 4);
+      if (!keys.length) return "";
+      return keys.map((k) => `${esc(k)}: ${esc(src[k])}`).join(" | ");
+    }
+
+    function renderSignals(payload) {
+      const wrap = document.getElementById("signals");
+      if (!wrap) return;
+      const rows = Array.isArray(payload && payload.signals) ? payload.signals : [];
+      if (!rows.length) {
+        wrap.innerHTML = '<div class="muted">No knowledge signals available.</div>';
+        return;
+      }
+      wrap.innerHTML = rows.map((row) => `
+        <div class="signal-card">
+          <div class="signal-head">
+            <div>
+              <div class="signal-title">${esc(row.title)}</div>
+              <div class="small muted">${esc(row.category)} | ${esc(row.symbol)} | ${esc(row.signal_type)}</div>
+            </div>
+            <span class="pill ${severityClass(row.severity)}">${esc(row.severity)}</span>
+          </div>
+          <div class="small" style="margin-bottom:4px;">${esc(row.summary)}</div>
+          <div class="small muted" style="margin-bottom:4px;">confidence=${esc(row.confidence)} | novelty=${esc(row.novelty)} | action=${esc(row.recommended_action)}</div>
+          <div class="small muted">${metricPairs(row.metrics)}</div>
+        </div>
+      `).join("");
+    }
+
+    function renderPayload(payload) {
+      latestPayload = payload;
+      const feedName = document.getElementById("feed-name");
+      const feedTime = document.getElementById("feed-time");
+      const feedCount = document.getElementById("feed-count");
+      const payloadBox = document.getElementById("payload");
+      if (feedName) feedName.textContent = payload && payload.feed_name ? payload.feed_name : "--";
+      if (feedTime) feedTime.textContent = payload && payload.generated_at ? payload.generated_at : "--";
+      if (feedCount) feedCount.textContent = String(payload && payload.signal_count ? payload.signal_count : 0);
+      if (payloadBox) payloadBox.value = JSON.stringify(payload || {}, null, 2);
+      renderSignals(payload || {});
+    }
+
+    async function refreshFeed(deltaOnly) {
+      const data = await fetchJson(`/api/lisa/feed${deltaOnly ? "?delta=1" : ""}`);
+      if (data && !data.error) {
+        renderPayload(data);
+      }
+    }
+
+    async function generateFeed() {
+      const data = await fetchJson("/api/lisa/feed/generate", { method: "POST" });
+      if (data && !data.error) {
+        await refreshFeed(false);
+      }
+    }
+
+    function downloadJson() {
+      window.open("/api/lisa/feed/export?format=json", "_blank");
+    }
+
+    function downloadNdjson() {
+      window.open("/api/lisa/feed/export?format=ndjson", "_blank");
+    }
+
+    async function savePacket() {
+      const data = await fetchJson("/api/lisa/feed/generate", { method: "POST" });
+      if (data && !data.error) {
+        await refreshFeed(false);
+      }
+    }
+
+    async function publishFeed() {
+      const data = await fetchJson("/api/lisa/feed/publish", { method: "POST" });
+      if (data && !data.error) {
+        await refreshFeed(false);
+      }
+    }
+
+    refreshFeed(false);
+  </script>
+</body>
+</html>
+        """
+    )
 
 
 @app.get("/api/account")
@@ -1810,6 +2533,7 @@ def reports_page():
       </div>
       <div class="actions">
         <a class="btn" href="/">Dashboard</a>
+        <a class="btn" href="/lisa-feed">LISA Feed</a>
         <a class="btn" href="/watch">Watch Page</a>
       </div>
     </div>
@@ -2190,6 +2914,7 @@ def watch_page():
       <div class="row">
         <a class="btn" href="/">Dashboard</a>
         <a class="btn" href="/reports">Reports</a>
+        <a class="btn" href="/lisa-feed">LISA Feed</a>
       </div>
     </div>
 
@@ -2740,6 +3465,7 @@ def home():
         <div class="muted">Last updated: <span id="last-updated">--</span> | Auto-refresh: 30s</div>
       </div>
       <div class="head-actions">
+        <a href="/lisa-feed" class="ctrl-btn" style="text-decoration:none;">LISA FEED</a>
         <a href="/reports" class="ctrl-btn" style="text-decoration:none;">REPORTS</a>
         <a href="/watch" class="ctrl-btn" style="text-decoration:none;">WATCH PAGE</a>
         <div class="paper">{{ "PAPER MODE" if paper else "LIVE MODE" }}</div>
