@@ -29,6 +29,9 @@ pip install -r requirements.txt
 Copy-Item .env.example .env
 # fill in real Alpaca keys in .env
 python dashboard.py
+
+# Safety smoke check (compile + key dashboard endpoints)
+python smoke_check.py
 ```
 
 ## Safety + Ops Controls

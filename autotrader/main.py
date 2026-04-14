@@ -17,6 +17,7 @@ import config
 from alerts import AlertManager
 from broker import AlpacaBroker
 from data import AlpacaDataClient
+from feature_flags import is_enabled
 from logger import TradeLogger
 from options import select_atm_option_contract_with_reason
 from risk import (
@@ -25,6 +26,7 @@ from risk import (
     position_matches_ticker,
 )
 from scanner import initialize_scanner, run_observation_phase, run_scan, set_catalyst_mode
+from strategy_profiles import get_profile_overrides, normalize_profile_name
 from state_store import load_bot_state, save_bot_state
 from trading_control import load_trading_control
 from watchlist_control import load_watchlist_control
@@ -634,12 +636,16 @@ def main():
     premarket_signals_day = str(state.get("premarket_signals_day", "") or "")
     premarket_scan_runs = int(state.get("premarket_scan_runs", 0) or 0)
     premarket_last_scan_at = _parse_state_datetime(state.get("premarket_last_scan_at_iso"))
+    bad_fill_tracker: dict[str, dict] = dict(state.get("bad_fill_tracker") or {})
     watchlist_control_state: dict = dict(state.get("watchlist_control") or {})
     last_trader_heartbeat_et = str(state.get("last_trader_heartbeat_et", "") or "")
     last_alpaca_auth_error_et = str(state.get("last_alpaca_auth_error_et", "") or "")
     last_alpaca_auth_error = str(state.get("last_alpaca_auth_error", "") or "")
     next_heartbeat_at = 0.0
     manual_stop_latched = False
+    control_state = load_trading_control()
+    strategy_profile = normalize_profile_name(str(control_state.get("strategy_profile", "balanced") or "balanced"))
+    dry_run_enabled = bool(control_state.get("dry_run", False)) and is_enabled("FEATURE_DRY_RUN_MODE", False)
     option_expiry_cache: dict[str, date | None] = {}
 
     def _resolve_option_expiry(symbol: str, meta: dict) -> date | None:
@@ -659,6 +665,55 @@ def main():
         if fetched_expiry is not None and symbol in open_trade_meta:
             open_trade_meta[symbol]["expiry"] = fetched_expiry.isoformat()
         return fetched_expiry
+
+    def _runtime_stop_loss_usd() -> float:
+        base = float(getattr(config, "STOP_LOSS_USD", 10.0))
+        if not is_enabled("FEATURE_STRATEGY_PROFILES", False):
+            return base
+        overrides = get_profile_overrides(strategy_profile)
+        override = overrides.get("stop_loss_usd")
+        if override is None:
+            return base
+        return float(override)
+
+    def _runtime_entry_min_signal_score() -> float:
+        base = float(getattr(config, "MIN_SIGNAL_SCORE", 5.0))
+        if not is_enabled("FEATURE_STRATEGY_PROFILES", False):
+            return base
+        overrides = get_profile_overrides(strategy_profile)
+        override = overrides.get("entry_min_signal_score")
+        if override is None:
+            return base
+        return float(override)
+
+    def _is_bad_fill_blocked(ticker: str, now_et: datetime) -> bool:
+        if not is_enabled("FEATURE_BAD_FILL_DETECTOR", False):
+            return False
+        info = bad_fill_tracker.get(str(ticker).upper())
+        if not isinstance(info, dict):
+            return False
+        until_dt = _parse_state_datetime(info.get("blocked_until_iso"))
+        if until_dt is None:
+            return False
+        return now_et < until_dt
+
+    def _record_bad_fill_event(ticker: str, now_et: datetime, slippage_pct: float) -> None:
+        if not is_enabled("FEATURE_BAD_FILL_DETECTOR", False):
+            return
+        symbol = str(ticker).upper()
+        info = bad_fill_tracker.get(symbol)
+        if not isinstance(info, dict):
+            info = {}
+        count = int(info.get("count", 0) or 0) + 1
+        info["count"] = count
+        info["last_slippage_pct"] = round(float(slippage_pct), 4)
+        info["last_seen_iso"] = now_et.isoformat()
+        if count >= 2:
+            cooldown_minutes = 45
+            blocked_until = now_et + timedelta(minutes=cooldown_minutes)
+            info["blocked_until_iso"] = blocked_until.isoformat()
+            info["count"] = 0
+        bad_fill_tracker[symbol] = info
 
     if catalyst_mode_until and datetime.now(tz) >= catalyst_mode_until:
         catalyst_mode_active = False
@@ -695,6 +750,7 @@ def main():
                 "premarket_signals_day": premarket_signals_day,
                 "premarket_scan_runs": premarket_scan_runs,
                 "premarket_last_scan_at_iso": premarket_last_scan_at.isoformat() if premarket_last_scan_at else "",
+                "bad_fill_tracker": bad_fill_tracker,
                 "watchlist_control": watchlist_control_state,
                 "last_trader_heartbeat_et": last_trader_heartbeat_et,
                 "last_alpaca_auth_error_et": last_alpaca_auth_error_et,
@@ -746,6 +802,9 @@ def main():
         now_et: datetime,
         reentries_used: int,
     ) -> bool:
+        if dry_run_enabled:
+            print(f"[{ts(now_et)}] DRY-RUN reversal candidate: {ticker} {direction.upper()} (no order submitted).")
+            return False
         if not _is_valid_long_direction(direction):
             return False
         if not is_at_or_after(now_et, config.NO_NEW_TRADES_BEFORE):
@@ -912,7 +971,7 @@ def main():
                 "qty": filled_qty,
                 "entry_price": filled_avg_price or ask_price,
                 "stop_floor_plpc": -float(config.STOP_LOSS_PCT),
-                "stop_loss_usd": float(getattr(config, "STOP_LOSS_USD", 10.0)),
+                "stop_loss_usd": _runtime_stop_loss_usd(),
                 "max_plpc": 0.0,
             }
             ticker_entry_counts[ticker] = prior_entries + 1
@@ -1053,6 +1112,8 @@ def main():
         now_ct = datetime.now(pytz.timezone(config.CENTRAL_TZ))
         last_trader_heartbeat_et = datetime.now(tz).isoformat()
         control_state = load_trading_control()
+        strategy_profile = normalize_profile_name(str(control_state.get("strategy_profile", "balanced") or "balanced"))
+        dry_run_enabled = bool(control_state.get("dry_run", False)) and is_enabled("FEATURE_DRY_RUN_MODE", False)
         manual_stop = bool(control_state.get("manual_stop", False))
         if manual_stop:
             now_et = datetime.now(tz)
@@ -1120,6 +1181,8 @@ def main():
         now_ct = datetime.now(pytz.timezone(config.CENTRAL_TZ))
         last_trader_heartbeat_et = now_et.isoformat()
         control_state = load_trading_control()
+        strategy_profile = normalize_profile_name(str(control_state.get("strategy_profile", "balanced") or "balanced"))
+        dry_run_enabled = bool(control_state.get("dry_run", False)) and is_enabled("FEATURE_DRY_RUN_MODE", False)
         manual_stop = bool(control_state.get("manual_stop", False))
         if manual_stop:
             if not manual_stop_latched:
@@ -1247,6 +1310,7 @@ def main():
             premarket_signals_day = ""
             premarket_scan_runs = 0
             premarket_last_scan_at = None
+            bad_fill_tracker = {}
             set_catalyst_mode(False, "")
 
         option_positions = broker.get_open_option_positions()
@@ -1410,6 +1474,16 @@ def main():
         elif signals:
             print(f"[{ts(now_et)}] Index bias neutral; keeping both call/put signals.")
 
+        entry_min_signal_score = _runtime_entry_min_signal_score()
+        if signals:
+            before = len(signals)
+            signals = [s for s in signals if float(s.get("signal_score", 0) or 0) >= entry_min_signal_score]
+            if before != len(signals):
+                print(
+                    f"[{ts(now_et)}] Entry signal-score gate {entry_min_signal_score:.2f} "
+                    f"filtered signals {before}->{len(signals)} (profile={strategy_profile})."
+                )
+
         if not pdt_allowed:
             print(
                 f"[{ts(now_et)}] PDT broker flag: no new entries reported. "
@@ -1518,6 +1592,10 @@ def main():
                 _mark_skip("invalid_strategy_direction")
                 print(f"[{ts(now_et)}] {ticker}: skip (invalid direction={direction!r}; only CALL/PUT allowed).")
                 continue
+            if _is_bad_fill_blocked(ticker, now_et):
+                _mark_skip("bad_fill_cooldown")
+                print(f"[{ts(now_et)}] {ticker}: skip (bad-fill cooldown active).")
+                continue
             if not is_at_or_after(now_et, config.NO_NEW_TRADES_BEFORE):
                 _mark_skip("before_entry_window")
                 print(f"[{ts(now_et)}] Entry window not open yet (before {config.NO_NEW_TRADES_BEFORE} ET).")
@@ -1542,6 +1620,13 @@ def main():
             if _has_ticker_open_meta(ticker):
                 _mark_skip("existing_ticker_runtime_state")
                 print(f"[{ts(now_et)}] {ticker}: skip (already open in runtime state).")
+                continue
+            if dry_run_enabled:
+                _mark_skip("dry_run_mode")
+                print(
+                    f"[{ts(now_et)}] DRY-RUN entry candidate: {ticker} {str(direction).upper()} "
+                    f"score={float(signal.get('signal_score', 0) or 0):.2f} (no order submitted)."
+                )
                 continue
 
             prior_entries = int(ticker_entry_counts.get(ticker, 0))
@@ -1774,6 +1859,7 @@ def main():
                 fill_slippage = _slippage_pct(ask_price, filled_avg_price) if (filled_avg_price > 0 and ask_price > 0) else 0.0
                 if (not direct_market_entry) and fill_slippage > config.MAX_FILL_SLIPPAGE_PCT:
                     _mark_skip("fill_slippage_too_high")
+                    _record_bad_fill_event(ticker, now_et, fill_slippage)
                     print(
                         f"[{ts(now_et)}] {ticker}: fill slippage {fill_slippage:.2f}% exceeds "
                         f"{config.MAX_FILL_SLIPPAGE_PCT:.2f}%. Closing immediately."
@@ -1805,7 +1891,7 @@ def main():
                     "qty": filled_qty,
                     "entry_price": filled_avg_price or ask_price,
                     "stop_floor_plpc": -float(config.STOP_LOSS_PCT),
-                    "stop_loss_usd": float(getattr(config, "STOP_LOSS_USD", 10.0)),
+                    "stop_loss_usd": _runtime_stop_loss_usd(),
                     "max_plpc": 0.0,
                 }
                 if prior_entries >= 1 and reentry_armed:
@@ -1929,7 +2015,7 @@ def main():
             if exit_reason is None and entry_time is not None and entry_time.date() < now_et.date():
                 exit_reason = "overnight_forced_close"
             # Rule 1: fixed-dollar stop loss
-            stop_loss_usd_cap = float(getattr(config, "STOP_LOSS_USD", 10.0))
+            stop_loss_usd_cap = _runtime_stop_loss_usd()
             if exit_reason is None and unrealized_usd is not None and unrealized_usd <= -abs(stop_loss_usd_cap):
                 exit_reason = "stop_loss"
 
@@ -2018,6 +2104,22 @@ def main():
                         exit_reason = "time_stop"
 
             if exit_reason:
+                if dry_run_enabled:
+                    print(
+                        f"[{ts(now_et)}] DRY-RUN exit candidate: {symbol} reason={exit_reason} "
+                        f"qty={close_qty}/{qty} plpc={plpc:+.2%} unrealized_usd={unrealized_usd if unrealized_usd is not None else 'n/a'}"
+                    )
+                    last_exit_debug = {
+                        "loop_ts_et": ts(now_et),
+                        "symbol": symbol,
+                        "reason": f"dry_run_{exit_reason}",
+                        "requested_qty": close_qty,
+                        "position_qty": qty,
+                        "filled_qty": 0,
+                        "result": "dry_run_skipped",
+                    }
+                    _save_runtime_state()
+                    continue
                 try:
                     last_exit_debug = {
                         "loop_ts_et": ts(now_et),

@@ -9,6 +9,7 @@ from typing import Any
 import requests
 
 import config
+from feature_flags import is_enabled
 
 
 class AlertManager:
@@ -24,6 +25,20 @@ class AlertManager:
     def send(self, event: str, message: str, *, level: str = "info", dedupe_key: str | None = None) -> None:
         if not self.enabled():
             return
+        if is_enabled("FEATURE_SMART_ALERTS", False):
+            important_events = {
+                "trader_crash",
+                "alpaca_auth_error",
+                "killswitch_active",
+                "daily_loss_limit",
+                "weekly_loss_limit",
+                "vix_guard_block",
+                "event_day_block",
+                "high_fill_slippage",
+                "session_complete",
+            }
+            if (str(level).lower() not in {"warning", "error"}) and (str(event) not in important_events):
+                return
 
         key = dedupe_key or event
         now_ts = time.time()
@@ -63,4 +78,3 @@ class AlertManager:
             ).raise_for_status()
         except Exception as exc:  # noqa: BLE001
             print(f"[alerts] Generic webhook failed: {exc}")
-

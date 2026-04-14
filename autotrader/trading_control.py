@@ -17,6 +17,8 @@ _CONTROL_KEY = redis_key("trading_control")
 def _default_state() -> dict:
     return {
         "manual_stop": False,
+        "dry_run": False,
+        "strategy_profile": "balanced",
         "updated_at_et": "",
         "reason": "",
     }
@@ -28,6 +30,8 @@ def load_trading_control(path: Path | None = None) -> dict:
         merged = _default_state()
         merged.update(cached)
         merged["manual_stop"] = bool(merged.get("manual_stop", False))
+        merged["dry_run"] = bool(merged.get("dry_run", False))
+        merged["strategy_profile"] = str(merged.get("strategy_profile", "balanced") or "balanced").strip().lower()
         return merged
 
     control_path = path or config.TRADING_CONTROL_PATH
@@ -40,6 +44,8 @@ def load_trading_control(path: Path | None = None) -> dict:
             merged = _default_state()
             merged.update(data)
             merged["manual_stop"] = bool(merged.get("manual_stop", False))
+            merged["dry_run"] = bool(merged.get("dry_run", False))
+            merged["strategy_profile"] = str(merged.get("strategy_profile", "balanced") or "balanced").strip().lower()
             return merged
     except Exception as exc:  # noqa: BLE001
         print(f"[control] load failed: {exc}")
@@ -50,6 +56,8 @@ def save_trading_control(state: dict, path: Path | None = None) -> dict:
     payload = _default_state()
     payload.update(state or {})
     payload["manual_stop"] = bool(payload.get("manual_stop", False))
+    payload["dry_run"] = bool(payload.get("dry_run", False))
+    payload["strategy_profile"] = str(payload.get("strategy_profile", "balanced") or "balanced").strip().lower()
     if not payload.get("updated_at_et"):
         now_et = datetime.now(pytz.timezone(config.EASTERN_TZ))
         payload["updated_at_et"] = now_et.strftime("%Y-%m-%d %H:%M:%S %Z")
@@ -72,5 +80,24 @@ def set_manual_stop(enabled: bool, reason: str = "") -> dict:
     now_et = datetime.now(pytz.timezone(config.EASTERN_TZ))
     current["manual_stop"] = bool(enabled)
     current["reason"] = reason or ("manual_stop" if enabled else "manual_start")
+    current["updated_at_et"] = now_et.strftime("%Y-%m-%d %H:%M:%S %Z")
+    return save_trading_control(current)
+
+
+def set_dry_run(enabled: bool, reason: str = "") -> dict:
+    current = load_trading_control()
+    now_et = datetime.now(pytz.timezone(config.EASTERN_TZ))
+    current["dry_run"] = bool(enabled)
+    current["reason"] = reason or ("dry_run_on" if enabled else "dry_run_off")
+    current["updated_at_et"] = now_et.strftime("%Y-%m-%d %H:%M:%S %Z")
+    return save_trading_control(current)
+
+
+def set_strategy_profile(profile: str, reason: str = "") -> dict:
+    current = load_trading_control()
+    normalized = str(profile or "").strip().lower() or "balanced"
+    now_et = datetime.now(pytz.timezone(config.EASTERN_TZ))
+    current["strategy_profile"] = normalized
+    current["reason"] = reason or f"strategy_profile_{normalized}"
     current["updated_at_et"] = now_et.strftime("%Y-%m-%d %H:%M:%S %Z")
     return save_trading_control(current)

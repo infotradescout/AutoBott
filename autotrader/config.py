@@ -341,6 +341,22 @@ PAPER = True   # paper trading — set to False only when ready for live
 
 
 # ---------------------------------------------------------------------------
+# Feature flags (safe rollout: all default OFF)
+# ---------------------------------------------------------------------------
+
+FEATURE_SESSION_GUARDRAIL_PANEL      = False
+FEATURE_TRADE_REPLAY                 = False
+FEATURE_PREMARKET_OPENING_PLAN_CARD  = False
+FEATURE_EXIT_RELIABILITY_METRICS     = False
+FEATURE_DRY_RUN_MODE                 = False
+FEATURE_SMART_ALERTS                 = False
+FEATURE_TICKER_SCORECARDS            = False
+FEATURE_STRATEGY_PROFILES            = False
+FEATURE_BAD_FILL_DETECTOR            = False
+FEATURE_WEEKLY_REVIEW_GENERATOR      = False
+
+
+# ---------------------------------------------------------------------------
 # File paths
 # ---------------------------------------------------------------------------
 

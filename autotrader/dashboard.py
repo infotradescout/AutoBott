@@ -16,8 +16,16 @@ from flask import Flask, jsonify, render_template_string, request
 
 import config
 from env_config import get_required_env, load_runtime_env
+from feature_flags import get_feature_flags_snapshot
+from feature_flags import is_enabled as feature_enabled
 from state_store import load_bot_state
-from trading_control import load_trading_control, set_manual_stop
+from strategy_profiles import PROFILE_PRESETS, normalize_profile_name
+from trading_control import (
+    load_trading_control,
+    set_dry_run,
+    set_manual_stop,
+    set_strategy_profile,
+)
 from watchlist_control import load_watchlist_control, update_watchlist_control
 
 load_runtime_env()
@@ -622,7 +630,10 @@ def api_status():
             elif plpc < 0:
                 losses += 1
 
-        trading_paused = bool(load_trading_control().get("manual_stop", False))
+        control = load_trading_control()
+        trading_paused = bool(control.get("manual_stop", False))
+        dry_run = bool(control.get("dry_run", False))
+        strategy_profile = normalize_profile_name(str(control.get("strategy_profile", "balanced") or "balanced"))
         blockers: list[str] = []
         if trading_paused:
             blockers.append("manual_stop")
@@ -645,6 +656,8 @@ def api_status():
             {
                 "market_open": bool(clock_body.get("is_open", False)),
                 "trading_paused": trading_paused,
+                "dry_run": dry_run,
+                "strategy_profile": strategy_profile,
                 "entry_window_open": entry_window_open,
                 "entry_window_label": f"{config.NO_NEW_TRADES_BEFORE}-{config.NO_NEW_TRADES_AFTER} ET",
                 "catalyst_mode_active": catalyst_mode_active,
@@ -661,6 +674,7 @@ def api_status():
                 "alpaca_auth_error_recent": auth_error_recent,
                 "last_entry_debug": last_entry_debug if isinstance(last_entry_debug, dict) else {},
                 "last_exit_debug": last_exit_debug if isinstance(last_exit_debug, dict) else {},
+                "feature_flags": get_feature_flags_snapshot(),
                 "last_updated": _now_et().strftime("%Y-%m-%d %H:%M:%S ET"),
                 "trades_today": len(today_rows),
                 "wins_today": wins,
@@ -674,6 +688,10 @@ def api_status():
                 "error": str(exc),
                 "market_open": False,
                 "trading_paused": bool(load_trading_control().get("manual_stop", False)),
+                "dry_run": bool(load_trading_control().get("dry_run", False)),
+                "strategy_profile": normalize_profile_name(
+                    str(load_trading_control().get("strategy_profile", "balanced") or "balanced")
+                ),
                 "entry_window_open": False,
                 "entry_window_label": f"{config.NO_NEW_TRADES_BEFORE}-{config.NO_NEW_TRADES_AFTER} ET",
                 "catalyst_mode_active": False,
@@ -690,6 +708,7 @@ def api_status():
                 "alpaca_auth_error_recent": False,
                 "last_entry_debug": {},
                 "last_exit_debug": {},
+                "feature_flags": get_feature_flags_snapshot(),
                 "last_updated": now_et.strftime("%Y-%m-%d %H:%M:%S ET"),
                 "trades_today": 0,
                 "wins_today": 0,
@@ -706,6 +725,9 @@ def api_trading_control():
         return jsonify(
             {
                 "manual_stop": bool(state.get("manual_stop", False)),
+                "dry_run": bool(state.get("dry_run", False)),
+                "strategy_profile": normalize_profile_name(str(state.get("strategy_profile", "balanced") or "balanced")),
+                "available_profiles": sorted(PROFILE_PRESETS.keys()),
                 "updated_at_et": str(state.get("updated_at_et", "")),
                 "reason": str(state.get("reason", "")),
             }
@@ -748,6 +770,36 @@ def api_trading_start():
             {
                 "ok": True,
                 "manual_stop": bool(state.get("manual_stop", False)),
+                "updated_at_et": str(state.get("updated_at_et", "")),
+                "reason": str(state.get("reason", "")),
+            }
+        )
+    except Exception as exc:  # noqa: BLE001
+        return jsonify({"error": str(exc)}), 500
+
+
+@app.post("/api/runtime-control")
+def api_runtime_control_update():
+    try:
+        ok, err, status = _verify_control_token()
+        if not ok:
+            return jsonify({"error": err}), status
+        payload = request.get_json(silent=True) or {}
+        dry_run = payload.get("dry_run")
+        profile = payload.get("strategy_profile")
+        state = load_trading_control()
+        if dry_run is not None:
+            state = set_dry_run(bool(dry_run), reason="dashboard_runtime_control")
+        if profile is not None:
+            normalized = normalize_profile_name(str(profile))
+            state = set_strategy_profile(normalized, reason="dashboard_runtime_control")
+        return jsonify(
+            {
+                "ok": True,
+                "manual_stop": bool(state.get("manual_stop", False)),
+                "dry_run": bool(state.get("dry_run", False)),
+                "strategy_profile": normalize_profile_name(str(state.get("strategy_profile", "balanced") or "balanced")),
+                "available_profiles": sorted(PROFILE_PRESETS.keys()),
                 "updated_at_et": str(state.get("updated_at_et", "")),
                 "reason": str(state.get("reason", "")),
             }
@@ -962,6 +1014,243 @@ def api_daily_review():
         _REVIEW_CACHE["ts"] = now
         _REVIEW_CACHE["payload"] = payload
         return jsonify(payload)
+    except Exception as exc:  # noqa: BLE001
+        return jsonify({"error": str(exc)}), 500
+
+
+def _pnl_usd_from_trade_row(row: dict[str, str]) -> float:
+    entry_price = _safe_float(row.get("entry_price"), 0.0)
+    exit_price = _safe_float(row.get("exit_price"), 0.0)
+    qty = int(_safe_float(row.get("qty"), 0))
+    if qty <= 0 or entry_price <= 0 or exit_price <= 0:
+        pnl_pct = _safe_float(row.get("pnl_pct"), 0.0)
+        return entry_price * qty * 100.0 * pnl_pct
+    return (exit_price - entry_price) * qty * 100.0
+
+
+def _recent_trade_rows(days: int = 7) -> list[dict[str, str]]:
+    now = _now_et()
+    rows = _read_csv_rows(TRADES_CSV, limit=8000, reverse=False)
+    out: list[dict[str, str]] = []
+    for row in rows:
+        dt = _parse_ts(str(row.get("timestamp", "")))
+        if dt is None:
+            continue
+        if (now - dt).days > max(1, int(days)):
+            continue
+        out.append(row)
+    return out
+
+
+@app.get("/api/trade-replay")
+def api_trade_replay():
+    try:
+        if not feature_enabled("FEATURE_TRADE_REPLAY", False):
+            return jsonify({"enabled": False, "rows": [], "generated_at": _now_et().strftime("%Y-%m-%d %H:%M:%S ET")})
+        trades = _read_csv_rows(TRADES_CSV, limit=300, reverse=True)
+        scans = _read_csv_rows(SCAN_LOG_CSV, limit=2000, reverse=True)
+        scan_by_symbol: dict[str, list[dict[str, str]]] = {}
+        for row in scans:
+            symbol = str(row.get("symbol", "")).upper()
+            if not symbol:
+                continue
+            scan_by_symbol.setdefault(symbol, []).append(row)
+
+        replay_rows: list[dict[str, Any]] = []
+        for trade in trades[:120]:
+            ticker = str(trade.get("ticker", "") or "").upper()
+            t_dt = _parse_ts(str(trade.get("timestamp", "")))
+            scan_reason = ""
+            scan_direction = ""
+            if ticker and t_dt is not None:
+                for scan in scan_by_symbol.get(ticker, []):
+                    s_dt = _parse_ts(str(scan.get("timestamp", "")))
+                    if s_dt is None or s_dt > t_dt:
+                        continue
+                    scan_reason = str(scan.get("reason", "") or "")
+                    scan_direction = str(scan.get("direction", "") or "")
+                    break
+            replay_rows.append(
+                {
+                    "timestamp": str(trade.get("timestamp", "") or ""),
+                    "ticker": ticker,
+                    "direction": str(trade.get("direction", "") or "").upper(),
+                    "entry_price": _safe_float(trade.get("entry_price"), 0.0),
+                    "exit_price": _safe_float(trade.get("exit_price"), 0.0),
+                    "qty": int(_safe_float(trade.get("qty"), 0)),
+                    "exit_reason": str(trade.get("exit_reason", "") or ""),
+                    "pnl_pct": round(_safe_float(trade.get("pnl_pct"), 0.0) * 100.0, 2),
+                    "pnl_usd": round(_pnl_usd_from_trade_row(trade), 2),
+                    "scan_direction": scan_direction.upper(),
+                    "scan_reason": scan_reason,
+                }
+            )
+        return jsonify({"enabled": True, "rows": replay_rows, "generated_at": _now_et().strftime("%Y-%m-%d %H:%M:%S ET")})
+    except Exception as exc:  # noqa: BLE001
+        return jsonify({"error": str(exc)}), 500
+
+
+@app.get("/api/premarket-plan")
+def api_premarket_plan():
+    try:
+        if not feature_enabled("FEATURE_PREMARKET_OPENING_PLAN_CARD", False):
+            return jsonify({"enabled": False, "rows": [], "generated_at": _now_et().strftime("%Y-%m-%d %H:%M:%S ET")})
+        runtime_state = load_bot_state()
+        rows = list(runtime_state.get("premarket_opening_signals") or [])
+        day = str(runtime_state.get("premarket_signals_day", "") or "")
+        plan_rows: list[dict[str, Any]] = []
+        for item in rows[:12]:
+            if not isinstance(item, dict):
+                continue
+            plan_rows.append(
+                {
+                    "symbol": str(item.get("symbol", "") or "").upper(),
+                    "direction": str(item.get("direction", "") or "").upper(),
+                    "signal_score": round(_safe_float(item.get("signal_score"), 0.0), 2),
+                    "rvol": round(_safe_float(item.get("rvol"), 0.0), 2),
+                    "reason": str(item.get("reason", "") or ""),
+                }
+            )
+        return jsonify(
+            {
+                "enabled": True,
+                "day": day,
+                "rows": plan_rows,
+                "generated_at": _now_et().strftime("%Y-%m-%d %H:%M:%S ET"),
+            }
+        )
+    except Exception as exc:  # noqa: BLE001
+        return jsonify({"error": str(exc)}), 500
+
+
+@app.get("/api/exit-reliability")
+def api_exit_reliability():
+    try:
+        if not feature_enabled("FEATURE_EXIT_RELIABILITY_METRICS", False):
+            return jsonify({"enabled": False, "generated_at": _now_et().strftime("%Y-%m-%d %H:%M:%S ET")})
+        trades = _recent_trade_rows(days=7)
+        total = len(trades)
+        reason_counts: dict[str, int] = {}
+        for row in trades:
+            reason = str(row.get("exit_reason", "") or "unknown")
+            reason_counts[reason] = reason_counts.get(reason, 0) + 1
+        stop_loss = int(reason_counts.get("stop_loss", 0))
+        pre_expiry = int(reason_counts.get("pre_expiry_exit", 0) + reason_counts.get("pre_expiry_exit_overdue", 0))
+        eod = int(reason_counts.get("eod_close", 0))
+        overnight = int(reason_counts.get("overnight_forced_close", 0))
+        reliability = 100.0
+        if total > 0:
+            reliability = max(0.0, 100.0 - ((overnight / total) * 100.0))
+        return jsonify(
+            {
+                "enabled": True,
+                "window_days": 7,
+                "total_exits": total,
+                "stop_loss_exits": stop_loss,
+                "pre_expiry_exits": pre_expiry,
+                "eod_exits": eod,
+                "overnight_forced_closes": overnight,
+                "reliability_score_pct": round(reliability, 2),
+                "reason_counts": reason_counts,
+                "generated_at": _now_et().strftime("%Y-%m-%d %H:%M:%S ET"),
+            }
+        )
+    except Exception as exc:  # noqa: BLE001
+        return jsonify({"error": str(exc)}), 500
+
+
+@app.get("/api/ticker-scorecards")
+def api_ticker_scorecards():
+    try:
+        if not feature_enabled("FEATURE_TICKER_SCORECARDS", False):
+            return jsonify({"enabled": False, "rows": [], "generated_at": _now_et().strftime("%Y-%m-%d %H:%M:%S ET")})
+        trades = _recent_trade_rows(days=21)
+        per_ticker: dict[str, dict[str, Any]] = {}
+        for row in trades:
+            ticker = str(row.get("ticker", "") or "").upper()
+            if not ticker:
+                continue
+            item = per_ticker.get(ticker)
+            if item is None:
+                item = {"ticker": ticker, "trades": 0, "wins": 0, "losses": 0, "total_pnl_usd": 0.0, "avg_pnl_pct": 0.0}
+                per_ticker[ticker] = item
+            pnl_pct = _safe_float(row.get("pnl_pct"), 0.0) * 100.0
+            pnl_usd = _pnl_usd_from_trade_row(row)
+            item["trades"] = int(item["trades"]) + 1
+            if pnl_usd > 0:
+                item["wins"] = int(item["wins"]) + 1
+            elif pnl_usd < 0:
+                item["losses"] = int(item["losses"]) + 1
+            item["total_pnl_usd"] = float(item["total_pnl_usd"]) + pnl_usd
+            item["avg_pnl_pct"] = float(item["avg_pnl_pct"]) + pnl_pct
+
+        rows: list[dict[str, Any]] = []
+        for item in per_ticker.values():
+            trades_count = max(1, int(item["trades"]))
+            wins = int(item["wins"])
+            losses = int(item["losses"])
+            rows.append(
+                {
+                    "ticker": str(item["ticker"]),
+                    "trades": int(item["trades"]),
+                    "wins": wins,
+                    "losses": losses,
+                    "win_rate_pct": round((wins / max(1, wins + losses)) * 100.0, 2) if (wins + losses) > 0 else 0.0,
+                    "total_pnl_usd": round(float(item["total_pnl_usd"]), 2),
+                    "avg_pnl_pct": round(float(item["avg_pnl_pct"]) / trades_count, 2),
+                }
+            )
+        rows.sort(key=lambda r: (float(r.get("total_pnl_usd", 0.0)), float(r.get("win_rate_pct", 0.0))), reverse=True)
+        return jsonify({"enabled": True, "rows": rows[:30], "generated_at": _now_et().strftime("%Y-%m-%d %H:%M:%S ET")})
+    except Exception as exc:  # noqa: BLE001
+        return jsonify({"error": str(exc)}), 500
+
+
+@app.get("/api/weekly-review")
+def api_weekly_review():
+    try:
+        if not feature_enabled("FEATURE_WEEKLY_REVIEW_GENERATOR", False):
+            return jsonify({"enabled": False, "generated_at": _now_et().strftime("%Y-%m-%d %H:%M:%S ET")})
+        trades = _recent_trade_rows(days=7)
+        total = len(trades)
+        wins = 0
+        total_pnl = 0.0
+        reason_counts: dict[str, int] = {}
+        for row in trades:
+            pnl = _pnl_usd_from_trade_row(row)
+            total_pnl += pnl
+            if pnl > 0:
+                wins += 1
+            reason = str(row.get("exit_reason", "") or "unknown")
+            reason_counts[reason] = reason_counts.get(reason, 0) + 1
+        win_rate = (wins / total * 100.0) if total > 0 else 0.0
+        top_reason = ""
+        if reason_counts:
+            top_reason = sorted(reason_counts.items(), key=lambda x: x[1], reverse=True)[0][0]
+        recommendations: list[str] = []
+        if total == 0:
+            recommendations.append("No closed trades this week. Verify scanner cadence and entry window settings.")
+        if win_rate < 45 and total > 5:
+            recommendations.append("Win rate below 45%. Consider raising entry_min_signal_score or conservative profile.")
+        if reason_counts.get("stop_loss", 0) >= max(3, total // 3):
+            recommendations.append("High stop-loss frequency. Review opening volatility filters and bad-fill detector settings.")
+        if reason_counts.get("overnight_forced_close", 0) > 0:
+            recommendations.append("Overnight forced closes occurred. Confirm EOD hard-close timing and loop heartbeat reliability.")
+        if not recommendations:
+            recommendations.append("Performance stable. Keep current profile and review top ticker scorecards for sizing opportunities.")
+        return jsonify(
+            {
+                "enabled": True,
+                "window_days": 7,
+                "total_trades": total,
+                "win_rate_pct": round(win_rate, 2),
+                "total_pnl_usd": round(total_pnl, 2),
+                "top_exit_reason": top_reason,
+                "reason_counts": reason_counts,
+                "recommendations": recommendations,
+                "generated_at": _now_et().strftime("%Y-%m-%d %H:%M:%S ET"),
+            }
+        )
     except Exception as exc:  # noqa: BLE001
         return jsonify({"error": str(exc)}), 500
 
@@ -1584,6 +1873,24 @@ def home():
       </div>
     </div>
 
+    <div id="runtime-control-card" class="card section" style="display:none;">
+      <h3>RUNTIME CONTROLS</h3>
+      <div class="ctrl">
+        <button id="dry-run-btn" class="ctrl-btn" onclick="toggleDryRun()">Toggle Dry Run</button>
+        <select id="strategy-profile-select" class="ctrl-btn" onchange="setStrategyProfile()">
+          <option value="balanced">balanced</option>
+          <option value="conservative">conservative</option>
+          <option value="aggressive">aggressive</option>
+        </select>
+        <span id="runtime-control-status" class="ctrl-state">Runtime: --</span>
+      </div>
+    </div>
+
+    <div id="guardrail-panel-card" class="card section" style="display:none;">
+      <h3>SESSION GUARDRAILS</h3>
+      <div id="guardrail-wrap" class="muted">Loading...</div>
+    </div>
+
     <div class="grid4">
       <div class="card strong"><div class="label">Equity</div><div id="equity" class="num">--</div><div class="kpi-sub">Portfolio net liquidation</div></div>
       <div class="card strong"><div class="label">Buying Power</div><div id="buying-power" class="num">--</div><div class="kpi-sub">Available for entries</div></div>
@@ -1619,6 +1926,16 @@ def home():
         <thead><tr><th>Time</th><th>Symbol</th><th>Reason</th></tr></thead>
         <tbody id="scan-fails-body"></tbody>
       </table>
+    </div>
+
+    <div id="premarket-plan-card" class="card section" style="display:none;">
+      <h3>PREMARKET OPENING PLAN</h3>
+      <div id="premarket-plan-wrap" class="muted">Loading...</div>
+    </div>
+
+    <div id="exit-reliability-card" class="card section" style="display:none;">
+      <h3>EXIT RELIABILITY</h3>
+      <div id="exit-reliability-wrap" class="muted">Loading...</div>
     </div>
 
     <div class="grid3 section">
@@ -1671,6 +1988,21 @@ def home():
       <div id="review-checks-wrap" class="muted">Loading review checks...</div>
       <div class="spacer-sm"></div>
       <div id="review-skipped-wrap" class="muted">Loading skipped analysis...</div>
+    </div>
+
+    <div id="trade-replay-card" class="card section" style="display:none;">
+      <h3>TRADE REPLAY</h3>
+      <div id="trade-replay-wrap" class="muted">Loading...</div>
+    </div>
+
+    <div id="ticker-scorecards-card" class="card section" style="display:none;">
+      <h3>TICKER SCORECARDS</h3>
+      <div id="ticker-scorecards-wrap" class="muted">Loading...</div>
+    </div>
+
+    <div id="weekly-review-card" class="card section" style="display:none;">
+      <h3>WEEKLY REVIEW</h3>
+      <div id="weekly-review-wrap" class="muted">Loading...</div>
     </div>
   </div>
 
@@ -2062,8 +2394,200 @@ def home():
       await refresh();
     }
 
+    function applyFeatureVisibility(flags) {
+      const f = flags || {};
+      const runtimeCard = document.getElementById("runtime-control-card");
+      const guardrailCard = document.getElementById("guardrail-panel-card");
+      const premarketCard = document.getElementById("premarket-plan-card");
+      const exitReliabilityCard = document.getElementById("exit-reliability-card");
+      const replayCard = document.getElementById("trade-replay-card");
+      const tickerCard = document.getElementById("ticker-scorecards-card");
+      const weeklyCard = document.getElementById("weekly-review-card");
+      if (runtimeCard) runtimeCard.style.display = (f.FEATURE_DRY_RUN_MODE || f.FEATURE_STRATEGY_PROFILES) ? "" : "none";
+      if (guardrailCard) guardrailCard.style.display = f.FEATURE_SESSION_GUARDRAIL_PANEL ? "" : "none";
+      if (premarketCard) premarketCard.style.display = f.FEATURE_PREMARKET_OPENING_PLAN_CARD ? "" : "none";
+      if (exitReliabilityCard) exitReliabilityCard.style.display = f.FEATURE_EXIT_RELIABILITY_METRICS ? "" : "none";
+      if (replayCard) replayCard.style.display = f.FEATURE_TRADE_REPLAY ? "" : "none";
+      if (tickerCard) tickerCard.style.display = f.FEATURE_TICKER_SCORECARDS ? "" : "none";
+      if (weeklyCard) weeklyCard.style.display = f.FEATURE_WEEKLY_REVIEW_GENERATOR ? "" : "none";
+    }
+
+    function renderGuardrails(status) {
+      const el = document.getElementById("guardrail-wrap");
+      if (!el) return;
+      if (!status || status.error) {
+        el.innerHTML = `<div class="muted">Guardrail data unavailable</div>`;
+        return;
+      }
+      const blockers = Array.isArray(status.blockers) ? status.blockers : [];
+      const rows = blockers.length ? blockers.map(b => `<span class="badge b-red">${b}</span>`).join(" ") : `<span class="badge b-green">no blockers</span>`;
+      el.innerHTML = `
+        <div class="mobile-grid">
+          <div><span class="mobile-k">Can Enter</span> <span class="mobile-v ${status.can_enter_now ? "pnl-pos" : "pnl-neg"}">${status.can_enter_now ? "YES" : "NO"}</span></div>
+          <div><span class="mobile-k">Profile</span> <span class="mobile-v">${status.strategy_profile || "balanced"}</span></div>
+          <div><span class="mobile-k">Dry Run</span> <span class="mobile-v">${status.dry_run ? "ON" : "OFF"}</span></div>
+          <div><span class="mobile-k">Entry Window</span> <span class="mobile-v">${status.entry_window_open ? "OPEN" : "CLOSED"}</span></div>
+        </div>
+        <div style="margin-top:8px;">${rows}</div>
+      `;
+    }
+
+    function renderPremarketPlan(data) {
+      const el = document.getElementById("premarket-plan-wrap");
+      if (!el) return;
+      if (!data || data.error || !data.enabled) {
+        el.innerHTML = `<div class="muted">Premarket plan disabled</div>`;
+        return;
+      }
+      const rows = Array.isArray(data.rows) ? data.rows : [];
+      if (!rows.length) {
+        el.innerHTML = `<div class="muted">No staged premarket signals for ${data.day || "today"}.</div>`;
+        return;
+      }
+      const items = rows.slice(0, 8).map(r => `
+        <tr>
+          <td>${r.symbol || "-"}</td>
+          <td><span class="badge ${String(r.direction || "").toLowerCase() === "call" ? "b-green" : "b-red"}">${r.direction || "-"}</span></td>
+          <td>${Number(r.signal_score || 0).toFixed(2)}</td>
+          <td>${Number(r.rvol || 0).toFixed(2)}x</td>
+          <td>${r.reason || "-"}</td>
+        </tr>
+      `).join("");
+      el.innerHTML = `<table><thead><tr><th>Symbol</th><th>Dir</th><th>Score</th><th>RVOL</th><th>Reason</th></tr></thead><tbody>${items}</tbody></table>`;
+    }
+
+    function renderExitReliability(data) {
+      const el = document.getElementById("exit-reliability-wrap");
+      if (!el) return;
+      if (!data || data.error || !data.enabled) {
+        el.innerHTML = `<div class="muted">Exit reliability metrics disabled</div>`;
+        return;
+      }
+      el.innerHTML = `
+        <div class="mobile-grid">
+          <div><span class="mobile-k">Reliability</span> <span class="mobile-v">${Number(data.reliability_score_pct || 0).toFixed(2)}%</span></div>
+          <div><span class="mobile-k">Total Exits</span> <span class="mobile-v">${data.total_exits || 0}</span></div>
+          <div><span class="mobile-k">Stop Loss</span> <span class="mobile-v">${data.stop_loss_exits || 0}</span></div>
+          <div><span class="mobile-k">Pre-expiry</span> <span class="mobile-v">${data.pre_expiry_exits || 0}</span></div>
+          <div><span class="mobile-k">EOD</span> <span class="mobile-v">${data.eod_exits || 0}</span></div>
+          <div><span class="mobile-k">Overnight Forced</span> <span class="mobile-v">${data.overnight_forced_closes || 0}</span></div>
+        </div>
+      `;
+    }
+
+    function renderTradeReplay(data) {
+      const el = document.getElementById("trade-replay-wrap");
+      if (!el) return;
+      if (!data || data.error || !data.enabled) {
+        el.innerHTML = `<div class="muted">Trade replay disabled</div>`;
+        return;
+      }
+      const rows = Array.isArray(data.rows) ? data.rows : [];
+      if (!rows.length) {
+        el.innerHTML = `<div class="muted">No replay rows yet</div>`;
+        return;
+      }
+      const body = rows.slice(0, 30).map(r => `
+        <tr>
+          <td>${r.timestamp || "-"}</td>
+          <td>${r.ticker || "-"}</td>
+          <td>${r.direction || "-"}</td>
+          <td class="${pctClass(Number(r.pnl_pct || 0))}">${asPct(Number(r.pnl_pct || 0), 2)}</td>
+          <td>${r.exit_reason || "-"}</td>
+          <td>${r.scan_direction || "-"}</td>
+          <td>${r.scan_reason || "-"}</td>
+        </tr>
+      `).join("");
+      el.innerHTML = `<table><thead><tr><th>Time</th><th>Ticker</th><th>Dir</th><th>P&L %</th><th>Exit</th><th>Scan Dir</th><th>Scan Reason</th></tr></thead><tbody>${body}</tbody></table>`;
+    }
+
+    function renderTickerScorecards(data) {
+      const el = document.getElementById("ticker-scorecards-wrap");
+      if (!el) return;
+      if (!data || data.error || !data.enabled) {
+        el.innerHTML = `<div class="muted">Ticker scorecards disabled</div>`;
+        return;
+      }
+      const rows = Array.isArray(data.rows) ? data.rows : [];
+      if (!rows.length) {
+        el.innerHTML = `<div class="muted">No scorecards yet</div>`;
+        return;
+      }
+      const body = rows.slice(0, 20).map(r => `
+        <tr>
+          <td>${r.ticker || "-"}</td>
+          <td>${r.trades || 0}</td>
+          <td>${Number(r.win_rate_pct || 0).toFixed(1)}%</td>
+          <td class="${pctClass(Number(r.total_pnl_usd || 0))}">${fmtMoney(r.total_pnl_usd || 0)}</td>
+          <td class="${pctClass(Number(r.avg_pnl_pct || 0))}">${asPct(Number(r.avg_pnl_pct || 0), 2)}</td>
+        </tr>
+      `).join("");
+      el.innerHTML = `<table><thead><tr><th>Ticker</th><th>Trades</th><th>Win Rate</th><th>Total P&L</th><th>Avg P&L %</th></tr></thead><tbody>${body}</tbody></table>`;
+    }
+
+    function renderWeeklyReview(data) {
+      const el = document.getElementById("weekly-review-wrap");
+      if (!el) return;
+      if (!data || data.error || !data.enabled) {
+        el.innerHTML = `<div class="muted">Weekly review disabled</div>`;
+        return;
+      }
+      const recs = Array.isArray(data.recommendations) ? data.recommendations : [];
+      const recHtml = recs.map(r => `<li>${r}</li>`).join("");
+      el.innerHTML = `
+        <div class="mobile-grid">
+          <div><span class="mobile-k">Trades</span> <span class="mobile-v">${data.total_trades || 0}</span></div>
+          <div><span class="mobile-k">Win Rate</span> <span class="mobile-v">${Number(data.win_rate_pct || 0).toFixed(2)}%</span></div>
+          <div><span class="mobile-k">Total P&L</span> <span class="mobile-v ${pctClass(Number(data.total_pnl_usd || 0))}">${fmtMoney(data.total_pnl_usd || 0)}</span></div>
+          <div><span class="mobile-k">Top Exit Reason</span> <span class="mobile-v">${data.top_exit_reason || "-"}</span></div>
+        </div>
+        <ol style="margin-top:8px;">${recHtml}</ol>
+      `;
+    }
+
+    async function updateRuntimeControl(payload) {
+      let controlToken = localStorage.getItem("tradeControlToken") || "";
+      if (!controlToken) {
+        controlToken = window.prompt("Enter dashboard control token");
+        if (controlToken) localStorage.setItem("tradeControlToken", controlToken);
+      }
+      if (!controlToken) {
+        alert("Control token is required");
+        return;
+      }
+      const res = await fetch("/api/runtime-control", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "X-Trade-Control-Token": controlToken,
+        },
+        body: JSON.stringify(payload || {}),
+      });
+      const body = await res.json();
+      if (!res.ok || body.error) {
+        alert(`Runtime control failed: ${body.error || "request failed"}`);
+        return;
+      }
+      await refresh();
+    }
+
+    async function toggleDryRun() {
+      const current = document.getElementById("runtime-control-status");
+      const currentlyOn = current && String(current.textContent || "").toUpperCase().includes("DRY RUN ON");
+      await updateRuntimeControl({ dry_run: !currentlyOn });
+    }
+
+    async function setStrategyProfile() {
+      const el = document.getElementById("strategy-profile-select");
+      if (!el) return;
+      await updateRuntimeControl({ strategy_profile: String(el.value || "balanced") });
+    }
+
     async function refresh() {
-      const [account, positions, trades, scanlog, status, scansummary, scanfails, review, control] = await Promise.all([
+      const [
+        account, positions, trades, scanlog, status, scansummary, scanfails, review, control,
+        replay, premarketPlan, exitReliability, tickerScorecards, weeklyReview,
+      ] = await Promise.all([
         fetchJson("/api/account"),
         fetchJson("/api/positions"),
         fetchJson("/api/trades"),
@@ -2073,6 +2597,11 @@ def home():
         fetchJson("/api/scanfails"),
         fetchJson("/api/daily-review"),
         fetchJson("/api/trading-control"),
+        fetchJson("/api/trade-replay"),
+        fetchJson("/api/premarket-plan"),
+        fetchJson("/api/exit-reliability"),
+        fetchJson("/api/ticker-scorecards"),
+        fetchJson("/api/weekly-review"),
       ]);
 
       document.getElementById("last-updated").textContent = new Date().toLocaleTimeString();
@@ -2163,6 +2692,23 @@ def home():
           controlEl.style.color = "var(--green)";
         }
       }
+      const runtimeStatusEl = document.getElementById("runtime-control-status");
+      if (runtimeStatusEl) {
+        const dryRunLabel = control && !control.error && control.dry_run ? "DRY RUN ON" : "DRY RUN OFF";
+        const profile = control && !control.error ? String(control.strategy_profile || "balanced") : "balanced";
+        runtimeStatusEl.textContent = `${dryRunLabel} | profile=${profile}`;
+      }
+      const profileSelect = document.getElementById("strategy-profile-select");
+      if (profileSelect && control && !control.error) {
+        profileSelect.value = String(control.strategy_profile || "balanced");
+      }
+      applyFeatureVisibility((status && status.feature_flags) ? status.feature_flags : {});
+      renderGuardrails(status);
+      renderPremarketPlan(premarketPlan);
+      renderExitReliability(exitReliability);
+      renderTradeReplay(replay);
+      renderTickerScorecards(tickerScorecards);
+      renderWeeklyReview(weeklyReview);
 
       renderPositions(positionsOk ? positionsRows : []);
       renderTrades(trades.error ? [] : trades);
