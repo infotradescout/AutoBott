@@ -194,22 +194,27 @@ def _fetch_snapshots(symbols: list[str]) -> dict[str, dict[str, Any]]:
         return {}
 
 
-def _fetch_intraday_stock_series(symbols: list[str], limit: int = 78) -> dict[str, list[dict[str, Any]]]:
+def _fetch_intraday_stock_series(
+  symbols: list[str],
+  limit: int = 360,
+  timeframe: str = "1Min",
+  lookback_minutes: int = 360,
+) -> dict[str, list[dict[str, Any]]]:
     clean_symbols = [str(s).upper() for s in symbols if str(s).strip()]
     if not clean_symbols:
         return {}
     now_et = _now_et()
-    start_et = now_et - timedelta(hours=8)
+  start_et = now_et - timedelta(minutes=max(15, int(lookback_minutes)))
     try:
         resp = requests.get(
             f"{DATA_BASE_URL}/v2/stocks/bars",
             headers=HEADERS,
             params={
                 "symbols": ",".join(clean_symbols),
-                "timeframe": "5Min",
+        "timeframe": str(timeframe or "1Min"),
                 "start": start_et.astimezone(pytz.UTC).isoformat().replace("+00:00", "Z"),
                 "end": now_et.astimezone(pytz.UTC).isoformat().replace("+00:00", "Z"),
-                "limit": max(50, int(limit)),
+        "limit": max(60, int(limit)),
                 "adjustment": "raw",
                 "feed": "iex",
             },
@@ -939,7 +944,12 @@ def api_watch_open():
                 }
             )
 
-        stock_series_map = _fetch_intraday_stock_series(list(dict.fromkeys(underlyings)), limit=96)
+        stock_series_map = _fetch_intraday_stock_series(
+          list(dict.fromkeys(underlyings)),
+          limit=360,
+          timeframe="1Min",
+          lookback_minutes=360,
+        )
         payload_rows = []
         for row in option_rows:
             symbol = str(row.get("symbol", ""))
@@ -1602,7 +1612,7 @@ def watch_page():
           </div>
           <div class="muted" style="font-size:12px; margin-bottom:6px;">Open P&L % (loop samples)</div>
           <svg id="pnl-${i}" viewBox="0 0 420 120" preserveAspectRatio="none"></svg>
-          <div class="muted" style="font-size:12px; margin:8px 0 6px;">Underlying Stock Price (5m)</div>
+          <div class="muted" style="font-size:12px; margin:8px 0 6px;">Underlying Stock Price (1m, last 6h)</div>
           <svg id="stk-${i}" viewBox="0 0 420 120" preserveAspectRatio="none"></svg>
         </div>
       `).join("");
