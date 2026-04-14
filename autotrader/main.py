@@ -647,6 +647,7 @@ def main():
     last_alpaca_auth_error_et = str(state.get("last_alpaca_auth_error_et", "") or "")
     last_alpaca_auth_error = str(state.get("last_alpaca_auth_error", "") or "")
     next_heartbeat_at = 0.0
+    last_heartbeat_persist_at = 0.0
     manual_stop_latched = False
     control_state = load_trading_control()
     strategy_profile = normalize_profile_name(str(control_state.get("strategy_profile", "balanced") or "balanced"))
@@ -762,6 +763,16 @@ def main():
                 "last_alpaca_auth_error": last_alpaca_auth_error,
             }
         )
+
+    def _touch_heartbeat(*, force: bool = False) -> None:
+        nonlocal last_trader_heartbeat_et, last_heartbeat_persist_at
+        now_ts = time.time()
+        min_interval = max(5, int(config.LOOP_INTERVAL_SECONDS) // 2)
+        if (not force) and (now_ts - last_heartbeat_persist_at) < min_interval:
+            return
+        last_trader_heartbeat_et = datetime.now(tz).isoformat()
+        _save_runtime_state()
+        last_heartbeat_persist_at = now_ts
 
     def _safe_get_clock(*, phase: str, now_et: datetime, now_ct: datetime):
         nonlocal last_alpaca_auth_error_et, last_alpaca_auth_error
@@ -1269,7 +1280,7 @@ def main():
     while True:
         now_et = datetime.now(tz)
         now_ct = datetime.now(pytz.timezone(config.CENTRAL_TZ))
-        last_trader_heartbeat_et = now_et.isoformat()
+        _touch_heartbeat(force=True)
         control_state = load_trading_control()
         strategy_profile = normalize_profile_name(str(control_state.get("strategy_profile", "balanced") or "balanced"))
         dry_run_enabled = bool(control_state.get("dry_run", False)) and is_enabled("FEATURE_DRY_RUN_MODE", False)
@@ -1620,6 +1631,7 @@ def main():
 
         for signal in signals:
             now_et = datetime.now(tz)
+            _touch_heartbeat()
             entry_debug["signals_considered"] = int(entry_debug.get("signals_considered", 0)) + 1
 
             # --- Daily loss limit ---
@@ -2031,6 +2043,7 @@ def main():
                 ticker_first_symbol[p_ticker] = p_symbol
         for pos in option_positions:
             now_et = datetime.now(tz)
+            _touch_heartbeat()
             symbol = str(getattr(pos, "symbol", ""))
             qty = position_qty_as_int(getattr(pos, "qty", 0))
             if qty <= 0:
