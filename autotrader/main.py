@@ -5,6 +5,7 @@ from __future__ import annotations
 import time
 from datetime import date, datetime, timedelta
 import re
+import math
 
 import pytz
 import yfinance as yf
@@ -107,6 +108,41 @@ def _slippage_pct(reference_price: float, current_price: float) -> float:
     return ((current_price - reference_price) / reference_price) * 100.0
 
 
+def _position_plpc_snapshot(pos) -> float | None:
+    """
+    Best-effort normalized unrealized P&L % for a long option position.
+    Returns None when a usable value is unavailable.
+    """
+    try:
+        pos_current = float(getattr(pos, "current_price", 0) or 0)
+        pos_entry = float(getattr(pos, "avg_entry_price", 0) or 0)
+        if pos_entry > 0 and pos_current > 0:
+            return (pos_current - pos_entry) / pos_entry
+    except (TypeError, ValueError):
+        pass
+
+    try:
+        raw_plpc = float(getattr(pos, "unrealized_plpc", 0) or 0)
+        if math.isfinite(raw_plpc):
+            return raw_plpc
+    except (TypeError, ValueError):
+        pass
+
+    qty = position_qty_as_int(getattr(pos, "qty", 0))
+    try:
+        pos_entry = float(getattr(pos, "avg_entry_price", 0) or 0)
+        unrealized_pl = float(getattr(pos, "unrealized_pl", 0) or 0)
+        if qty > 0 and pos_entry > 0:
+            basis = pos_entry * qty * 100.0
+            if basis > 0:
+                derived = unrealized_pl / basis
+                if math.isfinite(derived):
+                    return derived
+    except (TypeError, ValueError):
+        pass
+    return None
+
+
 def _live_option_mark_and_plpc(
     data_client: AlpacaDataClient,
     option_symbol: str,
@@ -167,6 +203,19 @@ def _fetch_vix_level() -> float | None:
 def _parse_trade_meta_entry_time(meta: dict) -> datetime | None:
     raw = str(meta.get("entry_time_iso", "") or "").strip()
     if not raw:
+        # Backward-compatible fallback for older runtime records that only had
+        # "timestamp" in "%Y-%m-%d %H:%M:%S %Z" format.
+        raw = str(meta.get("timestamp", "") or "").strip()
+        if not raw:
+            return None
+        for fmt in ("%Y-%m-%d %H:%M:%S %Z", "%Y-%m-%d %H:%M:%S"):
+            try:
+                parsed = datetime.strptime(raw, fmt)
+                if parsed.tzinfo is None:
+                    parsed = pytz.timezone(config.EASTERN_TZ).localize(parsed)
+                return parsed.astimezone(pytz.timezone(config.EASTERN_TZ))
+            except Exception:
+                continue
         return None
     try:
         parsed = datetime.fromisoformat(raw)
@@ -257,6 +306,16 @@ def _option_expiry_date(meta: dict, option_symbol: str) -> date | None:
         except Exception as exc:  # noqa: BLE001
             print(f"[main] invalid expiry in trade meta for {option_symbol}: {raw!r} ({exc})")
     return _parse_option_expiry_from_symbol(option_symbol)
+
+
+def _parse_expiration_text(value: str | None) -> date | None:
+    raw = str(value or "").strip()
+    if not raw:
+        return None
+    try:
+        return date.fromisoformat(raw[:10])
+    except Exception:
+        return None
 
 
 def _subtract_trading_days(end_date: date, days: int) -> date:
@@ -353,6 +412,7 @@ def _hydrate_missing_position_meta(open_trade_meta: dict[str, dict], option_posi
             "qty": qty,
             "entry_price": entry_price,
             "stop_floor_plpc": -float(config.STOP_LOSS_PCT),
+            "stop_loss_usd": float(getattr(config, "STOP_LOSS_USD", 10.0)),
             "max_plpc": 0.0,
             "inferred": True,
         }
@@ -580,6 +640,26 @@ def main():
     last_alpaca_auth_error = str(state.get("last_alpaca_auth_error", "") or "")
     next_heartbeat_at = 0.0
     manual_stop_latched = False
+    option_expiry_cache: dict[str, date | None] = {}
+
+    def _resolve_option_expiry(symbol: str, meta: dict) -> date | None:
+        from_meta = _option_expiry_date(meta, symbol)
+        if from_meta is not None:
+            option_expiry_cache[symbol] = from_meta
+            return from_meta
+        if symbol in option_expiry_cache:
+            return option_expiry_cache[symbol]
+        fetched_expiry: date | None = None
+        try:
+            contract = data_client.get_option_contract(symbol)
+            fetched_expiry = _parse_expiration_text(contract.get("expiration_date")) if isinstance(contract, dict) else None
+        except Exception:
+            fetched_expiry = None
+        option_expiry_cache[symbol] = fetched_expiry
+        if fetched_expiry is not None and symbol in open_trade_meta:
+            open_trade_meta[symbol]["expiry"] = fetched_expiry.isoformat()
+        return fetched_expiry
+
     if catalyst_mode_until and datetime.now(tz) >= catalyst_mode_until:
         catalyst_mode_active = False
         catalyst_mode_reason = ""
@@ -832,6 +912,7 @@ def main():
                 "qty": filled_qty,
                 "entry_price": filled_avg_price or ask_price,
                 "stop_floor_plpc": -float(config.STOP_LOSS_PCT),
+                "stop_loss_usd": float(getattr(config, "STOP_LOSS_USD", 10.0)),
                 "max_plpc": 0.0,
             }
             ticker_entry_counts[ticker] = prior_entries + 1
@@ -1724,6 +1805,7 @@ def main():
                     "qty": filled_qty,
                     "entry_price": filled_avg_price or ask_price,
                     "stop_floor_plpc": -float(config.STOP_LOSS_PCT),
+                    "stop_loss_usd": float(getattr(config, "STOP_LOSS_USD", 10.0)),
                     "max_plpc": 0.0,
                 }
                 if prior_entries >= 1 and reentry_armed:
@@ -1785,24 +1867,29 @@ def main():
                 entry_price=entry_price_for_monitor,
             )
 
-            # Calculate P&L from position data directly — most reliable source.
-            # Use current_price vs avg_entry_price from the position object first,
-            # then override with live quote if available.
-            try:
-                pos_current = float(getattr(pos, "current_price", 0) or 0)
-                pos_entry = float(getattr(pos, "avg_entry_price", 0) or 0)
-                if pos_entry > 0 and pos_current > 0:
-                    plpc = (pos_current - pos_entry) / pos_entry
-                else:
-                    plpc = float(getattr(pos, "unrealized_plpc", 0) or 0)
-            except (TypeError, ValueError):
+            # Calculate P&L from the best available live source.
+            plpc = _position_plpc_snapshot(pos)
+            if plpc is None:
                 plpc = 0.0
-            # Override with live quote if available (more real-time than position snapshot)
-            if live_plpc is not None:
+            # Override with live quote if available (more real-time than position snapshot).
+            if live_plpc is not None and math.isfinite(float(live_plpc)):
                 plpc = float(live_plpc)
 
+            unrealized_usd: float | None = None
+            if live_mark_price is not None and live_mark_price > 0 and entry_price_for_monitor > 0:
+                unrealized_usd = (float(live_mark_price) - float(entry_price_for_monitor)) * qty * 100.0
+            else:
+                try:
+                    pl_raw = float(getattr(pos, "unrealized_pl", 0) or 0)
+                    if math.isfinite(pl_raw):
+                        unrealized_usd = pl_raw
+                except (TypeError, ValueError):
+                    unrealized_usd = None
+                if unrealized_usd is None and entry_price_for_monitor > 0:
+                    unrealized_usd = float(plpc) * float(entry_price_for_monitor) * qty * 100.0
+
             # --- Exit strategy: two rules only ---
-            # 1. STOP LOSS: exit immediately if the trade is losing money at all.
+            # 1. STOP LOSS: exit immediately at/through the per-trade USD loss cap.
             # 2. REVERSAL EXIT: if the trade is profitable, hold until momentum reverses.
             # No trailing stop ladder — winners ride until reversal is confirmed.
 
@@ -1826,6 +1913,7 @@ def main():
             exit_reason = None
             close_qty = qty
             ticker_for_pos = str(meta.get("ticker", "") or "").upper()
+            entry_time = _parse_trade_meta_entry_time(meta) if meta else None
             if not ticker_for_pos:
                 parsed_ticker, _parsed_dir = _parse_option_symbol(symbol)
                 ticker_for_pos = parsed_ticker.upper()
@@ -1838,8 +1926,11 @@ def main():
                     elif qty > 1:
                         exit_reason = "exposure_normalize"
                         close_qty = qty - 1
-            # Rule 1: exit immediately on any loss
-            if exit_reason is None and plpc < -float(config.STOP_LOSS_PCT):
+            if exit_reason is None and entry_time is not None and entry_time.date() < now_et.date():
+                exit_reason = "overnight_forced_close"
+            # Rule 1: fixed-dollar stop loss
+            stop_loss_usd_cap = float(getattr(config, "STOP_LOSS_USD", 10.0))
+            if exit_reason is None and unrealized_usd is not None and unrealized_usd <= -abs(stop_loss_usd_cap):
                 exit_reason = "stop_loss"
 
             # --- Reversal detection exit ---
@@ -1908,7 +1999,7 @@ def main():
                 except Exception as _rev_exc:  # noqa: BLE001
                     pass  # reversal check is best-effort; never block exit management
             if exit_reason is None:
-                expiry_date = _option_expiry_date(meta, symbol)
+                expiry_date = _resolve_option_expiry(symbol, meta)
                 if expiry_date is not None:
                     cutoff_date = _subtract_trading_days(
                         expiry_date,
@@ -1921,7 +2012,6 @@ def main():
             if exit_reason is None and is_at_or_after(now_et, config.HARD_CLOSE_TIME):
                 exit_reason = "eod_close"
             if exit_reason is None:
-                entry_time = _parse_trade_meta_entry_time(meta) if meta else None
                 if entry_time is not None:
                     held_minutes = int((now_et - entry_time).total_seconds() // 60)
                     if held_minutes >= int(config.MAX_HOLD_MINUTES):
@@ -1937,6 +2027,7 @@ def main():
                         "position_qty": qty,
                         "filled_qty": 0,
                         "plpc_used": round(plpc, 6),
+                        "unrealized_usd_used": round(float(unrealized_usd), 4) if unrealized_usd is not None else None,
                         "quote_mark_price": round(float(live_mark_price), 6) if live_mark_price else None,
                         "result": "submitted",
                     }

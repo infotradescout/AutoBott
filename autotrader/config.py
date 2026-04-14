@@ -136,7 +136,8 @@ MAX_HOLD_MINUTES                   = 90
 # ---------------------------------------------------------------------------
 
 # Tight stop — exit immediately when trade starts losing
-STOP_LOSS_PCT          = 0.03   # exit at -3% loss — get out fast
+STOP_LOSS_USD          = 10.0   # exit if unrealized P&L is <= -$10 per trade
+STOP_LOSS_PCT          = 0.03   # legacy fallback reference for older state/debug fields
 
 # Fixed profit target (disabled — trailing stop rides winners instead)
 ENABLE_FIXED_PROFIT_TARGET = False

@@ -581,13 +581,13 @@ def api_scansummary():
 
 @app.get("/api/status")
 def api_status():
+    now_et = _now_et()
     try:
         clock = requests.get(f"{BASE_URL}/v2/clock", headers=HEADERS, timeout=10)
         clock.raise_for_status()
         clock_body = clock.json()
 
         today_rows = _today_trade_rows()
-        now_et = _now_et()
         now_minutes = (now_et.hour * 60) + now_et.minute
         entry_open = _clock_hhmm_to_minutes(config.NO_NEW_TRADES_BEFORE)
         entry_close = _clock_hhmm_to_minutes(config.NO_NEW_TRADES_AFTER)
@@ -601,13 +601,8 @@ def api_status():
         heartbeat_et_raw = str(runtime_state.get("last_trader_heartbeat_et", "") or "")
         heartbeat_dt = _parse_ts(heartbeat_et_raw)
         heartbeat_age_seconds = int((now_et - heartbeat_dt).total_seconds()) if heartbeat_dt else None
-        # During market hours: stale if no heartbeat for 4 loop intervals (default 60s)
-        # Outside market hours: stale if no heartbeat for 30 minutes (bot sleeps long between loops)
         market_is_open = bool(clock_body.get("is_open", False))
-        if market_is_open:
-            loop_stale_after = max(60, int(config.LOOP_INTERVAL_SECONDS) * 4)
-        else:
-            loop_stale_after = 1800  # 30 minutes — bot sleeps overnight
+        loop_stale_after = max(60, int(config.LOOP_INTERVAL_SECONDS) * 4) if market_is_open else 1800
         trader_loop_alive = heartbeat_age_seconds is not None and heartbeat_age_seconds <= loop_stale_after
         last_auth_error_et = str(runtime_state.get("last_alpaca_auth_error_et", "") or "")
         last_auth_error_msg = str(runtime_state.get("last_alpaca_auth_error", "") or "")
@@ -615,6 +610,7 @@ def api_status():
         auth_error_recent = False
         if last_auth_error_dt is not None:
             auth_error_recent = (now_et - last_auth_error_dt).total_seconds() <= 600
+
         wins = 0
         losses = 0
         total_plpc = 0.0
@@ -643,7 +639,7 @@ def api_status():
         if auth_error_recent:
             blockers.append("alpaca_auth_error_recent")
         if not trader_loop_alive:
-          blockers.append("trader_loop_stale")
+            blockers.append("trader_loop_stale")
 
         return jsonify(
             {
@@ -673,7 +669,34 @@ def api_status():
             }
         )
     except Exception as exc:  # noqa: BLE001
-        return jsonify({"error": str(exc)}), 500
+        return jsonify(
+            {
+                "error": str(exc),
+                "market_open": False,
+                "trading_paused": bool(load_trading_control().get("manual_stop", False)),
+                "entry_window_open": False,
+                "entry_window_label": f"{config.NO_NEW_TRADES_BEFORE}-{config.NO_NEW_TRADES_AFTER} ET",
+                "catalyst_mode_active": False,
+                "catalyst_mode_reason": "",
+                "catalyst_mode_until": "",
+                "can_enter_now": False,
+                "blockers": ["status_unavailable"],
+                "trader_loop_alive": False,
+                "trader_loop_stale_after_seconds": max(60, int(config.LOOP_INTERVAL_SECONDS) * 4),
+                "trader_heartbeat_et": "",
+                "trader_heartbeat_age_seconds": None,
+                "last_alpaca_auth_error_et": "",
+                "last_alpaca_auth_error": "",
+                "alpaca_auth_error_recent": False,
+                "last_entry_debug": {},
+                "last_exit_debug": {},
+                "last_updated": now_et.strftime("%Y-%m-%d %H:%M:%S ET"),
+                "trades_today": 0,
+                "wins_today": 0,
+                "losses_today": 0,
+                "daily_pnl_pct": 0.0,
+            }
+        )
 
 
 @app.get("/api/trading-control")
