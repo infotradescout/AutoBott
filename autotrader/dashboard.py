@@ -1165,6 +1165,196 @@ def _filtered_payload_delta(payload: dict[str, Any]) -> dict[str, Any]:
     return out
 
 
+def _rows_with_min_n(rows: list[dict[str, Any]], min_n: int) -> int:
+    total = 0
+    for row in rows:
+        if int(_safe_float(row.get("n"), 0)) >= int(min_n):
+            total += 1
+    return total
+
+
+def _negative_cluster_count(rows: list[dict[str, Any]], *, min_n: int = 6) -> int:
+    total = 0
+    for row in rows:
+        n = int(_safe_float(row.get("n"), 0))
+        exp = _safe_float(row.get("conservative_expectancy_usd"), 0.0)
+        if n >= min_n and exp < 0:
+            total += 1
+    return total
+
+
+def _selection_controls_active() -> bool:
+    blocked_hours = list(getattr(config, "ENTRY_BLOCKED_HOURS_ET", ()) or ())
+    min_signal = float(_safe_float(getattr(config, "MIN_SIGNAL_SCORE", 5.0), 5.0))
+    max_spread = float(_safe_float(getattr(config, "ENTRY_MAX_QUOTE_SPREAD_PCT", 18.0), 18.0))
+    return bool(blocked_hours) or min_signal > 5.0 or max_spread < 18.0
+
+
+def _build_roadmap_status_payload() -> dict[str, Any]:
+    report = _load_latest_trade_report()
+    runtime_state = load_bot_state()
+    lisa_feed_exists = LISA_FEED_JSON_PATH.exists()
+    lisa_publish_exists = LISA_FEED_PUBLISHED_PATH.exists()
+
+    metadata = report.get("metadata") if isinstance(report, dict) else {}
+    overall = report.get("overall") if isinstance(report, dict) else {}
+    joint = report.get("joint_tradeability") if isinstance(report, dict) else {}
+    stop = report.get("stop_loss_geometry") if isinstance(report, dict) else {}
+
+    closed_trades = int(_safe_float((metadata or {}).get("closed_trade_count"), 0))
+    by_ticker = list(report.get("by_ticker") or []) if isinstance(report, dict) else []
+    by_hour = list(report.get("by_entry_hour_et") or []) if isinstance(report, dict) else []
+    ticker_min_n = _rows_with_min_n(by_ticker, 8)
+    hour_min_n = _rows_with_min_n(by_hour, 6)
+
+    conservative_exp = _safe_float((overall or {}).get("conservative_expectancy_usd"), None)
+    ticker_hour_rows = list((joint or {}).get("ticker_x_hour", [])) if isinstance(joint, dict) else []
+    negative_clusters = _negative_cluster_count(ticker_hour_rows, min_n=6)
+    stop_count = int(_safe_float((stop or {}).get("stop_loss_trade_count"), 0))
+
+    phase1_complete = closed_trades >= 60 and ticker_min_n >= 3 and hour_min_n >= 3
+    controls_active = _selection_controls_active()
+    phase2_complete = phase1_complete and controls_active
+
+    if phase1_complete:
+        phase1_status = "completed"
+    elif closed_trades > 0:
+        phase1_status = "in_progress"
+    else:
+        phase1_status = "not_started"
+
+    if phase2_complete:
+        phase2_status = "completed"
+    elif phase1_complete:
+        phase2_status = "in_progress"
+    else:
+        phase2_status = "blocked"
+
+    if phase2_complete and stop_count >= 20:
+        phase3_status = "in_progress"
+    elif phase2_complete:
+        phase3_status = "not_started"
+    else:
+        phase3_status = "blocked"
+
+    if lisa_feed_exists and lisa_publish_exists:
+        phase4_status = "completed"
+    elif lisa_feed_exists:
+        phase4_status = "in_progress"
+    else:
+        phase4_status = "not_started"
+
+    promotion_ready = bool(
+        conservative_exp is not None and conservative_exp > 0 and closed_trades >= 100 and negative_clusters <= 2
+    )
+    if promotion_ready:
+        phase5_status = "completed"
+    elif closed_trades >= 60:
+        phase5_status = "in_progress"
+    else:
+        phase5_status = "blocked"
+
+    phases = [
+        {
+            "id": "phase1_data_accrual_freeze",
+            "title": "Phase 1: Data Accrual Freeze",
+            "status": phase1_status,
+            "checklist": [
+                {"item": "Closed trades >= 60", "done": closed_trades >= 60},
+                {"item": "Ticker buckets with n>=8 >= 3", "done": ticker_min_n >= 3},
+                {"item": "Hour buckets with n>=6 >= 3", "done": hour_min_n >= 3},
+                {
+                    "item": "Keep qty=1 and avoid order-logic changes",
+                    "done": True,
+                    "note": "Validation discipline rule",
+                },
+            ],
+        },
+        {
+            "id": "phase2_selection_cuts",
+            "title": "Phase 2: Selection-Layer Cuts Only",
+            "status": phase2_status,
+            "checklist": [
+                {"item": "Phase 1 complete", "done": phase1_complete},
+                {"item": "Selection controls activated", "done": controls_active},
+                {
+                    "item": "Cuts prioritized by hour -> spread -> symbol -> score bucket",
+                    "done": controls_active,
+                },
+            ],
+        },
+        {
+            "id": "phase3_stop_geometry_decision",
+            "title": "Phase 3: Cluster-Aware Stop Geometry Decision",
+            "status": phase3_status,
+            "checklist": [
+                {"item": "Phase 2 complete", "done": phase2_complete},
+                {"item": "Stop-loss sample >= 20 trades", "done": stop_count >= 20},
+                {
+                    "item": "Adjust STOP_LOSS_USD only if clusters persist post-cuts",
+                    "done": False,
+                },
+            ],
+        },
+        {
+            "id": "phase4_lisa_operationalization",
+            "title": "Phase 4: LISA Feed Operationalization",
+            "status": phase4_status,
+            "checklist": [
+                {"item": "Feed JSON generated", "done": lisa_feed_exists},
+                {"item": "Feed published snapshot exists", "done": lisa_publish_exists},
+                {"item": "Delta workflow available", "done": True},
+            ],
+        },
+        {
+            "id": "phase5_promotion_gate",
+            "title": "Phase 5: Promotion Gate",
+            "status": phase5_status,
+            "checklist": [
+                {
+                    "item": "Conservative expectancy positive",
+                    "done": conservative_exp is not None and conservative_exp > 0,
+                },
+                {"item": "Closed trades >= 100", "done": closed_trades >= 100},
+                {"item": "Negative symbol-hour clusters <= 2", "done": negative_clusters <= 2},
+            ],
+        },
+    ]
+
+    next_actions: list[str] = []
+    if phase1_status != "completed":
+        next_actions.append("Accrue more closed trades before applying aggressive selection cuts.")
+    elif phase2_status != "completed":
+        next_actions.append("Apply only selection-layer controls: worst hours, spread regimes, symbols, score buckets.")
+    elif phase3_status != "completed":
+        next_actions.append("Evaluate stop-loss geometry only after post-cut cluster persistence is confirmed.")
+    elif phase4_status != "completed":
+        next_actions.append("Generate and publish LISA feed packets on a repeatable cadence.")
+    else:
+        next_actions.append("Track promotion metrics weekly; avoid order-logic churn until gate is reached.")
+
+    return {
+        "roadmap_version": "v1",
+        "generated_at": _now_et().strftime("%Y-%m-%d %H:%M:%S ET"),
+        "metrics": {
+            "closed_trades": closed_trades,
+            "conservative_expectancy_usd": conservative_exp,
+            "ticker_buckets_n_ge_8": ticker_min_n,
+            "hour_buckets_n_ge_6": hour_min_n,
+            "negative_symbol_hour_clusters": negative_clusters,
+            "stop_loss_trade_count": stop_count,
+            "selection_controls_active": controls_active,
+        },
+        "phases": phases,
+        "next_actions": next_actions,
+        "runtime_hints": {
+            "strategy_profile": str(runtime_state.get("strategy_profile", "balanced") or "balanced"),
+            "manual_stop": bool(runtime_state.get("manual_stop", False)),
+            "dry_run": bool(runtime_state.get("dry_run", False)),
+        },
+    }
+
+
 @app.get("/api/lisa/feed")
 def api_lisa_feed():
     try:
@@ -1176,6 +1366,14 @@ def api_lisa_feed():
         return jsonify(payload)
     except Exception as exc:  # noqa: BLE001
         return jsonify({"error": str(exc)}), 500
+
+
+@app.get("/api/roadmap-status")
+def api_roadmap_status():
+    try:
+      return jsonify(_build_roadmap_status_payload())
+    except Exception as exc:  # noqa: BLE001
+      return jsonify({"error": str(exc)}), 500
 
 
 @app.post("/api/lisa/feed/generate")
@@ -1343,6 +1541,7 @@ def lisa_feed_page():
       </div>
       <div class="actions">
         <a class="btn" href="/">Dashboard</a>
+        <a class="btn" href="/roadmap">Roadmap</a>
         <a class="btn" href="/reports">Reports</a>
       </div>
     </div>
@@ -1486,6 +1685,100 @@ def lisa_feed_page():
     }
 
     refreshFeed(false);
+  </script>
+</body>
+</html>
+        """
+    )
+
+
+@app.get("/roadmap")
+def roadmap_page():
+    return render_template_string(
+        """
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>AutoBott Roadmap</title>
+  <style>
+    :root {
+      --bg:#081019; --panel:rgba(14,23,35,.88); --text:#ebf3fb; --muted:#95abc1;
+      --border:rgba(141,172,206,.25); --radius:16px; --shadow:0 14px 34px rgba(2,8,20,.45);
+      --green:#25d366; --yellow:#ffbf4a; --red:#ff5d66;
+    }
+    body { margin:0; color:var(--text); font-family:"Avenir Next","Nunito Sans","Segoe UI",Tahoma,sans-serif;
+      background:linear-gradient(145deg, #050a11 0%, #0b1524 45%, #0a111d 100%); min-height:100vh; }
+    .wrap { max-width:1200px; margin:0 auto; padding:16px; }
+    .header { display:flex; justify-content:space-between; align-items:center; gap:12px; flex-wrap:wrap; margin-bottom:14px; }
+    .title { font-size:clamp(20px, 2.4vw, 30px); font-weight:800; }
+    .btn { border:1px solid var(--border); border-radius:12px; padding:10px 12px; color:var(--text);
+      text-decoration:none; font-weight:700; background:rgba(127,156,191,.15); }
+    .grid { display:grid; grid-template-columns:repeat(2, minmax(0, 1fr)); gap:12px; }
+    .card { background:var(--panel); border:1px solid var(--border); border-radius:var(--radius); padding:12px; box-shadow:var(--shadow); }
+    .muted { color:var(--muted); }
+    .phase { border:1px solid var(--border); border-radius:12px; padding:10px; margin-bottom:8px; background:rgba(7,14,24,.56); }
+    .head { display:flex; justify-content:space-between; align-items:center; gap:8px; margin-bottom:6px; }
+    .pill { border:1px solid var(--border); border-radius:999px; padding:3px 8px; font-size:11px; text-transform:uppercase; }
+    .done { color:var(--green); }
+    .todo { color:var(--muted); }
+    .st-completed { color:var(--green); border-color:rgba(37,211,102,.45); }
+    .st-in_progress { color:var(--yellow); border-color:rgba(255,191,74,.45); }
+    .st-blocked, .st-not_started { color:var(--red); border-color:rgba(255,93,102,.45); }
+    @media (max-width: 980px) { .grid { grid-template-columns:1fr; } }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <div class="header">
+      <div>
+        <div class="title">Roadmap Status</div>
+        <div class="muted">Validation-to-deployment checklist with live completion state.</div>
+      </div>
+      <div style="display:flex; gap:8px; flex-wrap:wrap;">
+        <a class="btn" href="/">Dashboard</a>
+        <a class="btn" href="/lisa-feed">LISA Feed</a>
+      </div>
+    </div>
+
+    <div class="grid">
+      <div class="card">
+        <div class="muted" style="margin-bottom:8px;">Phase Checklist</div>
+        <div id="phases">Loading...</div>
+      </div>
+      <div class="card">
+        <div class="muted" style="margin-bottom:8px;">Metrics</div>
+        <pre id="metrics" style="white-space:pre-wrap; margin:0; font-family:ui-monospace,SFMono-Regular,Menlo,monospace; font-size:12px;">--</pre>
+        <div class="muted" style="margin:10px 0 6px;">Next Actions</div>
+        <div id="next-actions">--</div>
+      </div>
+    </div>
+  </div>
+  <script>
+    function esc(v){ return String(v||"").replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;"); }
+    function cls(st){ return `pill st-${String(st||"")}`; }
+    async function load(){
+      try {
+        const r = await fetch('/api/roadmap-status');
+        const d = await r.json();
+        if(!r.ok){ throw new Error(d.error || 'request failed'); }
+        const phases = Array.isArray(d.phases) ? d.phases : [];
+        const phaseHtml = phases.map(p => `
+          <div class="phase">
+            <div class="head"><div>${esc(p.title)}</div><span class="${cls(p.status)}">${esc(String(p.status||'').replace('_',' '))}</span></div>
+            ${(Array.isArray(p.checklist)?p.checklist:[]).map(c=>`<div class="${c.done?'done':'todo'}">${c.done?'✓':'•'} ${esc(c.item)}${c.note?` <span class='muted'>(${esc(c.note)})</span>`:''}</div>`).join('')}
+          </div>
+        `).join('');
+        document.getElementById('phases').innerHTML = phaseHtml || '<div class="muted">No phases</div>';
+        document.getElementById('metrics').textContent = JSON.stringify(d.metrics || {}, null, 2);
+        const actions = Array.isArray(d.next_actions) ? d.next_actions : [];
+        document.getElementById('next-actions').innerHTML = actions.length ? actions.map(a=>`<div>• ${esc(a)}</div>`).join('') : '<div class="muted">None</div>';
+      } catch (e) {
+        document.getElementById('phases').innerHTML = `<div class='muted'>${esc(e.message || 'load failed')}</div>`;
+      }
+    }
+    load();
   </script>
 </body>
 </html>
@@ -2533,6 +2826,7 @@ def reports_page():
       </div>
       <div class="actions">
         <a class="btn" href="/">Dashboard</a>
+        <a class="btn" href="/roadmap">Roadmap</a>
         <a class="btn" href="/lisa-feed">LISA Feed</a>
         <a class="btn" href="/watch">Watch Page</a>
       </div>
@@ -3465,6 +3759,7 @@ def home():
         <div class="muted">Last updated: <span id="last-updated">--</span> | Auto-refresh: 30s</div>
       </div>
       <div class="head-actions">
+        <a href="/roadmap" class="ctrl-btn" style="text-decoration:none;">ROADMAP</a>
         <a href="/lisa-feed" class="ctrl-btn" style="text-decoration:none;">LISA FEED</a>
         <a href="/reports" class="ctrl-btn" style="text-decoration:none;">REPORTS</a>
         <a href="/watch" class="ctrl-btn" style="text-decoration:none;">WATCH PAGE</a>
