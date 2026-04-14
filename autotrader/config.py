@@ -90,7 +90,7 @@ SCAN_DAILY_BARS     = 30
 # Position sizing & risk
 # ---------------------------------------------------------------------------
 
-MAX_POSITIONS                       = 999   # no cap — trade every signal found
+MAX_POSITIONS                       = 25    # hard cap for concurrent option positions
 POSITION_SIZE_USD                   = 500
 RISK_PER_TRADE_PCT                  = 0.01
 MAX_POSITION_SIZE_USD               = 700.0

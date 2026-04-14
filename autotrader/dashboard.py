@@ -620,6 +620,9 @@ def api_status():
         market_is_open = bool(clock_body.get("is_open", False))
         loop_stale_after = max(60, int(config.LOOP_INTERVAL_SECONDS) * 4) if market_is_open else 1800
         trader_loop_alive = heartbeat_age_seconds is not None and heartbeat_age_seconds <= loop_stale_after
+        trader_thread_last_crash_raw = str(runtime_state.get("trader_thread_last_crash_et", "") or "")
+        trader_thread_last_crash_dt = _parse_ts(trader_thread_last_crash_raw)
+        trader_thread_last_crash_msg = str(runtime_state.get("trader_thread_last_crash", "") or "")
         last_auth_error_et = str(runtime_state.get("last_alpaca_auth_error_et", "") or "")
         last_auth_error_msg = str(runtime_state.get("last_alpaca_auth_error", "") or "")
         last_auth_error_dt = _parse_ts(last_auth_error_et)
@@ -677,6 +680,8 @@ def api_status():
                 "trader_loop_stale_after_seconds": loop_stale_after,
                 "trader_heartbeat_et": _to_ct_label(heartbeat_dt) if heartbeat_dt else "",
                 "trader_heartbeat_age_seconds": heartbeat_age_seconds,
+                "trader_thread_last_crash_et": _to_ct_label(trader_thread_last_crash_dt) if trader_thread_last_crash_dt else "",
+                "trader_thread_last_crash": trader_thread_last_crash_msg,
                 "last_alpaca_auth_error_et": _to_ct_label(last_auth_error_dt) if last_auth_error_dt else "",
                 "last_alpaca_auth_error": last_auth_error_msg,
                 "alpaca_auth_error_recent": auth_error_recent,
@@ -711,6 +716,8 @@ def api_status():
                 "trader_loop_stale_after_seconds": max(60, int(config.LOOP_INTERVAL_SECONDS) * 4),
                 "trader_heartbeat_et": "",
                 "trader_heartbeat_age_seconds": None,
+                "trader_thread_last_crash_et": "",
+                "trader_thread_last_crash": "",
                 "last_alpaca_auth_error_et": "",
                 "last_alpaca_auth_error": "",
                 "alpaca_auth_error_recent": False,
@@ -2661,7 +2668,9 @@ def home():
           loopEl.style.color = "var(--green)";
         } else {
           const age = status.trader_heartbeat_age_seconds == null ? "no heartbeat" : `${status.trader_heartbeat_age_seconds}s`;
-          loopEl.textContent = `Trader Loop: NOT RUNNING (${age})`;
+          const crashMsg = String(status.trader_thread_last_crash || "").trim();
+          const crashShort = crashMsg ? ` | last crash: ${crashMsg.slice(0, 90)}` : "";
+          loopEl.textContent = `Trader Loop: NOT RUNNING (${age})${crashShort}`;
           loopEl.style.color = "var(--red)";
         }
       }

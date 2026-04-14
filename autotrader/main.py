@@ -1101,6 +1101,62 @@ def main():
             print(f"[{ts(now_et)}] {label} {symbol} qty={request_qty}: close error: {exc}")
             return 0, None
 
+    def _force_normalize_ticker_exposure(option_positions: list, now_et: datetime) -> int:
+        ticker_positions: dict[str, list[tuple[str, int]]] = {}
+        for pos in option_positions:
+            symbol = str(getattr(pos, "symbol", "") or "")
+            qty = position_qty_as_int(getattr(pos, "qty", 0))
+            if not symbol or qty <= 0:
+                continue
+            ticker = str(getattr(pos, "underlying_symbol", "") or "").upper()
+            if not ticker:
+                parsed_ticker, _parsed_direction = _parse_option_symbol(symbol)
+                ticker = parsed_ticker.upper()
+            if not ticker:
+                continue
+            ticker_positions.setdefault(ticker, []).append((symbol, qty))
+
+        close_actions: list[tuple[str, int, str]] = []
+        for ticker, entries in ticker_positions.items():
+            # Deterministic keep order: largest qty first, then symbol.
+            ordered = sorted(entries, key=lambda item: (-int(item[1]), str(item[0])))
+            allowance = 1
+            for symbol, qty in ordered:
+                keep_qty = min(allowance, qty)
+                close_qty = max(0, qty - keep_qty)
+                allowance = max(0, allowance - keep_qty)
+                if allowance == 0 and close_qty == 0:
+                    continue
+                if allowance == 0 and keep_qty == 0:
+                    close_qty = qty
+                if close_qty > 0:
+                    close_actions.append((symbol, close_qty, ticker))
+
+        total_filled = 0
+        for symbol, close_qty, ticker in close_actions:
+            filled_qty, _fill_price = _close_position_with_confirmation(
+                symbol=symbol,
+                qty=close_qty,
+                now_et=now_et,
+                label="EXPOSURE_GUARD",
+            )
+            if filled_qty <= 0:
+                continue
+            total_filled += filled_qty
+            meta = open_trade_meta.get(symbol, {})
+            existing_qty = int(meta.get("qty", 0) or 0)
+            if existing_qty <= filled_qty:
+                open_trade_meta.pop(symbol, None)
+            elif symbol in open_trade_meta:
+                open_trade_meta[symbol]["qty"] = existing_qty - filled_qty
+            print(
+                f"[{ts(now_et)}] EXPOSURE_GUARD closed {filled_qty} {symbol} "
+                f"to normalize {ticker} to one contract."
+            )
+        if total_filled > 0:
+            _save_runtime_state()
+        return total_filled
+
     mode = "PAPER" if config.PAPER else "LIVE"
     try:
         acct = broker.get_account()
@@ -1342,6 +1398,9 @@ def main():
                     ticker_entry_counts[ticker] = max(int(ticker_entry_counts.get(ticker, 0)), 1)
             print(f"[{ts(now_et)}] Hydrated {hydrated_count} externally-opened position(s) into runtime state.")
             _save_runtime_state()
+        normalized_fills = _force_normalize_ticker_exposure(option_positions, now_et)
+        if normalized_fills > 0:
+            option_positions = broker.get_open_option_positions()
         open_count = len(option_positions)
         if alerts.enabled() and time.time() >= next_heartbeat_at:
             alerts.send(
