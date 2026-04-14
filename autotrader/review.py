@@ -17,6 +17,8 @@ Sections produced:
   6. By contract spread quartile
   7. By entry hour (ET)
   8. Execution quality (entry/exit fill latency, slippage, retry rates)
+    9. Joint tradeability interactions (ticker x hour, spread x score, stop-loss clusters)
+    10. Stop-loss geometry diagnostics
 """
 
 from __future__ import annotations
@@ -44,6 +46,7 @@ from logger import TradeLogger  # noqa: E402
 
 _SEP = "=" * 72
 _SUBSEP = "-" * 72
+_MIN_COMBO_TRADES = 3
 
 
 def _hdr(title: str) -> None:
@@ -416,6 +419,166 @@ def _build_execution(df: pd.DataFrame) -> dict[str, object]:
     return result
 
 
+def _bucket_signal_score(df: pd.DataFrame) -> pd.DataFrame:
+    out = df.copy()
+    bins = [0, 3, 5, 7, float("inf")]
+    labels = ["[0-3)", "[3-5)", "[5-7)", "[7+)"]
+    out["score_bucket"] = pd.cut(out["signal_score"], bins=bins, labels=labels, right=False)
+    return out
+
+
+def _bucket_spread_quartile(df: pd.DataFrame) -> pd.DataFrame:
+    out = df.copy()
+    out["spread_quartile"] = pd.qcut(
+        out["contract_spread_pct"], q=4, labels=["Q1(tight)", "Q2", "Q3", "Q4(wide)"], duplicates="drop"
+    )
+    return out
+
+
+def _composite_summary_rows(
+    df: pd.DataFrame,
+    group_cols: list[str],
+    *,
+    min_trades: int = _MIN_COMBO_TRADES,
+) -> list[dict[str, object]]:
+    if df.empty:
+        return []
+    for col in group_cols:
+        if col not in df.columns:
+            return []
+
+    grouped_rows: list[dict[str, object]] = []
+    grouped = df.groupby(group_cols, observed=True)
+    for keys, g in grouped:
+        n = len(g)
+        if n < min_trades:
+            continue
+        if not isinstance(keys, tuple):
+            keys = (keys,)
+        row: dict[str, object] = {
+            "n": int(n),
+            "conservative_win_rate": _win_rate(g["conservative_executable_pnl_usd"]),
+            "paper_expectancy_usd": _expectancy(g["paper_reported_pnl_usd"]),
+            "conservative_expectancy_usd": _expectancy(g["conservative_executable_pnl_usd"]),
+            "paper_minus_conservative_gap_usd": (
+                _expectancy(g["paper_reported_pnl_usd"]) - _expectancy(g["conservative_executable_pnl_usd"])
+            ),
+            "avg_mae_pct": _safe_float(g["max_adverse_excursion_pct"].mean()),
+            "avg_mfe_pct": _safe_float(g["max_favorable_excursion_pct"].mean()),
+            "stop_loss_rate": float((g["exit_reason"].fillna("").astype(str).str.lower() == "stop_loss").mean())
+            if "exit_reason" in g.columns
+            else None,
+        }
+        for idx, col in enumerate(group_cols):
+            row[col] = str(keys[idx])
+        grouped_rows.append(row)
+
+    grouped_rows.sort(
+        key=lambda row: (
+            float("inf") if _safe_float(row.get("conservative_expectancy_usd")) is None else float(row["conservative_expectancy_usd"]),
+            -int(row.get("n", 0) or 0),
+        )
+    )
+    return grouped_rows
+
+
+def _build_joint_tradeability(df: pd.DataFrame) -> dict[str, object]:
+    if df.empty:
+        return {
+            "ticker_x_hour": [],
+            "spread_quartile_x_score_bucket": [],
+            "stop_loss_x_ticker": [],
+            "stop_loss_x_hour": [],
+            "mae_x_spread_x_ticker": [],
+        }
+
+    ticker_hour = _composite_summary_rows(df, ["ticker", "entry_hour"], min_trades=_MIN_COMBO_TRADES)
+
+    spread_score: list[dict[str, object]] = []
+    if "contract_spread_pct" in df.columns and "signal_score" in df.columns:
+        try:
+            spread_df = _bucket_spread_quartile(df)
+            spread_df = _bucket_signal_score(spread_df)
+            spread_score = _composite_summary_rows(
+                spread_df,
+                ["spread_quartile", "score_bucket"],
+                min_trades=_MIN_COMBO_TRADES,
+            )
+        except ValueError:
+            spread_score = []
+
+    stop_loss_df = df[df.get("exit_reason", pd.Series(dtype=object)).fillna("").astype(str).str.lower() == "stop_loss"].copy()
+    stop_loss_x_ticker = _composite_summary_rows(stop_loss_df, ["ticker"], min_trades=1)
+    stop_loss_x_hour = _composite_summary_rows(stop_loss_df, ["entry_hour"], min_trades=1)
+
+    mae_spread_ticker: list[dict[str, object]] = []
+    if "contract_spread_pct" in df.columns:
+        try:
+            mae_df = _bucket_spread_quartile(df)
+            mae_spread_ticker = _composite_summary_rows(
+                mae_df,
+                ["ticker", "spread_quartile"],
+                min_trades=_MIN_COMBO_TRADES,
+            )
+        except ValueError:
+            mae_spread_ticker = []
+
+    return {
+        "ticker_x_hour": ticker_hour,
+        "spread_quartile_x_score_bucket": spread_score,
+        "stop_loss_x_ticker": stop_loss_x_ticker,
+        "stop_loss_x_hour": stop_loss_x_hour,
+        "mae_x_spread_x_ticker": mae_spread_ticker,
+    }
+
+
+def _build_stop_loss_geometry(df: pd.DataFrame) -> dict[str, object]:
+    if df.empty:
+        return {
+            "stop_loss_trade_count": 0,
+            "stop_loss_rate": None,
+            "mae_pct_at_stop_loss": {"mean": None, "median": None, "p90": None},
+            "estimated_mae_usd_1c": {"mean": None, "median": None, "p90": None},
+            "comment": "No closed trades yet.",
+        }
+
+    stop_loss_mask = df.get("exit_reason", pd.Series(dtype=object)).fillna("").astype(str).str.lower() == "stop_loss"
+    stop_loss_df = df[stop_loss_mask].copy()
+    if stop_loss_df.empty:
+        return {
+            "stop_loss_trade_count": 0,
+            "stop_loss_rate": 0.0,
+            "mae_pct_at_stop_loss": {"mean": None, "median": None, "p90": None},
+            "estimated_mae_usd_1c": {"mean": None, "median": None, "p90": None},
+            "comment": "No stop-loss exits in sample.",
+        }
+
+    mae_pct = pd.to_numeric(stop_loss_df.get("max_adverse_excursion_pct"), errors="coerce").abs()
+    entry_px = pd.to_numeric(stop_loss_df.get("entry_price"), errors="coerce")
+    qty = pd.to_numeric(stop_loss_df.get("qty"), errors="coerce").fillna(1).clip(lower=1)
+    est_mae_usd = (mae_pct / 100.0) * entry_px * (qty * 100.0)
+
+    def _moments(series: pd.Series) -> dict[str, object]:
+        valid = pd.to_numeric(series, errors="coerce").dropna()
+        if valid.empty:
+            return {"mean": None, "median": None, "p90": None}
+        return {
+            "mean": float(valid.mean()),
+            "median": float(valid.median()),
+            "p90": float(valid.quantile(0.90)),
+        }
+
+    stop_loss_rate = float(len(stop_loss_df) / len(df)) if len(df) else None
+    return {
+        "stop_loss_trade_count": int(len(stop_loss_df)),
+        "stop_loss_rate": stop_loss_rate,
+        "mae_pct_at_stop_loss": _moments(mae_pct),
+        "estimated_mae_usd_1c": _moments(est_mae_usd),
+        "configured_stop_loss_usd": float(getattr(config, "STOP_LOSS_USD", 10.0)),
+        "comment": "Compare estimated MAE-at-stop-loss moments against configured STOP_LOSS_USD to assess stop tightness.",
+    }
+
+
 def _build_report(df: pd.DataFrame, csv_path: Path) -> dict[str, object]:
     return {
         "metadata": {
@@ -431,6 +594,8 @@ def _build_report(df: pd.DataFrame, csv_path: Path) -> dict[str, object]:
         "by_contract_spread_quartile": _build_spread_rows(df),
         "by_entry_hour_et": _build_hour_rows(df),
         "execution_quality": _build_execution(df),
+        "joint_tradeability": _build_joint_tradeability(df),
+        "stop_loss_geometry": _build_stop_loss_geometry(df),
     }
 
 
@@ -454,6 +619,11 @@ def _write_csv_exports(report: dict[str, object], export_dir: Path) -> None:
         "by_contract_spread_quartile": "contract_spread_quartile.csv",
         "by_entry_hour_et": "entry_hour_et.csv",
         "execution_exit_fill_seconds_by_reason": "execution_exit_fill_seconds_by_reason.csv",
+        "joint_ticker_x_hour": "joint_ticker_x_hour.csv",
+        "joint_spread_quartile_x_score_bucket": "joint_spread_quartile_x_score_bucket.csv",
+        "joint_stop_loss_x_ticker": "joint_stop_loss_x_ticker.csv",
+        "joint_stop_loss_x_hour": "joint_stop_loss_x_hour.csv",
+        "joint_mae_x_spread_x_ticker": "joint_mae_x_spread_x_ticker.csv",
     }
 
     section_values = dict(report)
@@ -462,6 +632,12 @@ def _write_csv_exports(report: dict[str, object], export_dir: Path) -> None:
         if isinstance(report.get("execution_quality"), dict)
         else []
     )
+    joint = report.get("joint_tradeability") or {}
+    section_values["joint_ticker_x_hour"] = joint.get("ticker_x_hour", []) if isinstance(joint, dict) else []
+    section_values["joint_spread_quartile_x_score_bucket"] = joint.get("spread_quartile_x_score_bucket", []) if isinstance(joint, dict) else []
+    section_values["joint_stop_loss_x_ticker"] = joint.get("stop_loss_x_ticker", []) if isinstance(joint, dict) else []
+    section_values["joint_stop_loss_x_hour"] = joint.get("stop_loss_x_hour", []) if isinstance(joint, dict) else []
+    section_values["joint_mae_x_spread_x_ticker"] = joint.get("mae_x_spread_x_ticker", []) if isinstance(joint, dict) else []
 
     for section, filename in list_sections.items():
         rows = section_values.get(section) or []
@@ -474,6 +650,23 @@ def _write_csv_exports(report: dict[str, object], export_dir: Path) -> None:
         encoding="utf-8",
     )
     print(f"Wrote CSV exports to {export_dir}")
+
+
+def _render_composite_table(rows: list[dict[str, object]], index_cols: list[str]) -> pd.DataFrame:
+    if not rows:
+        return pd.DataFrame()
+    tbl = pd.DataFrame(rows)
+    for col in ("conservative_win_rate", "stop_loss_rate"):
+        if col in tbl.columns:
+            tbl[col] = tbl[col].apply(lambda v: _pct(float(v)) if _safe_float(v) is not None else "  n/a")
+    for col in ("paper_expectancy_usd", "conservative_expectancy_usd", "paper_minus_conservative_gap_usd"):
+        if col in tbl.columns:
+            tbl[col] = tbl[col].apply(lambda v: _usd(float(v)) if _safe_float(v) is not None else "  n/a")
+    if "avg_mae_pct" in tbl.columns:
+        tbl["avg_mae_pct"] = tbl["avg_mae_pct"].apply(lambda v: _pct(float(v) / 100.0) if _safe_float(v) is not None else "  n/a")
+    if "avg_mfe_pct" in tbl.columns:
+        tbl["avg_mfe_pct"] = tbl["avg_mfe_pct"].apply(lambda v: _pct(float(v) / 100.0) if _safe_float(v) is not None else "  n/a")
+    return tbl.set_index(index_cols) if index_cols else tbl
 
 
 # ---------------------------------------------------------------------------
@@ -664,6 +857,57 @@ def _section_execution(df: pd.DataFrame) -> None:
         print(tbl.to_string())
 
 
+def _section_joint_tradeability(df: pd.DataFrame) -> None:
+    _hdr("9. JOINT TRADEABILITY INTERACTIONS")
+    joint = _build_joint_tradeability(df)
+
+    blocks = [
+        ("ticker x hour (worst conservative expectancy first)", joint.get("ticker_x_hour", []), ["ticker", "entry_hour"]),
+        ("spread quartile x signal-score bucket", joint.get("spread_quartile_x_score_bucket", []), ["spread_quartile", "score_bucket"]),
+        ("stop-loss exits x ticker", joint.get("stop_loss_x_ticker", []), ["ticker"]),
+        ("stop-loss exits x hour", joint.get("stop_loss_x_hour", []), ["entry_hour"]),
+        ("ticker x spread regime (MAE-sensitive)", joint.get("mae_x_spread_x_ticker", []), ["ticker", "spread_quartile"]),
+    ]
+
+    for label, rows, index_cols in blocks:
+        print(f"\n  {label}:")
+        tbl = _render_composite_table(list(rows or []), index_cols)
+        if tbl.empty:
+            print("    n/a (insufficient sample)")
+        else:
+            print(tbl.to_string())
+
+
+def _section_stop_loss_geometry(df: pd.DataFrame) -> None:
+    _hdr("10. STOP-LOSS GEOMETRY DIAGNOSTICS")
+    stop = _build_stop_loss_geometry(df)
+
+    print(f"  Stop-loss exits                 : {int(stop.get('stop_loss_trade_count', 0) or 0)}")
+    stop_rate = _safe_float(stop.get("stop_loss_rate"))
+    if stop_rate is None:
+        print("  Stop-loss rate                  : n/a")
+    else:
+        print(f"  Stop-loss rate                  : {stop_rate * 100:.1f}%")
+
+    cfg_stop = _safe_float(stop.get("configured_stop_loss_usd"))
+    if cfg_stop is not None:
+        print(f"  Configured STOP_LOSS_USD        : ${cfg_stop:.2f}")
+
+    mae_pct = stop.get("mae_pct_at_stop_loss") or {}
+    est_mae = stop.get("estimated_mae_usd_1c") or {}
+    print("\n  MAE percent at stop-loss exits:")
+    print(f"    mean={_pct((float(mae_pct.get('mean')) / 100.0)) if _safe_float(mae_pct.get('mean')) is not None else 'n/a'}")
+    print(f"    med ={_pct((float(mae_pct.get('median')) / 100.0)) if _safe_float(mae_pct.get('median')) is not None else 'n/a'}")
+    print(f"    p90 ={_pct((float(mae_pct.get('p90')) / 100.0)) if _safe_float(mae_pct.get('p90')) is not None else 'n/a'}")
+
+    print("\n  Estimated MAE in USD at stop-loss exits:")
+    print(f"    mean={_usd(float(est_mae.get('mean'))) if _safe_float(est_mae.get('mean')) is not None else 'n/a'}")
+    print(f"    med ={_usd(float(est_mae.get('median'))) if _safe_float(est_mae.get('median')) is not None else 'n/a'}")
+    print(f"    p90 ={_usd(float(est_mae.get('p90'))) if _safe_float(est_mae.get('p90')) is not None else 'n/a'}")
+
+    print(f"\n  Note: {stop.get('comment', '')}")
+
+
 def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Trade analytics and execution quality review")
     parser.add_argument("--csv", dest="csv_path", default=None, help="Override trades CSV path")
@@ -720,6 +964,8 @@ def main(csv_path: Optional[Path] = None, *, output_format: str = "text", output
     _section_spread(df)
     _section_hour(df)
     _section_execution(df)
+    _section_joint_tradeability(df)
+    _section_stop_loss_geometry(df)
 
     if export_csv_dir is not None:
         _write_csv_exports(report, export_csv_dir)
