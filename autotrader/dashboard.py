@@ -478,6 +478,298 @@ def _build_daily_review_payload() -> dict[str, Any]:
     }
 
 
+def _scan_symbol(row: dict[str, Any]) -> str:
+    return str(row.get("symbol", "") or row.get("ticker", "") or "").upper()
+
+
+def _trade_ticker(row: dict[str, Any]) -> str:
+    return str(row.get("ticker", "") or row.get("symbol", "") or "").upper()
+
+
+def _build_trade_report_summary(trade_rows: list[dict[str, str]]) -> dict[str, Any]:
+    total = len(trade_rows)
+    wins = 0
+    losses = 0
+    total_pnl_usd = 0.0
+    total_pnl_pct = 0.0
+    exit_reasons: dict[str, int] = {}
+    best_trade: dict[str, Any] | None = None
+    worst_trade: dict[str, Any] | None = None
+
+    for row in trade_rows:
+        ticker = _trade_ticker(row)
+        pnl_usd = _pnl_usd_from_trade_row(row)
+        pnl_pct = _safe_float(row.get("pnl_pct"), 0.0) * 100.0
+        exit_reason = str(row.get("exit_reason", "") or "unknown")
+        item = {
+            "timestamp": str(row.get("timestamp", "") or ""),
+            "ticker": ticker,
+            "direction": str(row.get("direction", "") or "").upper(),
+            "entry_price": round(_safe_float(row.get("entry_price"), 0.0), 4),
+            "exit_price": round(_safe_float(row.get("exit_price"), 0.0), 4),
+            "qty": int(_safe_float(row.get("qty"), 0.0)),
+            "pnl_usd": round(pnl_usd, 2),
+            "pnl_pct": round(pnl_pct, 2),
+            "exit_reason": exit_reason,
+        }
+        total_pnl_usd += pnl_usd
+        total_pnl_pct += pnl_pct
+        exit_reasons[exit_reason] = exit_reasons.get(exit_reason, 0) + 1
+        if pnl_usd > 0:
+            wins += 1
+        elif pnl_usd < 0:
+            losses += 1
+        if best_trade is None or pnl_usd > float(best_trade.get("pnl_usd", 0.0)):
+            best_trade = item
+        if worst_trade is None or pnl_usd < float(worst_trade.get("pnl_usd", 0.0)):
+            worst_trade = item
+
+    ordered_exit_reasons = [
+        {"reason": reason, "count": count}
+        for reason, count in sorted(exit_reasons.items(), key=lambda item: (-item[1], item[0]))
+    ]
+    return {
+        "total_trades": total,
+        "wins": wins,
+        "losses": losses,
+        "win_rate_pct": round((wins / total) * 100.0, 2) if total > 0 else 0.0,
+        "total_pnl_usd": round(total_pnl_usd, 2),
+        "avg_trade_pnl_usd": round(total_pnl_usd / total, 2) if total > 0 else 0.0,
+        "avg_trade_pnl_pct": round(total_pnl_pct / total, 2) if total > 0 else 0.0,
+        "best_trade": best_trade,
+        "worst_trade": worst_trade,
+        "exit_reasons": ordered_exit_reasons,
+    }
+
+
+def _build_scan_report_summary(scan_rows: list[dict[str, str]]) -> dict[str, Any]:
+    pass_rows: list[dict[str, Any]] = []
+    fail_reasons: dict[str, int] = {}
+    direction_counts: dict[str, int] = {}
+    symbols: set[str] = set()
+
+    for row in scan_rows:
+        symbol = _scan_symbol(row)
+        if symbol:
+            symbols.add(symbol)
+        result = str(row.get("result", "") or "").lower()
+        if result == "pass":
+            direction = str(row.get("direction", "") or "").upper()
+            if direction:
+                direction_counts[direction] = direction_counts.get(direction, 0) + 1
+            pass_rows.append(
+                {
+                    "timestamp": str(row.get("timestamp", "") or ""),
+                    "symbol": symbol,
+                    "direction": direction,
+                    "signal_score": round(_safe_float(row.get("signal_score"), 0.0), 2),
+                    "rvol": round(_safe_float(row.get("rvol"), 0.0), 2),
+                    "reason": str(row.get("reason", "") or ""),
+                }
+            )
+        elif result == "fail":
+            reason = str(row.get("reason", "") or "unknown")
+            fail_reasons[reason] = fail_reasons.get(reason, 0) + 1
+
+    pass_rows.sort(key=lambda item: (float(item.get("signal_score", 0.0)), float(item.get("rvol", 0.0))), reverse=True)
+    top_fail_reasons = [
+        {"reason": reason, "count": count}
+        for reason, count in sorted(fail_reasons.items(), key=lambda item: (-item[1], item[0]))[:8]
+    ]
+    return {
+        "total_rows": len(scan_rows),
+        "pass_count": len(pass_rows),
+        "fail_count": sum(fail_reasons.values()),
+        "unique_symbols": len(symbols),
+        "direction_counts": direction_counts,
+        "top_passes": pass_rows[:8],
+        "top_fail_reasons": top_fail_reasons,
+    }
+
+
+def _build_ticker_scorecard_rows(trade_rows: list[dict[str, str]], limit: int = 5) -> list[dict[str, Any]]:
+    per_ticker: dict[str, dict[str, Any]] = {}
+    for row in trade_rows:
+        ticker = _trade_ticker(row)
+        if not ticker:
+            continue
+        item = per_ticker.get(ticker)
+        if item is None:
+            item = {
+                "ticker": ticker,
+                "trades": 0,
+                "wins": 0,
+                "losses": 0,
+                "total_pnl_usd": 0.0,
+                "avg_pnl_pct": 0.0,
+            }
+            per_ticker[ticker] = item
+        pnl_usd = _pnl_usd_from_trade_row(row)
+        pnl_pct = _safe_float(row.get("pnl_pct"), 0.0) * 100.0
+        item["trades"] = int(item["trades"]) + 1
+        item["total_pnl_usd"] = float(item["total_pnl_usd"]) + pnl_usd
+        item["avg_pnl_pct"] = float(item["avg_pnl_pct"]) + pnl_pct
+        if pnl_usd > 0:
+            item["wins"] = int(item["wins"]) + 1
+        elif pnl_usd < 0:
+            item["losses"] = int(item["losses"]) + 1
+
+    rows: list[dict[str, Any]] = []
+    for item in per_ticker.values():
+        trades_count = max(1, int(item["trades"]))
+        wins = int(item["wins"])
+        losses = int(item["losses"])
+        rows.append(
+            {
+                "ticker": str(item["ticker"]),
+                "trades": trades_count,
+                "wins": wins,
+                "losses": losses,
+                "win_rate_pct": round((wins / max(1, wins + losses)) * 100.0, 2) if (wins + losses) > 0 else 0.0,
+                "total_pnl_usd": round(float(item["total_pnl_usd"]), 2),
+                "avg_pnl_pct": round(float(item["avg_pnl_pct"]) / trades_count, 2),
+            }
+        )
+    rows.sort(key=lambda item: (float(item.get("total_pnl_usd", 0.0)), float(item.get("win_rate_pct", 0.0))), reverse=True)
+    return rows[: max(1, int(limit))]
+
+
+def _morning_recommendations(
+    staged_rows: list[dict[str, Any]],
+    recent_summary: dict[str, Any],
+    scan_summary: dict[str, Any],
+) -> list[str]:
+    notes: list[str] = []
+    if not staged_rows:
+        notes.append("No staged premarket candidates yet. Stay selective and wait for clean live confirmation after the open.")
+    else:
+        top = staged_rows[0]
+        notes.append(
+            f"Lead setup is {top.get('symbol', '-')} {top.get('direction', '-')} with score {float(top.get('signal_score', 0.0)):.2f}. Prioritize best-quality names first."
+        )
+    if float(recent_summary.get("total_pnl_usd", 0.0)) < 0:
+        notes.append("Recent closed-trade P&L is negative. Keep size tight and let the first winner prove the session before pressing harder.")
+    if float(recent_summary.get("win_rate_pct", 0.0)) >= 55.0 and int(recent_summary.get("total_trades", 0)) >= 4:
+        notes.append("Recent hit rate is constructive. If the open confirms the staged names, the current profile can stay engaged.")
+    top_fail_reasons = list(scan_summary.get("top_fail_reasons") or [])
+    if top_fail_reasons:
+        top_fail = top_fail_reasons[0]
+        notes.append(
+            f"Main rejection trend this morning is '{top_fail.get('reason', 'unknown')}' ({int(top_fail.get('count', 0))} hits). Avoid forcing setups through that filter."
+        )
+    if not notes:
+        notes.append("Premarket conditions are balanced. Trade the first confirmed A-setups and avoid chasing weak opens.")
+    return notes[:4]
+
+
+def _evening_recommendations(
+    trade_summary: dict[str, Any],
+    scan_summary: dict[str, Any],
+) -> list[str]:
+    notes: list[str] = []
+    total_trades = int(trade_summary.get("total_trades", 0))
+    total_pnl_usd = float(trade_summary.get("total_pnl_usd", 0.0))
+    win_rate = float(trade_summary.get("win_rate_pct", 0.0))
+    exit_reasons = list(trade_summary.get("exit_reasons") or [])
+    if total_trades == 0:
+        notes.append("No closed trades today. Review whether the scanner stayed too selective or market structure never confirmed entries.")
+    elif total_pnl_usd < 0:
+        notes.append("The day closed red. Review the worst trade first and confirm whether entries were late or stops were too exposed.")
+    else:
+        notes.append("The day closed green. Preserve the same setups and session discipline that produced the best trade.")
+    if win_rate < 45.0 and total_trades >= 4:
+        notes.append("Win rate was soft. Consider a more conservative profile or a higher minimum signal score tomorrow.")
+    if exit_reasons and str(exit_reasons[0].get("reason", "")) == "stop_loss":
+        notes.append("Stop-loss exits led the book. Focus tomorrow on cleaner opening alignment and avoid marginal momentum entries.")
+    if int(scan_summary.get("pass_count", 0)) == 0:
+        notes.append("Nothing passed the scanner today. Check whether filters were appropriately strict for the tape.")
+    if not notes:
+        notes.append("Session stats were stable. Keep the same process and review ticker scorecards for sizing opportunities.")
+    return notes[:4]
+
+
+def _build_morning_report_payload() -> dict[str, Any]:
+    now = _now_et()
+    runtime_state = load_bot_state()
+    staged_day = str(runtime_state.get("premarket_signals_day", "") or now.date().isoformat())
+    entry_open_minutes = _clock_hhmm_to_minutes(str(config.NO_NEW_TRADES_BEFORE))
+    premarket_scans = []
+    for row in _today_scan_rows():
+        dt = _parse_ts(str(row.get("timestamp", "") or ""))
+        if dt is None:
+            continue
+        if (dt.hour * 60 + dt.minute) < entry_open_minutes:
+            premarket_scans.append(row)
+
+    staged_rows: list[dict[str, Any]] = []
+    staged_direction_counts: dict[str, int] = {}
+    for item in list(runtime_state.get("premarket_opening_signals") or [])[:8]:
+        if not isinstance(item, dict):
+            continue
+        direction = str(item.get("direction", "") or "").upper()
+        if direction:
+            staged_direction_counts[direction] = staged_direction_counts.get(direction, 0) + 1
+        staged_rows.append(
+            {
+                "symbol": str(item.get("symbol", "") or "").upper(),
+                "direction": direction,
+                "signal_score": round(_safe_float(item.get("signal_score"), 0.0), 2),
+                "rvol": round(_safe_float(item.get("rvol"), 0.0), 2),
+                "reason": str(item.get("reason", "") or ""),
+            }
+        )
+
+    recent_trades = _recent_trade_rows(days=5)
+    recent_summary = _build_trade_report_summary(recent_trades)
+    scan_summary = _build_scan_report_summary(premarket_scans)
+    ready_by = str(getattr(config, "PREMARKET_REPORT_READY_TIME", "08:20") or "08:20")
+    ready_by_minutes = _clock_hhmm_to_minutes(ready_by)
+    now_minutes = now.hour * 60 + now.minute
+    report_status = "ready" if staged_rows else ("building" if now_minutes < ready_by_minutes else "waiting_for_signals")
+
+    last_scan_at = _parse_ts(str(runtime_state.get("premarket_last_scan_at_iso", "") or ""))
+    return {
+        "report_type": "morning",
+        "date": staged_day,
+        "generated_at": now.strftime("%Y-%m-%d %H:%M:%S ET"),
+        "report_ready_time": ready_by,
+        "status": report_status,
+        "scan_runs": int(runtime_state.get("premarket_scan_runs", 0) or 0),
+        "last_scan_at": last_scan_at.strftime("%Y-%m-%d %H:%M:%S ET") if last_scan_at else "",
+        "staged_signal_count": len(staged_rows),
+        "staged_direction_counts": staged_direction_counts,
+        "staged_signals": staged_rows,
+        "premarket_scan_summary": scan_summary,
+        "recent_performance": recent_summary,
+        "ticker_leaders": _build_ticker_scorecard_rows(recent_trades, limit=5),
+        "recommendations": _morning_recommendations(staged_rows, recent_summary, scan_summary),
+    }
+
+
+def _build_evening_report_payload() -> dict[str, Any]:
+    now = _now_et()
+    runtime_state = load_bot_state()
+    today_trades = _today_trade_rows()
+    today_scans = _today_scan_rows()
+    trade_summary = _build_trade_report_summary(today_trades)
+    scan_summary = _build_scan_report_summary(today_scans)
+    daily_review = _build_daily_review_payload()
+    open_trade_meta = runtime_state.get("open_trade_meta") or {}
+    report_finalized = (not bool(open_trade_meta)) and ((now.hour * 60 + now.minute) >= _clock_hhmm_to_minutes(str(config.NO_NEW_TRADES_AFTER)))
+
+    return {
+        "report_type": "evening",
+        "date": now.strftime("%Y-%m-%d"),
+        "generated_at": now.strftime("%Y-%m-%d %H:%M:%S ET"),
+        "status": "finalized" if report_finalized else "live",
+        "trade_summary": trade_summary,
+        "scan_summary": scan_summary,
+        "ticker_leaders": _build_ticker_scorecard_rows(today_trades, limit=5),
+        "daily_review": daily_review,
+        "recommendations": _evening_recommendations(trade_summary, scan_summary),
+    }
+
+
 @app.get("/api/account")
 def api_account():
     try:
@@ -1381,6 +1673,402 @@ def api_weekly_review():
         return jsonify({"error": str(exc)}), 500
 
 
+@app.get("/api/reports/morning")
+def api_morning_report():
+    try:
+        return jsonify(_build_morning_report_payload())
+    except Exception as exc:  # noqa: BLE001
+        return jsonify({"error": str(exc)}), 500
+
+
+@app.get("/api/reports/evening")
+def api_evening_report():
+    try:
+        return jsonify(_build_evening_report_payload())
+    except Exception as exc:  # noqa: BLE001
+        return jsonify({"error": str(exc)}), 500
+
+
+@app.get("/reports")
+def reports_page():
+    return render_template_string(
+        """
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Trading Reports</title>
+  <style>
+    :root {
+      --bg:#081019;
+      --panel:rgba(14,23,35,.88);
+      --panel-strong:rgba(21,34,51,.96);
+      --text:#ebf3fb;
+      --muted:#95abc1;
+      --border:rgba(141,172,206,.25);
+      --green:#25d366;
+      --red:#ff5d66;
+      --cyan:#31cbff;
+      --yellow:#ffbf4a;
+      --radius:16px;
+      --shadow:0 14px 34px rgba(2,8,20,.45);
+    }
+    * { box-sizing:border-box; }
+    body {
+      margin:0;
+      color:var(--text);
+      font-family:"Avenir Next","Nunito Sans","Segoe UI",Tahoma,sans-serif;
+      background:
+        radial-gradient(1200px 500px at -10% -20%, rgba(49,203,255,.16), transparent 45%),
+        radial-gradient(900px 420px at 110% -10%, rgba(37,211,102,.12), transparent 45%),
+        linear-gradient(145deg, #050a11 0%, #0b1524 45%, #0a111d 100%);
+      min-height:100vh;
+    }
+    .wrap { max-width:1280px; margin:0 auto; padding:16px; }
+    .header { display:flex; justify-content:space-between; align-items:center; gap:12px; flex-wrap:wrap; margin-bottom:14px; }
+    .title { font-size:clamp(20px, 2.5vw, 31px); font-weight:800; line-height:1.1; }
+    .muted { color:var(--muted); }
+    .actions { display:flex; gap:8px; flex-wrap:wrap; }
+    .btn {
+      border:1px solid var(--border);
+      border-radius:12px;
+      padding:10px 12px;
+      color:var(--text);
+      text-decoration:none;
+      font-weight:700;
+      background:rgba(127,156,191,.15);
+    }
+    .grid { display:grid; grid-template-columns:repeat(2, minmax(0, 1fr)); gap:12px; }
+    .card {
+      background:var(--panel);
+      border:1px solid var(--border);
+      border-radius:var(--radius);
+      padding:14px;
+      box-shadow:var(--shadow);
+      backdrop-filter:blur(4px);
+    }
+    .card.strong { background:var(--panel-strong); }
+    .section-title { display:flex; justify-content:space-between; gap:10px; align-items:center; margin-bottom:10px; }
+    .section-title h2 { margin:0; font-size:14px; letter-spacing:.7px; color:var(--muted); }
+    .pill {
+      border:1px solid var(--border);
+      border-radius:999px;
+      padding:4px 8px;
+      font-size:11px;
+      text-transform:uppercase;
+      letter-spacing:.5px;
+    }
+    .pill.ready, .pill.finalized { color:var(--green); border-color:rgba(37,211,102,.45); }
+    .pill.building, .pill.live { color:var(--yellow); border-color:rgba(255,191,74,.45); }
+    .pill.waiting_for_signals { color:var(--red); border-color:rgba(255,93,102,.45); }
+    .metrics { display:grid; grid-template-columns:repeat(4, minmax(0, 1fr)); gap:10px; margin-bottom:12px; }
+    .metric {
+      background:rgba(7,14,24,.6);
+      border:1px solid var(--border);
+      border-radius:12px;
+      padding:10px;
+    }
+    .metric .label { font-size:11px; color:var(--muted); text-transform:uppercase; letter-spacing:.55px; margin-bottom:5px; }
+    .metric .value { font-family:ui-monospace,SFMono-Regular,Menlo,monospace; font-size:21px; font-weight:700; }
+    .metric .value.pos { color:var(--green); }
+    .metric .value.neg { color:var(--red); }
+    .two-col { display:grid; grid-template-columns:repeat(2, minmax(0, 1fr)); gap:12px; }
+    .list { display:grid; gap:8px; }
+    .list-item {
+      border:1px solid var(--border);
+      border-radius:12px;
+      padding:10px;
+      background:rgba(7,14,24,.56);
+    }
+    .list-title { font-weight:700; margin-bottom:4px; }
+    table { width:100%; border-collapse:collapse; font-size:13px; }
+    th, td { border-bottom:1px solid var(--border); padding:8px 6px; text-align:left; vertical-align:top; }
+    th { color:var(--muted); font-size:12px; letter-spacing:.35px; }
+    .table-wrap { overflow-x:auto; -webkit-overflow-scrolling:touch; }
+    .pos { color:var(--green); }
+    .neg { color:var(--red); }
+    .mono { font-family:ui-monospace,SFMono-Regular,Menlo,monospace; }
+    @media (max-width: 980px) {
+      .grid, .two-col { grid-template-columns:1fr; }
+      .metrics { grid-template-columns:repeat(2, minmax(0, 1fr)); }
+    }
+    @media (max-width: 640px) {
+      .wrap { padding:12px; }
+      .metrics { grid-template-columns:1fr; }
+      .btn { width:100%; text-align:center; }
+      .actions { width:100%; }
+    }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <div class="header">
+      <div>
+        <div class="title">Trading Reports</div>
+        <div class="muted">Morning plan before the open and an evening summary after the session.</div>
+      </div>
+      <div class="actions">
+        <a class="btn" href="/">Dashboard</a>
+        <a class="btn" href="/watch">Watch Page</a>
+      </div>
+    </div>
+
+    <div class="grid">
+      <div class="card strong">
+        <div class="section-title">
+          <h2>MORNING REPORT</h2>
+          <span id="morning-status" class="pill">Loading</span>
+        </div>
+        <div id="morning-report" class="muted">Loading morning report...</div>
+      </div>
+
+      <div class="card strong">
+        <div class="section-title">
+          <h2>EVENING REPORT</h2>
+          <span id="evening-status" class="pill">Loading</span>
+        </div>
+        <div id="evening-report" class="muted">Loading evening report...</div>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    function escapeHtml(value) {
+      return String(value || "")
+        .replace(/&/g, "&amp;")
+        .replace(/</g, "&lt;")
+        .replace(/>/g, "&gt;")
+        .replace(/\"/g, "&quot;")
+        .replace(/'/g, "&#39;");
+    }
+    function fmtMoney(value) {
+      const n = Number(value);
+      if (Number.isNaN(n)) return "--";
+      return n.toLocaleString(undefined, { style: "currency", currency: "USD", maximumFractionDigits: 2 });
+    }
+    function fmtPct(value) {
+      const n = Number(value);
+      if (Number.isNaN(n)) return "--";
+      return `${n >= 0 ? "+" : ""}${n.toFixed(2)}%`;
+    }
+    function cls(value) {
+      const n = Number(value);
+      if (Number.isNaN(n)) return "";
+      if (n > 0) return "pos";
+      if (n < 0) return "neg";
+      return "";
+    }
+    async function fetchJson(url) {
+      try {
+        const res = await fetch(url);
+        const body = await res.json();
+        if (!res.ok) return { error: body.error || "request failed" };
+        return body;
+      } catch {
+        return { error: "request failed" };
+      }
+    }
+    function listHtml(items) {
+      const rows = Array.isArray(items) ? items : [];
+      if (!rows.length) return `<div class="muted">No items yet.</div>`;
+      return `<div class="list">${rows.map((item) => `<div class="list-item">${escapeHtml(item)}</div>`).join("")}</div>`;
+    }
+    function topReasonRows(rows, labelKey) {
+      const data = Array.isArray(rows) ? rows : [];
+      if (!data.length) return `<div class="muted">No rows yet.</div>`;
+      return `
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th>${labelKey}</th><th>Count</th></tr></thead>
+            <tbody>
+              ${data.map((row) => `<tr><td>${escapeHtml(row.reason || "-")}</td><td class="mono">${Number(row.count || 0)}</td></tr>`).join("")}
+            </tbody>
+          </table>
+        </div>
+      `;
+    }
+    function signalTable(rows) {
+      const data = Array.isArray(rows) ? rows : [];
+      if (!data.length) return `<div class="muted">No candidates staged yet.</div>`;
+      return `
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th>Symbol</th><th>Dir</th><th>Score</th><th>RVOL</th><th>Reason</th></tr></thead>
+            <tbody>
+              ${data.map((row) => `
+                <tr>
+                  <td class="mono">${escapeHtml(row.symbol || "-")}</td>
+                  <td>${escapeHtml(row.direction || "-")}</td>
+                  <td class="mono">${Number(row.signal_score || 0).toFixed(2)}</td>
+                  <td class="mono">${Number(row.rvol || 0).toFixed(2)}</td>
+                  <td>${escapeHtml(row.reason || "-")}</td>
+                </tr>
+              `).join("")}
+            </tbody>
+          </table>
+        </div>
+      `;
+    }
+    function tickerTable(rows) {
+      const data = Array.isArray(rows) ? rows : [];
+      if (!data.length) return `<div class="muted">No ticker scorecards yet.</div>`;
+      return `
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th>Ticker</th><th>Trades</th><th>Win Rate</th><th>Total P&L</th></tr></thead>
+            <tbody>
+              ${data.map((row) => `
+                <tr>
+                  <td class="mono">${escapeHtml(row.ticker || "-")}</td>
+                  <td class="mono">${Number(row.trades || 0)}</td>
+                  <td class="mono">${Number(row.win_rate_pct || 0).toFixed(1)}%</td>
+                  <td class="mono ${cls(row.total_pnl_usd)}">${fmtMoney(row.total_pnl_usd)}</td>
+                </tr>
+              `).join("")}
+            </tbody>
+          </table>
+        </div>
+      `;
+    }
+    function tradeCard(label, trade) {
+      if (!trade) return `<div class="muted">No trade available.</div>`;
+      return `
+        <div class="list-item">
+          <div class="list-title">${escapeHtml(label)}: ${escapeHtml(trade.ticker || "-")}</div>
+          <div class="muted">${escapeHtml(trade.timestamp || "-")}</div>
+          <div class="mono ${cls(trade.pnl_usd)}" style="margin-top:6px;">${fmtMoney(trade.pnl_usd)} | ${fmtPct(trade.pnl_pct)}</div>
+          <div style="margin-top:6px;">${escapeHtml(trade.exit_reason || "-")}</div>
+        </div>
+      `;
+    }
+    function renderMorning(data) {
+      const statusEl = document.getElementById("morning-status");
+      const wrap = document.getElementById("morning-report");
+      if (!statusEl || !wrap) return;
+      if (!data || data.error) {
+        statusEl.className = "pill waiting_for_signals";
+        statusEl.textContent = "Error";
+        wrap.innerHTML = `<div class="muted">${escapeHtml(data && data.error ? data.error : "request failed")}</div>`;
+        return;
+      }
+      statusEl.className = `pill ${escapeHtml(data.status || "")}`;
+      statusEl.textContent = String(data.status || "unknown").replaceAll("_", " ");
+      const perf = data.recent_performance || {};
+      const scan = data.premarket_scan_summary || {};
+      const stagedDirectionCounts = data.staged_direction_counts || {};
+      wrap.innerHTML = `
+        <div class="muted" style="margin-bottom:10px;">Generated ${escapeHtml(data.generated_at || "-")} | Target ready by ${escapeHtml(data.report_ready_time || "-")} | Last scan ${escapeHtml(data.last_scan_at || "--")}</div>
+        <div class="metrics">
+          <div class="metric"><div class="label">Staged Signals</div><div class="value">${Number(data.staged_signal_count || 0)}</div></div>
+          <div class="metric"><div class="label">Premarket Passes</div><div class="value">${Number(scan.pass_count || 0)}</div></div>
+          <div class="metric"><div class="label">5-Day P&L</div><div class="value ${cls(perf.total_pnl_usd)}">${fmtMoney(perf.total_pnl_usd)}</div></div>
+          <div class="metric"><div class="label">5-Day Win Rate</div><div class="value ${cls((Number(perf.win_rate_pct || 0)) - 50)}">${Number(perf.win_rate_pct || 0).toFixed(1)}%</div></div>
+        </div>
+        <div class="two-col">
+          <div>
+            <div class="section-title"><h2>Trading Plan</h2></div>
+            ${listHtml(data.recommendations || [])}
+          </div>
+          <div>
+            <div class="section-title"><h2>Bias + Scan Pressure</h2></div>
+            <div class="list">
+              <div class="list-item">CALL bias: <span class="mono">${Number(stagedDirectionCounts.CALL || 0)}</span></div>
+              <div class="list-item">PUT bias: <span class="mono">${Number(stagedDirectionCounts.PUT || 0)}</span></div>
+              <div class="list-item">Premarket failures: <span class="mono">${Number(scan.fail_count || 0)}</span></div>
+              <div class="list-item">Premarket scan runs: <span class="mono">${Number(data.scan_runs || 0)}</span></div>
+            </div>
+          </div>
+        </div>
+        <div class="section-title" style="margin-top:12px;"><h2>Staged Signals</h2></div>
+        ${signalTable(data.staged_signals || [])}
+        <div class="two-col" style="margin-top:12px;">
+          <div>
+            <div class="section-title"><h2>Top Premarket Rejections</h2></div>
+            ${topReasonRows(scan.top_fail_reasons || [], "Reason")}
+          </div>
+          <div>
+            <div class="section-title"><h2>Recent Ticker Leaders</h2></div>
+            ${tickerTable(data.ticker_leaders || [])}
+          </div>
+        </div>
+      `;
+    }
+    function renderEvening(data) {
+      const statusEl = document.getElementById("evening-status");
+      const wrap = document.getElementById("evening-report");
+      if (!statusEl || !wrap) return;
+      if (!data || data.error) {
+        statusEl.className = "pill waiting_for_signals";
+        statusEl.textContent = "Error";
+        wrap.innerHTML = `<div class="muted">${escapeHtml(data && data.error ? data.error : "request failed")}</div>`;
+        return;
+      }
+      statusEl.className = `pill ${escapeHtml(data.status || "")}`;
+      statusEl.textContent = String(data.status || "unknown").replaceAll("_", " ");
+      const trades = data.trade_summary || {};
+      const scans = data.scan_summary || {};
+      const dailyReview = data.daily_review || {};
+      wrap.innerHTML = `
+        <div class="muted" style="margin-bottom:10px;">Generated ${escapeHtml(data.generated_at || "-")} | Closed trades ${Number(trades.total_trades || 0)} | Scan rows ${Number(scans.total_rows || 0)}</div>
+        <div class="metrics">
+          <div class="metric"><div class="label">Today P&L</div><div class="value ${cls(trades.total_pnl_usd)}">${fmtMoney(trades.total_pnl_usd)}</div></div>
+          <div class="metric"><div class="label">Win Rate</div><div class="value ${cls((Number(trades.win_rate_pct || 0)) - 50)}">${Number(trades.win_rate_pct || 0).toFixed(1)}%</div></div>
+          <div class="metric"><div class="label">Scanner Passes</div><div class="value">${Number(scans.pass_count || 0)}</div></div>
+          <div class="metric"><div class="label">Scanner Fails</div><div class="value">${Number(scans.fail_count || 0)}</div></div>
+        </div>
+        <div class="two-col">
+          <div>
+            <div class="section-title"><h2>Evening Summary</h2></div>
+            ${listHtml(data.recommendations || [])}
+          </div>
+          <div>
+            <div class="section-title"><h2>Best / Worst Trade</h2></div>
+            <div class="list">
+              ${tradeCard("Best", trades.best_trade)}
+              ${tradeCard("Worst", trades.worst_trade)}
+            </div>
+          </div>
+        </div>
+        <div class="two-col" style="margin-top:12px;">
+          <div>
+            <div class="section-title"><h2>Exit Reasons</h2></div>
+            ${topReasonRows(trades.exit_reasons || [], "Exit")}
+          </div>
+          <div>
+            <div class="section-title"><h2>Top Passing Signals</h2></div>
+            ${signalTable(scans.top_passes || [])}
+          </div>
+        </div>
+        <div class="two-col" style="margin-top:12px;">
+          <div>
+            <div class="section-title"><h2>Daily Self-Checks</h2></div>
+            ${listHtml((dailyReview.checks || []).map((item) => `${item.name}: ${item.detail}`))}
+          </div>
+          <div>
+            <div class="section-title"><h2>Ticker Leaders</h2></div>
+            ${tickerTable(data.ticker_leaders || [])}
+          </div>
+        </div>
+      `;
+    }
+    async function refreshReports() {
+      const [morning, evening] = await Promise.all([
+        fetchJson("/api/reports/morning"),
+        fetchJson("/api/reports/evening"),
+      ]);
+      renderMorning(morning);
+      renderEvening(evening);
+    }
+    refreshReports();
+    setInterval(refreshReports, 30000);
+  </script>
+</body>
+</html>
+        """
+    )
+
+
 @app.get("/watch")
 def watch_page():
     return render_template_string(
@@ -1501,6 +2189,7 @@ def watch_page():
       </div>
       <div class="row">
         <a class="btn" href="/">Dashboard</a>
+        <a class="btn" href="/reports">Reports</a>
       </div>
     </div>
 
@@ -2051,6 +2740,7 @@ def home():
         <div class="muted">Last updated: <span id="last-updated">--</span> | Auto-refresh: 30s</div>
       </div>
       <div class="head-actions">
+        <a href="/reports" class="ctrl-btn" style="text-decoration:none;">REPORTS</a>
         <a href="/watch" class="ctrl-btn" style="text-decoration:none;">WATCH PAGE</a>
         <div class="paper">{{ "PAPER MODE" if paper else "LIVE MODE" }}</div>
       </div>

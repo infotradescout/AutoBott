@@ -11,15 +11,53 @@ import config
 class TradeLogger:
     columns = [
         "timestamp",
+        "date",
         "ticker",
         "direction",
         "option_symbol",
         "strike",
         "expiry",
         "qty",
+        "signal_score",
+        "direction_score",
+        "rvol",
+        "rsi",
+        "roc",
+        "iv_rank",
+        "contract_spread_pct",
+        "entry_time",
+        "exit_time",
+        "hold_seconds",
         "entry_price",
         "exit_price",
+        "realized_pnl_usd",
         "pnl_pct",
+        "paper_reported_pnl_usd",
+        "paper_reported_pnl_pct",
+        "conservative_executable_pnl_usd",
+        "conservative_executable_pnl_pct",
+        "max_favorable_excursion_pct",
+        "max_adverse_excursion_pct",
+        "entry_underlying_symbol",
+        "entry_bid_submit",
+        "entry_ask_submit",
+        "entry_midpoint_submit",
+        "entry_intended_limit",
+        "entry_filled_price",
+        "entry_spread_pct",
+        "entry_fill_slippage_vs_ask_pct",
+        "entry_fill_seconds",
+        "entry_attempts",
+        "exit_underlying_symbol",
+        "exit_bid_submit",
+        "exit_ask_submit",
+        "exit_midpoint_submit",
+        "exit_intended_limit",
+        "exit_filled_price",
+        "exit_spread_pct",
+        "exit_fill_slippage_vs_bid_pct",
+        "exit_fill_seconds",
+        "exit_attempts",
         "exit_reason",
     ]
 
@@ -34,6 +72,29 @@ class TradeLogger:
             with self.path.open("w", newline="", encoding="utf-8") as f:
                 writer = csv.DictWriter(f, fieldnames=self.columns)
                 writer.writeheader()
+            return
+
+        try:
+            with self.path.open("r", newline="", encoding="utf-8") as f:
+                reader = csv.DictReader(f)
+                existing_columns = list(reader.fieldnames or [])
+                rows = list(reader)
+        except Exception as exc:  # noqa: BLE001
+            print(f"[logger] header read failed: {exc}")
+            return
+
+        if existing_columns == self.columns:
+            return
+
+        try:
+            with self.path.open("w", newline="", encoding="utf-8") as f:
+                writer = csv.DictWriter(f, fieldnames=self.columns)
+                writer.writeheader()
+                for row in rows:
+                    payload = {key: row.get(key, "") for key in self.columns}
+                    writer.writerow(payload)
+        except Exception as exc:  # noqa: BLE001
+            print(f"[logger] header migration failed: {exc}")
 
     def log_trade(self, row: dict):
         payload = {key: row.get(key, "") for key in self.columns}

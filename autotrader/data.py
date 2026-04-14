@@ -527,6 +527,11 @@ class AlpacaDataClient:
         ask = quote.get("ask")
         return float(ask) if ask is not None else None
 
+    def get_latest_option_bid(self, option_symbol: str) -> float | None:
+        quote = self.get_latest_option_quote(option_symbol)
+        bid = quote.get("bid")
+        return float(bid) if bid is not None else None
+
     def get_latest_option_quote(self, option_symbol: str) -> dict[str, float | None]:
         last_exc: Exception | None = None
         try:

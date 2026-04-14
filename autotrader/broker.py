@@ -69,6 +69,17 @@ class AlpacaBroker:
         )
         return self.trading_client.submit_order(order_data=req)
 
+    def place_option_limit_sell(self, option_symbol: str, qty: int, limit_price: float):
+        _assert_option_symbol(option_symbol)
+        req = LimitOrderRequest(
+            symbol=option_symbol,
+            qty=qty,
+            side=OrderSide.SELL,
+            time_in_force=TimeInForce.DAY,
+            limit_price=Decimal(str(limit_price)),
+        )
+        return self.trading_client.submit_order(order_data=req)
+
     def place_option_market_buy(self, option_symbol: str, qty: int):
         _assert_option_symbol(option_symbol)
         req = MarketOrderRequest(
