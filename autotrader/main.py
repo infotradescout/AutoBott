@@ -422,6 +422,30 @@ def _apply_watchlist_mode(universe: list[str], control: dict) -> list[str]:
     return universe
 
 
+def _dedupe_signals_by_symbol(signals: list[dict]) -> list[dict]:
+    deduped: list[dict] = []
+    seen: set[str] = set()
+    for signal in signals:
+        symbol = str(signal.get("symbol", "") or "").upper()
+        if not symbol or symbol in seen:
+            continue
+        seen.add(symbol)
+        deduped.append(signal)
+    return deduped
+
+
+def _signal_sort_key(signal: dict) -> tuple[float, float]:
+    try:
+        score = float(signal.get("signal_score", 0.0) or 0.0)
+    except (TypeError, ValueError):
+        score = 0.0
+    try:
+        rvol = float(signal.get("rvol", 0.0) or 0.0)
+    except (TypeError, ValueError):
+        rvol = 0.0
+    return score, rvol
+
+
 def _flatten_positions_for_killswitch(broker: AlpacaBroker, now_et: datetime, *, label: str = "KILLSWITCH") -> None:
     poll_seconds = max(1, int(config.EXIT_ORDER_STATUS_POLL_SECONDS))
     max_wait_seconds = max(poll_seconds, int(config.EXIT_ORDER_MAX_WAIT_SECONDS))
@@ -546,6 +570,10 @@ def main():
     open_position_pl_history: dict[str, list[dict[str, float | str | None]]] = dict(
         state.get("open_position_pl_history") or {}
     )
+    premarket_opening_signals: list[dict] = list(state.get("premarket_opening_signals") or [])
+    premarket_signals_day = str(state.get("premarket_signals_day", "") or "")
+    premarket_scan_runs = int(state.get("premarket_scan_runs", 0) or 0)
+    premarket_last_scan_at = _parse_state_datetime(state.get("premarket_last_scan_at_iso"))
     watchlist_control_state: dict = dict(state.get("watchlist_control") or {})
     last_trader_heartbeat_et = str(state.get("last_trader_heartbeat_et", "") or "")
     last_alpaca_auth_error_et = str(state.get("last_alpaca_auth_error_et", "") or "")
@@ -583,6 +611,10 @@ def main():
                 "last_entry_debug": last_entry_debug,
                 "last_exit_debug": last_exit_debug,
                 "open_position_pl_history": open_position_pl_history,
+                "premarket_opening_signals": premarket_opening_signals,
+                "premarket_signals_day": premarket_signals_day,
+                "premarket_scan_runs": premarket_scan_runs,
+                "premarket_last_scan_at_iso": premarket_last_scan_at.isoformat() if premarket_last_scan_at else "",
                 "watchlist_control": watchlist_control_state,
                 "last_trader_heartbeat_et": last_trader_heartbeat_et,
                 "last_alpaca_auth_error_et": last_alpaca_auth_error_et,
@@ -1050,6 +1082,56 @@ def main():
                 if next_open.tzinfo is None:
                     next_open = pytz.utc.localize(next_open)
                 next_open_ct = next_open.astimezone(pytz.timezone(config.CENTRAL_TZ)).strftime("%Y-%m-%d %H:%M:%S %Z")
+
+            if bool(getattr(config, "ENABLE_PREMARKET_OPENING_SIGNALS", False)):
+                today_tag = now_et.date().isoformat()
+                premarket_window_open = (
+                    is_at_or_after(now_et, config.PREMARKET_SIGNAL_WINDOW_START)
+                    and not is_at_or_after(now_et, config.PREMARKET_SIGNAL_WINDOW_END)
+                )
+                before_entry_open = not is_at_or_after(now_et, config.NO_NEW_TRADES_BEFORE)
+                if premarket_signals_day != today_tag:
+                    premarket_opening_signals = []
+                    premarket_signals_day = today_tag
+                    premarket_scan_runs = 0
+                    premarket_last_scan_at = None
+                interval_seconds = max(15, int(getattr(config, "PREMARKET_SCAN_INTERVAL_SECONDS", 120)))
+                max_runs = max(0, int(getattr(config, "PREMARKET_SCAN_MAX_RUNS", 0)))
+                run_budget_ok = (max_runs == 0) or (premarket_scan_runs < max_runs)
+                run_due = (
+                    premarket_last_scan_at is None
+                    or int((now_et - premarket_last_scan_at).total_seconds()) >= interval_seconds
+                )
+                if premarket_window_open and before_entry_open and run_budget_ok and run_due:
+                    watchlist_control_state = load_watchlist_control()
+                    watchlist_mode = str(watchlist_control_state.get("mode", "off") or "off").lower()
+                    premarket_watchlist = _build_scan_universe(data_client)
+                    premarket_watchlist = _apply_watchlist_mode(premarket_watchlist, watchlist_control_state)
+                    print(
+                        f"[{ts(now_et)}] Premarket scan on {len(premarket_watchlist)} tickers "
+                        f"(watchlist mode={watchlist_mode})."
+                    )
+                    premarket_signals = run_scan(
+                        premarket_watchlist,
+                        now_et=now_et,
+                        premarket_mode=True,
+                    ) if premarket_watchlist else []
+                    max_premarket = max(0, int(getattr(config, "PREMARKET_MAX_SIGNALS", 0)))
+                    merged_premarket = _dedupe_signals_by_symbol(
+                        list(premarket_signals) + list(premarket_opening_signals)
+                    )
+                    merged_premarket.sort(key=_signal_sort_key, reverse=True)
+                    if max_premarket > 0:
+                        merged_premarket = merged_premarket[:max_premarket]
+                    premarket_opening_signals = merged_premarket
+                    premarket_scan_runs += 1
+                    premarket_last_scan_at = now_et
+                    print(
+                        f"[{ts(now_et)}] Premarket opening set prepared: "
+                        f"{len(premarket_opening_signals)} signal(s) after run {premarket_scan_runs}."
+                    )
+                    _save_runtime_state()
+
             if alerts.enabled() and time.time() >= next_heartbeat_at:
                 alerts.send(
                     "heartbeat",
@@ -1080,6 +1162,10 @@ def main():
             ticker_reentry_armed = {}
             ticker_reentry_expected_direction = {}
             ticker_reentries_used = {}
+            premarket_opening_signals = []
+            premarket_signals_day = ""
+            premarket_scan_runs = 0
+            premarket_last_scan_at = None
             set_catalyst_mode(False, "")
 
         option_positions = broker.get_open_option_positions()
@@ -1218,6 +1304,22 @@ def main():
         else:
             vix_block_notice = None
             signals = run_scan(watchlist) if watchlist else []
+
+        if (
+            bool(getattr(config, "ENABLE_PREMARKET_OPENING_SIGNALS", False))
+            and premarket_opening_signals
+            and premarket_signals_day == now_et.date().isoformat()
+            and is_at_or_after(now_et, config.NO_NEW_TRADES_BEFORE)
+            and not is_at_or_after(now_et, config.PREMARKET_APPLY_UNTIL)
+        ):
+            merged = _dedupe_signals_by_symbol(list(premarket_opening_signals) + list(signals))
+            print(
+                f"[{ts(now_et)}] Applied premarket opening set: "
+                f"{len(premarket_opening_signals)} staged + {len(signals)} live -> {len(merged)} unique signals."
+            )
+            signals = merged
+            premarket_opening_signals = []
+            _save_runtime_state()
 
         index_bias = _index_regime_bias(data_client, now_et)
         if index_bias in ("call", "put") and signals:

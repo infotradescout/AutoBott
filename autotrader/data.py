@@ -288,6 +288,95 @@ class AlpacaDataClient:
             print(f"[data] get_intraday_bars_since_open yfinance failed for {symbol}: {exc}")
             return pd.DataFrame()
 
+    def get_intraday_bars_window(
+        self,
+        symbol: str,
+        start_et: datetime,
+        end_et: datetime,
+        limit: int = 120,
+    ) -> pd.DataFrame:
+        """
+        Fetch intraday bars between explicit ET timestamps.
+        Useful for premarket scans where we cannot anchor to 9:30 ET session open.
+        """
+        tz_et = pytz.timezone(config.EASTERN_TZ)
+        if start_et.tzinfo is None:
+            start_et = tz_et.localize(start_et)
+        if end_et.tzinfo is None:
+            end_et = tz_et.localize(end_et)
+        if end_et <= start_et:
+            return pd.DataFrame()
+
+        minutes_span = max(1, int((end_et - start_et).total_seconds() // 60))
+        timeframe = "1Min" if minutes_span <= 20 else "5Min"
+
+        # Primary source: Alpaca bars API
+        try:
+            start_utc = start_et.astimezone(pytz.UTC).isoformat().replace("+00:00", "Z")
+            end_utc = end_et.astimezone(pytz.UTC).isoformat().replace("+00:00", "Z")
+            resp = self.data_session.get(
+                f"{self.data_base_url}/v2/stocks/bars",
+                params={
+                    "symbols": symbol,
+                    "timeframe": timeframe,
+                    "start": start_utc,
+                    "end": end_utc,
+                    "limit": max(limit, 500),
+                    "adjustment": "raw",
+                    "feed": "iex",
+                },
+                timeout=15,
+            )
+            resp.raise_for_status()
+            body = resp.json()
+            bars_map = body.get("bars", {}) if isinstance(body, dict) else {}
+            rows = bars_map.get(symbol, []) if isinstance(bars_map, dict) else []
+            if rows:
+                df = pd.DataFrame(rows)
+                if not df.empty and {"t", "o", "h", "l", "c", "v"}.issubset(set(df.columns)):
+                    df = df.rename(
+                        columns={
+                            "t": "timestamp",
+                            "o": "open",
+                            "h": "high",
+                            "l": "low",
+                            "c": "close",
+                            "v": "volume",
+                        }
+                    )
+                    df["timestamp"] = pd.to_datetime(df["timestamp"], utc=True).dt.tz_convert(tz_et)
+                    df = df[(df["timestamp"] >= start_et) & (df["timestamp"] <= end_et)]
+                    df = df.tail(limit).reset_index(drop=True)
+                    if not df.empty:
+                        return df[["timestamp", "open", "high", "low", "close", "volume"]]
+        except Exception as exc:  # noqa: BLE001
+            print(f"[data] get_intraday_bars_window Alpaca failed for {symbol}: {exc}")
+
+        # Fallback: yfinance
+        try:
+            ticker = yf.Ticker(symbol)
+            interval = "1m" if timeframe == "1Min" else "5m"
+            df = ticker.history(period="5d", interval=interval, auto_adjust=True, prepost=True)
+
+            if df is None or df.empty:
+                return pd.DataFrame()
+
+            df.columns = [c.lower() for c in df.columns]
+            df = df.reset_index()
+            ts_col = [c for c in df.columns if "date" in c.lower() or c == "datetime" or c == "index"]
+            if ts_col:
+                df = df.rename(columns={ts_col[0]: "timestamp"})
+
+            df["timestamp"] = pd.to_datetime(df["timestamp"], utc=True).dt.tz_convert(tz_et)
+            df = df[(df["timestamp"] >= start_et) & (df["timestamp"] <= end_et)]
+            df = df.tail(limit).reset_index(drop=True)
+            if df.empty:
+                return pd.DataFrame()
+            return df[["timestamp", "open", "high", "low", "close", "volume"]]
+        except Exception as exc:  # noqa: BLE001
+            print(f"[data] get_intraday_bars_window yfinance failed for {symbol}: {exc}")
+            return pd.DataFrame()
+
     def get_latest_stock_price(self, symbol: str) -> float | None:
         """
         Get latest stock price.

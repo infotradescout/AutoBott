@@ -649,21 +649,38 @@ class IntradayScanner:
 
         return filtered
 
-    def run_scan(self, watchlist: list[str]) -> list[dict]:
-        now_et = datetime.now(self.tz)
+    def run_scan(
+        self,
+        watchlist: list[str],
+        *,
+        now_et: datetime | None = None,
+        premarket_mode: bool = False,
+    ) -> list[dict]:
+        now_et = now_et or datetime.now(self.tz)
         passed: list[dict] = []
         failed: list[dict[str, str]] = []
         cached_inputs: list[tuple[str, pd.DataFrame, pd.DataFrame, float]] = []
+        lookback_minutes = max(5, int(getattr(config, "PREMARKET_LOOKBACK_MINUTES", 75)))
 
         for symbol in watchlist:
             try:
-                bars_df = self.data_client.get_intraday_bars_since_open(
-                    symbol=symbol,
-                    now_et=now_et,
-                    limit=config.SCAN_INTRADAY_BARS,
-                )
+                if premarket_mode:
+                    window_start = now_et - timedelta(minutes=lookback_minutes)
+                    bars_df = self.data_client.get_intraday_bars_window(
+                        symbol=symbol,
+                        start_et=window_start,
+                        end_et=now_et,
+                        limit=config.SCAN_INTRADAY_BARS,
+                    )
+                else:
+                    bars_df = self.data_client.get_intraday_bars_since_open(
+                        symbol=symbol,
+                        now_et=now_et,
+                        limit=config.SCAN_INTRADAY_BARS,
+                    )
                 if bars_df.empty:
-                    failed.append({"symbol": symbol, "reason": "no intraday bars"})
+                    no_bars_reason = "no premarket bars" if premarket_mode else "no intraday bars"
+                    failed.append({"symbol": symbol, "reason": no_bars_reason})
                     continue
                 daily_df = self.data_client.get_stock_daily_bars(symbol, limit=config.SCAN_DAILY_BARS)
                 today_volume = float(bars_df["volume"].astype(float).sum())
@@ -674,10 +691,13 @@ class IntradayScanner:
                     daily_bars_df=daily_df,
                     today_volume=today_volume,
                     data_client=self.data_client,
+                    force_relaxed_rvol=premarket_mode,
                 )
                 if details.get("failed"):
                     failed.append({"symbol": symbol, "reason": details["reason"]})
                 else:
+                    if premarket_mode:
+                        details["reason"] = f"{details.get('reason', '')} | Premarket prep".strip()
                     passed.append(details)
             except Exception as exc:  # noqa: BLE001
                 failed.append({"symbol": symbol, "reason": f"scan error: {exc}"})
@@ -710,7 +730,16 @@ class IntradayScanner:
             passed = retry_passed
             failed = retry_failed
 
-        passed.sort(key=lambda item: float(item["rvol"]), reverse=True)
+        if premarket_mode:
+            passed.sort(
+                key=lambda item: (
+                    float(item.get("signal_score", 0.0) or 0.0),
+                    float(item.get("rvol", 0.0) or 0.0),
+                ),
+                reverse=True,
+            )
+        else:
+            passed.sort(key=lambda item: float(item["rvol"]), reverse=True)
         self.last_failures = failed
         if failopen_triggered:
             print(f"[{now_et.strftime('%H:%M ET')}] RVOL fail-open engaged: widespread low RVOL detected.")
@@ -790,10 +819,19 @@ def build_watchlist() -> list[str]:
     return _DEFAULT_SCANNER.build_watchlist()
 
 
-def run_scan(watchlist: list[str]) -> list[dict]:
+def run_scan(
+    watchlist: list[str],
+    *,
+    now_et: datetime | None = None,
+    premarket_mode: bool = False,
+) -> list[dict]:
     if _DEFAULT_SCANNER is None:
         raise RuntimeError("Scanner not initialized. Call initialize_scanner(data_client) first.")
-    return _DEFAULT_SCANNER.run_scan(watchlist)
+    return _DEFAULT_SCANNER.run_scan(
+        watchlist,
+        now_et=now_et,
+        premarket_mode=premarket_mode,
+    )
 
 
 def should_build_watchlist(now_et: datetime) -> bool:

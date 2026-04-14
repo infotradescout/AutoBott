@@ -115,6 +115,14 @@ NO_NEW_TRADES_AFTER                = "15:00"   # stop new entries 30 min before 
 SCAN_MORNING_TIME                  = "09:30"
 OBSERVATION_END_TIME               = "10:00"
 OBSERVATION_ENABLED                = True
+ENABLE_PREMARKET_OPENING_SIGNALS   = True
+PREMARKET_SIGNAL_WINDOW_START      = "09:20"
+PREMARKET_SIGNAL_WINDOW_END        = "09:30"
+PREMARKET_LOOKBACK_MINUTES         = 75
+PREMARKET_MAX_SIGNALS              = 6
+PREMARKET_APPLY_UNTIL              = "09:35"
+PREMARKET_SCAN_INTERVAL_SECONDS    = 120
+PREMARKET_SCAN_MAX_RUNS            = 0
 
 # Poll every 15 seconds for fast exit response on scalp trades
 LOOP_INTERVAL_SECONDS              = 15
