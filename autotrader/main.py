@@ -1028,6 +1028,11 @@ def main():
         str(k): int(v)
         for k, v in dict(state.get("ticker_reentries_used") or {}).items()
     }
+    ticker_loss_cooldown_until: dict[str, datetime] = {}
+    for _k, _v in dict(state.get("ticker_loss_cooldown_until") or {}).items():
+        _dt = _parse_state_datetime(_v)
+        if _dt is not None:
+            ticker_loss_cooldown_until[str(_k).upper()] = _dt
     last_entry_debug: dict = dict(state.get("last_entry_debug") or {})
     last_exit_debug: dict = dict(state.get("last_exit_debug") or {})
     open_position_pl_history: dict[str, list[dict[str, float | str | None]]] = dict(
@@ -1145,6 +1150,11 @@ def main():
                 "ticker_reentry_armed": ticker_reentry_armed,
                 "ticker_reentry_expected_direction": ticker_reentry_expected_direction,
                 "ticker_reentries_used": ticker_reentries_used,
+                "ticker_loss_cooldown_until": {
+                    str(k).upper(): v.isoformat()
+                    for k, v in ticker_loss_cooldown_until.items()
+                    if isinstance(v, datetime)
+                },
                 "last_entry_debug": last_entry_debug,
                 "last_exit_debug": last_exit_debug,
                 "open_position_pl_history": open_position_pl_history,
@@ -1169,6 +1179,32 @@ def main():
         last_trader_heartbeat_et = datetime.now(tz).isoformat()
         _save_runtime_state()
         last_heartbeat_persist_at = now_ts
+
+    def _active_ticker_loss_cooldown_until(ticker: str, now_et: datetime) -> datetime | None:
+        key = str(ticker or "").upper()
+        if not key:
+            return None
+        until_dt = ticker_loss_cooldown_until.get(key)
+        if until_dt is None:
+            return None
+        if until_dt <= now_et:
+            ticker_loss_cooldown_until.pop(key, None)
+            return None
+        return until_dt
+
+    def _set_ticker_loss_cooldown(ticker: str, now_et: datetime, *, minutes: int, reason: str) -> None:
+        key = str(ticker or "").upper()
+        if not key:
+            return
+        cooldown_minutes = max(1, int(minutes))
+        until_dt = now_et + timedelta(minutes=cooldown_minutes)
+        prior = ticker_loss_cooldown_until.get(key)
+        if prior is None or until_dt > prior:
+            ticker_loss_cooldown_until[key] = until_dt
+        print(
+            f"[{ts(now_et)}] {key}: loss cooldown armed for {cooldown_minutes}m "
+            f"(until {ts(ticker_loss_cooldown_until[key])}; reason={reason})."
+        )
 
     def _safe_get_clock(*, phase: str, now_et: datetime, now_ct: datetime):
         nonlocal last_alpaca_auth_error_et, last_alpaca_auth_error
@@ -1835,6 +1871,7 @@ def main():
             ticker_reentry_armed = {}
             ticker_reentry_expected_direction = {}
             ticker_reentries_used = {}
+            ticker_loss_cooldown_until = {}
             premarket_opening_signals = []
             premarket_signals_day = ""
             premarket_scan_runs = 0
@@ -2133,6 +2170,13 @@ def main():
             if _is_bad_fill_blocked(ticker, now_et):
                 _mark_skip("bad_fill_cooldown")
                 print(f"[{ts(now_et)}] {ticker}: skip (bad-fill cooldown active).")
+                continue
+            loss_cooldown_until = _active_ticker_loss_cooldown_until(ticker, now_et)
+            if loss_cooldown_until is not None:
+                _mark_skip("ticker_loss_cooldown")
+                print(
+                    f"[{ts(now_et)}] {ticker}: skip (loss cooldown until {ts(loss_cooldown_until)})."
+                )
                 continue
             if not is_at_or_after(now_et, config.NO_NEW_TRADES_BEFORE):
                 _mark_skip("before_entry_window")
@@ -2793,6 +2837,19 @@ def main():
                     ticker = str(meta.get("ticker", "") or "")
                     reversal_direction = ""
                     reentries_used = int(ticker_reentries_used.get(ticker, 0)) if ticker else 0
+                    if ticker and trade_pnl_usd < 0:
+                        loss_cd_minutes = int(getattr(config, "REENTRY_COOLDOWN_LOSS_MINUTES", 20) or 20)
+                        if str(exit_reason).lower() == "stop_loss":
+                            loss_cd_minutes = int(
+                                getattr(config, "STOP_LOSS_REENTRY_COOLDOWN_MINUTES", loss_cd_minutes)
+                                or loss_cd_minutes
+                            )
+                        _set_ticker_loss_cooldown(
+                            ticker,
+                            now_et,
+                            minutes=loss_cd_minutes,
+                            reason=str(exit_reason),
+                        )
                     if ticker and exit_reason == "stop_loss":
                         ticker_reentry_armed[ticker] = True
                         prior_direction = str(meta.get("direction", "") or "").lower()
@@ -2824,12 +2881,19 @@ def main():
                         and ticker
                         and reversal_direction in ("call", "put")
                     ):
-                        _attempt_reversal_entry(
-                            ticker=ticker,
-                            direction=reversal_direction,
-                            now_et=now_et,
-                            reentries_used=reentries_used,
-                        )
+                        cd_until = _active_ticker_loss_cooldown_until(ticker, now_et)
+                        if cd_until is None:
+                            _attempt_reversal_entry(
+                                ticker=ticker,
+                                direction=reversal_direction,
+                                now_et=now_et,
+                                reentries_used=reentries_used,
+                            )
+                        else:
+                            print(
+                                f"[{ts(now_et)}] {ticker}: immediate reversal entry suppressed "
+                                f"(loss cooldown until {ts(cd_until)})."
+                            )
                 except Exception as exc:  # noqa: BLE001
                     last_exit_debug = {
                         "loop_ts_et": ts(now_et),
