@@ -802,6 +802,96 @@ class IntradayScanner:
         self.data_client = data_client
         self.tz = pytz.timezone(config.EASTERN_TZ)
         self.last_failures: list[dict[str, str]] = []
+        # symbol -> {until: datetime, bucket: str, reason: str}
+        self._reject_cooldowns: dict[str, dict[str, Any]] = {}
+
+    def _next_session_open(self, now_et: datetime) -> datetime:
+        candidate = now_et
+        if (now_et.hour > 9) or (now_et.hour == 9 and now_et.minute >= 30):
+            candidate = now_et + timedelta(days=1)
+        while candidate.weekday() >= 5:
+            candidate += timedelta(days=1)
+        naive_open = datetime.combine(candidate.date(), datetime.min.time()).replace(hour=9, minute=30)
+        return self.tz.localize(naive_open)
+
+    def _cooldown_for_reject(self, reason: str, now_et: datetime) -> tuple[str, datetime] | None:
+        text = str(reason or "").strip().lower()
+        if not text:
+            return None
+
+        # No cooldown for live setup logic: keep checking every scan.
+        no_cooldown_tokens = (
+            "setup_reject: movement too weak",
+            "setup_reject: roc",
+            "setup_reject: signal score",
+            "near vwap",
+            "momentum opposes setup",
+        )
+        if any(token in text for token in no_cooldown_tokens):
+            return None
+
+        hard_tokens = (
+            "hard_block: earnings",
+            "hard_block: manual deny",
+            "hard_block: manual block",
+            "hard_block: news/event block",
+            "hard_block: explicit event/news block",
+        )
+        if any(token in text for token in hard_tokens):
+            return ("long", self._next_session_open(now_et))
+
+        medium_tokens = (
+            "no valid contract",
+            "spread too wide",
+            "chain lookup fails",
+            "chain lookup failed",
+            "option chain unavailable",
+            "contract selection failed",
+        )
+        if any(token in text for token in medium_tokens):
+            minutes = int(getattr(config, "REJECT_COOLDOWN_MEDIUM_MINUTES", 30) or 30)
+            return ("medium", now_et + timedelta(minutes=max(15, min(60, minutes))))
+
+        short_tokens = (
+            "no premarket bars",
+            "no intraday bars",
+            "insufficient bars",
+            "quote unavailable",
+            "no latest stock price",
+        )
+        if any(token in text for token in short_tokens):
+            minutes = int(getattr(config, "REJECT_COOLDOWN_SHORT_MINUTES", 3) or 3)
+            return ("short", now_et + timedelta(minutes=max(1, min(5, minutes))))
+
+        return None
+
+    def _active_reject_cooldown(self, symbol: str, now_et: datetime) -> dict[str, Any] | None:
+        key = str(symbol or "").upper()
+        if not key:
+            return None
+        item = self._reject_cooldowns.get(key)
+        if item is None:
+            return None
+        until = item.get("until")
+        if not isinstance(until, datetime) or until <= now_et:
+            self._reject_cooldowns.pop(key, None)
+            return None
+        return item
+
+    def _record_reject(self, failed: list[dict[str, str]], symbol: str, reason: str, now_et: datetime) -> None:
+        failed.append({"symbol": symbol, "reason": reason})
+        cooldown = self._cooldown_for_reject(reason, now_et)
+        if cooldown is None:
+            return
+        bucket, until = cooldown
+        self._reject_cooldowns[str(symbol or "").upper()] = {
+            "bucket": bucket,
+            "until": until,
+            "reason": reason,
+        }
+
+    def _clear_reject_cooldown(self, symbol: str) -> None:
+        self._reject_cooldowns.pop(str(symbol or "").upper(), None)
 
     def build_watchlist(self) -> list[str]:
         base = list(config.CORE_TICKERS)
@@ -860,23 +950,36 @@ class IntradayScanner:
 
         for symbol in watchlist:
             try:
-                if _is_obvious_junk_symbol(symbol):
-                    failed.append({"symbol": symbol, "reason": "universe rejected: junk/warrant-like symbol"})
-                    continue
-
-                latest_price = self.data_client.get_latest_stock_price(symbol)
-                if latest_price is None:
-                    failed.append({"symbol": symbol, "reason": "universe rejected: no latest stock price"})
-                    continue
-                if latest_price < float(config.MIN_SHARE_PRICE) or latest_price > float(config.MAX_SHARE_PRICE):
+                active_cd = self._active_reject_cooldown(symbol, now_et)
+                if active_cd is not None:
+                    until_et = active_cd["until"].astimezone(self.tz)
                     failed.append(
                         {
                             "symbol": symbol,
                             "reason": (
-                                f"universe rejected: price ${latest_price:.2f} outside "
-                                f"${float(config.MIN_SHARE_PRICE):.2f}-${float(config.MAX_SHARE_PRICE):.2f}"
+                                f"cooldown_skip:{active_cd['bucket']} until {until_et.strftime('%Y-%m-%d %H:%M %Z')}"
                             ),
                         }
+                    )
+                    continue
+
+                if _is_obvious_junk_symbol(symbol):
+                    self._record_reject(failed, symbol, "universe rejected: junk/warrant-like symbol", now_et)
+                    continue
+
+                latest_price = self.data_client.get_latest_stock_price(symbol)
+                if latest_price is None:
+                    self._record_reject(failed, symbol, "universe rejected: no latest stock price", now_et)
+                    continue
+                if latest_price < float(config.MIN_SHARE_PRICE) or latest_price > float(config.MAX_SHARE_PRICE):
+                    self._record_reject(
+                        failed,
+                        symbol,
+                        (
+                            f"universe rejected: price ${latest_price:.2f} outside "
+                            f"${float(config.MIN_SHARE_PRICE):.2f}-${float(config.MAX_SHARE_PRICE):.2f}"
+                        ),
+                        now_et,
                     )
                     continue
 
@@ -897,15 +1000,10 @@ class IntradayScanner:
                     )
                 if bars_df.empty:
                     no_bars_reason = "universe rejected: no premarket bars" if premarket_mode else "universe rejected: no intraday bars"
-                    failed.append({"symbol": symbol, "reason": no_bars_reason})
+                    self._record_reject(failed, symbol, no_bars_reason, now_et)
                     continue
                 if len(bars_df) < 2:
-                    failed.append(
-                        {
-                            "symbol": symbol,
-                            "reason": "universe rejected: insufficient bars (need >= 2)",
-                        }
-                    )
+                    self._record_reject(failed, symbol, "universe rejected: insufficient bars (need >= 2)", now_et)
                     continue
                 daily_df = self.data_client.get_stock_daily_bars(symbol, limit=config.SCAN_DAILY_BARS)
                 today_volume = float(bars_df["volume"].astype(float).sum())
@@ -919,7 +1017,7 @@ class IntradayScanner:
                     force_relaxed_rvol=premarket_mode,
                 )
                 if details.get("failed"):
-                    failed.append({"symbol": symbol, "reason": details["reason"]})
+                    self._record_reject(failed, symbol, details["reason"], now_et)
                 else:
                     profile_signals, rejected = _profile_signals_for_candidate(
                         base_signal=details,
@@ -933,11 +1031,11 @@ class IntradayScanner:
                             | _CORE_LIQUID_PROFILE_SYMBOLS
                         )
                         stage = "profile_miss" if symbol in _permissive_core else "setup_reject"
-                        failed.append(
-                            {
-                                "symbol": symbol,
-                                "reason": f"{stage}: no profile matched ({', '.join(rejected)})",
-                            }
+                        self._record_reject(
+                            failed,
+                            symbol,
+                            f"{stage}: no profile matched ({', '.join(rejected)})",
+                            now_et,
                         )
                     else:
                         for profile_signal in profile_signals:
@@ -946,8 +1044,9 @@ class IntradayScanner:
                                     f"{profile_signal.get('reason', '')} | Premarket prep"
                                 ).strip()
                             passed.append(profile_signal)
+                        self._clear_reject_cooldown(symbol)
             except Exception as exc:  # noqa: BLE001
-                failed.append({"symbol": symbol, "reason": f"setup_reject: scan error: {exc}"})
+                self._record_reject(failed, symbol, f"setup_reject: scan error: {exc}", now_et)
             time.sleep(config.RATE_LIMIT_SLEEP_SECONDS)
 
         rvol_fail_count = sum(1 for item in failed if "rvol" in str(item.get("reason", "")).lower())
@@ -967,7 +1066,7 @@ class IntradayScanner:
                         force_relaxed_rvol=True,
                     )
                     if details.get("failed"):
-                        retry_failed.append({"symbol": symbol, "reason": details["reason"]})
+                        self._record_reject(retry_failed, symbol, details["reason"], now_et)
                     else:
                         profile_signals, rejected = _profile_signals_for_candidate(
                             base_signal=details,
@@ -981,11 +1080,11 @@ class IntradayScanner:
                                 | _CORE_LIQUID_PROFILE_SYMBOLS
                             )
                             stage = "profile_miss" if symbol in _permissive_core else "setup_reject"
-                            retry_failed.append(
-                                {
-                                    "symbol": symbol,
-                                    "reason": f"{stage}: no profile matched ({', '.join(rejected)})",
-                                }
+                            self._record_reject(
+                                retry_failed,
+                                symbol,
+                                f"{stage}: no profile matched ({', '.join(rejected)})",
+                                now_et,
                             )
                         else:
                             for profile_signal in profile_signals:
@@ -993,8 +1092,9 @@ class IntradayScanner:
                                     f"{profile_signal.get('reason', '')} | RVOL fail-open"
                                 ).strip()
                                 retry_passed.append(profile_signal)
+                            self._clear_reject_cooldown(symbol)
                 except Exception as exc:  # noqa: BLE001
-                    retry_failed.append({"symbol": symbol, "reason": f"setup_reject: scan error: {exc}"})
+                    self._record_reject(retry_failed, symbol, f"setup_reject: scan error: {exc}", now_et)
                 time.sleep(config.RATE_LIMIT_SLEEP_SECONDS)
             passed = retry_passed
             failed = retry_failed

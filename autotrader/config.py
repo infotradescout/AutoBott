@@ -231,6 +231,10 @@ MAX_FILL_SLIPPAGE_PCT     = 5.0
 ENABLE_OPENING_ENTRY_RELAX    = True
 OPENING_ENTRY_RELAX_MINUTES   = 7
 
+# Reject cooldowns (scanner control flow)
+REJECT_COOLDOWN_SHORT_MINUTES  = 3   # transient data issues: 1-5m range enforced in scanner
+REJECT_COOLDOWN_MEDIUM_MINUTES = 30  # tradability/chain issues: 15-60m range enforced in scanner
+
 
 # ---------------------------------------------------------------------------
 # Catalyst mode
