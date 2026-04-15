@@ -222,6 +222,32 @@ def _clock_hhmm_to_minutes(hhmm: str) -> int:
     return (hour * 60) + minute
 
 
+def _scan_fail_stage(reason: Any) -> str:
+    text = str(reason or "").strip().lower()
+    if text.startswith("cooldown_skip:"):
+        return "cooldown_skip"
+    if text.startswith("hard_block:"):
+        return "hard_block"
+    if text.startswith("universe_reject:") or text.startswith("universe rejected"):
+        return "universe_reject"
+    if text.startswith("setup_reject:") or text.startswith("setup rejected"):
+        return "setup_reject"
+    if text.startswith("execution_reject:"):
+        return "execution_reject"
+    if text.startswith("profile_miss:"):
+        return "profile_miss"
+    return "other_fail"
+
+
+def _latest_scan_loop_rows(limit: int = 500) -> tuple[str, list[dict[str, Any]]]:
+    rows = _read_csv_rows(SCAN_LOG_CSV, limit=max(50, int(limit)), reverse=True)
+    if not rows:
+        return "", []
+    last_ts = str(rows[0].get("timestamp", "") or "")
+    loop_rows = [r for r in rows if str(r.get("timestamp", "") or "") == last_ts]
+    return last_ts, loop_rows
+
+
 def _fetch_snapshots(symbols: list[str]) -> dict[str, dict[str, Any]]:
     if not symbols:
         return {}
@@ -2123,35 +2149,62 @@ def api_trades():
 @app.get("/api/scanlog")
 def api_scanlog():
     try:
-        today = _now_et().date()
-        rows = _read_csv_rows(SCAN_LOG_CSV, limit=5000, reverse=True)
+        _last_ts, rows = _latest_scan_loop_rows(limit=1000)
         passed: list[dict[str, Any]] = []
         for row in rows:
             if str(row.get("result", "")).lower() != "pass":
                 continue
-            dt = _parse_ts(str(row.get("timestamp", "")))
-            if dt is not None and dt.date() != today:
-                continue
             passed.append(row)
-            if len(passed) >= 30:
-                break
-        return jsonify(passed)
+
+        # Keep one final state row per symbol in this loop.
+        deduped: list[dict[str, Any]] = []
+        seen: set[str] = set()
+        for row in passed:
+            symbol = str(row.get("symbol", "") or "").upper()
+            if not symbol or symbol in seen:
+                continue
+            seen.add(symbol)
+            deduped.append(row)
+
+        deduped.sort(
+            key=lambda item: (
+                float(_safe_float(item.get("signal_score"), 0.0)),
+                float(_safe_float(item.get("rvol"), 0.0)),
+            ),
+            reverse=True,
+        )
+        for row in deduped:
+            row["stage"] = "setup_pass"
+            row["final_state"] = "setup_pass"
+        return jsonify(deduped[:30])
     except Exception as exc:  # noqa: BLE001
         return jsonify({"error": str(exc)}), 500
 
 
 @app.route("/api/scanfails")
 def api_scanfails():
-    """Return the last 20 scan failures from scan_log.csv."""
+    """Return latest-loop final scan failures with stage labels."""
     try:
-        rows = _read_csv_rows(SCAN_LOG_CSV, limit=200, reverse=True)
+        _last_ts, rows = _latest_scan_loop_rows(limit=1000)
         fails = [r for r in rows if str(r.get("result", "")).lower() == "fail"]
         out: list[dict[str, Any]] = []
-        for row in fails[:20]:
+        deduped: list[dict[str, Any]] = []
+        seen: set[str] = set()
+        for row in fails:
+            symbol = str(row.get("symbol", "") or "").upper()
+            key = symbol or f"__row_{len(seen)}"
+            if key in seen:
+                continue
+            seen.add(key)
+            deduped.append(row)
+
+        for row in deduped[:20]:
             ts_raw = str(row.get("timestamp", "") or "")
             ts_dt = _parse_ts(ts_raw)
             patched = dict(row)
             patched["timestamp"] = _to_ct_label(ts_dt) or ts_raw
+            patched["stage"] = _scan_fail_stage(patched.get("reason", ""))
+            patched["final_state"] = "setup_reject"
             out.append(patched)
         return jsonify(out)
     except Exception as exc:  # noqa: BLE001
@@ -2160,21 +2213,52 @@ def api_scanfails():
 
 @app.route("/api/scansummary")
 def api_scansummary():
-    """Return counts and most common failure reason from the last scan loop."""
+    """Return stage-aware counts and reasons from the latest scan loop."""
     try:
-        rows = _read_csv_rows(SCAN_LOG_CSV, limit=200, reverse=True)
-        if not rows:
-            return jsonify({"pass_count": 0, "fail_count": 0, "top_reason": "No scan data yet", "last_scan": ""})
+        last_ts, same_loop = _latest_scan_loop_rows(limit=1000)
+        if not same_loop:
+            return jsonify(
+                {
+                    "universe_candidates": 0,
+                    "setup_passed_count": 0,
+                    "rejected_count": 0,
+                    "entry_eligible_count": 0,
+                    "stage_fail_counts": {},
+                    "top_fail_reason": "No scan data yet",
+                    "last_scan": "",
+                }
+            )
 
-        last_ts = rows[0].get("timestamp", "") if rows else ""
-        same_loop = [r for r in rows if r.get("timestamp") == last_ts]
-        pass_count = sum(1 for r in same_loop if r.get("result") == "pass")
-        fail_count = sum(1 for r in same_loop if r.get("result") == "fail")
-        reasons = [r.get("reason", "") for r in same_loop if r.get("result") == "fail"]
+        pass_rows = [r for r in same_loop if str(r.get("result", "") or "").lower() == "pass"]
+        fail_rows = [r for r in same_loop if str(r.get("result", "") or "").lower() == "fail"]
+        pass_count = len(pass_rows)
+        fail_count = len(fail_rows)
+        reasons = [str(r.get("reason", "") or "") for r in fail_rows]
         top_reason = max(set(reasons), key=reasons.count) if reasons else ""
+
+        stage_fail_counts: dict[str, int] = {}
+        for row in fail_rows:
+            stage = _scan_fail_stage(row.get("reason", ""))
+            stage_fail_counts[stage] = stage_fail_counts.get(stage, 0) + 1
+
+        stage_pipeline = {
+            "stage1_universe_candidates": len(same_loop),
+            "stage2_direction_passed": pass_count,
+            "stage3_setup_passed": pass_count,
+            # Entry eligibility is downstream of scanner in this code path.
+            "stage4_entry_eligible": pass_count,
+        }
 
         return jsonify(
             {
+                "universe_candidates": len(same_loop),
+                "setup_passed_count": pass_count,
+                "rejected_count": fail_count,
+                "entry_eligible_count": pass_count,
+                "stage_pipeline": stage_pipeline,
+                "stage_fail_counts": stage_fail_counts,
+                "top_fail_reason": top_reason,
+                # Backward-compatible aliases for existing clients.
                 "pass_count": pass_count,
                 "fail_count": fail_count,
                 "top_reason": top_reason,
@@ -4056,10 +4140,10 @@ def home():
       <div class="label">SCANNER STATUS</div>
       <div id="scan-summary">Loading...</div>
       <div style="margin-top:10px; font-size:12px; color:#888">
-        Last failures (up to 20):
+        Current loop final rejects (up to 20):
       </div>
       <table id="scan-fails-table">
-        <thead><tr><th>Time</th><th>Symbol</th><th>Reason</th></tr></thead>
+        <thead><tr><th>Time</th><th>Symbol</th><th>Stage</th><th>Reason</th></tr></thead>
         <tbody id="scan-fails-body"></tbody>
       </table>
     </div>
@@ -4115,7 +4199,7 @@ def home():
     </div>
 
     <div class="card section">
-      <h3>SCANNER - Last Passing Signals</h3>
+      <h3>SCANNER - Current Loop Final Setup Passes</h3>
       <div id="scan-wrap" class="muted">Loading...</div>
     </div>
 
@@ -4337,7 +4421,7 @@ def home():
       const el = document.getElementById("scan-wrap");
       if (!Array.isArray(data)) { el.textContent = "—"; return; }
       const slice = data.slice(0, 10);
-      if (slice.length === 0) { el.textContent = "No passing scan signals yet"; return; }
+      if (slice.length === 0) { el.textContent = "No final setup passes in latest scan loop"; return; }
       if (isMobileView()) {
         const cards = slice.map(s => `
           <div class="mobile-item">
@@ -4350,6 +4434,7 @@ def home():
               <div><span class="mobile-k">RVOL</span> <span class="mobile-v">${s.rvol || "-"}</span></div>
               <div><span class="mobile-k">RSI</span> <span class="mobile-v">${s.rsi || "-"}</span></div>
               <div><span class="mobile-k">IVR</span> <span class="mobile-v">${s.iv_rank || "-"}</span></div>
+              <div><span class="mobile-k">State</span> <span class="mobile-v">${s.final_state || "setup_pass"}</span></div>
               <div><span class="mobile-k">Reason</span> <span class="mobile-v">${s.reason || "-"}</span></div>
             </div>
           </div>
@@ -4365,9 +4450,10 @@ def home():
           <td>${s.rvol || "-"}</td>
           <td>${s.rsi || "-"}</td>
           <td>${s.iv_rank || "-"}</td>
+          <td>${s.final_state || "setup_pass"}</td>
           <td>${s.reason || "-"}</td>
         </tr>`).join("");
-      el.innerHTML = `<table><thead><tr><th>Time</th><th>Symbol</th><th>Dir</th><th>RVOL</th><th>RSI</th><th>IVR %</th><th>Reason</th></tr></thead><tbody>${rows}</tbody></table>`;
+      el.innerHTML = `<table><thead><tr><th>Time</th><th>Symbol</th><th>Dir</th><th>RVOL</th><th>RSI</th><th>IVR %</th><th>Final State</th><th>Reason</th></tr></thead><tbody>${rows}</tbody></table>`;
     }
 
     function reviewBadge(status) {
@@ -4892,14 +4978,31 @@ def home():
       const sumEl = document.getElementById("scan-summary");
       if (sumEl) {
         if (scansummary && !scansummary.error) {
-          const color = scansummary.pass_count > 0 ? "#00c853" : "#ff9800";
+          const setupPassed = Number(scansummary.setup_passed_count ?? scansummary.pass_count ?? 0);
+          const rejected = Number(scansummary.rejected_count ?? scansummary.fail_count ?? 0);
+          const candidates = Number(scansummary.universe_candidates ?? (setupPassed + rejected));
+          const entryEligible = Number(scansummary.entry_eligible_count ?? setupPassed);
+          const color = setupPassed > 0 ? "#00c853" : "#ff9800";
+          const stageFailCounts = scansummary.stage_fail_counts && typeof scansummary.stage_fail_counts === "object"
+            ? scansummary.stage_fail_counts
+            : {};
+          const stageFailText = Object.entries(stageFailCounts)
+            .sort((a, b) => Number(b[1]) - Number(a[1]))
+            .slice(0, 4)
+            .map(([k, v]) => `${k}: ${v}`)
+            .join(" | ");
           sumEl.innerHTML = `
-              <span style="color:${color}">✓ ${scansummary.pass_count} passed</span>
+              <span style="color:${color}">✓ Setup Passed: ${setupPassed}</span>
               &nbsp;|&nbsp;
-              <span style="color:#888">${scansummary.fail_count} failed</span>
+              <span style="color:#888">Rejected: ${rejected}</span>
+              &nbsp;|&nbsp;
+              <span style="color:#888">Universe Candidates: ${candidates}</span>
+              &nbsp;|&nbsp;
+              <span style="color:#888">Entry Eligible (proxy): ${entryEligible}</span>
               &nbsp;|&nbsp;
               Last: ${scansummary.last_scan || "—"}
-              <br><small style="color:#888">Top reason: ${scansummary.top_reason || "—"}</small>
+              <br><small style="color:#888">Top fail reason: ${scansummary.top_fail_reason || scansummary.top_reason || "—"}</small>
+              <br><small style="color:#888">Stage rejects: ${stageFailText || "—"}</small>
           `;
         } else {
           sumEl.textContent = "No scan data yet";
@@ -4915,6 +5018,7 @@ def home():
           row.innerHTML = `
               <td>${(f.timestamp || "").slice(11,16)}</td>
               <td>${f.symbol || ""}</td>
+              <td style="color:#8db8ff; font-size:11px">${f.stage || "setup_reject"}</td>
               <td style="color:#888; font-size:11px">${f.reason || ""}</td>
           `;
           failsBody.appendChild(row);
