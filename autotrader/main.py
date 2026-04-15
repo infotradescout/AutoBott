@@ -23,7 +23,7 @@ from risk import (
     is_at_or_after,
     position_matches_ticker,
 )
-from scanner import initialize_scanner, run_observation_phase, run_scan, set_catalyst_mode
+from scanner import initialize_scanner, log_universe_rejects, run_observation_phase, run_scan, set_catalyst_mode
 from state_store import load_bot_state, save_bot_state
 from trading_control import load_trading_control
 
@@ -383,6 +383,28 @@ def _detect_catalyst_event(
 
 
 def _build_scan_universe(data_client: AlpacaDataClient) -> list[str]:
+    def _is_junk_symbol(symbol: str) -> tuple[bool, str]:
+        sym = str(symbol or "").upper().strip()
+        if not sym:
+            return True, "empty_symbol"
+        if len(sym) > 8:
+            return True, "symbol_too_long"
+        if re.search(r"(WARRANT|RIGHT|UNIT)", sym):
+            return True, "warrant_right_unit_tag"
+        if re.search(r"(?:[./-](?:WS|WT|W|U|R))$", sym):
+            return True, "spac_suffix_pattern"
+        if re.search(r"(?:WS|WT)$", sym):
+            return True, "warrant_suffix_pattern"
+        return False, ""
+
+    def _asset_class(asset_payload: dict) -> str:
+        return str(
+            asset_payload.get("class")
+            or asset_payload.get("asset_class")
+            or asset_payload.get("type")
+            or ""
+        ).lower()
+
     base = [str(sym).upper() for sym in config.TICKERS if str(sym).strip()]
     core = [str(sym).upper() for sym in config.CORE_TICKERS if str(sym).strip()]
     base = list(dict.fromkeys(base + core))
@@ -395,6 +417,59 @@ def _build_scan_universe(data_client: AlpacaDataClient) -> list[str]:
         except Exception as exc:  # noqa: BLE001
             print(f"[{ts()}] Universe expansion skipped (movers unavailable): {exc}")
     deduped = list(dict.fromkeys(combined))
+    universe_rejects: list[dict[str, str]] = []
+    qualified: list[str] = []
+    min_price = float(getattr(config, "MIN_SHARE_PRICE", 10) or 10)
+    min_bars = max(1, int(getattr(config, "SCAN_MIN_BARS", 5) or 5))
+    now_et = datetime.now(pytz.timezone(config.EASTERN_TZ))
+    for sym in deduped:
+        is_junk, junk_reason = _is_junk_symbol(sym)
+        if is_junk:
+            universe_rejects.append({"symbol": sym, "reason": f"junk_symbol:{junk_reason}"})
+            continue
+        try:
+            price = data_client.get_latest_stock_price(sym)
+            if price is None or float(price) < min_price:
+                shown = 0.0 if price is None else float(price)
+                universe_rejects.append(
+                    {"symbol": sym, "reason": f"universe_price_floor:{shown:.2f}<{min_price:.2f}"}
+                )
+                continue
+            asset = data_client.get_asset(sym)
+            asset_obj = asset if isinstance(asset, dict) else {}
+            asset_class = _asset_class(asset_obj)
+            if asset_class and asset_class != "us_equity":
+                universe_rejects.append({"symbol": sym, "reason": f"asset_class_not_common:{asset_class}"})
+                continue
+            if not bool(asset_obj.get("tradable", True)):
+                universe_rejects.append({"symbol": sym, "reason": "asset_not_tradable"})
+                continue
+            if not bool(asset_obj.get("options_enabled", False)):
+                universe_rejects.append({"symbol": sym, "reason": "options_not_enabled"})
+                continue
+            bars_df = data_client.get_intraday_bars_since_open(
+                symbol=sym,
+                now_et=now_et,
+                limit=max(min_bars, 8),
+                bar_timeframe="1Min",
+            )
+            if bars_df is None or bars_df.empty:
+                universe_rejects.append({"symbol": sym, "reason": "universe_no_intraday_bars"})
+                continue
+            if len(bars_df) < min_bars:
+                universe_rejects.append(
+                    {"symbol": sym, "reason": f"universe_insufficient_bars:{len(bars_df)}/{min_bars}"}
+                )
+                continue
+            qualified.append(sym)
+        except Exception as exc:  # noqa: BLE001
+            universe_rejects.append({"symbol": sym, "reason": f"universe_prefilter_error:{type(exc).__name__}"})
+        time.sleep(config.RATE_LIMIT_SLEEP_SECONDS)
+
+    if universe_rejects:
+        log_universe_rejects(universe_rejects, now_et=now_et)
+
+    deduped = list(dict.fromkeys(qualified))
     max_tickers = max(1, int(config.UNIVERSE_MAX_TICKERS))
     return deduped[:max_tickers]
 

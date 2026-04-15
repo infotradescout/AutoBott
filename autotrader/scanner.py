@@ -109,6 +109,42 @@ def _scan_failure(reason: str) -> dict[str, Any]:
     return {"failed": True, "reason": reason}
 
 
+def log_universe_rejects(
+    rejects: list[dict[str, str]],
+    *,
+    now_et: datetime | None = None,
+) -> None:
+    if not rejects:
+        return
+    import csv
+
+    stamp = now_et or datetime.now(pytz.timezone(config.EASTERN_TZ))
+    write_header = not SCAN_LOG_PATH.exists()
+    with SCAN_LOG_PATH.open("a", newline="", encoding="utf-8") as f:
+        writer = csv.DictWriter(f, fieldnames=SCAN_LOG_COLUMNS)
+        if write_header:
+            writer.writeheader()
+        ts_str = stamp.strftime("%Y-%m-%d %H:%M:%S %Z")
+        for item in rejects:
+            writer.writerow(
+                {
+                    "timestamp": ts_str,
+                    "symbol": str(item.get("symbol", "") or ""),
+                    "result": "universe_reject",
+                    "direction": "",
+                    "rvol": "",
+                    "rsi": "",
+                    "roc": "",
+                    "iv_rank": "",
+                    "regime_score": "",
+                    "signal_score": "",
+                    "flow_score": "",
+                    "htf_reason": "",
+                    "reason": str(item.get("reason", "") or "universe prefilter"),
+                }
+            )
+
+
 def set_catalyst_mode(active: bool, reason: str = "") -> None:
     global _CATALYST_MODE_ACTIVE, _CATALYST_MODE_REASON
     _CATALYST_MODE_ACTIVE = bool(active)

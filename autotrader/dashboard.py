@@ -1919,6 +1919,26 @@ def api_scanfails():
             ts_raw = str(row.get("timestamp", "") or "")
             ts_dt = _parse_ts(ts_raw)
             patched = dict(row)
+            patched["reject_class"] = "scan_reject"
+            patched["timestamp"] = _to_ct_label(ts_dt) or ts_raw
+            out.append(patched)
+        return jsonify(out)
+    except Exception as exc:  # noqa: BLE001
+        return jsonify({"error": str(exc)}), 500
+
+
+@app.route("/api/universerejects")
+def api_universerejects():
+    """Return the last 20 universe prefilter rejects from scan_log.csv."""
+    try:
+        rows = _read_csv_rows(SCAN_LOG_CSV, limit=400, reverse=True)
+        rejects = [r for r in rows if str(r.get("result", "")).lower() == "universe_reject"]
+        out: list[dict[str, Any]] = []
+        for row in rejects[:20]:
+            ts_raw = str(row.get("timestamp", "") or "")
+            ts_dt = _parse_ts(ts_raw)
+            patched = dict(row)
+            patched["reject_class"] = "universe_reject"
             patched["timestamp"] = _to_ct_label(ts_dt) or ts_raw
             out.append(patched)
         return jsonify(out)
@@ -1932,20 +1952,40 @@ def api_scansummary():
     try:
         rows = _read_csv_rows(SCAN_LOG_CSV, limit=200, reverse=True)
         if not rows:
-            return jsonify({"pass_count": 0, "fail_count": 0, "top_reason": "No scan data yet", "last_scan": ""})
+            return jsonify(
+                {
+                    "pass_count": 0,
+                    "fail_count": 0,
+                    "scan_reject_count": 0,
+                    "universe_reject_count": 0,
+                    "top_reason": "No scan data yet",
+                    "top_scan_reason": "",
+                    "top_universe_reason": "",
+                    "last_scan": "",
+                }
+            )
 
         last_ts = rows[0].get("timestamp", "") if rows else ""
         same_loop = [r for r in rows if r.get("timestamp") == last_ts]
-        pass_count = sum(1 for r in same_loop if r.get("result") == "pass")
-        fail_count = sum(1 for r in same_loop if r.get("result") == "fail")
-        reasons = [r.get("reason", "") for r in same_loop if r.get("result") == "fail"]
-        top_reason = max(set(reasons), key=reasons.count) if reasons else ""
+        pass_count = sum(1 for r in same_loop if str(r.get("result", "")).lower() == "pass")
+        scan_fail_count = sum(1 for r in same_loop if str(r.get("result", "")).lower() == "fail")
+        universe_reject_count = sum(1 for r in same_loop if str(r.get("result", "")).lower() == "universe_reject")
+        scan_reasons = [r.get("reason", "") for r in same_loop if str(r.get("result", "")).lower() == "fail"]
+        universe_reasons = [
+            r.get("reason", "") for r in same_loop if str(r.get("result", "")).lower() == "universe_reject"
+        ]
+        top_reason = max(set(scan_reasons), key=scan_reasons.count) if scan_reasons else ""
+        top_universe_reason = max(set(universe_reasons), key=universe_reasons.count) if universe_reasons else ""
 
         return jsonify(
             {
                 "pass_count": pass_count,
-                "fail_count": fail_count,
+                "fail_count": scan_fail_count,
+                "scan_reject_count": scan_fail_count,
+                "universe_reject_count": universe_reject_count,
                 "top_reason": top_reason,
+                "top_scan_reason": top_reason,
+                "top_universe_reason": top_universe_reason,
                 "last_scan": _to_ct_label(_parse_ts(str(last_ts))) or str(last_ts),
             }
         )
@@ -4664,10 +4704,13 @@ def home():
           sumEl.innerHTML = `
               <span style="color:${color}">✓ ${scansummary.pass_count} passed</span>
               &nbsp;|&nbsp;
-              <span style="color:#888">${scansummary.fail_count} failed</span>
+              <span style="color:#888">${scansummary.scan_reject_count ?? scansummary.fail_count} scan rejects</span>
+              &nbsp;|&nbsp;
+              <span style="color:#888">${scansummary.universe_reject_count || 0} universe rejects</span>
               &nbsp;|&nbsp;
               Last: ${scansummary.last_scan || "—"}
-              <br><small style="color:#888">Top reason: ${scansummary.top_reason || "—"}</small>
+              <br><small style="color:#888">Top scan reason: ${scansummary.top_scan_reason || scansummary.top_reason || "—"}</small>
+              <br><small style="color:#888">Top universe reason: ${scansummary.top_universe_reason || "—"}</small>
           `;
         } else {
           sumEl.textContent = "No scan data yet";
