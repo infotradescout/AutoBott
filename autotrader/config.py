@@ -141,8 +141,8 @@ STOP_LOSS_USD          = 12.0   # exit if unrealized P&L is <= -$12 per trade
 STOP_LOSS_PCT          = 0.03   # legacy fallback reference for older state/debug fields
 
 # Immediate winner lock: exit as soon as gain reaches this fraction.
-# 1.0 = +100% (option price doubled from entry).
-IMMEDIATE_TAKE_PROFIT_PCT = 1.0
+# Small-win mode default: 0.12 = +12%.
+IMMEDIATE_TAKE_PROFIT_PCT = 0.12
 
 # Fixed profit target (disabled — trailing stop rides winners instead)
 ENABLE_FIXED_PROFIT_TARGET = False
