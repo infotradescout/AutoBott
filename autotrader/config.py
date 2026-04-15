@@ -67,7 +67,7 @@ CORE_TICKERS = [
 ]
 
 AUTO_EXPAND_UNIVERSE_WITH_MOVERS = True
-UNIVERSE_MOVER_TOP                = 100
+UNIVERSE_MOVER_TOP                = 50
 UNIVERSE_MAX_TICKERS              = 300
 SCREENER_TOP_N                    = 20
 MOVER_SYMBOLS_PER_SIDE            = 10

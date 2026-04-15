@@ -558,17 +558,30 @@ class AlpacaDataClient:
         return {"bid": None, "ask": None}
 
     def get_top_movers(self, top: int = 20) -> tuple[list[str], list[str]]:
-        params = {"top": top, "market_type": "stocks"}
-        resp = self.data_session.get(
-            f"{self.data_base_url}/v1beta1/screener/stocks/movers",
-            params=params,
-            timeout=15,
-        )
-        resp.raise_for_status()
-        body = resp.json()
-        gainers = [item.get("symbol", "") for item in body.get("gainers", []) if item.get("symbol")]
-        losers = [item.get("symbol", "") for item in body.get("losers", []) if item.get("symbol")]
-        return gainers, losers
+        # Alpaca's movers endpoint takes market_type in the URL path, not query params.
+        # Also cap "top" to avoid 400s on unsupported large values.
+        capped_top = max(1, min(int(top or 20), 50))
+        endpoint = f"{self.data_base_url}/v1beta1/screener/stocks/movers"
+
+        last_exc: Exception | None = None
+        for params in ({"top": capped_top}, {}):
+            try:
+                resp = self.data_session.get(
+                    endpoint,
+                    params=params,
+                    timeout=15,
+                )
+                resp.raise_for_status()
+                body = resp.json()
+                gainers = [item.get("symbol", "") for item in body.get("gainers", []) if item.get("symbol")]
+                losers = [item.get("symbol", "") for item in body.get("losers", []) if item.get("symbol")]
+                return gainers, losers
+            except Exception as exc:  # noqa: BLE001
+                last_exc = exc
+
+        if last_exc is not None:
+            raise last_exc
+        return [], []
 
     def get_asset(self, symbol: str) -> dict[str, Any]:
         resp = self.trade_session.get(f"{self.base_url}/v2/assets/{symbol}", timeout=15)
