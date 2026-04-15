@@ -183,6 +183,7 @@ def _runtime_entry_max_quote_spread_pct(
     now_et: datetime,
     *,
     strategy_profile: str | None = None,
+    spread_override_pct: float | None = None,
 ) -> float:
     base = float(getattr(config, "ENTRY_MAX_QUOTE_SPREAD_PCT", getattr(config, "MAX_OPTION_SPREAD_PCT", 30.0)))
     opening_base = float(getattr(config, "OPENING_ENTRY_MAX_QUOTE_SPREAD_PCT", base))
@@ -196,6 +197,12 @@ def _runtime_entry_max_quote_spread_pct(
 
     if bool(getattr(config, "ENABLE_OPENING_ENTRY_RELAX", False)) and minutes_since_open <= int(getattr(config, "OPENING_ENTRY_RELAX_MINUTES", 0) or 0):
         base = max(base, opening_base)
+
+    if spread_override_pct is not None:
+        try:
+            return max(1.0, float(spread_override_pct))
+        except (TypeError, ValueError):
+            pass
 
     if not is_enabled("FEATURE_STRATEGY_PROFILES", False):
         return base
@@ -237,13 +244,18 @@ def _entry_quote_spread_gate(
     entry_quote: dict[str, float | None],
     now_et: datetime,
     strategy_profile: str | None = None,
+    spread_override_pct: float | None = None,
 ) -> tuple[bool, str]:
     ask_price = float(entry_quote.get("ask") or 0.0)
     if ask_price <= 0:
         return False, f"no option ask for {option_symbol}"
 
     spread_pct = float(entry_quote.get("spread_pct") or 0.0)
-    max_spread_pct = _runtime_entry_max_quote_spread_pct(now_et, strategy_profile=strategy_profile)
+    max_spread_pct = _runtime_entry_max_quote_spread_pct(
+        now_et,
+        strategy_profile=strategy_profile,
+        spread_override_pct=spread_override_pct,
+    )
     if spread_pct > max_spread_pct:
         return False, f"live spread {spread_pct:.2f}% > max {max_spread_pct:.2f}%"
 
@@ -698,6 +710,7 @@ def _hydrate_missing_position_meta(open_trade_meta: dict[str, dict], option_posi
         open_trade_meta[symbol] = {
             "timestamp": ts(now_et),
             "entry_time_iso": now_et.isoformat(),
+            "strategy_profile": "hydrated_external",
             "ticker": ticker,
             "direction": direction,
             "option_symbol": symbol,
@@ -707,7 +720,10 @@ def _hydrate_missing_position_meta(open_trade_meta: dict[str, dict], option_posi
             "entry_price": entry_price,
             "stop_floor_plpc": -float(config.STOP_LOSS_PCT),
             "stop_loss_usd": float(getattr(config, "STOP_LOSS_USD", 10.0)),
+            "immediate_take_profit_pct": float(getattr(config, "IMMEDIATE_TAKE_PROFIT_PCT", 1.0) or 1.0),
+            "max_hold_minutes": int(getattr(config, "MAX_HOLD_MINUTES", 90) or 90),
             "max_plpc": 0.0,
+            "min_plpc": 0.0,
             "inferred": True,
         }
         hydrated += 1
@@ -1242,6 +1258,7 @@ def main():
             open_trade_meta[option_symbol] = {
                 "timestamp": ts(now_et),
                 "entry_time_iso": now_et.isoformat(),
+                "strategy_profile": "reversal_snapback",
                 "ticker": ticker,
                 "direction": direction,
                 "option_symbol": option_symbol,
@@ -1267,6 +1284,8 @@ def main():
                 "entry_attempts": entry_result.get("attempts", 0),
                 "stop_floor_plpc": -float(config.STOP_LOSS_PCT),
                 "stop_loss_usd": _runtime_stop_loss_usd(),
+                "immediate_take_profit_pct": float(getattr(config, "IMMEDIATE_TAKE_PROFIT_PCT", 1.0) or 1.0),
+                "max_hold_minutes": int(getattr(config, "MAX_HOLD_MINUTES", 90) or 90),
                 "max_plpc": 0.0,
                 "min_plpc": 0.0,
             }
@@ -1897,10 +1916,15 @@ def main():
         entry_min_signal_score = _runtime_entry_min_signal_score()
         if signals:
             before = len(signals)
-            signals = [s for s in signals if float(s.get("signal_score", 0) or 0) >= entry_min_signal_score]
+            filtered_signals: list[dict] = []
+            for s in signals:
+                floor = float(s.get("profile_min_signal_score", entry_min_signal_score) or entry_min_signal_score)
+                if float(s.get("signal_score", 0) or 0) >= floor:
+                    filtered_signals.append(s)
+            signals = filtered_signals
             if before != len(signals):
                 print(
-                    f"[{ts(now_et)}] Entry signal-score gate {entry_min_signal_score:.2f} "
+                    f"[{ts(now_et)}] Entry signal-score gate (runtime floor {entry_min_signal_score:.2f}) "
                     f"filtered signals {before}->{len(signals)} (profile={strategy_profile})."
                 )
 
@@ -2135,7 +2159,22 @@ def main():
                 continue
 
             try:
-                print(f"[{ts(now_et)}] {ticker}: scanner signal={direction}. {signal.get('reason', '')}")
+                print(
+                    f"[{ts(now_et)}] {ticker}: scanner signal={direction} "
+                    f"profile={str(signal.get('strategy_profile', 'generic') or 'generic')}. "
+                    f"{signal.get('reason', '')}"
+                )
+                signal_strategy_profile = str(signal.get("strategy_profile", "") or "generic")
+                signal_entry_max_spread = signal.get("entry_max_quote_spread_pct")
+                signal_stop_loss_usd = float(signal.get("stop_loss_usd", _runtime_stop_loss_usd()) or _runtime_stop_loss_usd())
+                signal_take_profit_pct = float(
+                    signal.get("immediate_take_profit_pct", getattr(config, "IMMEDIATE_TAKE_PROFIT_PCT", 1.0))
+                    or getattr(config, "IMMEDIATE_TAKE_PROFIT_PCT", 1.0)
+                )
+                signal_max_hold_minutes = int(
+                    signal.get("max_hold_minutes", getattr(config, "MAX_HOLD_MINUTES", 90))
+                    or getattr(config, "MAX_HOLD_MINUTES", 90)
+                )
 
                 stock_price = data_client.get_latest_stock_price(ticker)
                 if stock_price is None:
@@ -2171,6 +2210,7 @@ def main():
                     entry_quote=entry_quote,
                     now_et=now_et,
                     strategy_profile=strategy_profile,
+                    spread_override_pct=signal_entry_max_spread,
                 )
                 if not spread_ok:
                     _mark_skip("quote_spread_too_wide" if "spread" in spread_reason else "no_option_ask")
@@ -2188,6 +2228,7 @@ def main():
                         entry_quote=retry_quote,
                         now_et=now_et,
                         strategy_profile=strategy_profile,
+                        spread_override_pct=signal_entry_max_spread,
                     )
                     retry_ask = float(retry_quote.get("ask") or 0.0)
                     if retry_ok and retry_ask > 0:
@@ -2265,6 +2306,7 @@ def main():
                 open_trade_meta[option_symbol] = {
                     "timestamp": ts(now_et),
                     "entry_time_iso": now_et.isoformat(),
+                    "strategy_profile": signal_strategy_profile,
                     "ticker": ticker,
                     "direction": direction,
                     "option_symbol": option_symbol,
@@ -2289,7 +2331,9 @@ def main():
                     "entry_fill_seconds": entry_result.get("fill_seconds"),
                     "entry_attempts": entry_result.get("attempts", 0),
                     "stop_floor_plpc": -float(config.STOP_LOSS_PCT),
-                    "stop_loss_usd": _runtime_stop_loss_usd(),
+                    "stop_loss_usd": signal_stop_loss_usd,
+                    "immediate_take_profit_pct": signal_take_profit_pct,
+                    "max_hold_minutes": signal_max_hold_minutes,
                     "max_plpc": 0.0,
                     "min_plpc": 0.0,
                 }
@@ -2416,12 +2460,15 @@ def main():
             if exit_reason is None and should_force_same_day_exit(entry_time, now_et):
                 exit_reason = "overnight_forced_close"
             # Rule 1: fixed-dollar stop loss
-            stop_loss_usd_cap = _runtime_stop_loss_usd()
+            stop_loss_usd_cap = float(meta.get("stop_loss_usd", _runtime_stop_loss_usd()) or _runtime_stop_loss_usd())
             if exit_reason is None and should_trigger_stop_loss(unrealized_usd, stop_loss_usd_cap):
                 exit_reason = "stop_loss"
 
             # Rule 2: immediate take-profit once the option has doubled (or configured threshold).
-            immediate_take_profit_pct = float(getattr(config, "IMMEDIATE_TAKE_PROFIT_PCT", 1.0) or 1.0)
+            immediate_take_profit_pct = float(
+                meta.get("immediate_take_profit_pct", getattr(config, "IMMEDIATE_TAKE_PROFIT_PCT", 1.0))
+                or getattr(config, "IMMEDIATE_TAKE_PROFIT_PCT", 1.0)
+            )
             if exit_reason is None and plpc >= immediate_take_profit_pct:
                 exit_reason = "immediate_take_profit"
 
@@ -2506,7 +2553,8 @@ def main():
             if exit_reason is None:
                 if entry_time is not None:
                     held_minutes = int((now_et - entry_time).total_seconds() // 60)
-                    if held_minutes >= int(config.MAX_HOLD_MINUTES):
+                    max_hold_minutes = int(meta.get("max_hold_minutes", config.MAX_HOLD_MINUTES) or config.MAX_HOLD_MINUTES)
+                    if held_minutes >= max_hold_minutes:
                         exit_reason = "time_stop"
 
             if exit_reason:
@@ -2593,6 +2641,7 @@ def main():
                             "date": now_et.date().isoformat(),
                             "ticker": meta.get("ticker", ""),
                             "direction": meta.get("direction", ""),
+                            "strategy_profile": meta.get("strategy_profile", ""),
                             "option_symbol": symbol,
                             "strike": meta.get("strike", ""),
                             "expiry": meta.get("expiry", ""),

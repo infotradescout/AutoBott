@@ -14,6 +14,7 @@ import pytz
 
 import config
 from data import AlpacaDataClient
+from intraday_profiles import PROFILES, enrich_signal_for_profile, is_profile_window_open
 from risk import is_at_or_after
 
 _DEFAULT_SCANNER: "IntradayScanner | None" = None
@@ -23,6 +24,7 @@ SCAN_LOG_PATH = Path(config.SCAN_LOG_CSV_PATH)
 SCAN_LOG_COLUMNS = [
     "timestamp",
     "symbol",
+    "strategy_profile",
     "result",
     "direction",
     "rvol",
@@ -107,6 +109,100 @@ def calculate_rvol(symbol: str, today_volume: float, daily_bars_df: pd.DataFrame
 
 def _scan_failure(reason: str) -> dict[str, Any]:
     return {"failed": True, "reason": reason}
+
+
+def _ensure_scan_log_header() -> None:
+    if not SCAN_LOG_PATH.exists():
+        return
+    try:
+        import csv
+
+        with SCAN_LOG_PATH.open("r", newline="", encoding="utf-8") as f:
+            reader = csv.DictReader(f)
+            existing_columns = list(reader.fieldnames or [])
+            rows = list(reader)
+        if existing_columns == SCAN_LOG_COLUMNS:
+            return
+        with SCAN_LOG_PATH.open("w", newline="", encoding="utf-8") as f:
+            writer = csv.DictWriter(f, fieldnames=SCAN_LOG_COLUMNS)
+            writer.writeheader()
+            for row in rows:
+                payload = {key: row.get(key, "") for key in SCAN_LOG_COLUMNS}
+                writer.writerow(payload)
+    except Exception as exc:  # noqa: BLE001
+        print(f"[scanner] scan log header migration failed: {exc}")
+
+
+def _profile_signals_for_candidate(
+    *,
+    base_signal: dict[str, Any],
+    bars_df: pd.DataFrame,
+    now_et: datetime,
+    catalyst_mode_active: bool,
+) -> tuple[list[dict[str, Any]], list[str]]:
+    symbol = str(base_signal.get("symbol", "") or "").upper()
+    rvol = float(base_signal.get("rvol", 0.0) or 0.0)
+    roc = float(base_signal.get("roc", 0.0) or 0.0)
+    signal_score = float(base_signal.get("signal_score", 0.0) or 0.0)
+    direction = str(base_signal.get("direction", "") or "").lower()
+    price = float(base_signal.get("price", 0.0) or 0.0)
+    vwap = float(base_signal.get("vwap", 0.0) or 0.0)
+
+    closes = bars_df["close"].astype(float)
+    last2_roc = 0.0
+    if len(closes) >= 3:
+        prev2 = float(closes.iloc[-3] or 0.0)
+        curr = float(closes.iloc[-1] or 0.0)
+        if prev2 != 0:
+            last2_roc = ((curr - prev2) / prev2) * 100.0
+    distance_from_vwap_pct = 0.0
+    if vwap > 0:
+        distance_from_vwap_pct = abs(price - vwap) / vwap * 100.0
+
+    passed: list[dict[str, Any]] = []
+    rejected: list[str] = []
+    for profile in sorted(PROFILES.values(), key=lambda p: int(p.priority)):
+        if symbol not in set(profile.symbols):
+            rejected.append(f"{profile.name}:symbol")
+            continue
+        if not is_profile_window_open(now_et, profile):
+            rejected.append(f"{profile.name}:time")
+            continue
+        if signal_score < float(profile.min_signal_score):
+            rejected.append(f"{profile.name}:score")
+            continue
+
+        profile_ok = False
+        profile_reason = ""
+        if profile.name == "open_drive_momentum":
+            profile_ok = rvol >= 1.10 and abs(roc) >= 0.12 and distance_from_vwap_pct >= 0.06
+            profile_reason = "open-drive momentum gate"
+        elif profile.name == "vwap_continuation":
+            profile_ok = 0.06 <= distance_from_vwap_pct <= 0.70 and rvol >= 0.80 and abs(roc) >= 0.05
+            profile_reason = "vwap continuation gate"
+        elif profile.name == "reversal_snapback":
+            if distance_from_vwap_pct >= 0.35 and abs(last2_roc) >= 0.18:
+                if price > vwap and last2_roc < 0:
+                    base_signal = dict(base_signal)
+                    base_signal["direction"] = "put"
+                elif price < vwap and last2_roc > 0:
+                    base_signal = dict(base_signal)
+                    base_signal["direction"] = "call"
+                profile_ok = base_signal.get("direction") in ("call", "put")
+            profile_reason = "reversal snapback gate"
+        elif profile.name == "catalyst_impulse":
+            profile_ok = (catalyst_mode_active and rvol >= 0.70) or (rvol >= 1.60 and abs(roc) >= 0.20)
+            profile_reason = "catalyst impulse gate"
+
+        if not profile_ok:
+            rejected.append(f"{profile.name}:logic")
+            continue
+
+        enriched = enrich_signal_for_profile(base_signal, profile)
+        enriched["reason"] = f"{enriched.get('reason', '')} | {profile_reason}".strip()
+        passed.append(enriched)
+
+    return passed, rejected
 
 
 def set_catalyst_mode(active: bool, reason: str = "") -> None:
@@ -707,9 +803,26 @@ class IntradayScanner:
                 if details.get("failed"):
                     failed.append({"symbol": symbol, "reason": details["reason"]})
                 else:
-                    if premarket_mode:
-                        details["reason"] = f"{details.get('reason', '')} | Premarket prep".strip()
-                    passed.append(details)
+                    profile_signals, rejected = _profile_signals_for_candidate(
+                        base_signal=details,
+                        bars_df=bars_df,
+                        now_et=now_et,
+                        catalyst_mode_active=_CATALYST_MODE_ACTIVE,
+                    )
+                    if not profile_signals:
+                        failed.append(
+                            {
+                                "symbol": symbol,
+                                "reason": f"no profile matched ({', '.join(rejected)})",
+                            }
+                        )
+                    else:
+                        for profile_signal in profile_signals:
+                            if premarket_mode:
+                                profile_signal["reason"] = (
+                                    f"{profile_signal.get('reason', '')} | Premarket prep"
+                                ).strip()
+                            passed.append(profile_signal)
             except Exception as exc:  # noqa: BLE001
                 failed.append({"symbol": symbol, "reason": f"scan error: {exc}"})
             time.sleep(config.RATE_LIMIT_SLEEP_SECONDS)
@@ -733,13 +846,51 @@ class IntradayScanner:
                     if details.get("failed"):
                         retry_failed.append({"symbol": symbol, "reason": details["reason"]})
                     else:
-                        details["reason"] = f"{details.get('reason', '')} | RVOL fail-open".strip()
-                        retry_passed.append(details)
+                        profile_signals, rejected = _profile_signals_for_candidate(
+                            base_signal=details,
+                            bars_df=bars_df,
+                            now_et=now_et,
+                            catalyst_mode_active=_CATALYST_MODE_ACTIVE,
+                        )
+                        if not profile_signals:
+                            retry_failed.append(
+                                {
+                                    "symbol": symbol,
+                                    "reason": f"no profile matched ({', '.join(rejected)})",
+                                }
+                            )
+                        else:
+                            for profile_signal in profile_signals:
+                                profile_signal["reason"] = (
+                                    f"{profile_signal.get('reason', '')} | RVOL fail-open"
+                                ).strip()
+                                retry_passed.append(profile_signal)
                 except Exception as exc:  # noqa: BLE001
                     retry_failed.append({"symbol": symbol, "reason": f"scan error: {exc}"})
                 time.sleep(config.RATE_LIMIT_SLEEP_SECONDS)
             passed = retry_passed
             failed = retry_failed
+
+        by_symbol: dict[str, dict[str, Any]] = {}
+        for item in passed:
+            symbol = str(item.get("symbol", "") or "")
+            current = by_symbol.get(symbol)
+            if current is None:
+                by_symbol[symbol] = item
+                continue
+            left = (
+                float(item.get("signal_score", 0.0) or 0.0),
+                -int(item.get("profile_priority", 99) or 99),
+                float(item.get("rvol", 0.0) or 0.0),
+            )
+            right = (
+                float(current.get("signal_score", 0.0) or 0.0),
+                -int(current.get("profile_priority", 99) or 99),
+                float(current.get("rvol", 0.0) or 0.0),
+            )
+            if left > right:
+                by_symbol[symbol] = item
+        passed = list(by_symbol.values())
 
         if premarket_mode:
             passed.sort(
@@ -750,7 +901,13 @@ class IntradayScanner:
                 reverse=True,
             )
         else:
-            passed.sort(key=lambda item: float(item["rvol"]), reverse=True)
+            passed.sort(
+                key=lambda item: (
+                    float(item.get("signal_score", 0.0) or 0.0),
+                    float(item.get("rvol", 0.0) or 0.0),
+                ),
+                reverse=True,
+            )
         self.last_failures = failed
         if failopen_triggered:
             print(f"[{now_et.strftime('%H:%M ET')}] RVOL fail-open engaged: widespread low RVOL detected.")
@@ -762,7 +919,8 @@ class IntradayScanner:
         for item in passed:
             vwap_side = "Above VWAP" if item["direction"] == "call" else "Below VWAP"
             print(
-                f"  + {item['symbol']:<5} | {item['direction'].upper():<4} | RVOL {item['rvol']:.1f}x | "
+                f"  + {item['symbol']:<5} | {str(item.get('strategy_profile', 'base')):<18} | "
+                f"{item['direction'].upper():<4} | RVOL {item['rvol']:.1f}x | "
                 f"RSI {item['rsi']:.0f} | ROC {item['roc']:+.1f}% | IVR {item['iv_rank']:.0f}% | {vwap_side}"
             )
         for item in failed[:8]:
@@ -772,6 +930,7 @@ class IntradayScanner:
     def _write_scan_log(self, now_et: datetime, passed: list[dict], failed: list[dict[str, str]]) -> None:
         import csv
 
+        _ensure_scan_log_header()
         write_header = not SCAN_LOG_PATH.exists()
         with SCAN_LOG_PATH.open("a", newline="", encoding="utf-8") as f:
             writer = csv.DictWriter(f, fieldnames=SCAN_LOG_COLUMNS)
@@ -783,6 +942,7 @@ class IntradayScanner:
                     {
                         "timestamp": ts_str,
                         "symbol": item["symbol"],
+                        "strategy_profile": item.get("strategy_profile", ""),
                         "result": "pass",
                         "direction": item.get("direction", ""),
                         "rvol": item.get("rvol", ""),
@@ -801,6 +961,7 @@ class IntradayScanner:
                     {
                         "timestamp": ts_str,
                         "symbol": item["symbol"],
+                        "strategy_profile": "",
                         "result": "fail",
                         "direction": "",
                         "rvol": "",

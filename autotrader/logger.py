@@ -14,6 +14,7 @@ class TradeLogger:
         "date",
         "ticker",
         "direction",
+        "strategy_profile",
         "option_symbol",
         "strike",
         "expiry",
