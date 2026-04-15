@@ -874,7 +874,7 @@ def _entry_confirmation_passes(
 
         one_bar_move_pct = ((last_close - prev_close) / prev_close) * 100.0
         two_bar_move_pct = ((last_close - two_bar_ref) / two_bar_ref) * 100.0
-        momentum_threshold_pct = 0.06
+        momentum_threshold_pct = float(getattr(config, "ENTRY_CONFIRM_MOMENTUM_THRESHOLD_PCT", 0.06) or 0.06)
 
         if direction == "call":
             return (
@@ -2989,6 +2989,15 @@ def main():
                     reentries_used = int(ticker_reentries_used.get(ticker, 0)) if ticker else 0
                     if ticker and trade_pnl_usd < 0:
                         loss_cd_minutes = int(getattr(config, "REENTRY_COOLDOWN_LOSS_MINUTES", 20) or 20)
+                        quick_loser_minutes = int(
+                            getattr(config, "QUICK_LOSER_MAX_HOLD_MINUTES", 4) or 4
+                        )
+                        quick_loser_cooldown = int(
+                            getattr(config, "QUICK_LOSER_REENTRY_COOLDOWN_MINUTES", 45) or 45
+                        )
+                        held_minutes_for_loss = max(0.0, hold_seconds / 60.0)
+                        if held_minutes_for_loss <= float(quick_loser_minutes):
+                            loss_cd_minutes = max(loss_cd_minutes, quick_loser_cooldown)
                         if str(exit_reason).lower() == "stop_loss":
                             loss_cd_minutes = int(
                                 getattr(config, "STOP_LOSS_REENTRY_COOLDOWN_MINUTES", loss_cd_minutes)
@@ -3000,7 +3009,11 @@ def main():
                             minutes=loss_cd_minutes,
                             reason=str(exit_reason),
                         )
-                    if ticker and exit_reason == "stop_loss":
+                    if (
+                        ticker
+                        and exit_reason == "stop_loss"
+                        and bool(getattr(config, "ENABLE_STOPLOSS_REVERSAL_REENTRY", False))
+                    ):
                         ticker_reentry_armed[ticker] = True
                         prior_direction = str(meta.get("direction", "") or "").lower()
                         if prior_direction == "call":
@@ -3030,6 +3043,7 @@ def main():
                         and remaining_qty <= 0
                         and ticker
                         and reversal_direction in ("call", "put")
+                        and bool(getattr(config, "ENABLE_STOPLOSS_REVERSAL_REENTRY", False))
                     ):
                         cd_until = _active_ticker_loss_cooldown_until(ticker, now_et)
                         if cd_until is None:

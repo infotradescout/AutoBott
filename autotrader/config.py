@@ -298,7 +298,8 @@ VIX_MAX                    = 80.0
 
 ENABLE_ENTRY_CONFIRMATION              = True
 ENTRY_CONFIRM_BARS                     = 2
-ENTRY_CONFIRM_BYPASS_MIN_SIGNAL_SCORE  = 7.5
+ENTRY_CONFIRM_BYPASS_MIN_SIGNAL_SCORE  = 8.5
+ENTRY_CONFIRM_MOMENTUM_THRESHOLD_PCT   = 0.10
 
 
 # ---------------------------------------------------------------------------
@@ -343,8 +344,16 @@ EARNINGS_SKIP_SYMBOLS    = ("SPY", "QQQ", "IWM", "DIA", "VIX", "^VIX")
 # Re-entry
 # ---------------------------------------------------------------------------
 
-MAX_ENTRIES_PER_TICKER_PER_DAY = 3
+MAX_ENTRIES_PER_TICKER_PER_DAY = 2
 MAX_REENTRIES_PER_TICKER = 1
+
+# Hard churn-kill: quick losers get a longer cooldown to avoid repeated tuition
+# on the same tape. Applies only when realized loss and short hold-time are both true.
+QUICK_LOSER_MAX_HOLD_MINUTES         = 4
+QUICK_LOSER_REENTRY_COOLDOWN_MINUTES = 45
+
+# Optional reversal entry after stop-loss. Disable by default to reduce churn.
+ENABLE_STOPLOSS_REVERSAL_REENTRY = False
 
 
 # ---------------------------------------------------------------------------
