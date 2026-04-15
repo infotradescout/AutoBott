@@ -112,12 +112,35 @@ def calculate_rvol(symbol: str, today_volume: float, daily_bars_df: pd.DataFrame
     return float(today_volume / scaled)
 
 
-def _scan_failure(reason: str, *, stage: str = "setup rejected") -> dict[str, Any]:
+_STAGE_PREFIXES = frozenset({
+    "hard_block",
+    "universe_reject",
+    "universe rejected",  # legacy spelling from run_scan callers
+    "setup_reject",
+    "setup rejected",     # legacy spelling
+    "execution_reject",
+    "profile_miss",
+})
+
+
+def _scan_failure(reason: str, *, stage: str = "setup_reject") -> dict[str, Any]:
+    """Build a failure dict with a hierarchical stage label.
+
+    Stages (from highest to lowest severity):
+      hard_block       — earnings window, no data, price range, junk symbol
+      universe_reject  — upstream checks before bar fetch (set by run_scan callers)
+      setup_reject     — signal quality (RSI, ROC, ATR, score, VWAP movement)
+      execution_reject — HTF trend, order flow
+      profile_miss     — no named or generic profile matched
+    """
     text = str(reason or "").strip()
     if not text:
         text = "unknown"
-    if ":" in text and text.split(":", 1)[0].strip().endswith("rejected"):
-        return {"failed": True, "reason": text}
+    # Pass through already-labelled strings unchanged.
+    if ":" in text:
+        prefix = text.split(":", 1)[0].strip()
+        if prefix in _STAGE_PREFIXES:
+            return {"failed": True, "reason": text}
     return {"failed": True, "reason": f"{stage}: {text}"}
 
 
@@ -165,6 +188,21 @@ def _profile_signals_for_candidate(
     now_et: datetime,
     catalyst_mode_active: bool,
 ) -> tuple[list[dict[str, Any]], list[str]]:
+    """Evaluate all named profiles then fall back to generic continuation.
+
+    Architecture:
+      1. Named profiles (priority 1-4): tried in order.  A name matches if
+         (a) symbol is eligible, (b) time window is open, (c) score gate passes,
+         (d) profile logic passes.  Symbol eligibility tolerates empty-symbols
+         tuples (universal) and always accepts permissive_core names.
+      2. generic_intraday_continuation (priority 5): fires for permissive_core
+         names ONLY when no named profile matched.  It is the safety net so that
+         liquid names are *never* rejected solely because the named profiles do
+         not fit.
+
+    Returns (passed_list, rejected_reasons).  passed_list will contain at most
+    one entry per profile (the best one is selected upstream in run_scan).
+    """
     symbol = str(base_signal.get("symbol", "") or "").upper()
     rvol = float(base_signal.get("rvol", 0.0) or 0.0)
     roc = float(base_signal.get("roc", 0.0) or 0.0)
@@ -184,17 +222,29 @@ def _profile_signals_for_candidate(
     if vwap > 0:
         distance_from_vwap_pct = abs(price - vwap) / vwap * 100.0
 
+    permissive_core = set(str(s).upper() for s in getattr(config, "CORE_TICKERS", [])) | _CORE_LIQUID_PROFILE_SYMBOLS
+    is_core = symbol in permissive_core
+
     passed: list[dict[str, Any]] = []
     rejected: list[str] = []
-    permissive_core = set(str(s).upper() for s in getattr(config, "CORE_TICKERS", [])) | _CORE_LIQUID_PROFILE_SYMBOLS
-    for profile in sorted(PROFILES.values(), key=lambda p: int(p.priority)):
+
+    # ── Named profiles (priority 1-4) ─────────────────────────────────────
+    named_profiles = sorted(
+        (p for p in PROFILES.values() if p.name != "generic_intraday_continuation"),
+        key=lambda p: int(p.priority),
+    )
+    for profile in named_profiles:
         profile_symbols = set(profile.symbols)
-        if symbol not in profile_symbols and symbol not in permissive_core:
+        # Symbol gate: empty symbols = universal; core names bypass symbol list.
+        if profile_symbols and symbol not in profile_symbols and not is_core:
             rejected.append(f"{profile.name}:symbol")
             continue
+        # Time gate: hard-block non-core names outside window;
+        # for core names, a closed time window is a soft skip (tried next profile).
         if not is_profile_window_open(now_et, profile):
             rejected.append(f"{profile.name}:time")
             continue
+        # Score gate
         if signal_score < float(profile.min_signal_score):
             rejected.append(f"{profile.name}:score")
             continue
@@ -203,10 +253,10 @@ def _profile_signals_for_candidate(
         profile_reason = ""
         if profile.name == "open_drive_momentum":
             profile_ok = rvol >= 0.70 and abs(roc) >= 0.06 and distance_from_vwap_pct >= 0.02
-            profile_reason = "open-drive momentum gate"
+            profile_reason = "open-drive momentum"
         elif profile.name == "vwap_continuation":
             profile_ok = distance_from_vwap_pct <= 1.20 and rvol >= 0.55 and abs(roc) >= 0.03
-            profile_reason = "vwap continuation gate"
+            profile_reason = "vwap continuation"
         elif profile.name == "reversal_snapback":
             if distance_from_vwap_pct >= 0.20 and abs(last2_roc) >= 0.10:
                 if price > vwap and last2_roc < 0:
@@ -216,10 +266,10 @@ def _profile_signals_for_candidate(
                     base_signal = dict(base_signal)
                     base_signal["direction"] = "call"
                 profile_ok = base_signal.get("direction") in ("call", "put")
-            profile_reason = "reversal snapback gate"
+            profile_reason = "reversal snapback"
         elif profile.name == "catalyst_impulse":
             profile_ok = (catalyst_mode_active and rvol >= 0.55) or (rvol >= 1.20 and abs(roc) >= 0.10)
-            profile_reason = "catalyst impulse gate"
+            profile_reason = "catalyst impulse"
 
         if not profile_ok:
             rejected.append(f"{profile.name}:logic")
@@ -228,6 +278,34 @@ def _profile_signals_for_candidate(
         enriched = enrich_signal_for_profile(base_signal, profile)
         enriched["reason"] = f"{enriched.get('reason', '')} | {profile_reason}".strip()
         passed.append(enriched)
+
+    # ── Generic fallback (priority 5) ─────────────────────────────────────
+    # Only fires for core/permissive names that matched nothing above.
+    # Criteria: price is directional (clear VWAP side + any ROC signal).
+    if not passed and is_core:
+        generic = PROFILES.get("generic_intraday_continuation")
+        if generic is not None:
+            generic_ok = False
+            generic_reason = ""
+            if signal_score >= float(generic.min_signal_score):
+                has_direction = direction in ("call", "put")
+                has_roc = abs(roc) >= 0.015  # any measurable momentum
+                has_vwap_side = distance_from_vwap_pct >= 0.01  # not pinned to VWAP
+                generic_ok = has_direction and (has_roc or has_vwap_side)
+                if generic_ok:
+                    generic_reason = (
+                        f"generic continuation | {direction.upper()} | "
+                        f"ROC {roc:+.2f}% | VWAP dist {distance_from_vwap_pct:.2f}%"
+                    )
+                else:
+                    rejected.append("generic_intraday_continuation:logic")
+            else:
+                rejected.append(f"generic_intraday_continuation:score({signal_score:.2f}<{generic.min_signal_score})")
+
+            if generic_ok:
+                enriched = enrich_signal_for_profile(base_signal, generic)
+                enriched["reason"] = f"{enriched.get('reason', '')} | {generic_reason}".strip()
+                passed.append(enriched)
 
     return passed, rejected
 
@@ -496,10 +574,10 @@ def _scan_ticker_details(
 
     try:
         if data_client.has_earnings_within_days(symbol, config.EARNINGS_LOOKAHEAD_DAYS, now_et=now_et):
-            return _scan_failure(f"earnings within {config.EARNINGS_LOOKAHEAD_DAYS} days")
+            return _scan_failure(f"earnings within {config.EARNINGS_LOOKAHEAD_DAYS} days", stage="hard_block")
     except Exception as exc:  # noqa: BLE001
         if config.EARNINGS_CHECK_STRICT:
-            return _scan_failure(f"earnings check failed: {exc}")
+            return _scan_failure(f"earnings check failed: {exc}", stage="hard_block")
 
     rvol = calculate_rvol(
         symbol=symbol,
@@ -574,18 +652,18 @@ def _scan_ticker_details(
     if config.ENABLE_HTF_CONFIRM:
         htf_ok, htf_reason = _htf_trend_confirmation(symbol=symbol, direction=direction, data_client=data_client)
         if not htf_ok:
-            return _scan_failure(f"HTF trend mismatch: {htf_reason}")
+            return _scan_failure(f"HTF trend mismatch: {htf_reason}", stage="execution_reject")
 
     flow_score: float | None = None
     if config.ENABLE_ORDER_FLOW_FILTER:
         flow_score = _order_flow_score(symbol=symbol, data_client=data_client)
         if flow_score is None:
-            return _scan_failure("order flow unavailable")
+            return _scan_failure("order flow unavailable", stage="execution_reject")
         threshold = float(config.MIN_FLOW_SCORE)
         if direction == "call" and flow_score < threshold:
-            return _scan_failure(f"order flow weak for call ({flow_score:+.2f})")
+            return _scan_failure(f"order flow weak for call ({flow_score:+.2f})", stage="execution_reject")
         if direction == "put" and flow_score > -threshold:
-            return _scan_failure(f"order flow weak for put ({flow_score:+.2f})")
+            return _scan_failure(f"order flow weak for put ({flow_score:+.2f})", stage="execution_reject")
 
     # ROC and EMA are already computed above in the direction vote block.
     # Re-use those values here for downstream filters and scoring.
@@ -849,10 +927,15 @@ class IntradayScanner:
                         catalyst_mode_active=_CATALYST_MODE_ACTIVE,
                     )
                     if not profile_signals:
+                        _permissive_core = (
+                            set(str(s).upper() for s in getattr(config, "CORE_TICKERS", []))
+                            | _CORE_LIQUID_PROFILE_SYMBOLS
+                        )
+                        stage = "profile_miss" if symbol in _permissive_core else "setup_reject"
                         failed.append(
                             {
                                 "symbol": symbol,
-                                "reason": f"setup rejected: no profile matched ({', '.join(rejected)})",
+                                "reason": f"{stage}: no profile matched ({', '.join(rejected)})",
                             }
                         )
                     else:
@@ -863,7 +946,7 @@ class IntradayScanner:
                                 ).strip()
                             passed.append(profile_signal)
             except Exception as exc:  # noqa: BLE001
-                failed.append({"symbol": symbol, "reason": f"setup rejected: scan error: {exc}"})
+                failed.append({"symbol": symbol, "reason": f"setup_reject: scan error: {exc}"})
             time.sleep(config.RATE_LIMIT_SLEEP_SECONDS)
 
         rvol_fail_count = sum(1 for item in failed if "rvol" in str(item.get("reason", "")).lower())
@@ -892,10 +975,15 @@ class IntradayScanner:
                             catalyst_mode_active=_CATALYST_MODE_ACTIVE,
                         )
                         if not profile_signals:
+                            _permissive_core = (
+                                set(str(s).upper() for s in getattr(config, "CORE_TICKERS", []))
+                                | _CORE_LIQUID_PROFILE_SYMBOLS
+                            )
+                            stage = "profile_miss" if symbol in _permissive_core else "setup_reject"
                             retry_failed.append(
                                 {
                                     "symbol": symbol,
-                                    "reason": f"setup rejected: no profile matched ({', '.join(rejected)})",
+                                    "reason": f"{stage}: no profile matched ({', '.join(rejected)})",
                                 }
                             )
                         else:
@@ -905,7 +993,7 @@ class IntradayScanner:
                                 ).strip()
                                 retry_passed.append(profile_signal)
                 except Exception as exc:  # noqa: BLE001
-                    retry_failed.append({"symbol": symbol, "reason": f"setup rejected: scan error: {exc}"})
+                    retry_failed.append({"symbol": symbol, "reason": f"setup_reject: scan error: {exc}"})
                 time.sleep(config.RATE_LIMIT_SLEEP_SECONDS)
             passed = retry_passed
             failed = retry_failed

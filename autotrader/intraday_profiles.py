@@ -70,6 +70,22 @@ PROFILES: dict[str, IntradayProfile] = {
         min_signal_score=4.0,
         priority=4,
     ),
+    # ── Fallback profile ────────────────────────────────────────────────────
+    # Catches core liquid names that don't match a named profile.
+    # symbols=() means universal — any symbol in permissive_core is eligible.
+    # Logic gate is evaluated inline in _profile_signals_for_candidate().
+    "generic_intraday_continuation": IntradayProfile(
+        name="generic_intraday_continuation",
+        window_start="09:30",
+        window_end="16:00",
+        symbols=(),          # universal — handled via permissive_core in scanner
+        entry_max_quote_spread_pct=22.0,
+        stop_loss_usd=12.0,
+        immediate_take_profit_pct=0.80,
+        max_hold_minutes=60,
+        min_signal_score=3.0,   # intentionally lower — this is the safety net
+        priority=5,             # lowest priority — only fires when named profiles miss
+    ),
 }
 
 
