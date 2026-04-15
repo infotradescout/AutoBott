@@ -16,8 +16,10 @@ import pytz
 import requests
 from flask import Flask, Response, jsonify, render_template_string, request
 
-import config
 from env_config import get_required_env, load_runtime_env
+
+load_runtime_env()
+import config
 from feature_flags import get_feature_flags_snapshot
 from feature_flags import is_enabled as feature_enabled
 from state_store import load_bot_state
@@ -29,8 +31,6 @@ from trading_control import (
     set_strategy_profile,
 )
 from watchlist_control import load_watchlist_control, update_watchlist_control
-
-load_runtime_env()
 
 API_KEY = get_required_env("ALPACA_API_KEY")
 SECRET_KEY = get_required_env("ALPACA_SECRET_KEY")

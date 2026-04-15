@@ -11,7 +11,6 @@ from pathlib import Path
 import math
 
 from env_config import get_required_env, load_runtime_env
-import config
 
 load_runtime_env()
 
@@ -40,6 +39,7 @@ def _force_writable_data_dir() -> None:
 
 
 _force_writable_data_dir()
+import config
 
 from alerts import AlertManager
 from broker import AlpacaBroker
