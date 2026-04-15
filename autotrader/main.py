@@ -2199,6 +2199,11 @@ def main():
             "watchlist_tickers": list(watchlist_control_state.get("tickers") or []),
             "scan_pass_count": len(signals),
             "signals_considered": 0,
+            "entry_stage4_eligible_count": 0,
+            "entry_stage4_reject_count": 0,
+            "entry_stage4_reject_reasons": {},
+            "entry_stage4_eligible_symbols": [],
+            "entry_stage4_rejected_symbols": [],
             "entry_orders_submitted": 0,
             "entries_filled": 0,
             "skips": {},
@@ -2211,6 +2216,32 @@ def main():
                 skips = {}
             skips[reason] = int(skips.get(reason, 0)) + 1
             entry_debug["skips"] = skips
+
+        def _mark_stage4_reject(*, reason: str, ticker: str) -> None:
+            reject_reasons = entry_debug.get("entry_stage4_reject_reasons", {})
+            if not isinstance(reject_reasons, dict):
+                reject_reasons = {}
+            reject_reasons[reason] = int(reject_reasons.get(reason, 0)) + 1
+            entry_debug["entry_stage4_reject_reasons"] = reject_reasons
+            entry_debug["entry_stage4_reject_count"] = int(entry_debug.get("entry_stage4_reject_count", 0)) + 1
+
+            rejected_symbols = entry_debug.get("entry_stage4_rejected_symbols", [])
+            if not isinstance(rejected_symbols, list):
+                rejected_symbols = []
+            symbol_upper = str(ticker or "").upper()
+            if symbol_upper and symbol_upper not in rejected_symbols:
+                rejected_symbols.append(symbol_upper)
+            entry_debug["entry_stage4_rejected_symbols"] = rejected_symbols
+
+        def _mark_stage4_eligible(*, ticker: str) -> None:
+            entry_debug["entry_stage4_eligible_count"] = int(entry_debug.get("entry_stage4_eligible_count", 0)) + 1
+            eligible_symbols = entry_debug.get("entry_stage4_eligible_symbols", [])
+            if not isinstance(eligible_symbols, list):
+                eligible_symbols = []
+            symbol_upper = str(ticker or "").upper()
+            if symbol_upper and symbol_upper not in eligible_symbols:
+                eligible_symbols.append(symbol_upper)
+            entry_debug["entry_stage4_eligible_symbols"] = eligible_symbols
 
         def _record_entry_exception(ticker: str, exc: Exception) -> None:
             exceptions = entry_debug.get("exceptions", [])
@@ -2291,29 +2322,35 @@ def main():
             direction = signal["direction"]
             if not _is_valid_long_direction(direction):
                 _mark_skip("invalid_strategy_direction")
+                _mark_stage4_reject(reason="invalid_strategy_direction", ticker=ticker)
                 print(f"[{ts(now_et)}] {ticker}: skip (invalid direction={direction!r}; only CALL/PUT allowed).")
                 continue
             if _is_bad_fill_blocked(ticker, now_et):
                 _mark_skip("bad_fill_cooldown")
+                _mark_stage4_reject(reason="bad_fill_cooldown", ticker=ticker)
                 print(f"[{ts(now_et)}] {ticker}: skip (bad-fill cooldown active).")
                 continue
             loss_cooldown_until = _active_ticker_loss_cooldown_until(ticker, now_et)
             if loss_cooldown_until is not None:
                 _mark_skip("ticker_loss_cooldown")
+                _mark_stage4_reject(reason="ticker_loss_cooldown", ticker=ticker)
                 print(
                     f"[{ts(now_et)}] {ticker}: skip (loss cooldown until {ts(loss_cooldown_until)})."
                 )
                 continue
             if not is_at_or_after(now_et, config.NO_NEW_TRADES_BEFORE):
                 _mark_skip("before_entry_window")
+                _mark_stage4_reject(reason="before_entry_window", ticker=ticker)
                 print(f"[{ts(now_et)}] Entry window not open yet (before {config.NO_NEW_TRADES_BEFORE} ET).")
                 break
             if is_at_or_after(now_et, config.NO_NEW_TRADES_AFTER):
                 _mark_skip("after_entry_window")
+                _mark_stage4_reject(reason="after_entry_window", ticker=ticker)
                 print(f"[{ts(now_et)}] Entry window closed (past {config.NO_NEW_TRADES_AFTER} ET).")
                 break
             if _is_entry_hour_blocked(now_et, strategy_profile=strategy_profile):
                 _mark_skip("blocked_entry_hour")
+                _mark_stage4_reject(reason="blocked_entry_hour", ticker=ticker)
                 print(f"[{ts(now_et)}] {ticker}: skip (hour {now_et.hour:02d}:00 ET blocked by config).")
                 continue
 
@@ -2327,14 +2364,17 @@ def main():
             )
             if has_ticker_position:
                 _mark_skip("existing_option_position")
+                _mark_stage4_reject(reason="existing_option_position", ticker=ticker)
                 print(f"[{ts(now_et)}] {ticker}: skip (existing option position).")
                 continue
             if _has_ticker_open_meta(ticker):
                 _mark_skip("existing_ticker_runtime_state")
+                _mark_stage4_reject(reason="existing_ticker_runtime_state", ticker=ticker)
                 print(f"[{ts(now_et)}] {ticker}: skip (already open in runtime state).")
                 continue
             if dry_run_enabled:
                 _mark_skip("dry_run_mode")
+                _mark_stage4_reject(reason="dry_run_mode", ticker=ticker)
                 print(
                     f"[{ts(now_et)}] DRY-RUN entry candidate: {ticker} {str(direction).upper()} "
                     f"score={float(signal.get('signal_score', 0) or 0):.2f} (no order submitted)."
@@ -2349,6 +2389,7 @@ def main():
             if prior_entries >= max_entries_per_ticker:
                 if not reentry_armed:
                     _mark_skip("max_entries_per_ticker_reached")
+                    _mark_stage4_reject(reason="max_entries_per_ticker_reached", ticker=ticker)
                     print(
                         f"[{ts(now_et)}] {ticker}: skip (max entries reached "
                         f"{prior_entries}/{max_entries_per_ticker}; no stop-loss re-entry armed)."
@@ -2357,6 +2398,7 @@ def main():
             if reentry_armed:
                 if reentries_used >= int(config.MAX_REENTRIES_PER_TICKER):
                     _mark_skip("max_reentries_used")
+                    _mark_stage4_reject(reason="max_reentries_used", ticker=ticker)
                     print(
                         f"[{ts(now_et)}] {ticker}: skip (max re-entries used "
                         f"{reentries_used}/{int(config.MAX_REENTRIES_PER_TICKER)})."
@@ -2364,6 +2406,7 @@ def main():
                     continue
                 if expected_direction in ("call", "put") and direction != expected_direction:
                     _mark_skip("waiting_for_reversal_signal")
+                    _mark_stage4_reject(reason="waiting_for_reversal_signal", ticker=ticker)
                     print(
                         f"[{ts(now_et)}] {ticker}: waiting for reversal signal "
                         f"({expected_direction.upper()}); got {direction.upper()}."
@@ -2383,6 +2426,7 @@ def main():
                     )
                 else:
                     _mark_skip("entry_confirmation_mismatch")
+                    _mark_stage4_reject(reason="entry_confirmation_mismatch", ticker=ticker)
                     print(f"[{ts(now_et)}] {ticker}: skip (entry confirmation candle not aligned).")
                     continue
 
@@ -2391,6 +2435,7 @@ def main():
             open_count = len(option_positions)
             if not can_open_new_positions(open_count, config.MAX_POSITIONS):
                 _mark_skip("max_positions_reached")
+                _mark_stage4_reject(reason="max_positions_reached", ticker=ticker)
                 print(f"[{ts(now_et)}] Max positions reached. Stopping new entries this loop.")
                 break
 
@@ -2415,6 +2460,7 @@ def main():
                         break
             if existing_qty_for_ticker > 0:
                 _mark_skip("ticker_position_already_open")
+                _mark_stage4_reject(reason="ticker_position_already_open", ticker=ticker)
                 print(
                     f"[{ts(now_et)}] {ticker}: skip (existing open position qty={existing_qty_for_ticker}; "
                     "one position per ticker.)"
@@ -2442,6 +2488,7 @@ def main():
                 stock_price = data_client.get_latest_stock_price(ticker)
                 if stock_price is None:
                     _mark_skip("no_stock_quote")
+                    _mark_stage4_reject(reason="no_stock_quote", ticker=ticker)
                     print(f"[{ts(now_et)}] {ticker}: skip (no stock quote).")
                     time.sleep(config.RATE_LIMIT_SLEEP_SECONDS)
                     continue
@@ -2455,6 +2502,7 @@ def main():
                 )
                 if not contract:
                     _mark_skip("no_eligible_option_contract")
+                    _mark_stage4_reject(reason="no_eligible_option_contract", ticker=ticker)
                     print(f"[{ts(now_et)}] {ticker}: skip (no eligible option contract: {contract_reason}).")
                     time.sleep(config.RATE_LIMIT_SLEEP_SECONDS)
                     continue
@@ -2462,6 +2510,7 @@ def main():
                 option_symbol = contract["symbol"]
                 if not _option_symbol_matches_direction(option_symbol, direction):
                     _mark_skip("contract_direction_mismatch")
+                    _mark_stage4_reject(reason="contract_direction_mismatch", ticker=ticker)
                     print(
                         f"[{ts(now_et)}] {ticker}: skip (contract direction mismatch "
                         f"{option_symbol} vs {direction.upper()})."
@@ -2476,7 +2525,9 @@ def main():
                     spread_override_pct=signal_entry_max_spread,
                 )
                 if not spread_ok:
-                    _mark_skip("quote_spread_too_wide" if "spread" in spread_reason else "no_option_ask")
+                    reject_reason = "quote_spread_too_wide" if "spread" in spread_reason else "no_option_ask"
+                    _mark_skip(reject_reason)
+                    _mark_stage4_reject(reason=reject_reason, ticker=ticker)
                     print(f"[{ts(now_et)}] {ticker}: skip ({spread_reason}).")
                     time.sleep(config.RATE_LIMIT_SLEEP_SECONDS)
                     continue
@@ -2499,12 +2550,15 @@ def main():
                         ask_price = retry_ask
                         pre_submit_slippage = _slippage_pct(initial_chain_ask, ask_price)
                     elif not retry_ok:
-                        _mark_skip("quote_spread_too_wide" if "spread" in retry_reason else "no_option_ask")
+                        reject_reason = "quote_spread_too_wide" if "spread" in retry_reason else "no_option_ask"
+                        _mark_skip(reject_reason)
+                        _mark_stage4_reject(reason=reject_reason, ticker=ticker)
                         print(f"[{ts(now_et)}] {ticker}: skip ({retry_reason}).")
                         time.sleep(config.RATE_LIMIT_SLEEP_SECONDS)
                         continue
                 if pre_submit_slippage > (config.MAX_ENTRY_SLIPPAGE_PCT * 3):
                     _mark_skip("entry_slippage_too_high")
+                    _mark_stage4_reject(reason="entry_slippage_too_high", ticker=ticker)
                     print(
                         f"[{ts(now_et)}] {ticker}: skip (entry slippage {pre_submit_slippage:.2f}% > "
                         f"hard cap {(config.MAX_ENTRY_SLIPPAGE_PCT * 3):.2f}%)."
@@ -2513,6 +2567,7 @@ def main():
                     continue
 
                 qty = 1
+                _mark_stage4_eligible(ticker=ticker)
                 entry_result = _execute_limit_entry(
                     broker=broker,
                     data_client=data_client,
@@ -2612,6 +2667,7 @@ def main():
                 time.sleep(config.RATE_LIMIT_SLEEP_SECONDS)
             except Exception as exc:  # noqa: BLE001
                 _mark_skip("entry_flow_exception")
+                _mark_stage4_reject(reason="entry_flow_exception", ticker=ticker)
                 _record_entry_exception(ticker, exc)
                 print(
                     f"[{ts(now_et)}] {ticker}: error during entry flow "

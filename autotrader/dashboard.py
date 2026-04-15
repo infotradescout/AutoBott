@@ -2245,18 +2245,50 @@ def api_scansummary():
             "stage1_universe_candidates": len(same_loop),
             "stage2_direction_passed": pass_count,
             "stage3_setup_passed": pass_count,
-            # Entry eligibility is downstream of scanner in this code path.
-            "stage4_entry_eligible": pass_count,
         }
+
+        runtime_state = load_bot_state()
+        last_entry_debug = runtime_state.get("last_entry_debug") if isinstance(runtime_state, dict) else {}
+        entry_loop_ts = str(last_entry_debug.get("loop_ts_et", "") or "") if isinstance(last_entry_debug, dict) else ""
+
+        entry_stage4_eligible_count = pass_count
+        entry_stage4_reject_count = 0
+        entry_stage4_reject_reasons: dict[str, int] = {}
+        entry_stage4_source = "proxy_scanner_pass"
+        entry_debug_fresh = False
+
+        scan_dt = _parse_ts(str(last_ts))
+        entry_dt = _parse_ts(entry_loop_ts)
+        if scan_dt is not None and entry_dt is not None:
+          entry_debug_fresh = abs((scan_dt - entry_dt).total_seconds()) <= 180
+
+        if entry_debug_fresh and isinstance(last_entry_debug, dict):
+          entry_stage4_eligible_count = int(_safe_float(last_entry_debug.get("entry_stage4_eligible_count"), 0))
+          entry_stage4_reject_count = int(_safe_float(last_entry_debug.get("entry_stage4_reject_count"), 0))
+          raw_reasons = last_entry_debug.get("entry_stage4_reject_reasons")
+          if isinstance(raw_reasons, dict):
+            for k, v in raw_reasons.items():
+              key = str(k or "").strip()
+              if not key:
+                continue
+              entry_stage4_reject_reasons[key] = int(_safe_float(v, 0))
+          entry_stage4_source = "runtime_entry_debug"
+
+        stage_pipeline["stage4_entry_eligible"] = entry_stage4_eligible_count
 
         return jsonify(
             {
                 "universe_candidates": len(same_loop),
                 "setup_passed_count": pass_count,
                 "rejected_count": fail_count,
-                "entry_eligible_count": pass_count,
+            "entry_eligible_count": entry_stage4_eligible_count,
+            "entry_rejected_count": entry_stage4_reject_count,
                 "stage_pipeline": stage_pipeline,
                 "stage_fail_counts": stage_fail_counts,
+            "stage4_entry_reject_reasons": entry_stage4_reject_reasons,
+            "entry_stage4_source": entry_stage4_source,
+            "entry_stage4_fresh": entry_debug_fresh,
+            "entry_stage4_loop_ts": _to_ct_label(entry_dt) if entry_dt else entry_loop_ts,
                 "top_fail_reason": top_reason,
                 # Backward-compatible aliases for existing clients.
                 "pass_count": pass_count,
@@ -4982,6 +5014,7 @@ def home():
           const rejected = Number(scansummary.rejected_count ?? scansummary.fail_count ?? 0);
           const candidates = Number(scansummary.universe_candidates ?? (setupPassed + rejected));
           const entryEligible = Number(scansummary.entry_eligible_count ?? setupPassed);
+          const entryRejected = Number(scansummary.entry_rejected_count ?? 0);
           const color = setupPassed > 0 ? "#00c853" : "#ff9800";
           const stageFailCounts = scansummary.stage_fail_counts && typeof scansummary.stage_fail_counts === "object"
             ? scansummary.stage_fail_counts
@@ -4991,6 +5024,16 @@ def home():
             .slice(0, 4)
             .map(([k, v]) => `${k}: ${v}`)
             .join(" | ");
+          const stage4RejectReasons = scansummary.stage4_entry_reject_reasons && typeof scansummary.stage4_entry_reject_reasons === "object"
+            ? scansummary.stage4_entry_reject_reasons
+            : {};
+          const stage4RejectText = Object.entries(stage4RejectReasons)
+            .sort((a, b) => Number(b[1]) - Number(a[1]))
+            .slice(0, 4)
+            .map(([k, v]) => `${k}: ${v}`)
+            .join(" | ");
+          const stage4Source = String(scansummary.entry_stage4_source || "proxy_scanner_pass");
+          const stage4Fresh = Boolean(scansummary.entry_stage4_fresh);
           sumEl.innerHTML = `
               <span style="color:${color}">✓ Setup Passed: ${setupPassed}</span>
               &nbsp;|&nbsp;
@@ -4998,11 +5041,15 @@ def home():
               &nbsp;|&nbsp;
               <span style="color:#888">Universe Candidates: ${candidates}</span>
               &nbsp;|&nbsp;
-              <span style="color:#888">Entry Eligible (proxy): ${entryEligible}</span>
+              <span style="color:#888">Entry Eligible: ${entryEligible}</span>
+              &nbsp;|&nbsp;
+              <span style="color:#888">Entry Rejected: ${entryRejected}</span>
               &nbsp;|&nbsp;
               Last: ${scansummary.last_scan || "—"}
               <br><small style="color:#888">Top fail reason: ${scansummary.top_fail_reason || scansummary.top_reason || "—"}</small>
               <br><small style="color:#888">Stage rejects: ${stageFailText || "—"}</small>
+              <br><small style="color:#888">Stage4 entry rejects: ${stage4RejectText || "—"}</small>
+              <br><small style="color:#888">Stage4 source: ${stage4Source}${stage4Fresh ? " (fresh)" : " (fallback/proxy)"}</small>
           `;
         } else {
           sumEl.textContent = "No scan data yet";
