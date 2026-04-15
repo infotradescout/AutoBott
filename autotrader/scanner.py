@@ -6,7 +6,7 @@ import math
 import time
 from datetime import date, datetime, timedelta
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 import numpy as np
 import pandas as pd
@@ -649,13 +649,23 @@ class IntradayScanner:
 
         return filtered
 
-    def run_scan(self, watchlist: list[str]) -> list[dict]:
+    def run_scan(
+        self,
+        watchlist: list[str],
+        *,
+        heartbeat_callback: Callable[[], None] | None = None,
+    ) -> list[dict]:
         now_et = datetime.now(self.tz)
         passed: list[dict] = []
         failed: list[dict[str, str]] = []
         cached_inputs: list[tuple[str, pd.DataFrame, pd.DataFrame, float]] = []
 
         for symbol in watchlist:
+            if heartbeat_callback is not None:
+                try:
+                    heartbeat_callback()
+                except Exception:
+                    pass
             try:
                 bars_df = self.data_client.get_intraday_bars_since_open(
                     symbol=symbol,
@@ -690,6 +700,11 @@ class IntradayScanner:
             retry_passed: list[dict] = []
             retry_failed: list[dict[str, str]] = []
             for symbol, bars_df, daily_df, today_volume in cached_inputs:
+                if heartbeat_callback is not None:
+                    try:
+                        heartbeat_callback()
+                    except Exception:
+                        pass
                 try:
                     details = _scan_ticker_details(
                         symbol=symbol,
@@ -790,10 +805,17 @@ def build_watchlist() -> list[str]:
     return _DEFAULT_SCANNER.build_watchlist()
 
 
-def run_scan(watchlist: list[str]) -> list[dict]:
+def run_scan(
+    watchlist: list[str],
+    *,
+    heartbeat_callback: Callable[[], None] | None = None,
+) -> list[dict]:
     if _DEFAULT_SCANNER is None:
         raise RuntimeError("Scanner not initialized. Call initialize_scanner(data_client) first.")
-    return _DEFAULT_SCANNER.run_scan(watchlist)
+    return _DEFAULT_SCANNER.run_scan(
+        watchlist,
+        heartbeat_callback=heartbeat_callback,
+    )
 
 
 def should_build_watchlist(now_et: datetime) -> bool:

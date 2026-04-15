@@ -1175,7 +1175,7 @@ def main():
             signals = []
         else:
             vix_block_notice = None
-            signals = run_scan(watchlist) if watchlist else []
+            signals = run_scan(watchlist, heartbeat_callback=_touch_heartbeat) if watchlist else []
 
         index_bias = _index_regime_bias(data_client, now_et)
         if index_bias in ("call", "put") and signals:
