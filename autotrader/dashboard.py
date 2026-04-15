@@ -147,6 +147,19 @@ def _parse_ts(value: str) -> datetime | None:
     return None
 
 
+def _parse_state_iso(value: Any) -> datetime | None:
+    raw = str(value or "").strip()
+    if not raw:
+        return None
+    try:
+        dt = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+        if dt.tzinfo is None:
+            return EASTERN.localize(dt)
+        return dt.astimezone(EASTERN)
+    except Exception:
+        return None
+
+
 def _today_trade_rows() -> list[dict[str, str]]:
     today = _now_et().date()
     rows = _read_csv_rows(TRADES_CSV, limit=5000, reverse=False)
@@ -909,6 +922,225 @@ def _synthesize_lisa_signals() -> dict[str, Any]:
 
     signals: list[dict[str, Any]] = []
     now_label = _now_et().strftime("%Y-%m-%d %H:%M:%S ET")
+    now_et = _now_et()
+
+    # Live scanner and runtime signal bridge for operational LISA packets.
+    scan_rows = _today_scan_rows()
+    scan_summary = _build_scan_report_summary(scan_rows)
+    top_passes = list(scan_summary.get("top_passes") or [])[:10]
+    top_fail_reasons = list(scan_summary.get("top_fail_reasons") or [])[:8]
+
+    pass_counts_by_symbol: dict[str, int] = {}
+    for row in scan_rows:
+        if str(row.get("result", "") or "").lower() != "pass":
+            continue
+        symbol = _scan_symbol(row)
+        if not symbol:
+            continue
+        pass_counts_by_symbol[symbol] = pass_counts_by_symbol.get(symbol, 0) + 1
+
+    for row in top_passes:
+        symbol = str(row.get("symbol", "") or "").upper()
+        if not symbol:
+            continue
+        pass_n = max(1, int(pass_counts_by_symbol.get(symbol, 1)))
+        score = _safe_float(row.get("signal_score"), 0.0)
+        rvol = _safe_float(row.get("rvol"), 0.0)
+        sev = _clamp((score / 12.0) + min(0.35, rvol / 8.0), 0.2, 0.85)
+        signals.append(
+            _build_knowledge_signal(
+                signal_type="scanner_pass_signal",
+                source_type="scanner_live",
+                symbol=symbol,
+                lane="market",
+                category="live_scanner_knowledge",
+                title=f"{symbol} live scanner pass",
+                summary=(
+                    f"{symbol} is actively passing scanner gates with signal score {score:.2f} and RVOL {rvol:.2f}x."
+                ),
+                evidence={"trades": pass_n, "last_seen": str(row.get("timestamp", "") or "")},
+                metrics={
+                    "signal_score": score,
+                    "rvol": rvol,
+                    "direction": str(row.get("direction", "") or "").upper(),
+                },
+                recommended_action="scanner_pass_signal",
+                tags=["scanner", "pass", "live"],
+                severity_score=sev,
+                time_scope={"window": "today_live", "as_of": now_label},
+                published_keys=published_keys,
+            )
+        )
+
+    fail_rows: list[dict[str, Any]] = []
+    for row in scan_rows:
+        if str(row.get("result", "") or "").lower() == "fail":
+            fail_rows.append(row)
+
+    for row in top_fail_reasons:
+        reason = str(row.get("reason", "") or "unknown")
+        count = max(1, int(_safe_float(row.get("count"), 1)))
+        sev = _clamp((count / 12.0), 0.2, 0.95)
+        signals.append(
+            _build_knowledge_signal(
+                signal_type="scanner_fail_signal",
+                source_type="scanner_live",
+                symbol="ALL",
+                lane="market",
+                category="live_scanner_knowledge",
+                title=f"Top scanner fail reason: {reason}",
+                summary=f"Scanner rejects are currently concentrated on '{reason}'.",
+                evidence={"trades": count},
+                metrics={"fail_count": count, "reason": reason},
+                recommended_action="scanner_fail_signal",
+                tags=["scanner", "fail", "live"],
+                severity_score=sev,
+                time_scope={"window": "today_live", "as_of": now_label},
+                published_keys=published_keys,
+            )
+        )
+
+    hard_block_symbol_counts: dict[str, int] = {}
+    hard_block_reason_counts: dict[str, int] = {}
+    cooldown_symbol_counts: dict[str, int] = {}
+
+    for row in fail_rows:
+        symbol = _scan_symbol(row)
+        reason = str(row.get("reason", "") or "")
+        reason_l = reason.lower()
+
+        if reason_l.startswith("cooldown_skip:"):
+            if symbol:
+                cooldown_symbol_counts[symbol] = cooldown_symbol_counts.get(symbol, 0) + 1
+            continue
+
+        if reason_l.startswith("hard_block:") or reason_l.startswith("universe rejected"):
+            if symbol:
+                hard_block_symbol_counts[symbol] = hard_block_symbol_counts.get(symbol, 0) + 1
+            hard_block_reason_counts[reason] = hard_block_reason_counts.get(reason, 0) + 1
+
+    for symbol, count in sorted(cooldown_symbol_counts.items(), key=lambda item: item[1], reverse=True)[:8]:
+        sev = _clamp((count / 8.0), 0.2, 0.8)
+        signals.append(
+            _build_knowledge_signal(
+                signal_type="cooldown_signal",
+                source_type="scanner_live",
+                symbol=symbol,
+                lane="execution",
+                category="runtime_system_knowledge",
+                title=f"{symbol} scanner cooldown active",
+                summary=f"{symbol} is currently being skipped by scanner cooldown gates.",
+                evidence={"trades": count},
+                metrics={"cooldown_skip_count": count, "channel": "scanner_reject_cooldown"},
+                recommended_action="cooldown_signal",
+                tags=["cooldown", "scanner", "live"],
+                severity_score=sev,
+                time_scope={"window": "today_live", "as_of": now_label},
+                published_keys=published_keys,
+            )
+        )
+
+    for symbol, count in sorted(hard_block_symbol_counts.items(), key=lambda item: item[1], reverse=True)[:8]:
+        sev = _clamp((count / 8.0) + 0.25, 0.3, 1.0)
+        signals.append(
+            _build_knowledge_signal(
+                signal_type="hard_block_signal",
+                source_type="scanner_live",
+                symbol=symbol,
+                lane="risk",
+                category="live_scanner_knowledge",
+                title=f"{symbol} hard-blocked by scanner gates",
+                summary=f"{symbol} hit hard-block style scanner rejections {count} times in recent scans.",
+                evidence={"trades": count},
+                metrics={"hard_block_count": count},
+                recommended_action="hard_block_signal",
+                tags=["hard_block", "scanner", "live"],
+                severity_score=sev,
+                time_scope={"window": "today_live", "as_of": now_label},
+                published_keys=published_keys,
+            )
+        )
+
+    if hard_block_reason_counts:
+        top_reason, top_reason_count = sorted(
+            hard_block_reason_counts.items(), key=lambda item: item[1], reverse=True
+        )[0]
+        sev = _clamp((top_reason_count / 10.0) + 0.2, 0.3, 0.95)
+        signals.append(
+            _build_knowledge_signal(
+                signal_type="hard_block_signal",
+                source_type="scanner_live",
+                symbol="ALL",
+                lane="risk",
+                category="live_scanner_knowledge",
+                title="Dominant hard-block reason in current scanner cycle",
+                summary=f"Hard-block pressure is led by '{top_reason}'.",
+                evidence={"trades": max(1, int(top_reason_count))},
+                metrics={"reason": top_reason, "count": int(top_reason_count)},
+                recommended_action="hard_block_signal",
+                tags=["hard_block", "reason", "scanner"],
+                severity_score=sev,
+                time_scope={"window": "today_live", "as_of": now_label},
+                published_keys=published_keys,
+            )
+        )
+
+    ticker_loss_cooldown = runtime_state.get("ticker_loss_cooldown_until") if isinstance(runtime_state, dict) else {}
+    if isinstance(ticker_loss_cooldown, dict):
+        for symbol_raw, until_raw in list(ticker_loss_cooldown.items())[:30]:
+            until_dt = _parse_state_iso(until_raw)
+            if until_dt is None or until_dt <= now_et:
+                continue
+            mins_left = max(1, int((until_dt - now_et).total_seconds() // 60))
+            sev = _clamp(0.3 + (mins_left / 180.0), 0.3, 0.9)
+            symbol = str(symbol_raw or "").upper()
+            if not symbol:
+                continue
+            signals.append(
+                _build_knowledge_signal(
+                    signal_type="cooldown_signal",
+                    source_type="runtime_state",
+                    symbol=symbol,
+                    lane="execution",
+                    category="runtime_system_knowledge",
+                    title=f"{symbol} ticker loss cooldown active",
+                    summary=f"Ticker re-entry is blocked for approximately {mins_left} more minutes.",
+                    evidence={"trades": 1, "blocked_until": until_dt.strftime("%Y-%m-%d %H:%M:%S ET")},
+                    metrics={"minutes_remaining": mins_left, "channel": "ticker_loss_cooldown"},
+                    recommended_action="cooldown_signal",
+                    tags=["cooldown", "loss_control", "runtime"],
+                    severity_score=sev,
+                    time_scope={"window": "runtime_recent", "as_of": now_label},
+                    published_keys=published_keys,
+                )
+            )
+
+    metadata = report.get("metadata") if isinstance(report, dict) else {}
+    overall = report.get("overall") if isinstance(report, dict) else {}
+    closed_trades = int(_safe_float((metadata or {}).get("closed_trade_count"), 0))
+    conservative_exp = _safe_float((overall or {}).get("conservative_expectancy_usd"), 0.0)
+    if closed_trades > 0:
+        sev = _clamp((abs(conservative_exp) / 20.0) + (0.2 if conservative_exp < 0 else 0.0), 0.15, 0.95)
+        signals.append(
+            _build_knowledge_signal(
+                signal_type="review_signal",
+                source_type="trade_review",
+                symbol="ALL",
+                lane="market",
+                category="execution_knowledge",
+                title="Latest review expectancy snapshot",
+                summary=(
+                    f"Closed-trade review currently reports conservative expectancy {conservative_exp:.2f} USD over {closed_trades} trades."
+                ),
+                evidence={"trades": closed_trades},
+                metrics={"conservative_expectancy_usd": conservative_exp, "closed_trade_count": closed_trades},
+                recommended_action="review_signal",
+                tags=["review", "expectancy", "knowledge"],
+                severity_score=sev,
+                time_scope={"window": "rolling", "as_of": now_label},
+                published_keys=published_keys,
+            )
+        )
 
     joint = report.get("joint_tradeability") if isinstance(report, dict) else {}
     if not isinstance(joint, dict):
