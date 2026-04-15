@@ -302,6 +302,112 @@ def _conservative_executable_pnl(
     return round(net_usd, 2), round(net_pct, 4)
 
 
+def _is_runner_eligible(
+    symbol: str,
+    ticker: str,
+    meta: dict,
+    data_client: AlpacaDataClient,
+    now_et: datetime,
+) -> bool:
+    """
+    Determine if a profitable trade should be promoted to 'runner mode'
+    (allowed to run for larger gains) vs immediately banked.
+    
+    A runner is eligible if:
+    1. Momentum signature is still strong (trend continuing)
+    2. Price structure remains aligned (no reversal signals)
+    3. Spread/liquidity acceptable (from meta)
+    
+    For now, we check EMA alignment and early reversal signals.
+    """
+    if not isinstance(meta, dict):
+        return False
+    
+    try:
+        trade_direction = str(meta.get("direction", "") or "").lower()
+        if trade_direction not in ("call", "put"):
+            return False
+        
+        # Get recent bars
+        bars = data_client.get_intraday_bars_since_open(
+            symbol=ticker, now_et=now_et, limit=12
+        )
+        if bars is None or bars.empty or len(bars) < 5:
+            return False
+        
+        closes = bars["close"].astype(float)
+        
+        # Check 1: EMA alignment (9 above 21 for calls, below for puts)
+        ema9 = closes.ewm(span=9, adjust=False).mean()
+        ema21 = closes.ewm(span=21, adjust=False).mean()
+        
+        ema_aligned = False
+        if len(ema9) >= 2 and len(ema21) >= 2:
+            if trade_direction == "call" and ema9.iloc[-1] > ema21.iloc[-1]:
+                ema_aligned = True
+            elif trade_direction == "put" and ema9.iloc[-1] < ema21.iloc[-1]:
+                ema_aligned = True
+        
+        # Check 2: Early reversal signals (only 1 out of 3 is OK; 2+ means don't run)
+        from scanner import calculate_vwap
+        
+        # Signal A: ROC of last 2 bars
+        roc_reversed = False
+        if len(closes) >= 3:
+            prev2 = float(closes.iloc[-3])
+            curr = float(closes.iloc[-1])
+            last2_roc = ((curr - prev2) / prev2) * 100 if prev2 > 0 else 0
+            reversal_roc_threshold = float(getattr(config, "REVERSAL_ROC_THRESHOLD_PCT", 0.30))
+            if trade_direction == "call" and last2_roc <= -reversal_roc_threshold:
+                roc_reversed = True
+            elif trade_direction == "put" and last2_roc >= reversal_roc_threshold:
+                roc_reversed = True
+        
+        # Signal B: VWAP flip
+        vwap_flipped = False
+        vwap = calculate_vwap(bars)
+        if vwap and not (vwap != vwap):  # not nan
+            curr_price = float(closes.iloc[-1])
+            if trade_direction == "call" and curr_price < vwap:
+                vwap_flipped = True
+            elif trade_direction == "put" and curr_price > vwap:
+                vwap_flipped = True
+        
+        # Count reversal signals
+        reversal_count = sum([roc_reversed, vwap_flipped])
+        
+        # Runner is eligible if:
+        # - EMA aligned AND
+        # - Fewer than 2 reversal signals (0 or 1 is OK; 2+ means don't trust it)
+        return ema_aligned and reversal_count < 2
+        
+    except Exception:  # noqa: BLE001
+        # Conservatively assume not runner eligible if any error
+        return False
+
+
+def _apply_profit_protection(meta: dict, plpc: float, now_et: datetime = None) -> None:
+    """
+    Apply profit protection: at +3%, move the stop floor to breakeven or slight green.
+    This prevents a green trade from turning red while still allowing upside.
+    
+    Called once when profit first reaches +3%.
+    """
+    if not isinstance(meta, dict):
+        return
+    
+    # Only apply once
+    if meta.get("profit_protection_applied"):
+        return
+    
+    if plpc >= 0.03:  # +3% threshold
+        # Move stop floor to breakeven-ish (with slight cushion)
+        current_floor = float(meta.get("stop_floor_plpc", 0) or 0)
+        if current_floor < -0.005:  # Only move if stop is deeper than we want
+            meta["stop_floor_plpc"] = -0.005  # Protect to -0.5% (slight green)
+            meta["profit_protection_applied"] = True
+
+
 def _await_order_fill(
     broker: AlpacaBroker,
     *,
@@ -530,6 +636,26 @@ def _parse_trade_meta_entry_time(meta: dict) -> datetime | None:
         return parsed.astimezone(pytz.timezone(config.EASTERN_TZ))
     except Exception:
         return None
+
+
+def _is_in_anti_churn_window(entry_time: datetime | None, now_et: datetime) -> bool:
+    """
+    Check if the trade is still within the anti-churn hold window.
+    
+    During the first N minutes after entry, we skip discretionary exits
+    (reversal, immediate take-profit) to avoid round-trip losses from early
+    noise. Stop loss and profit protection still apply.
+    
+    Returns True if trade should skip discretionary exits; False if ready for them.
+    """
+    if entry_time is None:
+        return False
+    try:
+        hold_minutes = float(getattr(config, "ANTI_CHURN_HOLD_MINUTES", 3) or 3)
+        elapsed = (now_et - entry_time).total_seconds() / 60.0
+        return elapsed < hold_minutes
+    except Exception:
+        return False
 
 
 def _parse_state_datetime(value: str | None) -> datetime | None:
@@ -2601,22 +2727,46 @@ def main():
             if exit_reason is None and should_trigger_stop_loss(unrealized_usd, stop_loss_usd_cap):
                 exit_reason = "stop_loss"
 
-            # Rule 2: immediate take-profit once the option has doubled (or configured threshold).
+            # --- Layered profit management ---
+            # Stage 1: Profit lock at +3% — move stop floor to breakeven, allow upside
+            if exit_reason is None and plpc >= 0.03:
+                _apply_profit_protection(meta, plpc, now_et)
+
+            # Stage 2: Runner qualification at +8-12%
+            # Decide: bank the win or promote to runner mode for larger gains?
+            if exit_reason is None and plpc >= 0.08 and plpc < 0.12 and not meta.get("runner_mode"):
+                # Check if this trade qualifies for runner mode (strong momentum, no early reversal)
+                ticker_for_eligibility = ticker_for_pos or ""
+                if ticker_for_eligibility and _is_runner_eligible(symbol, ticker_for_eligibility, meta, data_client, now_et):
+                    # Promote to runner mode — more lenient exit
+                    meta["runner_mode"] = True
+                    print(f"[{ts(now_et)}] RUNNER ELIGIBLE: {symbol} at +{plpc:.2%}, promoted to runner mode")
+                else:
+                    # No runner eligibility — bank the small win at +8-12%
+                    exit_reason = "base_win_bank"
+                    print(f"[{ts(now_et)}] BASE WIN BANK: {symbol} at +{plpc:.2%}, not runner eligible, taking profit")
+
+            # Rule 2: immediate take-profit (but NOT in runner mode, and NOT during anti-churn hold).
+            # Runner mode trades must earn the right to run longer.
+            # Anti-churn hold suppresses this rule in first N minutes to avoid round-trip losses.
             immediate_take_profit_pct = float(
                 meta.get("immediate_take_profit_pct", getattr(config, "IMMEDIATE_TAKE_PROFIT_PCT", 1.0))
                 or getattr(config, "IMMEDIATE_TAKE_PROFIT_PCT", 1.0)
             )
-            if exit_reason is None and plpc >= immediate_take_profit_pct:
+            if (exit_reason is None and not meta.get("runner_mode") and not _is_in_anti_churn_window(entry_time, now_et)
+                and plpc >= immediate_take_profit_pct):
                 exit_reason = "immediate_take_profit"
 
             # --- Reversal detection exit ---
             # When the trade is in profit, check if the underlying is reversing.
             # Exit on confirmed reversal so we keep gains without a fixed cap.
-            # Only triggers when ENABLE_REVERSAL_EXIT=true (default: true) and
-            # the trade has reached a minimum profit threshold first.
+            # Only triggers when ENABLE_REVERSAL_EXIT=true (default: true), trade has reached
+            # minimum profit threshold, NOT in runner mode, and NOT during anti-churn hold.
             if (
                 exit_reason is None
                 and bool(getattr(config, "ENABLE_REVERSAL_EXIT", True))
+                and not meta.get("runner_mode")
+                and not _is_in_anti_churn_window(entry_time, now_et)
                 and plpc >= float(getattr(config, "REVERSAL_EXIT_MIN_PROFIT_PCT", 0.10))
                 and ticker_for_pos
             ):

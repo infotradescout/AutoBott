@@ -131,6 +131,11 @@ LOOP_INTERVAL_SECONDS              = 15
 # Allow trades to run up to 90 min — trailing stop exits winners well before this
 MAX_HOLD_MINUTES                   = 90
 
+# Anti-churn entry hold: prevent discretionary exits (reversal, immediate take-profit)
+# during first N minutes after entry. Stop loss still fires immediately.
+# Reduces round-trip losses from early noise; lets winners establish momentum.
+ANTI_CHURN_HOLD_MINUTES            = 3
+
 
 # ---------------------------------------------------------------------------
 # Stop loss & trailing exit ladder
@@ -141,8 +146,8 @@ STOP_LOSS_USD          = 12.0   # exit if unrealized P&L is <= -$12 per trade
 STOP_LOSS_PCT          = 0.03   # legacy fallback reference for older state/debug fields
 
 # Immediate winner lock: exit as soon as gain reaches this fraction.
-# Small-win mode default: 0.12 = +12%.
-IMMEDIATE_TAKE_PROFIT_PCT = 0.12
+# Small-win mode: 0.05 = +5% (bank small frequent wins).
+IMMEDIATE_TAKE_PROFIT_PCT = 0.05
 
 # Fixed profit target (disabled — trailing stop rides winners instead)
 ENABLE_FIXED_PROFIT_TARGET = False
@@ -173,7 +178,7 @@ TRAIL_PULLBACK_PCT      = 0.06   # trail 6% below peak when deep in profit
 # Requires REVERSAL_CONFIRM_SIGNALS of 3 to fire an exit.
 
 ENABLE_REVERSAL_EXIT         = True
-REVERSAL_EXIT_MIN_PROFIT_PCT = 0.05   # check for reversal once trade is up 5%
+REVERSAL_EXIT_MIN_PROFIT_PCT = 0.02   # check for reversal once trade is up 2%
 REVERSAL_ROC_THRESHOLD_PCT   = 0.30   # 0.3% move in 2 bars counts as reversal signal
 REVERSAL_CONFIRM_SIGNALS     = 2      # require 2 of 3 signals to confirm reversal
 
