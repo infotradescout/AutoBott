@@ -136,8 +136,8 @@ MAX_HOLD_MINUTES                   = 90
 # Stop loss & trailing exit ladder
 # ---------------------------------------------------------------------------
 
-# Tight stop — exit immediately when trade starts losing
-STOP_LOSS_USD          = 10.0   # exit if unrealized P&L is <= -$10 per trade
+# Slightly wider stop to reduce chop noise exits.
+STOP_LOSS_USD          = 12.0   # exit if unrealized P&L is <= -$12 per trade
 STOP_LOSS_PCT          = 0.03   # legacy fallback reference for older state/debug fields
 
 # Immediate winner lock: exit as soon as gain reaches this fraction.
@@ -328,6 +328,7 @@ EARNINGS_SKIP_SYMBOLS    = ("SPY", "QQQ", "IWM", "DIA", "VIX", "^VIX")
 # Re-entry
 # ---------------------------------------------------------------------------
 
+MAX_ENTRIES_PER_TICKER_PER_DAY = 3
 MAX_REENTRIES_PER_TICKER = 1
 
 

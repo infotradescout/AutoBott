@@ -2055,14 +2055,19 @@ def main():
                 continue
 
             prior_entries = int(ticker_entry_counts.get(ticker, 0))
+            max_entries_per_ticker = max(1, int(getattr(config, "MAX_ENTRIES_PER_TICKER_PER_DAY", 1) or 1))
             reentries_used = int(ticker_reentries_used.get(ticker, 0))
             reentry_armed = bool(ticker_reentry_armed.get(ticker, False))
             expected_direction = str(ticker_reentry_expected_direction.get(ticker, "") or "").lower()
-            if prior_entries >= 1:
+            if prior_entries >= max_entries_per_ticker:
                 if not reentry_armed:
-                    _mark_skip("already_traded_today")
-                    print(f"[{ts(now_et)}] {ticker}: skip (already traded today; no stop-loss re-entry armed).")
+                    _mark_skip("max_entries_per_ticker_reached")
+                    print(
+                        f"[{ts(now_et)}] {ticker}: skip (max entries reached "
+                        f"{prior_entries}/{max_entries_per_ticker}; no stop-loss re-entry armed)."
+                    )
                     continue
+            if reentry_armed:
                 if reentries_used >= int(config.MAX_REENTRIES_PER_TICKER):
                     _mark_skip("max_reentries_used")
                     print(
