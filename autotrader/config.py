@@ -190,6 +190,8 @@ RVOL_RELAXED_MIN          = 0.7
 RVOL_IGNORE_AFTER         = "10:30"
 ATR_PCT_MIN               = 1.0   # lowered from 1.8 — ETFs like SPY/QQQ have lower ATR
 VWAP_NEUTRAL_BAND_PCT     = 0.05  # tightened from 0.15 — 0.15% was rejecting stocks barely off VWAP
+MOVEMENT_FORCE_MIN_PCT    = 0.02  # was 0.03 (scanner default); allow borderline tape to be evaluated
+MOVEMENT_WEAK_VWAP_MULT   = 1.00  # was effectively 1.5 in scanner; only block when very close to VWAP
 
 # Direction conviction: minimum weighted-vote score to commit to call/put.
 # 0.0 = any majority; 0.5 = strongly one-sided required.
@@ -212,7 +214,7 @@ IV_RANK_MIN               = 20.0
 IV_RANK_MAX               = 99.0
 
 ENABLE_SIGNAL_SCORING     = True
-MIN_SIGNAL_SCORE          = 5.0
+MIN_SIGNAL_SCORE          = 4.2   # was 5.0; keeps quality gate while admitting near-threshold core moves
 
 # Phase 3 enforcement knobs driven by review.py output.
 # Use blocked hours after you identify weak entry windows from analytics.

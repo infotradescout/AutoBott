@@ -627,7 +627,8 @@ def _scan_ticker_details(
         ema_vote = 1.0 if ema9_pre.iloc[-1] > ema21_pre.iloc[-1] else -1.0
 
     movement_force_min = float(getattr(config, "MOVEMENT_FORCE_MIN_PCT", 0.03) or 0.03)
-    if not math.isnan(roc_early) and abs(roc_early) < movement_force_min and distance_pct < (vwap_band * 1.5):
+    weak_vwap_mult = float(getattr(config, "MOVEMENT_WEAK_VWAP_MULT", 1.5) or 1.5)
+    if not math.isnan(roc_early) and abs(roc_early) < movement_force_min and distance_pct < (vwap_band * weak_vwap_mult):
         return _scan_failure(f"movement too weak (ROC {roc_early:+.2f}%, VWAP dist {distance_pct:.2f}%)")
 
     vwap_weight = 0.50 if vwap_neutral else 1.00
