@@ -564,6 +564,7 @@ def _latest_5m_move_pct(data_client: AlpacaDataClient, symbol: str, now_et: date
 
 
 _OPTION_SYMBOL_RE = re.compile(r"^([A-Z.]+)\d{6}([CP])\d{8}$")
+_SCAN_SYMBOL_RE = re.compile(r"^[A-Z][A-Z.]{0,5}$")
 
 
 def _parse_option_symbol(option_symbol: str) -> tuple[str, str]:
@@ -575,6 +576,63 @@ def _parse_option_symbol(option_symbol: str) -> tuple[str, str]:
     cp = match.group(2)
     direction = "call" if cp == "C" else "put"
     return ticker, direction
+
+
+def _looks_like_junk_scan_symbol(symbol: str, *, protected: set[str]) -> bool:
+    sym = str(symbol or "").upper().strip()
+    if not sym:
+        return True
+    if sym in protected:
+        return False
+    if not _SCAN_SYMBOL_RE.match(sym):
+        return True
+    if len(sym) > 5 and "." not in sym:
+        return True
+
+    # Common warrant/right/unit tails that pollute mover feeds.
+    if len(sym) == 5 and sym[-1] in {"W", "R", "U"}:
+        return True
+    if "." in sym:
+        suffix = sym.split(".", 1)[1]
+        if suffix in {"W", "WS", "WT", "WTS", "R", "RT", "U", "UN", "UNIT"}:
+            return True
+    return False
+
+
+def _filter_mover_candidates(
+    data_client: AlpacaDataClient,
+    symbols: list[str],
+    *,
+    protected: set[str],
+) -> list[str]:
+    kept: list[str] = []
+    for raw in symbols:
+        sym = str(raw or "").upper().strip()
+        if not sym:
+            continue
+        if _looks_like_junk_scan_symbol(sym, protected=protected):
+            continue
+        if sym in protected:
+            kept.append(sym)
+            continue
+
+        try:
+            asset = data_client.get_asset(sym)
+            if not bool(asset.get("tradable", False)):
+                continue
+            if not bool(asset.get("options_enabled", False)):
+                continue
+            if str(asset.get("status", "active") or "active").lower() != "active":
+                continue
+            price = data_client.get_latest_stock_price(sym)
+            if price is None:
+                continue
+            if price < float(config.MIN_SHARE_PRICE) or price > float(config.MAX_SHARE_PRICE):
+                continue
+            kept.append(sym)
+        except Exception:
+            continue
+    return list(dict.fromkeys(kept))
 
 
 def _is_valid_long_direction(direction: str) -> bool:
@@ -684,9 +742,27 @@ def _entry_confirmation_passes(
         closes = bars["close"].astype(float)
         last_close = float(closes.iloc[-1])
         prev_close = float(closes.iloc[-2])
+        two_bar_ref = float(closes.iloc[-3]) if len(closes) >= 3 else prev_close
+        if two_bar_ref <= 0 or prev_close <= 0:
+            return False
+
+        one_bar_move_pct = ((last_close - prev_close) / prev_close) * 100.0
+        two_bar_move_pct = ((last_close - two_bar_ref) / two_bar_ref) * 100.0
+        momentum_threshold_pct = 0.06
+
         if direction == "call":
-            return last_close > prev_close
-        return last_close < prev_close
+            return (
+                last_close > prev_close
+                or last_close > two_bar_ref
+                or one_bar_move_pct >= momentum_threshold_pct
+                or two_bar_move_pct >= momentum_threshold_pct
+            )
+        return (
+            last_close < prev_close
+            or last_close < two_bar_ref
+            or one_bar_move_pct <= -momentum_threshold_pct
+            or two_bar_move_pct <= -momentum_threshold_pct
+        )
     except Exception:
         return False
 
@@ -767,23 +843,40 @@ def _detect_catalyst_event(
 def _build_scan_universe(data_client: AlpacaDataClient) -> list[str]:
     base = [str(sym).upper() for sym in config.TICKERS if str(sym).strip()]
     core = [str(sym).upper() for sym in config.CORE_TICKERS if str(sym).strip()]
+    protected = set(base + core)
     base = list(dict.fromkeys(base + core))
-    combined = list(base)
+    mover_candidates: list[str] = []
     if config.AUTO_EXPAND_UNIVERSE_WITH_MOVERS:
         try:
             gainers, losers = data_client.get_top_movers(top=int(config.UNIVERSE_MOVER_TOP))
-            combined.extend(str(sym).upper() for sym in gainers if str(sym).strip())
-            combined.extend(str(sym).upper() for sym in losers if str(sym).strip())
+            mover_candidates.extend(str(sym).upper() for sym in gainers if str(sym).strip())
+            mover_candidates.extend(str(sym).upper() for sym in losers if str(sym).strip())
         except Exception as exc:  # noqa: BLE001
             print(f"[{ts()}] Universe expansion skipped (movers unavailable): {exc}")
-    deduped = list(dict.fromkeys(combined))
+
+    mover_candidates = [s for s in list(dict.fromkeys(mover_candidates)) if s not in protected]
+    filtered_movers = _filter_mover_candidates(
+        data_client,
+        mover_candidates,
+        protected=protected,
+    )
+    dropped_count = max(0, len(mover_candidates) - len(filtered_movers))
+    if dropped_count > 0:
+        print(f"[{ts()}] Universe cleanup removed {dropped_count} junk/non-tradable mover symbols before scan.")
+
+    deduped = list(dict.fromkeys(base + filtered_movers))
     max_tickers = max(1, int(config.UNIVERSE_MAX_TICKERS))
     return deduped[:max_tickers]
 
 
 def _apply_watchlist_mode(universe: list[str], control: dict) -> list[str]:
     mode = str(control.get("mode", "off") or "off").strip().lower()
-    tickers = [str(s).upper() for s in (control.get("tickers") or []) if str(s).strip()]
+    protected = set(str(s).upper() for s in config.CORE_TICKERS)
+    tickers = [
+        str(s).upper()
+        for s in (control.get("tickers") or [])
+        if str(s).strip() and not _looks_like_junk_scan_symbol(str(s), protected=protected)
+    ]
     ticker_set = set(tickers)
     if mode == "only_listed":
         return tickers

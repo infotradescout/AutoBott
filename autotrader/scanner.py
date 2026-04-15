@@ -510,53 +510,32 @@ def _scan_ticker_details(
 
     above_vwap = price > vwap
 
-    # --- Multi-factor direction vote ---
-    # Each indicator casts a +1 (bullish/call) or -1 (bearish/put) vote.
-    # The final direction is determined by the weighted sum of votes.
-    # This prevents a single noisy indicator from overriding clear momentum.
-    direction_votes: list[tuple[str, float, float]] = []  # (name, weight, vote)
-
-    # 1. VWAP position (primary anchor — highest weight)
-    direction_votes.append(("vwap", 3.0, 1.0 if above_vwap else -1.0))
-
-    # 2. Rate of Change — actual price momentum over last N bars
+    # Simple direction model: anchor to VWAP side, confirm with momentum,
+    # and use EMA only as a light tiebreaker to keep responsiveness high.
     roc_early = calculate_roc(closes, period=config.ROC_PERIOD)
-    if not math.isnan(roc_early):
-        direction_votes.append(("roc", 2.0, 1.0 if roc_early > 0 else -1.0))
-
-    # 3. EMA9 vs EMA21 crossover — short-term trend
     ema9_pre = closes.ewm(span=9, adjust=False).mean()
     ema21_pre = closes.ewm(span=21, adjust=False).mean()
+
+    vwap_vote = 1.0 if above_vwap else -1.0
+    roc_vote = 0.0 if math.isnan(roc_early) or abs(roc_early) < 0.01 else (1.0 if roc_early > 0 else -1.0)
+    ema_vote = 0.0
     if len(ema9_pre) >= 3 and len(ema21_pre) >= 3:
-        direction_votes.append(
-            ("ema", 1.5, 1.0 if ema9_pre.iloc[-1] > ema21_pre.iloc[-1] else -1.0)
-        )
+        ema_vote = 1.0 if ema9_pre.iloc[-1] > ema21_pre.iloc[-1] else -1.0
 
-    # 4. RSI momentum (above/below 50 midpoint)
-    rsi_pre = calculate_rsi(closes, period=min(14, max(5, len(closes) - 1)))
-    if not math.isnan(rsi_pre):
-        direction_votes.append(("rsi", 1.0, 1.0 if rsi_pre > 50 else -1.0))
+    direction_bias = (1.0 * vwap_vote) + (0.8 * roc_vote) + (0.4 * ema_vote)
+    direction_score = max(-1.0, min(1.0, direction_bias / 2.2))
+    direction = "call" if direction_bias >= 0 else "put"
 
-    # 5. Recent bar close vs open (last 3 bars net candle direction)
-    if len(bars) >= 3:
-        recent_move = float(closes.iloc[-1]) - float(bars["open"].astype(float).iloc[-3])
-        direction_votes.append(("candle", 1.0, 1.0 if recent_move > 0 else -1.0))
+    if direction == "call" and roc_vote < 0 and abs(float(roc_early or 0.0)) >= 0.05:
+        return _scan_failure(f"momentum opposes call setup (ROC {float(roc_early):+.2f}%)")
+    if direction == "put" and roc_vote > 0 and abs(float(roc_early or 0.0)) >= 0.05:
+        return _scan_failure(f"momentum opposes put setup (ROC {float(roc_early):+.2f}%)")
 
-    total_weight = sum(w for _, w, _ in direction_votes)
-    weighted_sum = sum(w * v for _, w, v in direction_votes)
-    direction_score = weighted_sum / total_weight if total_weight > 0 else 0.0
-
-    # Require a minimum conviction threshold to avoid coin-flip trades.
-    # A score of 0 means indicators are evenly split — skip it.
-    direction_conviction_min = float(getattr(config, "DIRECTION_CONVICTION_MIN", 0.2))
-    if abs(direction_score) < direction_conviction_min:
-        vote_summary = ", ".join(f"{n}={'+' if v > 0 else ''}{v:.0f}" for n, _, v in direction_votes)
-        return _scan_failure(
-            f"direction conviction too low ({direction_score:+.2f}, min {direction_conviction_min:.2f}) [{vote_summary}]"
-        )
-
-    direction = "call" if direction_score > 0 else "put"
-    above_vwap = direction == "call"  # keep downstream logic consistent
+    direction_votes: list[tuple[str, float, float]] = [
+        ("vwap", 1.0, vwap_vote),
+        ("roc", 0.8, roc_vote),
+        ("ema", 0.4, ema_vote),
+    ]
 
     htf_reason = ""
     if config.ENABLE_HTF_CONFIRM:
