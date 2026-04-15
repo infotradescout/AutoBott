@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import math
+import re
 import time
 from datetime import date, datetime, timedelta
 from pathlib import Path
@@ -48,6 +49,10 @@ OBSERVATION_LOG_COLS = [
     "early_volume",
     "hot",
 ]
+_SCAN_SYMBOL_RE = re.compile(r"^[A-Z][A-Z.]{0,5}$")
+_CORE_LIQUID_PROFILE_SYMBOLS = {
+    "SPY", "QQQ", "IWM", "DIA", "AAPL", "MSFT", "NVDA", "AMZN", "META", "GOOGL", "TSLA", "AMD",
+}
 
 
 def calculate_rsi(closes: pd.Series, period: int = 14) -> float:
@@ -107,8 +112,28 @@ def calculate_rvol(symbol: str, today_volume: float, daily_bars_df: pd.DataFrame
     return float(today_volume / scaled)
 
 
-def _scan_failure(reason: str) -> dict[str, Any]:
-    return {"failed": True, "reason": reason}
+def _scan_failure(reason: str, *, stage: str = "setup rejected") -> dict[str, Any]:
+    text = str(reason or "").strip()
+    if not text:
+        text = "unknown"
+    if ":" in text and text.split(":", 1)[0].strip().endswith("rejected"):
+        return {"failed": True, "reason": text}
+    return {"failed": True, "reason": f"{stage}: {text}"}
+
+
+def _is_obvious_junk_symbol(symbol: str) -> bool:
+    sym = str(symbol or "").upper().strip()
+    if not sym:
+        return True
+    if not _SCAN_SYMBOL_RE.match(sym):
+        return True
+    if len(sym) == 5 and sym[-1] in {"W", "R", "U"}:
+        return True
+    if "." in sym:
+        suffix = sym.split(".", 1)[1]
+        if suffix in {"W", "WS", "WT", "WTS", "R", "RT", "U", "UN", "UNIT"}:
+            return True
+    return False
 
 
 def _ensure_scan_log_header() -> None:
@@ -161,8 +186,10 @@ def _profile_signals_for_candidate(
 
     passed: list[dict[str, Any]] = []
     rejected: list[str] = []
+    permissive_core = set(str(s).upper() for s in getattr(config, "CORE_TICKERS", [])) | _CORE_LIQUID_PROFILE_SYMBOLS
     for profile in sorted(PROFILES.values(), key=lambda p: int(p.priority)):
-        if symbol not in set(profile.symbols):
+        profile_symbols = set(profile.symbols)
+        if symbol not in profile_symbols and symbol not in permissive_core:
             rejected.append(f"{profile.name}:symbol")
             continue
         if not is_profile_window_open(now_et, profile):
@@ -175,13 +202,13 @@ def _profile_signals_for_candidate(
         profile_ok = False
         profile_reason = ""
         if profile.name == "open_drive_momentum":
-            profile_ok = rvol >= 1.10 and abs(roc) >= 0.12 and distance_from_vwap_pct >= 0.06
+            profile_ok = rvol >= 0.70 and abs(roc) >= 0.06 and distance_from_vwap_pct >= 0.02
             profile_reason = "open-drive momentum gate"
         elif profile.name == "vwap_continuation":
-            profile_ok = 0.06 <= distance_from_vwap_pct <= 0.70 and rvol >= 0.80 and abs(roc) >= 0.05
+            profile_ok = distance_from_vwap_pct <= 1.20 and rvol >= 0.55 and abs(roc) >= 0.03
             profile_reason = "vwap continuation gate"
         elif profile.name == "reversal_snapback":
-            if distance_from_vwap_pct >= 0.35 and abs(last2_roc) >= 0.18:
+            if distance_from_vwap_pct >= 0.20 and abs(last2_roc) >= 0.10:
                 if price > vwap and last2_roc < 0:
                     base_signal = dict(base_signal)
                     base_signal["direction"] = "put"
@@ -191,7 +218,7 @@ def _profile_signals_for_candidate(
                 profile_ok = base_signal.get("direction") in ("call", "put")
             profile_reason = "reversal snapback gate"
         elif profile.name == "catalyst_impulse":
-            profile_ok = (catalyst_mode_active and rvol >= 0.70) or (rvol >= 1.60 and abs(roc) >= 0.20)
+            profile_ok = (catalyst_mode_active and rvol >= 0.55) or (rvol >= 1.20 and abs(roc) >= 0.10)
             profile_reason = "catalyst impulse gate"
 
         if not profile_ok:
@@ -505,8 +532,7 @@ def _scan_ticker_details(
         return _scan_failure("VWAP unavailable")
     vwap_band = getattr(config, "VWAP_NEUTRAL_BAND_PCT", 0.05)
     distance_pct = abs(price - vwap) / vwap * 100
-    if distance_pct <= vwap_band:
-        return _scan_failure(f"price near VWAP ({distance_pct:.2f}%)")
+    vwap_neutral = distance_pct <= vwap_band
 
     above_vwap = price > vwap
 
@@ -522,18 +548,25 @@ def _scan_ticker_details(
     if len(ema9_pre) >= 3 and len(ema21_pre) >= 3:
         ema_vote = 1.0 if ema9_pre.iloc[-1] > ema21_pre.iloc[-1] else -1.0
 
-    direction_bias = (1.0 * vwap_vote) + (0.8 * roc_vote) + (0.4 * ema_vote)
+    movement_force_min = float(getattr(config, "MOVEMENT_FORCE_MIN_PCT", 0.03) or 0.03)
+    if not math.isnan(roc_early) and abs(roc_early) < movement_force_min and distance_pct < (vwap_band * 1.5):
+        return _scan_failure(f"movement too weak (ROC {roc_early:+.2f}%, VWAP dist {distance_pct:.2f}%)")
+
+    vwap_weight = 0.50 if vwap_neutral else 1.00
+    direction_bias = (vwap_weight * vwap_vote) + (1.10 * roc_vote) + (0.40 * ema_vote)
     direction_score = max(-1.0, min(1.0, direction_bias / 2.2))
     direction = "call" if direction_bias >= 0 else "put"
 
-    if direction == "call" and roc_vote < 0 and abs(float(roc_early or 0.0)) >= 0.05:
-        return _scan_failure(f"momentum opposes call setup (ROC {float(roc_early):+.2f}%)")
-    if direction == "put" and roc_vote > 0 and abs(float(roc_early or 0.0)) >= 0.05:
-        return _scan_failure(f"momentum opposes put setup (ROC {float(roc_early):+.2f}%)")
+    # If momentum is clearly opposite, follow momentum rather than reject outright.
+    if not math.isnan(roc_early) and abs(float(roc_early)) >= 0.15:
+        if roc_early > 0:
+            direction = "call"
+        elif roc_early < 0:
+            direction = "put"
 
     direction_votes: list[tuple[str, float, float]] = [
-        ("vwap", 1.0, vwap_vote),
-        ("roc", 0.8, roc_vote),
+        ("vwap", vwap_weight, vwap_vote),
+        ("roc", 1.1, roc_vote),
         ("ema", 0.4, ema_vote),
     ]
 
@@ -558,10 +591,9 @@ def _scan_ticker_details(
     # Re-use those values here for downstream filters and scoring.
     roc = roc_early if not math.isnan(roc_early) else 0.0
     if config.ENABLE_ROC_FILTER and not math.isnan(roc_early):
-        if direction == "call" and roc <= config.ROC_BULL_MIN:
-            return _scan_failure(f"ROC {roc:+.2f}% too weak for call")
-        if direction == "put" and roc >= config.ROC_BEAR_MAX:
-            return _scan_failure(f"ROC {roc:+.2f}% too weak for put")
+        weak_floor = max(0.01, movement_force_min / 2.0)
+        if abs(roc) < weak_floor and distance_pct < (vwap_band * 2.0):
+            return _scan_failure(f"ROC {roc:+.2f}% too weak for active move")
 
     ema9 = ema9_pre
     ema21 = ema21_pre
@@ -749,6 +781,26 @@ class IntradayScanner:
 
         for symbol in watchlist:
             try:
+                if _is_obvious_junk_symbol(symbol):
+                    failed.append({"symbol": symbol, "reason": "universe rejected: junk/warrant-like symbol"})
+                    continue
+
+                latest_price = self.data_client.get_latest_stock_price(symbol)
+                if latest_price is None:
+                    failed.append({"symbol": symbol, "reason": "universe rejected: no latest stock price"})
+                    continue
+                if latest_price < float(config.MIN_SHARE_PRICE) or latest_price > float(config.MAX_SHARE_PRICE):
+                    failed.append(
+                        {
+                            "symbol": symbol,
+                            "reason": (
+                                f"universe rejected: price ${latest_price:.2f} outside "
+                                f"${float(config.MIN_SHARE_PRICE):.2f}-${float(config.MAX_SHARE_PRICE):.2f}"
+                            ),
+                        }
+                    )
+                    continue
+
                 if premarket_mode:
                     window_start = now_et - timedelta(minutes=lookback_minutes)
                     bars_df = self.data_client.get_intraday_bars_window(
@@ -765,8 +817,16 @@ class IntradayScanner:
                         bar_timeframe="1Min",
                     )
                 if bars_df.empty:
-                    no_bars_reason = "no premarket bars" if premarket_mode else "no intraday bars"
+                    no_bars_reason = "universe rejected: no premarket bars" if premarket_mode else "universe rejected: no intraday bars"
                     failed.append({"symbol": symbol, "reason": no_bars_reason})
+                    continue
+                if len(bars_df) < 2:
+                    failed.append(
+                        {
+                            "symbol": symbol,
+                            "reason": "universe rejected: insufficient bars (need >= 2)",
+                        }
+                    )
                     continue
                 daily_df = self.data_client.get_stock_daily_bars(symbol, limit=config.SCAN_DAILY_BARS)
                 today_volume = float(bars_df["volume"].astype(float).sum())
@@ -792,7 +852,7 @@ class IntradayScanner:
                         failed.append(
                             {
                                 "symbol": symbol,
-                                "reason": f"no profile matched ({', '.join(rejected)})",
+                                "reason": f"setup rejected: no profile matched ({', '.join(rejected)})",
                             }
                         )
                     else:
@@ -803,7 +863,7 @@ class IntradayScanner:
                                 ).strip()
                             passed.append(profile_signal)
             except Exception as exc:  # noqa: BLE001
-                failed.append({"symbol": symbol, "reason": f"scan error: {exc}"})
+                failed.append({"symbol": symbol, "reason": f"setup rejected: scan error: {exc}"})
             time.sleep(config.RATE_LIMIT_SLEEP_SECONDS)
 
         rvol_fail_count = sum(1 for item in failed if "rvol" in str(item.get("reason", "")).lower())
@@ -835,7 +895,7 @@ class IntradayScanner:
                             retry_failed.append(
                                 {
                                     "symbol": symbol,
-                                    "reason": f"no profile matched ({', '.join(rejected)})",
+                                    "reason": f"setup rejected: no profile matched ({', '.join(rejected)})",
                                 }
                             )
                         else:
@@ -845,7 +905,7 @@ class IntradayScanner:
                                 ).strip()
                                 retry_passed.append(profile_signal)
                 except Exception as exc:  # noqa: BLE001
-                    retry_failed.append({"symbol": symbol, "reason": f"scan error: {exc}"})
+                    retry_failed.append({"symbol": symbol, "reason": f"setup rejected: scan error: {exc}"})
                 time.sleep(config.RATE_LIMIT_SLEEP_SECONDS)
             passed = retry_passed
             failed = retry_failed
