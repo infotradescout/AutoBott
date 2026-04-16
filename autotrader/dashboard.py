@@ -248,6 +248,35 @@ def _latest_scan_loop_rows(limit: int = 500) -> tuple[str, list[dict[str, Any]]]
     return last_ts, loop_rows
 
 
+def _scan_row_stage(row: dict[str, Any]) -> str:
+  result = str(row.get("result", "") or "").strip().lower()
+  if result == "pass":
+    return "setup_pass"
+  return _scan_fail_stage(row.get("reason", ""))
+
+
+def _timeline_for_symbol(scan_rows: list[dict[str, Any]], symbol: str, *, max_items: int = 5) -> list[str]:
+  want = str(symbol or "").upper().strip()
+  if not want:
+    return []
+
+  rows = [r for r in scan_rows if _scan_symbol(r) == want]
+  rows.sort(key=lambda item: str(item.get("timestamp", "") or ""), reverse=True)
+  out: list[str] = []
+  for row in rows[: max(1, int(max_items))]:
+    ts_dt = _parse_ts(str(row.get("timestamp", "") or ""))
+    ts_label = ts_dt.strftime("%H:%M") if ts_dt is not None else str(row.get("timestamp", "") or "")[:5]
+    stage = _scan_row_stage(row)
+    reason = str(row.get("reason", "") or "")
+    if len(reason) > 70:
+      reason = reason[:67] + "..."
+    if str(row.get("result", "") or "").lower() == "pass":
+      out.append(f"{ts_label} pass ({stage})")
+    else:
+      out.append(f"{ts_label} fail ({stage}) {reason}")
+  return out
+
+
 def _fetch_snapshots(symbols: list[str]) -> dict[str, dict[str, Any]]:
     if not symbols:
         return {}
@@ -2148,37 +2177,43 @@ def api_trades():
 
 @app.get("/api/scanlog")
 def api_scanlog():
-    try:
-        _last_ts, rows = _latest_scan_loop_rows(limit=1000)
-        passed: list[dict[str, Any]] = []
-        for row in rows:
-            if str(row.get("result", "")).lower() != "pass":
-                continue
-            passed.append(row)
+  try:
+    _last_ts, rows = _latest_scan_loop_rows(limit=1000)
+    today_rows = _today_scan_rows()
+    passed: list[dict[str, Any]] = []
+    for row in rows:
+      if str(row.get("result", "")).lower() != "pass":
+        continue
+      passed.append(row)
 
-        # Keep one final state row per symbol in this loop.
-        deduped: list[dict[str, Any]] = []
-        seen: set[str] = set()
-        for row in passed:
-            symbol = str(row.get("symbol", "") or "").upper()
-            if not symbol or symbol in seen:
-                continue
-            seen.add(symbol)
-            deduped.append(row)
+    # Keep one final state row per symbol in this loop.
+    deduped: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for row in passed:
+      symbol = str(row.get("symbol", "") or "").upper()
+      if not symbol or symbol in seen:
+        continue
+      seen.add(symbol)
+      deduped.append(row)
 
-        deduped.sort(
-            key=lambda item: (
-                float(_safe_float(item.get("signal_score"), 0.0)),
-                float(_safe_float(item.get("rvol"), 0.0)),
-            ),
-            reverse=True,
-        )
-        for row in deduped:
-            row["stage"] = "setup_pass"
-            row["final_state"] = "setup_pass"
-        return jsonify(deduped[:30])
-    except Exception as exc:  # noqa: BLE001
-        return jsonify({"error": str(exc)}), 500
+    deduped.sort(
+      key=lambda item: (
+        float(_safe_float(item.get("signal_score"), 0.0)),
+        float(_safe_float(item.get("rvol"), 0.0)),
+      ),
+      reverse=True,
+    )
+    for row in deduped:
+      row["stage"] = "setup_pass"
+      row["final_state"] = "setup_pass"
+      row["state_timeline"] = _timeline_for_symbol(
+        today_rows,
+        str(row.get("symbol", "") or ""),
+        max_items=5,
+      )
+    return jsonify(deduped[:30])
+  except Exception as exc:  # noqa: BLE001
+    return jsonify({"error": str(exc)}), 500
 
 
 @app.route("/api/scanfails")
@@ -4454,6 +4489,10 @@ def home():
       if (!Array.isArray(data)) { el.textContent = "—"; return; }
       const slice = data.slice(0, 10);
       if (slice.length === 0) { el.textContent = "No final setup passes in latest scan loop"; return; }
+      const timelineText = (arr) => {
+        if (!Array.isArray(arr) || !arr.length) return "-";
+        return arr.join(" > ");
+      };
       if (isMobileView()) {
         const cards = slice.map(s => `
           <div class="mobile-item">
@@ -4468,6 +4507,7 @@ def home():
               <div><span class="mobile-k">IVR</span> <span class="mobile-v">${s.iv_rank || "-"}</span></div>
               <div><span class="mobile-k">State</span> <span class="mobile-v">${s.final_state || "setup_pass"}</span></div>
               <div><span class="mobile-k">Reason</span> <span class="mobile-v">${s.reason || "-"}</span></div>
+              <div><span class="mobile-k">Timeline</span> <span class="mobile-v">${timelineText(s.state_timeline)}</span></div>
             </div>
           </div>
         `).join("");
@@ -4484,8 +4524,9 @@ def home():
           <td>${s.iv_rank || "-"}</td>
           <td>${s.final_state || "setup_pass"}</td>
           <td>${s.reason || "-"}</td>
+          <td style="max-width:360px; white-space:normal; color:#9ab0c9; font-size:11px">${timelineText(s.state_timeline)}</td>
         </tr>`).join("");
-      el.innerHTML = `<table><thead><tr><th>Time</th><th>Symbol</th><th>Dir</th><th>RVOL</th><th>RSI</th><th>IVR %</th><th>Final State</th><th>Reason</th></tr></thead><tbody>${rows}</tbody></table>`;
+      el.innerHTML = `<table><thead><tr><th>Time</th><th>Symbol</th><th>Dir</th><th>RVOL</th><th>RSI</th><th>IVR %</th><th>Final State</th><th>Reason</th><th>Recent Timeline</th></tr></thead><tbody>${rows}</tbody></table>`;
     }
 
     function reviewBadge(status) {
