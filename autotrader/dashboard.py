@@ -4493,6 +4493,18 @@ def home():
         if (!Array.isArray(arr) || !arr.length) return "-";
         return arr.join(" > ");
       };
+      const timelineDetails = (arr) => {
+        if (!Array.isArray(arr) || !arr.length) return "-";
+        const latest = String(arr[0] || "-");
+        if (arr.length === 1) return latest;
+        const extra = arr.slice(1).map(item => `<div style="margin-top:4px">${item}</div>`).join("");
+        return `
+          <details style="cursor:pointer;">
+            <summary style="color:#9ab0c9">${latest} <span style="color:#6f849c">(+${arr.length - 1} more)</span></summary>
+            <div style="margin-top:6px; color:#9ab0c9">${extra}</div>
+          </details>
+        `;
+      };
       if (isMobileView()) {
         const cards = slice.map(s => `
           <div class="mobile-item">
@@ -4507,7 +4519,7 @@ def home():
               <div><span class="mobile-k">IVR</span> <span class="mobile-v">${s.iv_rank || "-"}</span></div>
               <div><span class="mobile-k">State</span> <span class="mobile-v">${s.final_state || "setup_pass"}</span></div>
               <div><span class="mobile-k">Reason</span> <span class="mobile-v">${s.reason || "-"}</span></div>
-              <div><span class="mobile-k">Timeline</span> <span class="mobile-v">${timelineText(s.state_timeline)}</span></div>
+              <div><span class="mobile-k">Timeline</span> <span class="mobile-v">${timelineDetails(s.state_timeline)}</span></div>
             </div>
           </div>
         `).join("");
@@ -4524,7 +4536,7 @@ def home():
           <td>${s.iv_rank || "-"}</td>
           <td>${s.final_state || "setup_pass"}</td>
           <td>${s.reason || "-"}</td>
-          <td style="max-width:360px; white-space:normal; color:#9ab0c9; font-size:11px">${timelineText(s.state_timeline)}</td>
+          <td style="max-width:360px; white-space:normal; color:#9ab0c9; font-size:11px">${timelineDetails(s.state_timeline)}</td>
         </tr>`).join("");
       el.innerHTML = `<table><thead><tr><th>Time</th><th>Symbol</th><th>Dir</th><th>RVOL</th><th>RSI</th><th>IVR %</th><th>Final State</th><th>Reason</th><th>Recent Timeline</th></tr></thead><tbody>${rows}</tbody></table>`;
     }
