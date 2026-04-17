@@ -550,6 +550,23 @@ def _apply_profit_protection(meta: dict, plpc: float, now_et: datetime = None) -
             meta["profit_protection_applied"] = True
 
 
+def _runner_near_close_blocked(now_et: datetime) -> bool:
+    cutoff = str(getattr(config, "RUNNER_DISABLE_AFTER_ET", getattr(config, "NO_NEW_TRADES_AFTER", "14:30")) or "14:30")
+    try:
+        return is_at_or_after(now_et, cutoff)
+    except Exception:
+        return False
+
+
+def _trade_state_from_meta(meta: dict[str, Any]) -> str:
+    raw = str(meta.get("trade_state", "") or "").strip().lower()
+    if raw in {"unproven", "protected", "bank_or_qualify", "runner"}:
+        return raw
+    if bool(meta.get("runner_mode")):
+        return "runner"
+    return "unproven"
+
+
 def _await_order_fill(
     broker: AlpacaBroker,
     *,
@@ -1091,6 +1108,8 @@ def _hydrate_missing_position_meta(open_trade_meta: dict[str, dict], option_posi
             "stop_loss_usd": float(getattr(config, "STOP_LOSS_USD", 10.0)),
             "immediate_take_profit_pct": float(getattr(config, "IMMEDIATE_TAKE_PROFIT_PCT", 1.0) or 1.0),
             "max_hold_minutes": int(getattr(config, "MAX_HOLD_MINUTES", 90) or 90),
+            "trade_state": "unproven",
+            "runner_mode": False,
             "max_plpc": 0.0,
             "min_plpc": 0.0,
             "inferred": True,
@@ -1726,6 +1745,8 @@ def main():
                 "stop_loss_usd": _runtime_stop_loss_usd(),
                 "immediate_take_profit_pct": float(getattr(config, "IMMEDIATE_TAKE_PROFIT_PCT", 1.0) or 1.0),
                 "max_hold_minutes": int(getattr(config, "MAX_HOLD_MINUTES", 90) or 90),
+                "trade_state": "unproven",
+                "runner_mode": False,
                 "max_plpc": 0.0,
                 "min_plpc": 0.0,
             }
@@ -2881,6 +2902,24 @@ def main():
                 is_expensive_symbol = ticker in expensive_symbols
                 if _is_in_opening_strict_window(now_et):
                     opening_premium_cap = float(getattr(config, "OPENING_MAX_FRESH_PREMIUM_USD", 300.0) or 300.0)
+
+                    # In opening strict mode, expensive names are blocked unless
+                    # they are core names or fit an extra-tight premium budget.
+                    if is_expensive_symbol:
+                        core_set = set(str(s).upper() for s in getattr(config, "PREFERRED_CORE_TICKERS", ()))
+                        tight_opening_expensive_premium = float(
+                            getattr(config, "OPENING_EXPENSIVE_MAX_PREMIUM_USD", max_trade_premium) or max_trade_premium
+                        )
+                        is_core_name = ticker in core_set
+                        if not is_core_name and trade_premium_usd > tight_opening_expensive_premium:
+                            _mark_skip("opening_expensive_name_gate")
+                            _mark_stage4_reject(reason="opening_expensive_name_gate", ticker=ticker)
+                            print(
+                                f"[{ts(now_et)}] {ticker}: skip (opening expensive-name gate; premium ${trade_premium_usd:.2f} "
+                                f"> ${tight_opening_expensive_premium:.2f} and not core)."
+                            )
+                            continue
+
                     if (opening_fresh_premium_deployed_usd + trade_premium_usd) > opening_premium_cap:
                         if not premium_override_ok:
                             _mark_skip("opening_fresh_premium_cap")
@@ -3029,6 +3068,8 @@ def main():
                     "stop_loss_usd": signal_stop_loss_usd,
                     "immediate_take_profit_pct": signal_take_profit_pct,
                     "max_hold_minutes": signal_max_hold_minutes,
+                    "trade_state": "unproven",
+                    "runner_mode": False,
                     "max_plpc": 0.0,
                     "min_plpc": 0.0,
                 }
@@ -3124,12 +3165,15 @@ def main():
 
             # --- Exit strategy ---
             # 1. STOP LOSS: exit immediately at/through the per-trade USD loss cap.
-            # 2. IMMEDIATE TAKE PROFIT: exit instantly once gain reaches configured cap.
-            # 3. REVERSAL EXIT: otherwise, if profitable, hold until momentum reverses.
+            # 2. STATE TRANSITIONS: unproven -> protected -> bank_or_qualify -> runner.
+            # 3. REVERSAL EXIT: in protected/runner states, exit on confirmed reversal.
 
             if meta:
                 meta["max_plpc"] = max(float(meta.get("max_plpc", plpc) or plpc), plpc)
                 meta["min_plpc"] = min(float(meta.get("min_plpc", plpc) or plpc), plpc)
+                # Legacy meta compatibility: ensure a default state exists.
+                if not str(meta.get("trade_state", "") or "").strip():
+                    meta["trade_state"] = "runner" if bool(meta.get("runner_mode")) else "unproven"
                 open_trade_meta[symbol] = meta
 
             history_rows = open_position_pl_history.get(symbol)
@@ -3168,53 +3212,68 @@ def main():
             if exit_reason is None and should_trigger_stop_loss(unrealized_usd, stop_loss_usd_cap):
                 exit_reason = "stop_loss"
 
-            # --- Layered profit management ---
-            # Stage 1: Profit lock at +3% — move stop floor to breakeven, allow upside
-            if exit_reason is None and plpc >= 0.03:
-                _apply_profit_protection(meta, plpc, now_et)
+            # --- Stateful profit management ---
+            trade_state = _trade_state_from_meta(meta)
 
-            # Stage 2: Runner qualification at +8-12%
-            # Decide: bank the win or promote to runner mode for larger gains?
+            protect_trigger = float(getattr(config, "TRADE_STATE_PROTECT_TRIGGER_PCT", 0.03) or 0.03)
+            protect_floor = float(getattr(config, "TRADE_STATE_PROTECTED_STOP_FLOOR_PCT", 0.001) or 0.001)
+            bank_trigger = float(getattr(config, "TRADE_STATE_BANK_OR_QUALIFY_TRIGGER_PCT", 0.08) or 0.08)
+
+            if exit_reason is None and trade_state == "unproven" and plpc >= protect_trigger:
+                current_floor = float(meta.get("stop_floor_plpc", -float(config.STOP_LOSS_PCT)) or -float(config.STOP_LOSS_PCT))
+                meta["stop_floor_plpc"] = max(current_floor, protect_floor)
+                meta["trade_state"] = "protected"
+                trade_state = "protected"
+                print(
+                    f"[{ts(now_et)}] {symbol}: promoted to protected state at {plpc:+.2%}; "
+                    f"floor={float(meta.get('stop_floor_plpc', 0.0)):+.2%}."
+                )
+
+            if exit_reason is None and trade_state in {"protected", "bank_or_qualify", "runner"}:
+                floor_plpc = float(meta.get("stop_floor_plpc", -float(config.STOP_LOSS_PCT)) or -float(config.STOP_LOSS_PCT))
+                if plpc <= floor_plpc:
+                    exit_reason = "protected_floor_breach"
+
+            # Stage 3: bank-or-qualify at meaningful green threshold.
             if (
                 exit_reason is None
-                and plpc >= 0.08
-                and plpc < 0.12
-                and not meta.get("runner_mode")
+                and trade_state in {"protected", "bank_or_qualify"}
+                and plpc >= bank_trigger
                 and not _is_in_anti_churn_window(entry_time, now_et)
             ):
-                # Check if this trade qualifies for runner mode (strong momentum, no early reversal)
+                meta["trade_state"] = "bank_or_qualify"
+                trade_state = "bank_or_qualify"
                 ticker_for_eligibility = ticker_for_pos or ""
-                if ticker_for_eligibility and _is_runner_eligible(symbol, ticker_for_eligibility, meta, data_client, now_et):
-                    # Promote to runner mode — more lenient exit
+                if (
+                    ticker_for_eligibility
+                    and not _runner_near_close_blocked(now_et)
+                    and _is_runner_eligible(symbol, ticker_for_eligibility, meta, data_client, now_et)
+                ):
                     meta["runner_mode"] = True
+                    meta["trade_state"] = "runner"
+                    runner_floor = float(getattr(config, "TRADE_STATE_RUNNER_PROMOTION_STOP_FLOOR_PCT", 0.03) or 0.03)
+                    current_floor = float(meta.get("stop_floor_plpc", 0.0) or 0.0)
+                    meta["stop_floor_plpc"] = max(current_floor, runner_floor)
+                    trade_state = "runner"
                     print(f"[{ts(now_et)}] RUNNER ELIGIBLE: {symbol} at +{plpc:.2%}, promoted to runner mode")
                 else:
-                    # No runner eligibility — bank the small win at +8-12%
                     exit_reason = "base_win_bank"
                     print(f"[{ts(now_et)}] BASE WIN BANK: {symbol} at +{plpc:.2%}, not runner eligible, taking profit")
 
-            # Rule 2: immediate take-profit (but NOT in runner mode, and NOT during anti-churn hold).
-            # Runner mode trades must earn the right to run longer.
-            # Anti-churn hold suppresses this rule in first N minutes to avoid round-trip losses.
-            immediate_take_profit_pct = float(
-                meta.get("immediate_take_profit_pct", getattr(config, "IMMEDIATE_TAKE_PROFIT_PCT", 1.0))
-                or getattr(config, "IMMEDIATE_TAKE_PROFIT_PCT", 1.0)
-            )
-            if (exit_reason is None and not meta.get("runner_mode") and not _is_in_anti_churn_window(entry_time, now_et)
-                and plpc >= immediate_take_profit_pct):
-                exit_reason = "immediate_take_profit"
-
             # --- Reversal detection exit ---
-            # When the trade is in profit, check if the underlying is reversing.
-            # Exit on confirmed reversal so we keep gains without a fixed cap.
-            # Only triggers when ENABLE_REVERSAL_EXIT=true (default: true), trade has reached
-            # minimum profit threshold, NOT in runner mode, and NOT during anti-churn hold.
+            # Reversal logic is a protected/runner-state manager (not an early scalp trigger).
+            reversal_min_profit_pct = float(getattr(config, "REVERSAL_EXIT_MIN_PROFIT_PCT", 0.06) or 0.06)
+            runner_reversal_min_profit_pct = float(
+                getattr(config, "RUNNER_REVERSAL_EXIT_MIN_PROFIT_PCT", reversal_min_profit_pct)
+                or reversal_min_profit_pct
+            )
+            active_reversal_threshold = runner_reversal_min_profit_pct if trade_state == "runner" else reversal_min_profit_pct
             if (
                 exit_reason is None
                 and bool(getattr(config, "ENABLE_REVERSAL_EXIT", True))
-                and not meta.get("runner_mode")
+                and trade_state in {"protected", "bank_or_qualify", "runner"}
                 and not _is_in_anti_churn_window(entry_time, now_et)
-                and plpc >= float(getattr(config, "REVERSAL_EXIT_MIN_PROFIT_PCT", 0.10))
+                and plpc >= active_reversal_threshold
                 and ticker_for_pos
             ):
                 try:

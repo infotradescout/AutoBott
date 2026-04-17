@@ -177,6 +177,7 @@ OPENING_MAX_FRESH_ENTRIES                    = 1
 OPENING_MAX_CONCURRENT_POSITIONS             = 2
 OPENING_MAX_NEW_ENTRY_ATTEMPTS_PER_LOOP      = 1
 OPENING_MAX_EXPENSIVE_ENTRIES                = 1
+OPENING_EXPENSIVE_MAX_PREMIUM_USD            = 140.0
 
 
 # ---------------------------------------------------------------------------
@@ -187,9 +188,16 @@ OPENING_MAX_EXPENSIVE_ENTRIES                = 1
 STOP_LOSS_USD          = 9.0    # tighter loss cap per trade in capital-preservation mode
 STOP_LOSS_PCT          = 0.03   # legacy fallback reference for older state/debug fields
 
-# Immediate winner lock: exit as soon as gain reaches this fraction.
-# Small-win mode: 0.05 = +5% (bank small frequent wins).
-IMMEDIATE_TAKE_PROFIT_PCT = 0.05
+# Legacy immediate TP knob retained for backward compatibility only.
+# Stateful manager (protect -> bank/qualify -> runner) is now primary.
+IMMEDIATE_TAKE_PROFIT_PCT = 0.50
+
+# Explicit stateful winner-management transitions.
+TRADE_STATE_PROTECT_TRIGGER_PCT             = 0.03   # +3%: move to protected
+TRADE_STATE_PROTECTED_STOP_FLOOR_PCT        = 0.001  # +0.1% floor once protected
+TRADE_STATE_BANK_OR_QUALIFY_TRIGGER_PCT     = 0.08   # +8%: bank-or-qualify decision
+TRADE_STATE_RUNNER_PROMOTION_STOP_FLOOR_PCT = 0.03   # +3% floor when promoted to runner
+RUNNER_DISABLE_AFTER_ET                     = "14:30"
 
 # Fixed profit target (disabled — trailing stop rides winners instead)
 ENABLE_FIXED_PROFIT_TARGET = False
@@ -220,7 +228,8 @@ TRAIL_PULLBACK_PCT      = 0.06   # trail 6% below peak when deep in profit
 # Requires REVERSAL_CONFIRM_SIGNALS of 3 to fire an exit.
 
 ENABLE_REVERSAL_EXIT         = True
-REVERSAL_EXIT_MIN_PROFIT_PCT = 0.02   # check for reversal once trade is up 2%
+REVERSAL_EXIT_MIN_PROFIT_PCT = 0.06   # protected-state reversal starts at +6%
+RUNNER_REVERSAL_EXIT_MIN_PROFIT_PCT = 0.08
 REVERSAL_ROC_THRESHOLD_PCT   = 0.30   # 0.3% move in 2 bars counts as reversal signal
 REVERSAL_CONFIRM_SIGNALS     = 2      # require 2 of 3 signals to confirm reversal
 
