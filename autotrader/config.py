@@ -90,21 +90,21 @@ SCAN_DAILY_BARS     = 30
 # Position sizing & risk
 # ---------------------------------------------------------------------------
 
-MAX_POSITIONS                       = 3     # hard cap for concurrent option positions (small live account doctrine)
-POSITION_SIZE_USD                   = 500
+MAX_POSITIONS                       = 2     # hard cap for concurrent option positions (small live account doctrine)
+POSITION_SIZE_USD                   = 350
 RISK_PER_TRADE_PCT                  = 0.01
-MAX_POSITION_SIZE_USD               = 700.0
+MAX_POSITION_SIZE_USD               = 500.0
 DRAWDOWN_REDUCE_AFTER_CONSEC_LOSSES = 2
 DRAWDOWN_SIZE_MULTIPLIER            = 0.5
-DAILY_LOSS_LIMIT_USD                = 120.0
-WEEKLY_LOSS_LIMIT_USD               = 400.0
-CONSECUTIVE_LOSS_LIMIT              = 3
+DAILY_LOSS_LIMIT_USD                = 75.0
+WEEKLY_LOSS_LIMIT_USD               = 240.0
+CONSECUTIVE_LOSS_LIMIT              = 2
 
 # Capital doctrine for small live account preparation.
-MAX_PREMIUM_PER_TRADE_USD           = 150.0
-MAX_TOTAL_OPEN_PREMIUM_USD          = 600.0
-OPENING_MAX_FRESH_PREMIUM_USD       = 300.0
-MAX_SAME_DIRECTION_POSITIONS        = 2
+MAX_PREMIUM_PER_TRADE_USD           = 110.0
+MAX_TOTAL_OPEN_PREMIUM_USD          = 350.0
+OPENING_MAX_FRESH_PREMIUM_USD       = 180.0
+MAX_SAME_DIRECTION_POSITIONS        = 1
 
 # Expensive names are allowed only when premium stays inside per-trade budget;
 # opening window allows at most one expensive-name fresh entry.
@@ -116,8 +116,8 @@ EXPENSIVE_PREMIUM_SYMBOLS = (
 PREFERRED_CORE_TICKERS = (
     "SPY", "QQQ", "IWM", "AAPL", "AMD", "INTC", "JPM", "XOM", "CRM", "ORCL",
 )
-MAX_NON_CORE_ENTRIES_PER_DAY        = 4
-NON_CORE_MIN_SIGNAL_SCORE           = 9.0
+MAX_NON_CORE_ENTRIES_PER_DAY        = 2
+NON_CORE_MIN_SIGNAL_SCORE           = 10.0
 
 
 # ---------------------------------------------------------------------------
@@ -129,8 +129,8 @@ PREOPEN_READY_MINUTES              = 10
 HARD_CLOSE_TIME                    = "15:30"   # force-close all positions at this time
 OPTION_EXPIRY_EXIT_TIME            = "15:00"   # exit expiring contracts by this time
 OPTION_FORCE_EXIT_DAYS_BEFORE_EXPIRY = 1
-NO_NEW_TRADES_BEFORE               = "09:30"
-NO_NEW_TRADES_AFTER                = "15:00"   # stop new entries 30 min before close
+NO_NEW_TRADES_BEFORE               = "09:35"
+NO_NEW_TRADES_AFTER                = "14:30"   # stop new entries earlier to avoid late-session noise
 SCAN_MORNING_TIME                  = "09:30"
 OBSERVATION_END_TIME               = "10:00"
 OBSERVATION_ENABLED                = True
@@ -156,18 +156,18 @@ MAX_HOLD_MINUTES                   = 90
 ANTI_CHURN_HOLD_MINUTES            = 3
 
 # Opening strict mode (09:30+N minutes): trade fewer, stronger setups only.
-OPENING_STRICT_WINDOW_MINUTES                = 10
-OPENING_STRICT_MIN_SIGNAL_SCORE              = 6.0
+OPENING_STRICT_WINDOW_MINUTES                = 20
+OPENING_STRICT_MIN_SIGNAL_SCORE              = 6.8
 OPENING_STRICT_CONFIRM_BARS                  = 3
-OPENING_STRICT_CONFIRM_MOMENTUM_THRESHOLD_PCT = 0.18
-OPENING_STRICT_MIN_DIRECTION_SCORE           = 0.55
-OPENING_STRICT_MIN_RVOL                      = 1.20
-OPENING_STRICT_MIN_ROC_PCT                   = 0.18
-OPENING_STRICT_MIN_VWAP_DISTANCE_PCT         = 0.08
-OPENING_MAX_SIGNAL_CANDIDATES                = 4
-OPENING_MAX_FRESH_ENTRIES                    = 2
+OPENING_STRICT_CONFIRM_MOMENTUM_THRESHOLD_PCT = 0.22
+OPENING_STRICT_MIN_DIRECTION_SCORE           = 0.65
+OPENING_STRICT_MIN_RVOL                      = 1.40
+OPENING_STRICT_MIN_ROC_PCT                   = 0.24
+OPENING_STRICT_MIN_VWAP_DISTANCE_PCT         = 0.12
+OPENING_MAX_SIGNAL_CANDIDATES                = 2
+OPENING_MAX_FRESH_ENTRIES                    = 1
 OPENING_MAX_CONCURRENT_POSITIONS             = 2
-OPENING_MAX_NEW_ENTRY_ATTEMPTS_PER_LOOP      = 2
+OPENING_MAX_NEW_ENTRY_ATTEMPTS_PER_LOOP      = 1
 OPENING_MAX_EXPENSIVE_ENTRIES                = 1
 
 
@@ -176,7 +176,7 @@ OPENING_MAX_EXPENSIVE_ENTRIES                = 1
 # ---------------------------------------------------------------------------
 
 # Slightly wider stop to reduce chop noise exits.
-STOP_LOSS_USD          = 12.0   # exit if unrealized P&L is <= -$12 per trade
+STOP_LOSS_USD          = 9.0    # tighter loss cap per trade in capital-preservation mode
 STOP_LOSS_PCT          = 0.03   # legacy fallback reference for older state/debug fields
 
 # Immediate winner lock: exit as soon as gain reaches this fraction.
@@ -253,7 +253,7 @@ IV_RANK_MIN               = 20.0
 IV_RANK_MAX               = 99.0
 
 ENABLE_SIGNAL_SCORING     = True
-MIN_SIGNAL_SCORE          = 4.2   # was 5.0; keeps quality gate while admitting near-threshold core moves
+MIN_SIGNAL_SCORE          = 5.8   # raise quality floor to reduce marginal entries
 
 # Phase 3 enforcement knobs driven by review.py output.
 # Use blocked hours after you identify weak entry windows from analytics.
@@ -261,11 +261,11 @@ ENTRY_BLOCKED_HOURS_ET    = ()
 
 # Execution-time spread gate using the live quote right before order submission.
 # Keep this tighter than MAX_OPTION_SPREAD_PCT, which is only used during chain selection.
-ENTRY_MAX_QUOTE_SPREAD_PCT         = 18.0
-OPENING_ENTRY_MAX_QUOTE_SPREAD_PCT = 24.0
+ENTRY_MAX_QUOTE_SPREAD_PCT         = 12.0
+OPENING_ENTRY_MAX_QUOTE_SPREAD_PCT = 15.0
 
-MAX_ENTRY_SLIPPAGE_PCT    = 5.0
-MAX_FILL_SLIPPAGE_PCT     = 5.0
+MAX_ENTRY_SLIPPAGE_PCT    = 3.0
+MAX_FILL_SLIPPAGE_PCT     = 3.0
 
 # Churn control: block immediate re-entry on a ticker after a losing exit.
 REENTRY_COOLDOWN_LOSS_MINUTES      = 20
