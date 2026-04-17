@@ -6149,7 +6149,13 @@ def home():
               <br><small style="color:#888">Stage4 source: ${stage4Source}${stage4Fresh ? " (fresh)" : " (fallback/proxy)"}</small>
           `;
         } else {
-          sumEl.textContent = "No scan data yet";
+          const fallbackScanRows = Array.isArray(scanlog) ? scanlog.length : 0;
+          const fallbackRejectRows = Array.isArray(scanfails) ? scanfails.length : 0;
+          if (fallbackScanRows > 0 || fallbackRejectRows > 0) {
+            sumEl.textContent = `Scan summary unavailable (scan rows=${fallbackScanRows}, rejects=${fallbackRejectRows}).`;
+          } else {
+            sumEl.textContent = "No scan data yet";
+          }
         }
       }
 
