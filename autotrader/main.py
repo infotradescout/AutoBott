@@ -248,6 +248,38 @@ def _is_in_opening_strict_window(now_et: datetime) -> bool:
     return entry_open_minutes <= now_minutes < (entry_open_minutes + window_minutes)
 
 
+def _opening_entry_quality_ok(signal: dict[str, Any], now_et: datetime) -> tuple[bool, str]:
+    if not _is_in_opening_strict_window(now_et):
+        return True, ""
+    try:
+        direction_score = abs(float(signal.get("direction_score", 0.0) or 0.0))
+        rvol = float(signal.get("rvol", 0.0) or 0.0)
+        roc = abs(float(signal.get("roc", 0.0) or 0.0))
+        price = float(signal.get("price", 0.0) or 0.0)
+        vwap = float(signal.get("vwap", 0.0) or 0.0)
+    except (TypeError, ValueError):
+        return False, "opening quality parse failure"
+
+    min_dir = float(getattr(config, "OPENING_STRICT_MIN_DIRECTION_SCORE", 0.55) or 0.55)
+    min_rvol = float(getattr(config, "OPENING_STRICT_MIN_RVOL", 1.2) or 1.2)
+    min_roc = float(getattr(config, "OPENING_STRICT_MIN_ROC_PCT", 0.18) or 0.18)
+    min_vwap_dist = float(getattr(config, "OPENING_STRICT_MIN_VWAP_DISTANCE_PCT", 0.08) or 0.08)
+
+    vwap_dist = 0.0
+    if vwap > 0 and price > 0:
+        vwap_dist = abs(price - vwap) / vwap * 100.0
+
+    if direction_score < min_dir:
+        return False, f"opening direction conviction too weak ({direction_score:.2f}<{min_dir:.2f})"
+    if rvol < min_rvol:
+        return False, f"opening RVOL too weak ({rvol:.2f}<{min_rvol:.2f})"
+    if roc < min_roc:
+        return False, f"opening ROC too weak ({roc:.2f}%<{min_roc:.2f}%)"
+    if vwap_dist < min_vwap_dist:
+        return False, f"opening VWAP distance too shallow ({vwap_dist:.2f}%<{min_vwap_dist:.2f}%)"
+    return True, ""
+
+
 def _entry_quote_spread_gate(
     *,
     option_symbol: str,
@@ -2340,6 +2372,8 @@ def main():
             )
             entry_debug["exceptions"] = exceptions
 
+        opening_entry_attempts_loop = 0
+
         for signal in signals:
             now_et = datetime.now(tz)
             _touch_heartbeat()
@@ -2403,6 +2437,16 @@ def main():
             ticker = signal["symbol"]
             direction = signal["direction"]
             if _is_in_opening_strict_window(now_et):
+                opening_attempt_cap = max(1, int(getattr(config, "OPENING_MAX_NEW_ENTRY_ATTEMPTS_PER_LOOP", 2) or 2))
+                if opening_entry_attempts_loop >= opening_attempt_cap:
+                    _mark_skip("opening_entry_attempt_cap")
+                    _mark_stage4_reject(reason="opening_entry_attempt_cap", ticker=ticker)
+                    print(
+                        f"[{ts(now_et)}] Opening entry-attempt cap reached "
+                        f"({opening_entry_attempts_loop}/{opening_attempt_cap})."
+                    )
+                    break
+
                 opening_max_fresh_entries = max(1, int(getattr(config, "OPENING_MAX_FRESH_ENTRIES", 3) or 3))
                 if opening_entries_today_count >= opening_max_fresh_entries:
                     _mark_skip("opening_fresh_entry_cap")
@@ -2412,6 +2456,13 @@ def main():
                         f"({opening_entries_today_count}/{opening_max_fresh_entries})."
                     )
                     break
+
+            opening_quality_ok, opening_quality_reason = _opening_entry_quality_ok(signal, now_et)
+            if not opening_quality_ok:
+                _mark_skip("opening_quality_gate")
+                _mark_stage4_reject(reason="opening_quality_gate", ticker=ticker)
+                print(f"[{ts(now_et)}] {ticker}: skip ({opening_quality_reason}).")
+                continue
 
             if not _is_valid_long_direction(direction):
                 _mark_skip("invalid_strategy_direction")
@@ -2671,6 +2722,8 @@ def main():
 
                 qty = 1
                 _mark_stage4_eligible(ticker=ticker)
+                if _is_in_opening_strict_window(now_et):
+                    opening_entry_attempts_loop += 1
                 entry_result = _execute_limit_entry(
                     broker=broker,
                     data_client=data_client,
