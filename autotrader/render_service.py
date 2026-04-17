@@ -46,6 +46,7 @@ from broker import AlpacaBroker
 from dashboard import app
 from main import main as trader_main
 from state_store import load_bot_state, save_bot_state
+from trading_control import load_trading_control
 
 try:
     import pytz
@@ -128,6 +129,26 @@ def _patch_runtime_state(updates: dict) -> None:
         save_bot_state(state)
     except Exception as exc:  # noqa: BLE001
         print(f"[render_service] runtime state patch failed: {exc}")
+
+
+def _print_startup_readiness() -> None:
+    data_dir = Path(str(getattr(config, "DATA_DIR", "") or os.getenv("DATA_DIR", "")).strip() or "/tmp/autotrader-data")
+    token_enabled = bool(str(getattr(config, "DASHBOARD_CONTROL_TOKEN", "") or "").strip())
+    live_options_keys = bool(
+        str(getattr(config, "ALPACA_LIVE_API_KEY", "") or "").strip()
+        and str(getattr(config, "ALPACA_LIVE_SECRET_KEY", "") or "").strip()
+    )
+    control = load_trading_control()
+
+    print("[render_service] STARTUP READINESS")
+    print(f"[render_service] paper_mode={bool(getattr(config, 'PAPER', True))}")
+    print(f"[render_service] alpaca_key_present={bool(str(os.getenv('ALPACA_API_KEY', '')).strip())}")
+    print(f"[render_service] alpaca_secret_present={bool(str(os.getenv('ALPACA_SECRET_KEY', '')).strip())}")
+    print(f"[render_service] live_options_keys_present={live_options_keys}")
+    print(f"[render_service] data_dir={data_dir} writable={data_dir.exists() and os.access(data_dir, os.W_OK)}")
+    print(f"[render_service] dashboard_control_auth_enabled={token_enabled}")
+    print(f"[render_service] manual_stop={bool(control.get('manual_stop', False))}")
+    print(f"[render_service] dry_run={bool(control.get('dry_run', False))}")
 
 
 def _run_trader_forever() -> None:
@@ -224,6 +245,7 @@ def _run_independent_stoploss_guard() -> None:
 
 
 if __name__ == "__main__":
+    _print_startup_readiness()
     trader_thread = threading.Thread(target=_run_trader_forever, daemon=True)
     trader_thread.start()
     stoploss_guard_thread = threading.Thread(target=_run_independent_stoploss_guard, daemon=True)

@@ -87,8 +87,24 @@ def _safe_float(value: Any, default: float = 0.0) -> float:
 
 
 def _verify_control_token() -> tuple[bool, str, int]:
-  # Token auth intentionally disabled per operator preference.
-    return True, "", 200
+  expected = str(CONTROL_TOKEN or "").strip()
+  if not expected:
+    return False, "Dashboard control token is not configured.", 503
+
+  provided = ""
+  auth_header = str(request.headers.get("Authorization", "") or "").strip()
+  if auth_header.lower().startswith("bearer "):
+    provided = auth_header.split(" ", 1)[1].strip()
+  if not provided:
+    provided = str(request.headers.get("X-Control-Token", "") or "").strip()
+  if not provided:
+    provided = str(request.args.get("token", "") or "").strip()
+
+  if not provided:
+    return False, "Missing control token.", 401
+  if not hmac.compare_digest(provided, expected):
+    return False, "Invalid control token.", 403
+  return True, "", 200
 
 
 def _read_csv_rows(path: Path, limit: int, reverse: bool = True) -> list[dict[str, str]]:
@@ -2516,37 +2532,37 @@ def api_lisa_feed():
         return jsonify({"error": str(exc)}), 500
 
 
-    @app.get("/api/layers/all")
-    def api_layers_all():
-      try:
+@app.get("/api/layers/all")
+def api_layers_all():
+    try:
         return jsonify(_build_three_layer_payload())
-      except Exception as exc:  # noqa: BLE001
+    except Exception as exc:  # noqa: BLE001
         return jsonify({"error": str(exc)}), 500
 
 
-    @app.get("/api/layer/internal")
-    def api_layer_internal():
-      try:
+@app.get("/api/layer/internal")
+def api_layer_internal():
+    try:
         return jsonify(_build_internal_trader_layer())
-      except Exception as exc:  # noqa: BLE001
+    except Exception as exc:  # noqa: BLE001
         return jsonify({"error": str(exc)}), 500
 
 
-    @app.get("/api/layer/public")
-    def api_layer_public():
-      try:
+@app.get("/api/layer/public")
+def api_layer_public():
+    try:
         return jsonify(_build_public_livestream_layer())
-      except Exception as exc:  # noqa: BLE001
+    except Exception as exc:  # noqa: BLE001
         return jsonify({"error": str(exc)}), 500
 
 
-    @app.get("/api/layer/lisa-ingestion")
-    def api_layer_lisa_ingestion():
-      try:
+@app.get("/api/layer/lisa-ingestion")
+def api_layer_lisa_ingestion():
+    try:
         internal_layer = _build_internal_trader_layer()
         public_layer = _build_public_livestream_layer()
         return jsonify(_build_lisa_ingestion_layer(public_layer, internal_layer))
-      except Exception as exc:  # noqa: BLE001
+    except Exception as exc:  # noqa: BLE001
         return jsonify({"error": str(exc)}), 500
 
 
@@ -2561,6 +2577,9 @@ def api_roadmap_status():
 @app.post("/api/lisa/feed/generate")
 def api_lisa_feed_generate():
     try:
+        ok, err, status = _verify_control_token()
+        if not ok:
+            return jsonify({"error": err}), status
         payload = _synthesize_lisa_signals()
         if str(request.args.get("delta", "0")) == "1":
             payload = _filtered_payload_delta(payload)
@@ -2597,6 +2616,9 @@ def api_lisa_feed_export():
 @app.post("/api/lisa/feed/publish")
 def api_lisa_feed_publish():
     try:
+        ok, err, status = _verify_control_token()
+        if not ok:
+            return jsonify({"error": err}), status
         payload = _synthesize_lisa_signals()
         payload = _filtered_payload_delta(payload) if str(request.args.get("delta", "0")) == "1" else payload
         _persist_lisa_feed(payload)
