@@ -2490,9 +2490,36 @@ def main():
             "entry_stage4_rejected_symbols": [],
             "entry_orders_submitted": 0,
             "entries_filled": 0,
+            "signal_outcomes": {},
             "skips": {},
             "exceptions": [],
         }
+
+        def _normalize_disposition_reason(reason: str) -> str:
+            token = str(reason or "").strip().lower()
+            aliases = {
+                "premium_per_trade_cap": "premium_cap",
+                "entry_confirmation_mismatch": "entry_confirmation",
+                "quote_spread_too_wide": "spread_gate",
+                "same_direction_exposure_cap": "same_direction_cap",
+                "opening_fresh_entry_cap": "opening_limit",
+            }
+            normalized = aliases.get(token, token)
+            normalized = normalized.replace(" ", "_")
+            return normalized or "unknown"
+
+        def _set_signal_outcome(*, ticker: str, disposition: str, detail: str = "") -> None:
+            outcomes = entry_debug.get("signal_outcomes", {})
+            if not isinstance(outcomes, dict):
+                outcomes = {}
+            symbol_upper = str(ticker or "").upper()
+            if not symbol_upper:
+                return
+            outcomes[symbol_upper] = {
+                "disposition": str(disposition or "").strip() or "unknown",
+                "detail": str(detail or "").strip(),
+            }
+            entry_debug["signal_outcomes"] = outcomes
 
         def _mark_skip(reason: str) -> None:
             skips = entry_debug.get("skips", {})
@@ -2516,6 +2543,11 @@ def main():
             if symbol_upper and symbol_upper not in rejected_symbols:
                 rejected_symbols.append(symbol_upper)
             entry_debug["entry_stage4_rejected_symbols"] = rejected_symbols
+            _set_signal_outcome(
+                ticker=ticker,
+                disposition=f"blocked_{_normalize_disposition_reason(reason)}",
+                detail=reason,
+            )
 
         def _mark_stage4_eligible(*, ticker: str) -> None:
             entry_debug["entry_stage4_eligible_count"] = int(entry_debug.get("entry_stage4_eligible_count", 0)) + 1
@@ -2527,6 +2559,7 @@ def main():
             if symbol_upper and symbol_upper not in eligible_symbols:
                 eligible_symbols.append(symbol_upper)
             entry_debug["entry_stage4_eligible_symbols"] = eligible_symbols
+            _set_signal_outcome(ticker=ticker, disposition="entry_eligible")
 
         def _record_entry_exception(ticker: str, exc: Exception) -> None:
             exceptions = entry_debug.get("exceptions", [])
@@ -2608,6 +2641,7 @@ def main():
 
             ticker = signal["symbol"]
             direction = signal["direction"]
+            _set_signal_outcome(ticker=ticker, disposition="setup_pass")
 
             loop_attempt_cap = max(1, int(getattr(config, "MAX_NEW_ENTRY_ATTEMPTS_PER_LOOP", 1) or 1))
             if entry_attempts_loop >= loop_attempt_cap:
@@ -3053,8 +3087,18 @@ def main():
                     initial_quote=entry_quote,
                 )
                 entry_debug["entry_orders_submitted"] = int(entry_debug.get("entry_orders_submitted", 0)) + int(entry_result.get("attempts", 0) or 0)
+                _set_signal_outcome(
+                    ticker=ticker,
+                    disposition="order_submitted",
+                    detail=str(entry_result.get("status", "submitted") or "submitted"),
+                )
                 if not bool(entry_result.get("filled", False)):
                     _mark_skip("entry_not_filled_after_retry")
+                    _set_signal_outcome(
+                        ticker=ticker,
+                        disposition="order_not_filled",
+                        detail=str(entry_result.get("status", "unknown") or "unknown"),
+                    )
                     print(
                         f"[{ts(now_et)}] {ticker}: entry not filled "
                         f"(status={entry_result.get('status', 'unknown')}). Skipping."
@@ -3148,6 +3192,7 @@ def main():
                 if ticker not in set(str(s).upper() for s in getattr(config, "PREFERRED_CORE_TICKERS", ())):
                     non_core_entries_today_count += 1
                 entry_debug["entries_filled"] = int(entry_debug.get("entries_filled", 0)) + 1
+                _set_signal_outcome(ticker=ticker, disposition="order_filled")
                 _save_runtime_state()
                 time.sleep(config.RATE_LIMIT_SLEEP_SECONDS)
             except Exception as exc:  # noqa: BLE001

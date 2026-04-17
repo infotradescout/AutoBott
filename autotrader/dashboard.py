@@ -3150,6 +3150,10 @@ def api_scanlog():
   try:
     _last_ts, rows = _latest_scan_loop_rows(limit=1000)
     today_rows = _today_scan_rows()
+    runtime_state = load_bot_state()
+    last_entry_debug = runtime_state.get("last_entry_debug") if isinstance(runtime_state, dict) else {}
+    raw_outcomes = last_entry_debug.get("signal_outcomes") if isinstance(last_entry_debug, dict) else {}
+    signal_outcomes = raw_outcomes if isinstance(raw_outcomes, dict) else {}
     passed: list[dict[str, Any]] = []
     for row in rows:
       if str(row.get("result", "")).lower() != "pass":
@@ -3174,8 +3178,14 @@ def api_scanlog():
       reverse=True,
     )
     for row in deduped:
+      symbol_upper = str(row.get("symbol", "") or "").upper()
+      outcome = signal_outcomes.get(symbol_upper, {}) if symbol_upper else {}
+      disposition = str(outcome.get("disposition", "") or "").strip() or "setup_pass"
+      disposition_detail = str(outcome.get("detail", "") or "").strip()
       row["stage"] = "setup_pass"
-      row["final_state"] = "setup_pass"
+      row["post_setup_disposition"] = disposition
+      row["post_setup_detail"] = disposition_detail
+      row["final_state"] = disposition
       row["state_timeline"] = _timeline_for_symbol(
         today_rows,
         str(row.get("symbol", "") or ""),
@@ -5550,6 +5560,7 @@ def home():
               <div><span class="mobile-k">RSI</span> <span class="mobile-v">${s.rsi || "-"}</span></div>
               <div><span class="mobile-k">IVR</span> <span class="mobile-v">${s.iv_rank || "-"}</span></div>
               <div><span class="mobile-k">State</span> <span class="mobile-v">${s.final_state || "setup_pass"}</span></div>
+              <div><span class="mobile-k">Disposition</span> <span class="mobile-v">${s.post_setup_detail || "-"}</span></div>
               <div><span class="mobile-k">Reason</span> <span class="mobile-v">${s.reason || "-"}</span></div>
               <div><span class="mobile-k">Timeline</span> <span class="mobile-v">${timelineDetails(s.state_timeline)}</span></div>
             </div>
@@ -5567,10 +5578,11 @@ def home():
           <td>${s.rsi || "-"}</td>
           <td>${s.iv_rank || "-"}</td>
           <td>${s.final_state || "setup_pass"}</td>
+          <td>${s.post_setup_detail || "-"}</td>
           <td>${s.reason || "-"}</td>
           <td style="max-width:360px; white-space:normal; color:#9ab0c9; font-size:11px">${timelineDetails(s.state_timeline)}</td>
         </tr>`).join("");
-      el.innerHTML = `<table><thead><tr><th>Time</th><th>Symbol</th><th>Dir</th><th>RVOL</th><th>RSI</th><th>IVR %</th><th>Final State</th><th>Reason</th><th>Recent Timeline</th></tr></thead><tbody>${rows}</tbody></table>`;
+      el.innerHTML = `<table><thead><tr><th>Time</th><th>Symbol</th><th>Dir</th><th>RVOL</th><th>RSI</th><th>IVR %</th><th>Final State</th><th>Disposition Detail</th><th>Reason</th><th>Recent Timeline</th></tr></thead><tbody>${rows}</tbody></table>`;
     }
 
     function reviewBadge(status) {
