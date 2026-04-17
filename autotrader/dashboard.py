@@ -822,59 +822,59 @@ def _build_morning_report_payload() -> dict[str, Any]:
     }
 
 
-    def _file_health(path: Path) -> dict[str, Any]:
-      try:
+def _file_health(path: Path) -> dict[str, Any]:
+    try:
         exists = path.exists()
         if not exists:
-          return {
+            return {
+                "path": str(path),
+                "exists": False,
+                "size_bytes": 0,
+                "modified_at": "",
+            }
+        stat = path.stat()
+        modified = datetime.fromtimestamp(stat.st_mtime, tz=EASTERN)
+        return {
+            "path": str(path),
+            "exists": True,
+            "size_bytes": int(stat.st_size),
+            "modified_at": modified.strftime("%Y-%m-%d %H:%M:%S ET"),
+        }
+    except Exception as exc:  # noqa: BLE001
+        return {
             "path": str(path),
             "exists": False,
             "size_bytes": 0,
             "modified_at": "",
-          }
-        stat = path.stat()
-        modified = datetime.fromtimestamp(stat.st_mtime, tz=EASTERN)
-        return {
-          "path": str(path),
-          "exists": True,
-          "size_bytes": int(stat.st_size),
-          "modified_at": modified.strftime("%Y-%m-%d %H:%M:%S ET"),
-        }
-      except Exception as exc:  # noqa: BLE001
-        return {
-          "path": str(path),
-          "exists": False,
-          "size_bytes": 0,
-          "modified_at": "",
-          "error": str(exc),
+            "error": str(exc),
         }
 
 
-    def _fetch_broker_order_telemetry() -> dict[str, Any]:
-      now = _now_et()
-      day_start_et = now.replace(hour=0, minute=0, second=0, microsecond=0)
-      day_start_utc = day_start_et.astimezone(pytz.UTC).isoformat().replace("+00:00", "Z")
-      try:
+def _fetch_broker_order_telemetry() -> dict[str, Any]:
+    now = _now_et()
+    day_start_et = now.replace(hour=0, minute=0, second=0, microsecond=0)
+    day_start_utc = day_start_et.astimezone(pytz.UTC).isoformat().replace("+00:00", "Z")
+    try:
         resp = requests.get(
-          f"{BASE_URL}/v2/orders",
-          headers=HEADERS,
-          params={
-            "status": "all",
-            "after": day_start_utc,
-            "direction": "desc",
-            "limit": 500,
-            "nested": "false",
-          },
-          timeout=12,
+            f"{BASE_URL}/v2/orders",
+            headers=HEADERS,
+            params={
+                "status": "all",
+                "after": day_start_utc,
+                "direction": "desc",
+                "limit": 500,
+                "nested": "false",
+            },
+            timeout=12,
         )
         resp.raise_for_status()
         payload = resp.json()
         if not isinstance(payload, list):
-          return {
-            "ok": False,
-            "error": "unexpected response format",
-            "generated_at": now.strftime("%Y-%m-%d %H:%M:%S ET"),
-          }
+            return {
+                "ok": False,
+                "error": "unexpected response format",
+                "generated_at": now.strftime("%Y-%m-%d %H:%M:%S ET"),
+            }
 
         option_orders_today = 0
         option_filled_orders_today = 0
@@ -886,48 +886,48 @@ def _build_morning_report_payload() -> dict[str, Any]:
         status_counts: dict[str, int] = {}
 
         for order in payload:
-          if not isinstance(order, dict):
-            continue
-          symbol = str(order.get("symbol", "") or "").upper()
-          if not _extract_underlying(symbol):
-            continue
-          submitted_dt = _parse_ts(str(order.get("submitted_at", "") or ""))
-          if submitted_dt is None or submitted_dt.date() != now.date():
-            continue
-          option_orders_today += 1
-          symbols.add(symbol)
+            if not isinstance(order, dict):
+                continue
+            symbol = str(order.get("symbol", "") or "").upper()
+            if not _extract_underlying(symbol):
+                continue
+            submitted_dt = _parse_ts(str(order.get("submitted_at", "") or ""))
+            if submitted_dt is None or submitted_dt.date() != now.date():
+                continue
+            option_orders_today += 1
+            symbols.add(symbol)
 
-          status = str(order.get("status", "") or "").lower()
-          status_counts[status] = status_counts.get(status, 0) + 1
-          filled_qty = _safe_float(order.get("filled_qty"), 0.0)
-          side = str(order.get("side", "") or "").lower()
-          if status in {"rejected", "canceled", "expired"}:
-            option_rejected_or_canceled_today += 1
-          if status in {"filled", "partially_filled"} and filled_qty > 0:
-            option_filled_orders_today += 1
-            filled_qty_contracts += filled_qty
-            if side == "buy":
-              option_buy_fills_today += 1
-            elif side == "sell":
-              option_sell_fills_today += 1
+            status = str(order.get("status", "") or "").lower()
+            status_counts[status] = status_counts.get(status, 0) + 1
+            filled_qty = _safe_float(order.get("filled_qty"), 0.0)
+            side = str(order.get("side", "") or "").lower()
+            if status in {"rejected", "canceled", "expired"}:
+                option_rejected_or_canceled_today += 1
+            if status in {"filled", "partially_filled"} and filled_qty > 0:
+                option_filled_orders_today += 1
+                filled_qty_contracts += filled_qty
+                if side == "buy":
+                    option_buy_fills_today += 1
+                elif side == "sell":
+                    option_sell_fills_today += 1
 
         return {
-          "ok": True,
-          "generated_at": now.strftime("%Y-%m-%d %H:%M:%S ET"),
-          "option_orders_today": option_orders_today,
-          "option_filled_orders_today": option_filled_orders_today,
-          "option_buy_fills_today": option_buy_fills_today,
-          "option_sell_fills_today": option_sell_fills_today,
-          "option_rejected_or_canceled_today": option_rejected_or_canceled_today,
-          "filled_qty_contracts": round(filled_qty_contracts, 2),
-          "unique_option_symbols": len(symbols),
-          "status_counts": status_counts,
+            "ok": True,
+            "generated_at": now.strftime("%Y-%m-%d %H:%M:%S ET"),
+            "option_orders_today": option_orders_today,
+            "option_filled_orders_today": option_filled_orders_today,
+            "option_buy_fills_today": option_buy_fills_today,
+            "option_sell_fills_today": option_sell_fills_today,
+            "option_rejected_or_canceled_today": option_rejected_or_canceled_today,
+            "filled_qty_contracts": round(filled_qty_contracts, 2),
+            "unique_option_symbols": len(symbols),
+            "status_counts": status_counts,
         }
-      except Exception as exc:  # noqa: BLE001
+    except Exception as exc:  # noqa: BLE001
         return {
-          "ok": False,
-          "error": str(exc),
-          "generated_at": now.strftime("%Y-%m-%d %H:%M:%S ET"),
+            "ok": False,
+            "error": str(exc),
+            "generated_at": now.strftime("%Y-%m-%d %H:%M:%S ET"),
         }
 
 
