@@ -156,6 +156,22 @@ def select_atm_option_contract_with_reason(
         expiration_date_gte=expiry_floor,
         expiration_date_lte=expiry_ceiling,
     )
+    if (not contracts) and int(getattr(config, "MIN_DTE_TRADING_DAYS", 0) or 0) > 0:
+        # Fail-open DTE fallback: on Fridays a 1-5 trading day window can exclude
+        # both same-day weekly contracts and next-week weeklies.
+        fallback_floor = _add_trading_days(today, 0)
+        fallback_contracts = data_client.get_option_contracts(
+            underlying_symbol=underlying_symbol,
+            contract_type=direction,
+            expiration_date_gte=fallback_floor,
+            expiration_date_lte=expiry_ceiling,
+        )
+        if fallback_contracts:
+            contracts = fallback_contracts
+            print(
+                f"[options] DTE fallback engaged for {underlying_symbol} {direction}: "
+                f"window 0-{config.MAX_DTE_TRADING_DAYS} trading days."
+            )
     if not contracts:
         return None, (
             "no contracts in DTE window "
