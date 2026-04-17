@@ -47,11 +47,19 @@ LISA_FEED_NDJSON_PATH = DASHBOARD_DIR / "autobott_lisa_feed.ndjson"
 LISA_FEED_PUBLISHED_PATH = DASHBOARD_DIR / "autobott_lisa_feed_published.json"
 EASTERN = pytz.timezone(config.EASTERN_TZ)
 CENTRAL = pytz.timezone(config.CENTRAL_TZ)
-_DISPLAY_TZ_NAME = str(os.getenv("DASHBOARD_DISPLAY_TZ", "Etc/GMT+6") or "Etc/GMT+6").strip()
-try:
-  DISPLAY_TZ = pytz.timezone(_DISPLAY_TZ_NAME)
-except Exception:
-  DISPLAY_TZ = pytz.timezone("Etc/GMT+6")
+def _resolve_display_tz() -> Any:
+    raw = str(os.getenv("DASHBOARD_DISPLAY_TZ", "America/Chicago") or "America/Chicago").strip()
+    normalized = raw.upper().replace("_", "").replace("/", "")
+    central_aliases = {"CST", "CDT", "CT", "CENTRAL", "AMERICACHICAGO"}
+    if normalized in central_aliases:
+        return pytz.timezone("America/Chicago")
+    try:
+        return pytz.timezone(raw)
+    except Exception:
+        return pytz.timezone("America/Chicago")
+
+
+DISPLAY_TZ = _resolve_display_tz()
 DISPLAY_TZ_LABEL = str(os.getenv("DASHBOARD_DISPLAY_TZ_LABEL", "CST") or "CST").strip() or "CST"
 _REVIEW_CACHE: dict[str, Any] = {"ts": None, "payload": None}
 CONTROL_TOKEN = str(config.DASHBOARD_CONTROL_TOKEN or "").strip()
