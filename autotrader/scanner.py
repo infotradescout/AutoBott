@@ -461,11 +461,11 @@ def _calculate_iv_rank_from_contracts(
     """
     Returns (atm_iv, iv_rank_pct).
 
-    iv_rank_pct is a 0-100 score:
+        iv_rank_pct is a 0-100 score:
       - Uses 52-week daily bars of the underlying to compute rolling 30-day
         annualized realized volatility, then ranks the ATM IV against that
         historical RV range as a proxy for true IV Rank.
-      - Falls back to 50.0 (neutral) if historical data is unavailable.
+            - Returns None when historical data is unavailable.
     """
     closest_iv: float | None = None
     closest_dist = float("inf")
@@ -500,7 +500,7 @@ def _calculate_iv_rank_from_contracts(
         except Exception as exc:
             print(f"[scanner] IV rank fallback for {symbol} failed: {exc}")
 
-    return closest_iv, 50.0
+    return closest_iv, None
 
 
 def scan_ticker(
@@ -729,13 +729,12 @@ def _scan_ticker_details(
             chain, price=price, data_client=data_client, symbol=symbol
         )
 
-    if iv_rank is None:
-        iv_rank = 50.0
+    iv_rank_for_score = 50.0 if iv_rank is None else float(iv_rank)
 
     effective_iv_rank_max = (
         float(config.CATALYST_RELAXED_IV_RANK_MAX) if _CATALYST_MODE_ACTIVE else float(config.IV_RANK_MAX)
     )
-    if iv_rank > effective_iv_rank_max:
+    if iv_rank is not None and iv_rank > effective_iv_rank_max:
         return _scan_failure(f"IV Rank {iv_rank:.0f}% too high (max {effective_iv_rank_max:.0f}%)")
 
     if config.ENABLE_NEWS_EVENT_BLOCK:
@@ -758,10 +757,12 @@ def _scan_ticker_details(
         rvol=float(rvol),
         atr_pct=float(atr_pct),
         roc=float(roc),
-        iv_rank=float(iv_rank),
+        iv_rank=iv_rank_for_score,
         regime_score=float(regime_score),
         ema_aligned=ema_aligned,
     )
+
+    ivr_reason_text = f"IVR {iv_rank:.0f}%" if iv_rank is not None else "IVR N/A"
     effective_min_signal_score = (
         float(config.CATALYST_RELAXED_MIN_SIGNAL_SCORE) if _CATALYST_MODE_ACTIVE else float(config.MIN_SIGNAL_SCORE)
     )
@@ -783,14 +784,14 @@ def _scan_ticker_details(
         "vwap": round(vwap, 4),
         "price": round(price, 4),
         "iv": round(iv_value, 4) if iv_value is not None else None,
-        "iv_rank": round(iv_rank, 2),
+        "iv_rank": round(float(iv_rank), 2) if iv_rank is not None else None,
         "regime_score": round(regime_score, 2),
         "signal_score": round(signal_score, 2),
         "flow_score": round(flow_score, 4) if flow_score is not None else None,
         "htf_reason": htf_reason,
         "reason": (
             f"RVOL {rvol:.1f}x | {above_below} | Dir {direction_score:+.2f} [{vote_log}] | {ema_note} | "
-            f"ROC {roc:+.2f}% | IVR {iv_rank:.0f}% | Regime {regime_score:.2f} | "
+            f"ROC {roc:+.2f}% | {ivr_reason_text} | Regime {regime_score:.2f} | "
             f"Flow {(flow_score if flow_score is not None else 0):+.2f} | Score {signal_score:.2f}"
         ) + (f" | Catalyst {_CATALYST_MODE_REASON}" if _CATALYST_MODE_ACTIVE and _CATALYST_MODE_REASON else ""),
         "regime_reason": regime_reason,
@@ -1146,10 +1147,11 @@ class IntradayScanner:
         print(f"[{now_et.strftime('%H:%M ET')}] SCAN RESULTS - {len(passed)} of {total} tickers passed")
         for item in passed:
             vwap_side = "Above VWAP" if item["direction"] == "call" else "Below VWAP"
+            ivr_print = f"{float(item['iv_rank']):.0f}%" if item.get("iv_rank") is not None else "N/A"
             print(
                 f"  + {item['symbol']:<5} | {str(item.get('strategy_profile', 'base')):<18} | "
                 f"{item['direction'].upper():<4} | RVOL {item['rvol']:.1f}x | "
-                f"RSI {item['rsi']:.0f} | ROC {item['roc']:+.1f}% | IVR {item['iv_rank']:.0f}% | {vwap_side}"
+                f"RSI {item['rsi']:.0f} | ROC {item['roc']:+.1f}% | IVR {ivr_print} | {vwap_side}"
             )
         for item in failed[:8]:
             print(f"  - {item['symbol']:<5} | failed: {item['reason']}")
