@@ -930,34 +930,34 @@ def _build_evening_report_payload() -> dict[str, Any]:
     trade_summary = _build_trade_report_summary(today_trades)
     scan_summary = _build_scan_report_summary(today_scans)
     daily_review = _build_daily_review_payload()
-      broker_telemetry = _fetch_broker_order_telemetry()
+    broker_telemetry = _fetch_broker_order_telemetry()
 
-      telemetry_trade_day = str(runtime_state.get("trade_telemetry_day", "") or "")
-      telemetry_closed_count = int(runtime_state.get("trade_telemetry_closed_count", 0) or 0)
-      telemetry_total_pnl = round(float(runtime_state.get("trade_telemetry_total_pnl_usd", 0.0) or 0.0), 2)
-      telemetry_last_close_iso = str(runtime_state.get("trade_telemetry_last_close_iso", "") or "")
-      telemetry_last_close_dt = _parse_state_iso(telemetry_last_close_iso)
-      telemetry_log_error = str(runtime_state.get("trade_telemetry_last_log_error", "") or "")
+    telemetry_trade_day = str(runtime_state.get("trade_telemetry_day", "") or "")
+    telemetry_closed_count = int(runtime_state.get("trade_telemetry_closed_count", 0) or 0)
+    telemetry_total_pnl = round(float(runtime_state.get("trade_telemetry_total_pnl_usd", 0.0) or 0.0), 2)
+    telemetry_last_close_iso = str(runtime_state.get("trade_telemetry_last_close_iso", "") or "")
+    telemetry_last_close_dt = _parse_state_iso(telemetry_last_close_iso)
+    telemetry_log_error = str(runtime_state.get("trade_telemetry_last_log_error", "") or "")
 
-      data_health = {
+    data_health = {
         "trades_csv": _file_health(TRADES_CSV),
         "scan_log_csv": _file_health(SCAN_LOG_CSV),
         "last_trader_heartbeat_et": str(runtime_state.get("last_trader_heartbeat_et", "") or ""),
-      }
+    }
 
-      telemetry_alerts: list[str] = []
-      if telemetry_trade_day == now.date().isoformat() and telemetry_closed_count > int(trade_summary.get("total_trades", 0)):
+    telemetry_alerts: list[str] = []
+    if telemetry_trade_day == now.date().isoformat() and telemetry_closed_count > int(trade_summary.get("total_trades", 0)):
         telemetry_alerts.append(
-          (
-            f"Runtime recorded {telemetry_closed_count} closed trade(s) today but trades.csv only has "
-            f"{int(trade_summary.get('total_trades', 0))}. Local trade log is lagging or failed."
-          )
+            (
+                f"Runtime recorded {telemetry_closed_count} closed trade(s) today but trades.csv only has "
+                f"{int(trade_summary.get('total_trades', 0))}. Local trade log is lagging or failed."
+            )
         )
-      if broker_telemetry.get("ok") and int(broker_telemetry.get("option_sell_fills_today", 0)) > 0 and int(trade_summary.get("total_trades", 0)) == 0:
+    if broker_telemetry.get("ok") and int(broker_telemetry.get("option_sell_fills_today", 0)) > 0 and int(trade_summary.get("total_trades", 0)) == 0:
         telemetry_alerts.append(
-          "Broker reports option sell fills today, but closed-trade rows are still zero. Check trade CSV writer health and runtime log errors."
+            "Broker reports option sell fills today, but closed-trade rows are still zero. Check trade CSV writer health and runtime log errors."
         )
-      if telemetry_log_error:
+    if telemetry_log_error:
         telemetry_alerts.append(f"Recent trade log write error: {telemetry_log_error}")
 
     open_trade_meta = runtime_state.get("open_trade_meta") or {}
