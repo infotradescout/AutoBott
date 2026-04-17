@@ -481,16 +481,16 @@ def _build_logic_checks(scan_rows: list[dict[str, str]], trade_rows: list[dict[s
     else:
         checks.append({"status": "warn", "name": "Scan Activity", "detail": "No scan rows for today yet."})
 
-    pass_count = sum(1 for r in scan_rows if str(r.get("result", "")).lower() == "pass")
+    setup_valid_count = sum(1 for r in scan_rows if str(r.get("result", "")).lower() == "pass")
     fail_count = sum(1 for r in scan_rows if str(r.get("result", "")).lower() == "fail")
-    total_scans = pass_count + fail_count
+    total_scans = setup_valid_count + fail_count
     if total_scans > 0:
-        pass_rate = (pass_count / total_scans) * 100.0
+        setup_yield_rate = (setup_valid_count / total_scans) * 100.0
         checks.append(
             {
-                "status": "ok" if pass_rate >= 5 else "warn",
-                "name": "Pass Rate",
-                "detail": f"{pass_count}/{total_scans} passed ({pass_rate:.1f}%).",
+                "status": "ok" if setup_yield_rate >= 5 else "warn",
+                "name": "Setup Yield",
+                "detail": f"{setup_valid_count}/{total_scans} scanner-valid ({setup_yield_rate:.1f}%).",
             }
         )
 
@@ -652,10 +652,12 @@ def _build_scan_report_summary(scan_rows: list[dict[str, str]]) -> dict[str, Any
     ]
     return {
         "total_rows": len(scan_rows),
+      "setup_valid_count": len(pass_rows),
         "pass_count": len(pass_rows),
         "fail_count": sum(fail_reasons.values()),
         "unique_symbols": len(symbols),
         "direction_counts": direction_counts,
+      "top_setup_valid": pass_rows[:8],
         "top_passes": pass_rows[:8],
         "top_fail_reasons": top_fail_reasons,
     }
@@ -755,8 +757,8 @@ def _evening_recommendations(
         notes.append("Win rate was soft. Consider a more conservative profile or a higher minimum signal score tomorrow.")
     if exit_reasons and str(exit_reasons[0].get("reason", "")) == "stop_loss":
         notes.append("Stop-loss exits led the book. Focus tomorrow on cleaner opening alignment and avoid marginal momentum entries.")
-    if int(scan_summary.get("pass_count", 0)) == 0:
-        notes.append("Nothing passed the scanner today. Check whether filters were appropriately strict for the tape.")
+    if int(scan_summary.get("setup_valid_count", scan_summary.get("pass_count", 0))) == 0:
+      notes.append("No setup-valid scanner signals today. Check whether filters were appropriately strict for the tape.")
     if not notes:
         notes.append("Session stats were stable. Keep the same process and review ticker scorecards for sizing opportunities.")
     return notes[:4]
@@ -878,8 +880,10 @@ def _build_morning_report_payload() -> dict[str, Any]:
         option_filled_orders_today = 0
         option_buy_fills_today = 0
         option_sell_fills_today = 0
+        option_rejected_or_canceled_today = 0
         filled_qty_contracts = 0.0
         symbols: set[str] = set()
+        status_counts: dict[str, int] = {}
 
         for order in payload:
           if not isinstance(order, dict):
@@ -894,8 +898,11 @@ def _build_morning_report_payload() -> dict[str, Any]:
           symbols.add(symbol)
 
           status = str(order.get("status", "") or "").lower()
+          status_counts[status] = status_counts.get(status, 0) + 1
           filled_qty = _safe_float(order.get("filled_qty"), 0.0)
           side = str(order.get("side", "") or "").lower()
+          if status in {"rejected", "canceled", "expired"}:
+            option_rejected_or_canceled_today += 1
           if status in {"filled", "partially_filled"} and filled_qty > 0:
             option_filled_orders_today += 1
             filled_qty_contracts += filled_qty
@@ -911,8 +918,10 @@ def _build_morning_report_payload() -> dict[str, Any]:
           "option_filled_orders_today": option_filled_orders_today,
           "option_buy_fills_today": option_buy_fills_today,
           "option_sell_fills_today": option_sell_fills_today,
+          "option_rejected_or_canceled_today": option_rejected_or_canceled_today,
           "filled_qty_contracts": round(filled_qty_contracts, 2),
           "unique_option_symbols": len(symbols),
+          "status_counts": status_counts,
         }
       except Exception as exc:  # noqa: BLE001
         return {
@@ -1116,188 +1125,188 @@ def _build_knowledge_signal(
     }
 
 
-  def _price_move_label(day_move_pct: float | None) -> str:
+def _price_move_label(day_move_pct: float | None) -> str:
     if day_move_pct is None:
-      return "flat"
+        return "flat"
     if day_move_pct >= 1.0:
-      return "strong_up"
+        return "strong_up"
     if day_move_pct >= 0.25:
-      return "up"
+        return "up"
     if day_move_pct <= -1.0:
-      return "strong_down"
+        return "strong_down"
     if day_move_pct <= -0.25:
-      return "down"
+        return "down"
     return "flat"
 
 
-  def _range_position_pct(latest: float, day_low: float, day_high: float) -> float | None:
+def _range_position_pct(latest: float, day_low: float, day_high: float) -> float | None:
     if day_high <= day_low or latest <= 0:
-      return None
+        return None
     return _clamp(((latest - day_low) / (day_high - day_low)) * 100.0, 0.0, 100.0)
 
 
-  def _build_price_intelligence_signals(
+def _build_price_intelligence_signals(
     *,
     scan_rows: list[dict[str, Any]],
     published_keys: set[str],
     now_label: str,
-  ) -> tuple[list[dict[str, Any]], list[str]]:
+) -> tuple[list[dict[str, Any]], list[str]]:
     symbol_stats: dict[str, dict[str, Any]] = {}
     for row in scan_rows:
-      symbol = _scan_symbol(row)
-      if not symbol:
-        continue
-      stats = symbol_stats.setdefault(
-        symbol,
-        {
-          "pass_count": 0,
-          "fail_count": 0,
-          "last_seen": "",
-          "last_direction": "",
-          "last_score": 0.0,
-          "last_rvol": 0.0,
-        },
-      )
-      is_pass = str(row.get("result", "") or "").lower() == "pass"
-      if is_pass:
-        stats["pass_count"] = int(stats["pass_count"]) + 1
-      else:
-        stats["fail_count"] = int(stats["fail_count"]) + 1
-      stats["last_seen"] = str(row.get("timestamp", "") or stats["last_seen"])
-      stats["last_direction"] = str(row.get("direction", "") or stats["last_direction"])
-      stats["last_score"] = _safe_float(row.get("signal_score"), float(stats.get("last_score", 0.0) or 0.0))
-      stats["last_rvol"] = _safe_float(row.get("rvol"), float(stats.get("last_rvol", 0.0) or 0.0))
+        symbol = _scan_symbol(row)
+        if not symbol:
+            continue
+        stats = symbol_stats.setdefault(
+            symbol,
+            {
+                "pass_count": 0,
+                "fail_count": 0,
+                "last_seen": "",
+                "last_direction": "",
+                "last_score": 0.0,
+                "last_rvol": 0.0,
+            },
+        )
+        is_pass = str(row.get("result", "") or "").lower() == "pass"
+        if is_pass:
+            stats["pass_count"] = int(stats["pass_count"]) + 1
+        else:
+            stats["fail_count"] = int(stats["fail_count"]) + 1
+        stats["last_seen"] = str(row.get("timestamp", "") or stats["last_seen"])
+        stats["last_direction"] = str(row.get("direction", "") or stats["last_direction"])
+        stats["last_score"] = _safe_float(row.get("signal_score"), float(stats.get("last_score", 0.0) or 0.0))
+        stats["last_rvol"] = _safe_float(row.get("rvol"), float(stats.get("last_rvol", 0.0) or 0.0))
 
     ranked_symbols = sorted(
-      symbol_stats.keys(),
-      key=lambda s: (
-        int(symbol_stats[s].get("pass_count", 0)),
-        _safe_float(symbol_stats[s].get("last_score"), 0.0),
-        _safe_float(symbol_stats[s].get("last_rvol"), 0.0),
-      ),
-      reverse=True,
+        symbol_stats.keys(),
+        key=lambda s: (
+            int(symbol_stats[s].get("pass_count", 0)),
+            _safe_float(symbol_stats[s].get("last_score"), 0.0),
+            _safe_float(symbol_stats[s].get("last_rvol"), 0.0),
+        ),
+        reverse=True,
     )[:8]
     if not ranked_symbols:
-      return [], []
+        return [], []
 
     snapshots = _fetch_snapshots(ranked_symbols)
     signals: list[dict[str, Any]] = []
     briefing: list[str] = []
 
     for symbol in ranked_symbols:
-      snap = snapshots.get(symbol, {}) if isinstance(snapshots, dict) else {}
-      daily = snap.get("dailyBar", {}) if isinstance(snap, dict) else {}
-      minute_bar = snap.get("minuteBar", {}) if isinstance(snap, dict) else {}
-      latest_trade = snap.get("latestTrade", {}) if isinstance(snap, dict) else {}
+        snap = snapshots.get(symbol, {}) if isinstance(snapshots, dict) else {}
+        daily = snap.get("dailyBar", {}) if isinstance(snap, dict) else {}
+        minute_bar = snap.get("minuteBar", {}) if isinstance(snap, dict) else {}
+        latest_trade = snap.get("latestTrade", {}) if isinstance(snap, dict) else {}
 
-      latest = _safe_float(latest_trade.get("p"), 0.0)
-      if latest <= 0:
-        latest = _safe_float(minute_bar.get("c"), 0.0)
-      if latest <= 0:
-        latest = _safe_float(daily.get("c"), 0.0)
-      if latest <= 0:
-        continue
+        latest = _safe_float(latest_trade.get("p"), 0.0)
+        if latest <= 0:
+            latest = _safe_float(minute_bar.get("c"), 0.0)
+        if latest <= 0:
+            latest = _safe_float(daily.get("c"), 0.0)
+        if latest <= 0:
+            continue
 
-      day_open = _safe_float(daily.get("o"), 0.0)
-      day_high = _safe_float(daily.get("h"), 0.0)
-      day_low = _safe_float(daily.get("l"), 0.0)
-      day_volume = _safe_float(daily.get("v"), 0.0)
-      day_move_pct = ((latest - day_open) / day_open * 100.0) if day_open > 0 else None
-      range_pos = _range_position_pct(latest, day_low, day_high)
+        day_open = _safe_float(daily.get("o"), 0.0)
+        day_high = _safe_float(daily.get("h"), 0.0)
+        day_low = _safe_float(daily.get("l"), 0.0)
+        day_volume = _safe_float(daily.get("v"), 0.0)
+        day_move_pct = ((latest - day_open) / day_open * 100.0) if day_open > 0 else None
+        range_pos = _range_position_pct(latest, day_low, day_high)
 
-      stats = symbol_stats.get(symbol, {})
-      pass_count = int(stats.get("pass_count", 0) or 0)
-      fail_count = int(stats.get("fail_count", 0) or 0)
-      score = _safe_float(stats.get("last_score"), 0.0)
-      rvol = _safe_float(stats.get("last_rvol"), 0.0)
-      direction = str(stats.get("last_direction", "") or "").upper()
+        stats = symbol_stats.get(symbol, {})
+        pass_count = int(stats.get("pass_count", 0) or 0)
+        fail_count = int(stats.get("fail_count", 0) or 0)
+        score = _safe_float(stats.get("last_score"), 0.0)
+        rvol = _safe_float(stats.get("last_rvol"), 0.0)
+        direction = str(stats.get("last_direction", "") or "").upper()
 
-      move_label = _price_move_label(day_move_pct)
-      bias = "watch"
-      if move_label in {"strong_up", "up"} and pass_count >= fail_count:
-        bias = "bullish_continuation_bias"
-      elif move_label in {"strong_down", "down"} and pass_count <= fail_count:
-        bias = "bearish_continuation_bias"
-      elif move_label == "flat":
-        bias = "range_wait_bias"
+        move_label = _price_move_label(day_move_pct)
+        bias = "watch"
+        if move_label in {"strong_up", "up"} and pass_count >= fail_count:
+            bias = "bullish_continuation_bias"
+        elif move_label in {"strong_down", "down"} and pass_count <= fail_count:
+            bias = "bearish_continuation_bias"
+        elif move_label == "flat":
+            bias = "range_wait_bias"
 
-      sev = _clamp(
-        (abs(day_move_pct or 0.0) / 3.0)
-        + (max(0, pass_count - fail_count) / 10.0)
-        + min(0.2, max(0.0, rvol - 1.0) / 5.0),
-        0.2,
-        0.92,
-      )
-
-      move_text = "n/a" if day_move_pct is None else f"{day_move_pct:+.2f}%"
-      range_text = "n/a" if range_pos is None else f"{range_pos:.0f}%"
-      summary = (
-        f"{symbol} is {move_text} today at ${latest:.2f}, trading near {range_text} of intraday range. "
-        f"Scanner pressure: {pass_count} pass / {fail_count} fail, last score {score:.2f}, RVOL {rvol:.2f}x."
-      )
-
-      signals.append(
-        _build_knowledge_signal(
-          signal_type="price_action_signal",
-          source_type="market_api_snapshot",
-          symbol=symbol,
-          lane="market",
-          category="price_intelligence",
-          title=f"{symbol} price lens",
-          summary=summary,
-          evidence={
-            "trades": max(1, pass_count + fail_count),
-            "last_seen": str(stats.get("last_seen", "") or ""),
-            "source": "alpaca_snapshot_api",
-          },
-          metrics={
-            "latest_price": round(latest, 4),
-            "day_move_pct": round(day_move_pct, 2) if day_move_pct is not None else None,
-            "range_position_pct": round(range_pos, 2) if range_pos is not None else None,
-            "day_high": round(day_high, 4) if day_high > 0 else None,
-            "day_low": round(day_low, 4) if day_low > 0 else None,
-            "day_volume": int(day_volume) if day_volume > 0 else 0,
-            "scanner_pass_count": pass_count,
-            "scanner_fail_count": fail_count,
-            "last_signal_score": round(score, 2),
-            "last_rvol": round(rvol, 2),
-            "direction": direction,
-          },
-          recommended_action=bias,
-          tags=["price_tool", "snapshot", "scanner_bridge", "human_readable"],
-          severity_score=sev,
-          time_scope={"window": "intraday_live", "as_of": now_label},
-          published_keys=published_keys,
+        sev = _clamp(
+            (abs(day_move_pct or 0.0) / 3.0)
+            + (max(0, pass_count - fail_count) / 10.0)
+            + min(0.2, max(0.0, rvol - 1.0) / 5.0),
+            0.2,
+            0.92,
         )
-      )
 
-      briefing.append(
-        f"{symbol}: ${latest:.2f} ({move_text}) | range {range_text} | scanner {pass_count}p/{fail_count}f | bias={bias}."
-      )
+        move_text = "n/a" if day_move_pct is None else f"{day_move_pct:+.2f}%"
+        range_text = "n/a" if range_pos is None else f"{range_pos:.0f}%"
+        summary = (
+            f"{symbol} is {move_text} today at ${latest:.2f}, trading near {range_text} of intraday range. "
+            f"Scanner pressure: {pass_count} setup-valid / {fail_count} fail, last score {score:.2f}, RVOL {rvol:.2f}x."
+        )
+
+        signals.append(
+            _build_knowledge_signal(
+                signal_type="price_action_signal",
+                source_type="market_api_snapshot",
+                symbol=symbol,
+                lane="market",
+                category="price_intelligence",
+                title=f"{symbol} price lens",
+                summary=summary,
+                evidence={
+                    "trades": max(1, pass_count + fail_count),
+                    "last_seen": str(stats.get("last_seen", "") or ""),
+                    "source": "alpaca_snapshot_api",
+                },
+                metrics={
+                    "latest_price": round(latest, 4),
+                    "day_move_pct": round(day_move_pct, 2) if day_move_pct is not None else None,
+                    "range_position_pct": round(range_pos, 2) if range_pos is not None else None,
+                    "day_high": round(day_high, 4) if day_high > 0 else None,
+                    "day_low": round(day_low, 4) if day_low > 0 else None,
+                    "day_volume": int(day_volume) if day_volume > 0 else 0,
+                    "scanner_pass_count": pass_count,
+                    "scanner_fail_count": fail_count,
+                    "last_signal_score": round(score, 2),
+                    "last_rvol": round(rvol, 2),
+                    "direction": direction,
+                },
+                recommended_action=bias,
+                tags=["price_tool", "snapshot", "scanner_bridge", "human_readable"],
+                severity_score=sev,
+                time_scope={"window": "intraday_live", "as_of": now_label},
+                published_keys=published_keys,
+            )
+        )
+
+        briefing.append(
+            f"{symbol}: ${latest:.2f} ({move_text}) | range {range_text} | scanner {pass_count}v/{fail_count}f | bias={bias}."
+        )
 
     return signals, briefing[:6]
 
 
-  def _scan_fail_family(reason: str) -> str:
+def _scan_fail_family(reason: str) -> str:
     text = str(reason or "").strip().lower()
     if not text:
-      return "unknown"
+        return "unknown"
     if "weak movement" in text or "roc" in text or "vwap" in text:
-      return "weak_movement"
+        return "weak_movement"
     if "spread" in text or "quote" in text:
-      return "quote_spread"
+        return "quote_spread"
     if "confirmation" in text:
-      return "confirmation_mismatch"
+        return "confirmation_mismatch"
     if text.startswith("cooldown_skip:") or "cooldown" in text:
-      return "cooldown"
+        return "cooldown"
     if text.startswith("hard_block:") or "hard block" in text:
-      return "hard_block"
+        return "hard_block"
     if text.startswith("universe_reject:") or "universe rejected" in text:
-      return "universe_reject"
+        return "universe_reject"
     if "loss limit" in text or "max positions" in text or "risk" in text:
-      return "risk_guard"
+        return "risk_guard"
     if "before_entry_window" in text or "after_entry_window" in text:
-      return "timing_window"
+        return "timing_window"
     return "other"
 
 
@@ -2797,6 +2806,16 @@ def api_scansummary():
         entry_stage4_source = "proxy_scanner_pass"
         entry_debug_fresh = False
 
+        broker_telemetry = _fetch_broker_order_telemetry()
+        orders_submitted_count = int(broker_telemetry.get("option_orders_today", 0) or 0) if broker_telemetry.get("ok") else 0
+        orders_filled_count = int(broker_telemetry.get("option_buy_fills_today", 0) or 0) if broker_telemetry.get("ok") else 0
+        orders_rejected_or_canceled_count = (
+          int(broker_telemetry.get("option_rejected_or_canceled_today", 0) or 0) if broker_telemetry.get("ok") else 0
+        )
+
+        today_trades = _today_trade_rows()
+        realized_pnl_usd = round(sum(_pnl_usd_from_trade_row(row) for row in today_trades), 2)
+
         scan_dt = _parse_ts(str(last_ts))
         entry_dt = _parse_ts(entry_loop_ts)
         if scan_dt is not None and entry_dt is not None:
@@ -2821,16 +2840,22 @@ def api_scansummary():
                 "universe_candidates": len(same_loop),
                 "setup_passed_count": pass_count,
                 "rejected_count": fail_count,
-            "entry_eligible_count": entry_stage4_eligible_count,
-            "entry_rejected_count": entry_stage4_reject_count,
+                "entry_eligible_count": entry_stage4_eligible_count,
+                "entry_rejected_count": entry_stage4_reject_count,
+                "orders_submitted_count": orders_submitted_count,
+                "orders_filled_count": orders_filled_count,
+                "orders_rejected_or_canceled_count": orders_rejected_or_canceled_count,
+                "trades_filled_count": orders_filled_count,
+                "realized_pnl_usd": realized_pnl_usd,
                 "stage_pipeline": stage_pipeline,
                 "stage_fail_counts": stage_fail_counts,
-            "stage4_entry_reject_reasons": entry_stage4_reject_reasons,
-            "entry_stage4_source": entry_stage4_source,
-            "entry_stage4_fresh": entry_debug_fresh,
-            "entry_stage4_loop_ts": _to_ct_label(entry_dt) if entry_dt else entry_loop_ts,
+                "stage4_entry_reject_reasons": entry_stage4_reject_reasons,
+                "entry_stage4_source": entry_stage4_source,
+                "entry_stage4_fresh": entry_debug_fresh,
+                "entry_stage4_loop_ts": _to_ct_label(entry_dt) if entry_dt else entry_loop_ts,
                 "top_fail_reason": top_reason,
                 # Backward-compatible aliases for existing clients.
+                "setup_valid_count": pass_count,
                 "pass_count": pass_count,
                 "fail_count": fail_count,
                 "top_reason": top_reason,
@@ -3871,7 +3896,7 @@ def reports_page():
         <div class="muted" style="margin-bottom:10px;">Generated ${escapeHtml(data.generated_at || "-")} | Target ready by ${escapeHtml(data.report_ready_time || "-")} | Last scan ${escapeHtml(data.last_scan_at || "--")}</div>
         <div class="metrics">
           <div class="metric"><div class="label">Staged Signals</div><div class="value">${Number(data.staged_signal_count || 0)}</div></div>
-          <div class="metric"><div class="label">Premarket Passes</div><div class="value">${Number(scan.pass_count || 0)}</div></div>
+          <div class="metric"><div class="label">Premarket Setup-Valid</div><div class="value">${Number(scan.setup_valid_count ?? scan.pass_count || 0)}</div></div>
           <div class="metric"><div class="label">5-Day P&L</div><div class="value ${cls(perf.total_pnl_usd)}">${fmtMoney(perf.total_pnl_usd)}</div></div>
           <div class="metric"><div class="label">5-Day Win Rate</div><div class="value ${cls((Number(perf.win_rate_pct || 0)) - 50)}">${Number(perf.win_rate_pct || 0).toFixed(1)}%</div></div>
         </div>
@@ -3930,7 +3955,7 @@ def reports_page():
         <div class="metrics">
           <div class="metric"><div class="label">Today P&L</div><div class="value ${cls(trades.total_pnl_usd)}">${fmtMoney(trades.total_pnl_usd)}</div></div>
           <div class="metric"><div class="label">Win Rate</div><div class="value ${cls((Number(trades.win_rate_pct || 0)) - 50)}">${Number(trades.win_rate_pct || 0).toFixed(1)}%</div></div>
-          <div class="metric"><div class="label">Scanner Passes</div><div class="value">${Number(scans.pass_count || 0)}</div></div>
+          <div class="metric"><div class="label">Scanner Setup-Valid</div><div class="value">${Number(scans.setup_valid_count ?? scans.pass_count || 0)}</div></div>
           <div class="metric"><div class="label">Scanner Fails</div><div class="value">${Number(scans.fail_count || 0)}</div></div>
         </div>
         <div class="two-col">
@@ -3952,8 +3977,8 @@ def reports_page():
             ${topReasonRows(trades.exit_reasons || [], "Exit")}
           </div>
           <div>
-            <div class="section-title"><h2>Top Passing Signals</h2></div>
-            ${signalTable(scans.top_passes || [])}
+            <div class="section-title"><h2>Top Setup-Valid Signals</h2></div>
+            ${signalTable(scans.top_setup_valid || scans.top_passes || [])}
           </div>
         </div>
         <div class="two-col" style="margin-top:12px;">
@@ -5602,12 +5627,16 @@ def home():
       const sumEl = document.getElementById("scan-summary");
       if (sumEl) {
         if (scansummary && !scansummary.error) {
-          const setupPassed = Number(scansummary.setup_passed_count ?? scansummary.pass_count ?? 0);
+          const setupValid = Number(scansummary.setup_valid_count ?? scansummary.setup_passed_count ?? scansummary.pass_count ?? 0);
           const rejected = Number(scansummary.rejected_count ?? scansummary.fail_count ?? 0);
-          const candidates = Number(scansummary.universe_candidates ?? (setupPassed + rejected));
-          const entryEligible = Number(scansummary.entry_eligible_count ?? setupPassed);
+          const candidates = Number(scansummary.universe_candidates ?? (setupValid + rejected));
+          const entryEligible = Number(scansummary.entry_eligible_count ?? setupValid);
           const entryRejected = Number(scansummary.entry_rejected_count ?? 0);
-          const color = setupPassed > 0 ? "#00c853" : "#ff9800";
+          const tradesFilled = Number(scansummary.trades_filled_count ?? scansummary.orders_filled_count ?? 0);
+          const ordersSubmitted = Number(scansummary.orders_submitted_count ?? 0);
+          const ordersRejectedOrCanceled = Number(scansummary.orders_rejected_or_canceled_count ?? 0);
+          const realizedPnlUsd = Number(scansummary.realized_pnl_usd ?? 0);
+          const color = tradesFilled > 0 ? "#00c853" : "#ff9800";
           const stageFailCounts = scansummary.stage_fail_counts && typeof scansummary.stage_fail_counts === "object"
             ? scansummary.stage_fail_counts
             : {};
@@ -5627,17 +5656,25 @@ def home():
           const stage4Source = String(scansummary.entry_stage4_source || "proxy_scanner_pass");
           const stage4Fresh = Boolean(scansummary.entry_stage4_fresh);
           sumEl.innerHTML = `
-              <span style="color:${color}">✓ Setup Passed: ${setupPassed}</span>
+              <span style="color:${color}">✓ Trades Filled (PASS): ${tradesFilled}</span>
               &nbsp;|&nbsp;
-              <span style="color:#888">Rejected: ${rejected}</span>
+              <span style="color:#888">Signal (scanner-valid): ${setupValid}</span>
               &nbsp;|&nbsp;
               <span style="color:#888">Universe Candidates: ${candidates}</span>
               &nbsp;|&nbsp;
-              <span style="color:#888">Entry Eligible: ${entryEligible}</span>
+              <span style="color:#888">Eligible: ${entryEligible}</span>
+              &nbsp;|&nbsp;
+              <span style="color:#888">Orders Submitted: ${ordersSubmitted}</span>
+              &nbsp;|&nbsp;
+              <span style="color:#888">Orders Rejected/Canceled: ${ordersRejectedOrCanceled}</span>
+              &nbsp;|&nbsp;
+              <span style="color:#888">Setup Rejected: ${rejected}</span>
               &nbsp;|&nbsp;
               <span style="color:#888">Entry Rejected: ${entryRejected}</span>
               &nbsp;|&nbsp;
-              Last: ${scansummary.last_scan || "—"}
+              <span style="color:${realizedPnlUsd >= 0 ? "#00c853" : "#ff5252"}">Realized P&L: ${fmtMoney(realizedPnlUsd)}</span>
+              &nbsp;|&nbsp;
+              Last Scan: ${scansummary.last_scan || "—"}
               <br><small style="color:#888">Top fail reason: ${scansummary.top_fail_reason || scansummary.top_reason || "—"}</small>
               <br><small style="color:#888">Stage rejects: ${stageFailText || "—"}</small>
               <br><small style="color:#888">Stage4 entry rejects: ${stage4RejectText || "—"}</small>
