@@ -245,6 +245,22 @@ def _clock_hhmm_to_minutes(hhmm: str) -> int:
     return (hour * 60) + minute
 
 
+def _entry_window_label_for_display() -> str:
+    try:
+        start_raw = str(config.NO_NEW_TRADES_BEFORE)
+        end_raw = str(config.NO_NEW_TRADES_AFTER)
+        start_hour, start_min = [int(p) for p in start_raw.split(":", 1)]
+        end_hour, end_min = [int(p) for p in end_raw.split(":", 1)]
+        now_et = _now_et()
+        start_et = EASTERN.localize(datetime(now_et.year, now_et.month, now_et.day, start_hour, start_min, 0))
+        end_et = EASTERN.localize(datetime(now_et.year, now_et.month, now_et.day, end_hour, end_min, 0))
+        start_local = start_et.astimezone(DISPLAY_TZ).strftime("%H:%M")
+        end_local = end_et.astimezone(DISPLAY_TZ).strftime("%H:%M")
+        return f"{start_local}-{end_local} {DISPLAY_TZ_LABEL}"
+    except Exception:
+        return f"{config.NO_NEW_TRADES_BEFORE}-{config.NO_NEW_TRADES_AFTER} ET"
+
+
 def _scan_fail_stage(reason: Any) -> str:
     text = str(reason or "").strip().lower()
     if text.startswith("cooldown_skip:"):
@@ -3501,7 +3517,7 @@ def api_status():
                 "dry_run": dry_run,
                 "strategy_profile": strategy_profile,
                 "entry_window_open": entry_window_open,
-                "entry_window_label": f"{config.NO_NEW_TRADES_BEFORE}-{config.NO_NEW_TRADES_AFTER} ET",
+                "entry_window_label": _entry_window_label_for_display(),
                 "catalyst_mode_active": catalyst_mode_active,
                 "catalyst_mode_reason": catalyst_mode_reason,
                 "catalyst_mode_until": catalyst_mode_until,
@@ -3547,7 +3563,7 @@ def api_status():
                     str(load_trading_control().get("strategy_profile", "balanced") or "balanced")
                 ),
                 "entry_window_open": False,
-                "entry_window_label": f"{config.NO_NEW_TRADES_BEFORE}-{config.NO_NEW_TRADES_AFTER} ET",
+                "entry_window_label": _entry_window_label_for_display(),
                 "catalyst_mode_active": False,
                 "catalyst_mode_reason": "",
                 "catalyst_mode_until": "",
