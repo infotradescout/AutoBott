@@ -942,7 +942,9 @@ def _build_evening_report_payload() -> dict[str, Any]:
     data_health = {
         "trades_csv": _file_health(TRADES_CSV),
         "scan_log_csv": _file_health(SCAN_LOG_CSV),
+      "runtime_state_json": _file_health(config.STATE_JSON_PATH),
         "last_trader_heartbeat_et": str(runtime_state.get("last_trader_heartbeat_et", "") or ""),
+      "state_updated_at_iso": str(runtime_state.get("_state_updated_at_iso", "") or ""),
     }
 
     telemetry_alerts: list[str] = []
@@ -1114,6 +1116,191 @@ def _build_knowledge_signal(
     }
 
 
+  def _price_move_label(day_move_pct: float | None) -> str:
+    if day_move_pct is None:
+      return "flat"
+    if day_move_pct >= 1.0:
+      return "strong_up"
+    if day_move_pct >= 0.25:
+      return "up"
+    if day_move_pct <= -1.0:
+      return "strong_down"
+    if day_move_pct <= -0.25:
+      return "down"
+    return "flat"
+
+
+  def _range_position_pct(latest: float, day_low: float, day_high: float) -> float | None:
+    if day_high <= day_low or latest <= 0:
+      return None
+    return _clamp(((latest - day_low) / (day_high - day_low)) * 100.0, 0.0, 100.0)
+
+
+  def _build_price_intelligence_signals(
+    *,
+    scan_rows: list[dict[str, Any]],
+    published_keys: set[str],
+    now_label: str,
+  ) -> tuple[list[dict[str, Any]], list[str]]:
+    symbol_stats: dict[str, dict[str, Any]] = {}
+    for row in scan_rows:
+      symbol = _scan_symbol(row)
+      if not symbol:
+        continue
+      stats = symbol_stats.setdefault(
+        symbol,
+        {
+          "pass_count": 0,
+          "fail_count": 0,
+          "last_seen": "",
+          "last_direction": "",
+          "last_score": 0.0,
+          "last_rvol": 0.0,
+        },
+      )
+      is_pass = str(row.get("result", "") or "").lower() == "pass"
+      if is_pass:
+        stats["pass_count"] = int(stats["pass_count"]) + 1
+      else:
+        stats["fail_count"] = int(stats["fail_count"]) + 1
+      stats["last_seen"] = str(row.get("timestamp", "") or stats["last_seen"])
+      stats["last_direction"] = str(row.get("direction", "") or stats["last_direction"])
+      stats["last_score"] = _safe_float(row.get("signal_score"), float(stats.get("last_score", 0.0) or 0.0))
+      stats["last_rvol"] = _safe_float(row.get("rvol"), float(stats.get("last_rvol", 0.0) or 0.0))
+
+    ranked_symbols = sorted(
+      symbol_stats.keys(),
+      key=lambda s: (
+        int(symbol_stats[s].get("pass_count", 0)),
+        _safe_float(symbol_stats[s].get("last_score"), 0.0),
+        _safe_float(symbol_stats[s].get("last_rvol"), 0.0),
+      ),
+      reverse=True,
+    )[:8]
+    if not ranked_symbols:
+      return [], []
+
+    snapshots = _fetch_snapshots(ranked_symbols)
+    signals: list[dict[str, Any]] = []
+    briefing: list[str] = []
+
+    for symbol in ranked_symbols:
+      snap = snapshots.get(symbol, {}) if isinstance(snapshots, dict) else {}
+      daily = snap.get("dailyBar", {}) if isinstance(snap, dict) else {}
+      minute_bar = snap.get("minuteBar", {}) if isinstance(snap, dict) else {}
+      latest_trade = snap.get("latestTrade", {}) if isinstance(snap, dict) else {}
+
+      latest = _safe_float(latest_trade.get("p"), 0.0)
+      if latest <= 0:
+        latest = _safe_float(minute_bar.get("c"), 0.0)
+      if latest <= 0:
+        latest = _safe_float(daily.get("c"), 0.0)
+      if latest <= 0:
+        continue
+
+      day_open = _safe_float(daily.get("o"), 0.0)
+      day_high = _safe_float(daily.get("h"), 0.0)
+      day_low = _safe_float(daily.get("l"), 0.0)
+      day_volume = _safe_float(daily.get("v"), 0.0)
+      day_move_pct = ((latest - day_open) / day_open * 100.0) if day_open > 0 else None
+      range_pos = _range_position_pct(latest, day_low, day_high)
+
+      stats = symbol_stats.get(symbol, {})
+      pass_count = int(stats.get("pass_count", 0) or 0)
+      fail_count = int(stats.get("fail_count", 0) or 0)
+      score = _safe_float(stats.get("last_score"), 0.0)
+      rvol = _safe_float(stats.get("last_rvol"), 0.0)
+      direction = str(stats.get("last_direction", "") or "").upper()
+
+      move_label = _price_move_label(day_move_pct)
+      bias = "watch"
+      if move_label in {"strong_up", "up"} and pass_count >= fail_count:
+        bias = "bullish_continuation_bias"
+      elif move_label in {"strong_down", "down"} and pass_count <= fail_count:
+        bias = "bearish_continuation_bias"
+      elif move_label == "flat":
+        bias = "range_wait_bias"
+
+      sev = _clamp(
+        (abs(day_move_pct or 0.0) / 3.0)
+        + (max(0, pass_count - fail_count) / 10.0)
+        + min(0.2, max(0.0, rvol - 1.0) / 5.0),
+        0.2,
+        0.92,
+      )
+
+      move_text = "n/a" if day_move_pct is None else f"{day_move_pct:+.2f}%"
+      range_text = "n/a" if range_pos is None else f"{range_pos:.0f}%"
+      summary = (
+        f"{symbol} is {move_text} today at ${latest:.2f}, trading near {range_text} of intraday range. "
+        f"Scanner pressure: {pass_count} pass / {fail_count} fail, last score {score:.2f}, RVOL {rvol:.2f}x."
+      )
+
+      signals.append(
+        _build_knowledge_signal(
+          signal_type="price_action_signal",
+          source_type="market_api_snapshot",
+          symbol=symbol,
+          lane="market",
+          category="price_intelligence",
+          title=f"{symbol} price lens",
+          summary=summary,
+          evidence={
+            "trades": max(1, pass_count + fail_count),
+            "last_seen": str(stats.get("last_seen", "") or ""),
+            "source": "alpaca_snapshot_api",
+          },
+          metrics={
+            "latest_price": round(latest, 4),
+            "day_move_pct": round(day_move_pct, 2) if day_move_pct is not None else None,
+            "range_position_pct": round(range_pos, 2) if range_pos is not None else None,
+            "day_high": round(day_high, 4) if day_high > 0 else None,
+            "day_low": round(day_low, 4) if day_low > 0 else None,
+            "day_volume": int(day_volume) if day_volume > 0 else 0,
+            "scanner_pass_count": pass_count,
+            "scanner_fail_count": fail_count,
+            "last_signal_score": round(score, 2),
+            "last_rvol": round(rvol, 2),
+            "direction": direction,
+          },
+          recommended_action=bias,
+          tags=["price_tool", "snapshot", "scanner_bridge", "human_readable"],
+          severity_score=sev,
+          time_scope={"window": "intraday_live", "as_of": now_label},
+          published_keys=published_keys,
+        )
+      )
+
+      briefing.append(
+        f"{symbol}: ${latest:.2f} ({move_text}) | range {range_text} | scanner {pass_count}p/{fail_count}f | bias={bias}."
+      )
+
+    return signals, briefing[:6]
+
+
+  def _scan_fail_family(reason: str) -> str:
+    text = str(reason or "").strip().lower()
+    if not text:
+      return "unknown"
+    if "weak movement" in text or "roc" in text or "vwap" in text:
+      return "weak_movement"
+    if "spread" in text or "quote" in text:
+      return "quote_spread"
+    if "confirmation" in text:
+      return "confirmation_mismatch"
+    if text.startswith("cooldown_skip:") or "cooldown" in text:
+      return "cooldown"
+    if text.startswith("hard_block:") or "hard block" in text:
+      return "hard_block"
+    if text.startswith("universe_reject:") or "universe rejected" in text:
+      return "universe_reject"
+    if "loss limit" in text or "max positions" in text or "risk" in text:
+      return "risk_guard"
+    if "before_entry_window" in text or "after_entry_window" in text:
+      return "timing_window"
+    return "other"
+
+
 def _synthesize_lisa_signals() -> dict[str, Any]:
     report = _load_latest_trade_report()
     runtime_state = load_bot_state()
@@ -1126,73 +1313,170 @@ def _synthesize_lisa_signals() -> dict[str, Any]:
     # Live scanner and runtime signal bridge for operational LISA packets.
     scan_rows = _today_scan_rows()
     scan_summary = _build_scan_report_summary(scan_rows)
-    top_passes = list(scan_summary.get("top_passes") or [])[:10]
-    top_fail_reasons = list(scan_summary.get("top_fail_reasons") or [])[:8]
 
-    pass_counts_by_symbol: dict[str, int] = {}
+    price_signals, human_briefing = _build_price_intelligence_signals(
+        scan_rows=scan_rows,
+        published_keys=published_keys,
+        now_label=now_label,
+    )
+    signals.extend(price_signals)
+
+    pass_rows: list[dict[str, Any]] = []
+    fail_rows: list[dict[str, Any]] = []
     for row in scan_rows:
-        if str(row.get("result", "") or "").lower() != "pass":
-            continue
+        result = str(row.get("result", "") or "").lower()
+        if result == "pass":
+            pass_rows.append(row)
+        elif result == "fail":
+            fail_rows.append(row)
+
+    symbol_state: dict[str, dict[str, Any]] = {}
+    for row in pass_rows:
         symbol = _scan_symbol(row)
         if not symbol:
             continue
-        pass_counts_by_symbol[symbol] = pass_counts_by_symbol.get(symbol, 0) + 1
 
-    for row in top_passes:
-        symbol = str(row.get("symbol", "") or "").upper()
-        if not symbol:
-            continue
-        pass_n = max(1, int(pass_counts_by_symbol.get(symbol, 1)))
         score = _safe_float(row.get("signal_score"), 0.0)
         rvol = _safe_float(row.get("rvol"), 0.0)
-        sev = _clamp((score / 12.0) + min(0.35, rvol / 8.0), 0.2, 0.85)
+        direction = str(row.get("direction", "") or "").upper()
+        timestamp = str(row.get("timestamp", "") or "")
+        ts_dt = _parse_ts(timestamp)
+
+        state = symbol_state.get(symbol)
+        if state is None:
+            state = {
+                "symbol": symbol,
+                "pass_count": 0,
+                "direction_counts": {},
+                "latest_row": None,
+                "latest_dt": None,
+                "latest_score": 0.0,
+                "latest_rvol": 0.0,
+                "peak_score": 0.0,
+                "peak_rvol": 0.0,
+                "peak_timestamp": "",
+            }
+            symbol_state[symbol] = state
+
+        state["pass_count"] = int(state["pass_count"]) + 1
+        if direction:
+            dir_counts = state["direction_counts"]
+            dir_counts[direction] = int(dir_counts.get(direction, 0) or 0) + 1
+
+        current_latest_dt = state.get("latest_dt")
+        if current_latest_dt is None or (ts_dt is not None and ts_dt >= current_latest_dt):
+            state["latest_row"] = row
+            state["latest_dt"] = ts_dt
+            state["latest_score"] = score
+            state["latest_rvol"] = rvol
+
+        if score >= float(state.get("peak_score", 0.0) or 0.0):
+            state["peak_score"] = score
+            state["peak_rvol"] = rvol
+            state["peak_timestamp"] = timestamp
+
+    for symbol, state in sorted(
+        symbol_state.items(),
+        key=lambda item: (
+            int(item[1].get("pass_count", 0) or 0),
+            float(item[1].get("latest_score", 0.0) or 0.0),
+            float(item[1].get("peak_score", 0.0) or 0.0),
+        ),
+        reverse=True,
+    )[:10]:
+        latest_row = state.get("latest_row") or {}
+        latest_direction = str(latest_row.get("direction", "") or "").upper()
+        direction_counts = dict(state.get("direction_counts") or {})
+        active_dirs = [d for d, c in direction_counts.items() if int(c or 0) > 0]
+        direction_conflict = len(active_dirs) > 1
+        pass_n = max(1, int(state.get("pass_count", 1) or 1))
+        latest_score = _safe_float(state.get("latest_score"), 0.0)
+        latest_rvol = _safe_float(state.get("latest_rvol"), 0.0)
+        peak_score = _safe_float(state.get("peak_score"), latest_score)
+        peak_rvol = _safe_float(state.get("peak_rvol"), latest_rvol)
+        sev = _clamp((max(latest_score, peak_score) / 12.0) + min(0.35, max(latest_rvol, peak_rvol) / 8.0), 0.2, 0.9)
+
+        if direction_conflict:
+            summary = (
+                f"{symbol} has mixed scanner direction in the live window (current {latest_direction or 'n/a'}; "
+                f"direction counts {direction_counts})."
+            )
+            action = "scanner_direction_conflict_review"
+        else:
+            summary = (
+                f"{symbol} current scanner state is {latest_direction or 'n/a'} with latest score {latest_score:.2f} "
+                f"(peak {peak_score:.2f}) and RVOL {latest_rvol:.2f}x."
+            )
+            action = "scanner_symbol_state"
+
         signals.append(
             _build_knowledge_signal(
-                signal_type="scanner_pass_signal",
+                signal_type="scanner_symbol_state",
                 source_type="scanner_live",
                 symbol=symbol,
                 lane="market",
                 category="live_scanner_knowledge",
-                title=f"{symbol} live scanner pass",
-                summary=(
-                    f"{symbol} is actively passing scanner gates with signal score {score:.2f} and RVOL {rvol:.2f}x."
-                ),
-                evidence={"trades": pass_n, "last_seen": str(row.get("timestamp", "") or "")},
-                metrics={
-                    "signal_score": score,
-                    "rvol": rvol,
-                    "direction": str(row.get("direction", "") or "").upper(),
+                title=f"{symbol} consolidated scanner state",
+                summary=summary,
+                evidence={
+                    "trades": pass_n,
+                    "last_seen": str(latest_row.get("timestamp", "") or ""),
+                    "peak_seen": str(state.get("peak_timestamp", "") or ""),
                 },
-                recommended_action="scanner_pass_signal",
-                tags=["scanner", "pass", "live"],
+                metrics={
+                    "current_direction": latest_direction,
+                    "direction_counts": direction_counts,
+                    "direction_conflict": direction_conflict,
+                    "latest_score": round(latest_score, 2),
+                    "peak_score": round(peak_score, 2),
+                    "latest_rvol": round(latest_rvol, 2),
+                    "peak_rvol": round(peak_rvol, 2),
+                    "pass_count": pass_n,
+                },
+                recommended_action=action,
+                tags=["scanner", "state", "live", "deduped", "symbol_consolidated"],
                 severity_score=sev,
                 time_scope={"window": "today_live", "as_of": now_label},
                 published_keys=published_keys,
             )
         )
 
-    fail_rows: list[dict[str, Any]] = []
-    for row in scan_rows:
-        if str(row.get("result", "") or "").lower() == "fail":
-            fail_rows.append(row)
-
-    for row in top_fail_reasons:
+    fail_family_counts: dict[str, int] = {}
+    fail_family_examples: dict[str, str] = {}
+    for row in fail_rows:
         reason = str(row.get("reason", "") or "unknown")
-        count = max(1, int(_safe_float(row.get("count"), 1)))
-        sev = _clamp((count / 12.0), 0.2, 0.95)
+        family = _scan_fail_family(reason)
+        fail_family_counts[family] = int(fail_family_counts.get(family, 0) or 0) + 1
+        if family not in fail_family_examples and reason:
+            fail_family_examples[family] = reason
+
+    if fail_family_counts:
+        ranked_families = sorted(fail_family_counts.items(), key=lambda item: item[1], reverse=True)
+        top_family, top_count = ranked_families[0]
+        total_fails = sum(int(v or 0) for v in fail_family_counts.values())
+        sev = _clamp((top_count / max(1, total_fails)) + (total_fails / 40.0), 0.2, 0.95)
         signals.append(
             _build_knowledge_signal(
-                signal_type="scanner_fail_signal",
+                signal_type="scanner_fail_summary",
                 source_type="scanner_live",
                 symbol="ALL",
                 lane="market",
                 category="live_scanner_knowledge",
-                title=f"Top scanner fail reason: {reason}",
-                summary=f"Scanner rejects are currently concentrated on '{reason}'.",
-                evidence={"trades": count},
-                metrics={"fail_count": count, "reason": reason},
-                recommended_action="scanner_fail_signal",
-                tags=["scanner", "fail", "live"],
+                title="Scanner fail-family summary (grouped)",
+                summary=(
+                    f"Scanner fails are led by '{top_family}' ({top_count}/{total_fails}). "
+                    "Fine-grained reasons are grouped into families for LISA clarity."
+                ),
+                evidence={"trades": max(1, total_fails)},
+                metrics={
+                    "top_fail_family": top_family,
+                    "top_fail_family_count": int(top_count),
+                    "total_fail_count": int(total_fails),
+                    "fail_family_counts": {k: int(v) for k, v in ranked_families[:6]},
+                    "fail_family_examples": {k: fail_family_examples.get(k, "") for k, _v in ranked_families[:4]},
+                },
+                recommended_action="scanner_fail_summary",
+                tags=["scanner", "fail", "live", "grouped"],
                 severity_score=sev,
                 time_scope={"window": "today_live", "as_of": now_label},
                 published_keys=published_keys,
@@ -1564,9 +1848,11 @@ def _synthesize_lisa_signals() -> dict[str, Any]:
     )
     return {
         "feed_name": "autobott_lisa_feed",
-        "schema_version": "1.0.0",
+      "schema_version": "1.1.0",
         "generated_at": now_label,
         "source_system": "autobott",
+      "data_sources": ["scanner_live_csv", "runtime_state", "trade_review", "alpaca_snapshot_api"],
+      "human_briefing": human_briefing,
         "signal_count": len(signals),
         "signals": signals,
     }
@@ -1944,6 +2230,23 @@ def lisa_feed_page():
     }
     .signal-head { display:flex; justify-content:space-between; gap:8px; align-items:flex-start; margin-bottom:6px; }
     .signal-title { font-weight:800; }
+    .brief-list { display:grid; gap:6px; }
+    .brief-item {
+      border:1px solid var(--border);
+      border-radius:10px;
+      background:rgba(6,12,20,.52);
+      padding:8px 10px;
+      font-size:13px;
+    }
+    .metric-row { display:flex; flex-wrap:wrap; gap:8px; margin-top:6px; }
+    .metric-chip {
+      border:1px solid var(--border);
+      border-radius:999px;
+      padding:3px 8px;
+      font-size:12px;
+      color:var(--muted);
+      background:rgba(18,29,43,.6);
+    }
     textarea {
       width:100%;
       min-height:380px;
@@ -1990,6 +2293,11 @@ def lisa_feed_page():
       <div class="card strong"><div class="muted small">Feed Name</div><div id="feed-name">--</div></div>
       <div class="card strong"><div class="muted small">Generated At</div><div id="feed-time">--</div></div>
       <div class="card strong"><div class="muted small">Signal Count</div><div id="feed-count">0</div></div>
+    </div>
+
+    <div class="card" style="margin-bottom:12px;">
+      <div class="muted" style="margin-bottom:8px;">Human Briefing — Price + Scanner Context</div>
+      <div id="human-briefing" class="brief-list"></div>
     </div>
 
     <div class="cols">
@@ -2042,6 +2350,38 @@ def lisa_feed_page():
       return keys.map((k) => `${esc(k)}: ${esc(src[k])}`).join(" | ");
     }
 
+    function asNum(v) {
+      const n = Number(v);
+      return Number.isFinite(n) ? n : null;
+    }
+
+    function fmtUsd(v) {
+      const n = asNum(v);
+      if (n === null) return "n/a";
+      return `$${n.toFixed(2)}`;
+    }
+
+    function fmtPct(v) {
+      const n = asNum(v);
+      if (n === null) return "n/a";
+      return `${n >= 0 ? "+" : ""}${n.toFixed(2)}%`;
+    }
+
+    function metricChip(label, value) {
+      return `<span class="metric-chip">${esc(label)}: ${esc(value)}</span>`;
+    }
+
+    function renderBriefing(payload) {
+      const wrap = document.getElementById("human-briefing");
+      if (!wrap) return;
+      const lines = Array.isArray(payload && payload.human_briefing) ? payload.human_briefing : [];
+      if (!lines.length) {
+        wrap.innerHTML = '<div class="muted">No human briefing lines available yet.</div>';
+        return;
+      }
+      wrap.innerHTML = lines.map((line) => `<div class="brief-item">${esc(line)}</div>`).join("");
+    }
+
     function renderSignals(payload) {
       const wrap = document.getElementById("signals");
       if (!wrap) return;
@@ -2050,7 +2390,26 @@ def lisa_feed_page():
         wrap.innerHTML = '<div class="muted">No knowledge signals available.</div>';
         return;
       }
-      wrap.innerHTML = rows.map((row) => `
+      const ordered = rows.slice().sort((a, b) => {
+        const aPrice = String(a && a.category || "") === "price_intelligence" ? 1 : 0;
+        const bPrice = String(b && b.category || "") === "price_intelligence" ? 1 : 0;
+        if (aPrice !== bPrice) return bPrice - aPrice;
+        return Number(b && b.severity_score || 0) - Number(a && a.severity_score || 0);
+      });
+      wrap.innerHTML = ordered.map((row) => {
+        const metrics = row && typeof row.metrics === "object" ? row.metrics : {};
+        const isPrice = String(row.category || "") === "price_intelligence";
+        const coreMetrics = isPrice
+          ? `
+            <div class="metric-row">
+              ${metricChip("price", fmtUsd(metrics.latest_price))}
+              ${metricChip("day", fmtPct(metrics.day_move_pct))}
+              ${metricChip("range pos", asNum(metrics.range_position_pct) === null ? "n/a" : `${Number(metrics.range_position_pct).toFixed(0)}%`)}
+              ${metricChip("scanner", `${Number(metrics.scanner_pass_count || 0)}p/${Number(metrics.scanner_fail_count || 0)}f`)}
+            </div>
+          `
+          : `<div class="small muted">${metricPairs(metrics)}</div>`;
+        return `
         <div class="signal-card">
           <div class="signal-head">
             <div>
@@ -2060,10 +2419,11 @@ def lisa_feed_page():
             <span class="pill ${severityClass(row.severity)}">${esc(row.severity)}</span>
           </div>
           <div class="small" style="margin-bottom:4px;">${esc(row.summary)}</div>
-          <div class="small muted" style="margin-bottom:4px;">confidence=${esc(row.confidence)} | novelty=${esc(row.novelty)} | action=${esc(row.recommended_action)}</div>
-          <div class="small muted">${metricPairs(row.metrics)}</div>
+          <div class="small muted" style="margin-bottom:4px;">confidence=${esc(row.confidence)} | novelty=${esc(row.novelty)} | action=${esc(row.recommended_action)} | source=${esc(row.source_type || "-")}</div>
+          ${coreMetrics}
         </div>
-      `).join("");
+      `;
+      }).join("");
     }
 
     function renderPayload(payload) {
@@ -2076,6 +2436,7 @@ def lisa_feed_page():
       if (feedTime) feedTime.textContent = payload && payload.generated_at ? payload.generated_at : "--";
       if (feedCount) feedCount.textContent = String(payload && payload.signal_count ? payload.signal_count : 0);
       if (payloadBox) payloadBox.value = JSON.stringify(payload || {}, null, 2);
+      renderBriefing(payload || {});
       renderSignals(payload || {});
     }
 
@@ -2586,6 +2947,10 @@ def api_status():
                 "alpaca_auth_error_recent": auth_error_recent,
                 "last_entry_debug": last_entry_debug if isinstance(last_entry_debug, dict) else {},
                 "last_exit_debug": last_exit_debug if isinstance(last_exit_debug, dict) else {},
+                "runtime_state_updated_at_iso": str(runtime_state.get("_state_updated_at_iso", "") or ""),
+                "runtime_state_keys": len(runtime_state.keys()) if isinstance(runtime_state, dict) else 0,
+                "runtime_state_file": str(config.STATE_JSON_PATH),
+                "runtime_state_file_exists": bool(config.STATE_JSON_PATH.exists()),
                 "feature_flags": get_feature_flags_snapshot(),
                 "last_updated": _now_et().strftime("%Y-%m-%d %H:%M:%S ET"),
                 "trades_today": len(today_rows),

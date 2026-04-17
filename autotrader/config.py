@@ -90,15 +90,34 @@ SCAN_DAILY_BARS     = 30
 # Position sizing & risk
 # ---------------------------------------------------------------------------
 
-MAX_POSITIONS                       = 25    # hard cap for concurrent option positions
+MAX_POSITIONS                       = 3     # hard cap for concurrent option positions (small live account doctrine)
 POSITION_SIZE_USD                   = 500
 RISK_PER_TRADE_PCT                  = 0.01
 MAX_POSITION_SIZE_USD               = 700.0
 DRAWDOWN_REDUCE_AFTER_CONSEC_LOSSES = 2
 DRAWDOWN_SIZE_MULTIPLIER            = 0.5
-DAILY_LOSS_LIMIT_USD                = 150.0
-WEEKLY_LOSS_LIMIT_USD               = 900.0
+DAILY_LOSS_LIMIT_USD                = 120.0
+WEEKLY_LOSS_LIMIT_USD               = 400.0
 CONSECUTIVE_LOSS_LIMIT              = 3
+
+# Capital doctrine for small live account preparation.
+MAX_PREMIUM_PER_TRADE_USD           = 150.0
+MAX_TOTAL_OPEN_PREMIUM_USD          = 600.0
+OPENING_MAX_FRESH_PREMIUM_USD       = 300.0
+MAX_SAME_DIRECTION_POSITIONS        = 2
+
+# Expensive names are allowed only when premium stays inside per-trade budget;
+# opening window allows at most one expensive-name fresh entry.
+EXPENSIVE_PREMIUM_SYMBOLS = (
+    "TSLA", "MSFT", "AVGO", "NFLX", "META", "GOOGL", "AMZN",
+)
+
+# Preferred core names for small-account behavior (used for guidance/reporting).
+PREFERRED_CORE_TICKERS = (
+    "SPY", "QQQ", "IWM", "AAPL", "AMD", "INTC", "JPM", "XOM", "CRM", "ORCL",
+)
+MAX_NON_CORE_ENTRIES_PER_DAY        = 4
+NON_CORE_MIN_SIGNAL_SCORE           = 9.0
 
 
 # ---------------------------------------------------------------------------
@@ -149,6 +168,7 @@ OPENING_MAX_SIGNAL_CANDIDATES                = 4
 OPENING_MAX_FRESH_ENTRIES                    = 2
 OPENING_MAX_CONCURRENT_POSITIONS             = 2
 OPENING_MAX_NEW_ENTRY_ATTEMPTS_PER_LOOP      = 2
+OPENING_MAX_EXPENSIVE_ENTRIES                = 1
 
 
 # ---------------------------------------------------------------------------

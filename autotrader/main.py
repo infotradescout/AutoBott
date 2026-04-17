@@ -248,6 +248,68 @@ def _is_in_opening_strict_window(now_et: datetime) -> bool:
     return entry_open_minutes <= now_minutes < (entry_open_minutes + window_minutes)
 
 
+def _current_open_premium_usd(option_positions: list, open_trade_meta: dict[str, dict]) -> float:
+    total = 0.0
+    seen_symbols: set[str] = set()
+    for pos in option_positions:
+        symbol = str(getattr(pos, "symbol", "") or "")
+        qty = position_qty_as_int(getattr(pos, "qty", 0))
+        if not symbol or qty <= 0:
+            continue
+        seen_symbols.add(symbol)
+        meta = open_trade_meta.get(symbol, {})
+        entry_price = float(meta.get("entry_price", getattr(pos, "avg_entry_price", 0) or 0) or 0)
+        if entry_price > 0:
+            total += entry_price * qty * 100.0
+
+    for symbol, meta in open_trade_meta.items():
+        if symbol in seen_symbols:
+            continue
+        qty = int(meta.get("qty", 0) or 0)
+        entry_price = float(meta.get("entry_price", 0) or 0)
+        if qty > 0 and entry_price > 0:
+            total += entry_price * qty * 100.0
+    return round(total, 4)
+
+
+def _direction_exposure_counts(option_positions: list, open_trade_meta: dict[str, dict]) -> tuple[int, int]:
+    call_symbols: set[str] = set()
+    put_symbols: set[str] = set()
+
+    def _add_symbol(symbol: str, direction: str) -> None:
+        direction_lc = str(direction or "").lower()
+        if direction_lc == "call":
+            call_symbols.add(symbol)
+        elif direction_lc == "put":
+            put_symbols.add(symbol)
+
+    seen_symbols: set[str] = set()
+    for pos in option_positions:
+        symbol = str(getattr(pos, "symbol", "") or "")
+        qty = position_qty_as_int(getattr(pos, "qty", 0))
+        if not symbol or qty <= 0:
+            continue
+        seen_symbols.add(symbol)
+        meta = open_trade_meta.get(symbol, {})
+        direction = str(meta.get("direction", "") or "")
+        if direction not in ("call", "put"):
+            _parsed_ticker, direction = _parse_option_symbol(symbol)
+        _add_symbol(symbol, direction)
+
+    for symbol, meta in open_trade_meta.items():
+        if symbol in seen_symbols:
+            continue
+        qty = int(meta.get("qty", 0) or 0)
+        if qty <= 0:
+            continue
+        direction = str(meta.get("direction", "") or "")
+        if direction not in ("call", "put"):
+            _parsed_ticker, direction = _parse_option_symbol(symbol)
+        _add_symbol(symbol, direction)
+
+    return len(call_symbols), len(put_symbols)
+
+
 def _opening_entry_quality_ok(signal: dict[str, Any], now_et: datetime) -> tuple[bool, str]:
     if not _is_in_opening_strict_window(now_et):
         return True, ""
@@ -1246,6 +1308,9 @@ def main():
     trade_telemetry_last_close_iso = str(state.get("trade_telemetry_last_close_iso", "") or "")
     trade_telemetry_last_log_error = str(state.get("trade_telemetry_last_log_error", "") or "")
     opening_entries_today_count = int(state.get("opening_entries_today_count", 0) or 0)
+    opening_fresh_premium_deployed_usd = float(state.get("opening_fresh_premium_deployed_usd", 0.0) or 0.0)
+    opening_expensive_entries_today_count = int(state.get("opening_expensive_entries_today_count", 0) or 0)
+    non_core_entries_today_count = int(state.get("non_core_entries_today_count", 0) or 0)
     next_heartbeat_at = 0.0
     last_heartbeat_persist_at = 0.0
     manual_stop_latched = False
@@ -1372,6 +1437,9 @@ def main():
                 "trade_telemetry_last_close_iso": trade_telemetry_last_close_iso,
                 "trade_telemetry_last_log_error": trade_telemetry_last_log_error,
                 "opening_entries_today_count": opening_entries_today_count,
+                "opening_fresh_premium_deployed_usd": round(opening_fresh_premium_deployed_usd, 6),
+                "opening_expensive_entries_today_count": opening_expensive_entries_today_count,
+                "non_core_entries_today_count": non_core_entries_today_count,
             }
         )
 
@@ -2088,6 +2156,9 @@ def main():
             trade_telemetry_last_close_iso = ""
             trade_telemetry_last_log_error = ""
             opening_entries_today_count = 0
+            opening_fresh_premium_deployed_usd = 0.0
+            opening_expensive_entries_today_count = 0
+            non_core_entries_today_count = 0
             set_catalyst_mode(False, "")
 
         option_positions = broker.get_open_option_positions()
@@ -2469,6 +2540,33 @@ def main():
                 _mark_stage4_reject(reason="invalid_strategy_direction", ticker=ticker)
                 print(f"[{ts(now_et)}] {ticker}: skip (invalid direction={direction!r}; only CALL/PUT allowed).")
                 continue
+
+            preferred_core = set(str(s).upper() for s in getattr(config, "PREFERRED_CORE_TICKERS", ()))
+            is_non_core = ticker not in preferred_core
+            if is_non_core:
+                non_core_cap = max(0, int(getattr(config, "MAX_NON_CORE_ENTRIES_PER_DAY", 4) or 4))
+                if non_core_entries_today_count >= non_core_cap:
+                    _mark_skip("non_core_entry_cap")
+                    _mark_stage4_reject(reason="non_core_entry_cap", ticker=ticker)
+                    print(
+                        f"[{ts(now_et)}] {ticker}: skip (non-core entry cap "
+                        f"{non_core_entries_today_count}/{non_core_cap})."
+                    )
+                    continue
+                try:
+                    signal_score = float(signal.get("signal_score", 0.0) or 0.0)
+                except (TypeError, ValueError):
+                    signal_score = 0.0
+                non_core_min_signal = float(getattr(config, "NON_CORE_MIN_SIGNAL_SCORE", 9.0) or 9.0)
+                if signal_score < non_core_min_signal:
+                    _mark_skip("non_core_quality_gate")
+                    _mark_stage4_reject(reason="non_core_quality_gate", ticker=ticker)
+                    print(
+                        f"[{ts(now_et)}] {ticker}: skip (non-core signal score {signal_score:.2f} "
+                        f"< {non_core_min_signal:.2f})."
+                    )
+                    continue
+
             if _is_bad_fill_blocked(ticker, now_et):
                 _mark_skip("bad_fill_cooldown")
                 _mark_stage4_reject(reason="bad_fill_cooldown", ticker=ticker)
@@ -2530,6 +2628,11 @@ def main():
             reentries_used = int(ticker_reentries_used.get(ticker, 0))
             reentry_armed = bool(ticker_reentry_armed.get(ticker, False))
             expected_direction = str(ticker_reentry_expected_direction.get(ticker, "") or "").lower()
+            if _is_in_opening_strict_window(now_et) and prior_entries >= 1:
+                _mark_skip("opening_no_reentry")
+                _mark_stage4_reject(reason="opening_no_reentry", ticker=ticker)
+                print(f"[{ts(now_et)}] {ticker}: skip (opening window disallows re-entry).")
+                continue
             if prior_entries >= max_entries_per_ticker:
                 if not reentry_armed:
                     _mark_skip("max_entries_per_ticker_reached")
@@ -2592,6 +2695,20 @@ def main():
                 _mark_stage4_reject(reason="max_positions_reached", ticker=ticker)
                 print(f"[{ts(now_et)}] Max positions reached. Stopping new entries this loop.")
                 break
+
+            direction_lc = str(direction or "").lower()
+            same_dir_cap = max(1, int(getattr(config, "MAX_SAME_DIRECTION_POSITIONS", 2) or 2))
+            call_exposure, put_exposure = _direction_exposure_counts(option_positions, open_trade_meta)
+            if direction_lc == "call" and call_exposure >= same_dir_cap:
+                _mark_skip("same_direction_exposure_cap")
+                _mark_stage4_reject(reason="same_direction_exposure_cap", ticker=ticker)
+                print(f"[{ts(now_et)}] {ticker}: skip (call exposure cap {call_exposure}/{same_dir_cap}).")
+                continue
+            if direction_lc == "put" and put_exposure >= same_dir_cap:
+                _mark_skip("same_direction_exposure_cap")
+                _mark_stage4_reject(reason="same_direction_exposure_cap", ticker=ticker)
+                print(f"[{ts(now_et)}] {ticker}: skip (put exposure cap {put_exposure}/{same_dir_cap}).")
+                continue
 
             # Check both live Alpaca positions AND in-memory open_trade_meta to prevent
             # duplicate entries when Alpaca API returns stale data right after an order fill.
@@ -2687,6 +2804,51 @@ def main():
                     continue
                 ask_price = float(entry_quote.get("ask") or 0.0)
 
+                qty = 1
+                trade_premium_usd = ask_price * qty * 100.0
+                max_trade_premium = float(getattr(config, "MAX_PREMIUM_PER_TRADE_USD", 150.0) or 150.0)
+                if trade_premium_usd > max_trade_premium:
+                    _mark_skip("premium_per_trade_cap")
+                    _mark_stage4_reject(reason="premium_per_trade_cap", ticker=ticker)
+                    print(
+                        f"[{ts(now_et)}] {ticker}: skip (premium ${trade_premium_usd:.2f} > "
+                        f"per-trade cap ${max_trade_premium:.2f})."
+                    )
+                    continue
+
+                total_open_premium = _current_open_premium_usd(option_positions, open_trade_meta)
+                max_total_open_premium = float(getattr(config, "MAX_TOTAL_OPEN_PREMIUM_USD", 600.0) or 600.0)
+                if (total_open_premium + trade_premium_usd) > max_total_open_premium:
+                    _mark_skip("total_open_premium_cap")
+                    _mark_stage4_reject(reason="total_open_premium_cap", ticker=ticker)
+                    print(
+                        f"[{ts(now_et)}] {ticker}: skip (open premium ${total_open_premium:.2f} + "
+                        f"new ${trade_premium_usd:.2f} > cap ${max_total_open_premium:.2f})."
+                    )
+                    continue
+
+                expensive_symbols = set(str(s).upper() for s in getattr(config, "EXPENSIVE_PREMIUM_SYMBOLS", ()))
+                is_expensive_symbol = ticker in expensive_symbols
+                if _is_in_opening_strict_window(now_et):
+                    opening_premium_cap = float(getattr(config, "OPENING_MAX_FRESH_PREMIUM_USD", 300.0) or 300.0)
+                    if (opening_fresh_premium_deployed_usd + trade_premium_usd) > opening_premium_cap:
+                        _mark_skip("opening_fresh_premium_cap")
+                        _mark_stage4_reject(reason="opening_fresh_premium_cap", ticker=ticker)
+                        print(
+                            f"[{ts(now_et)}] {ticker}: skip (opening premium ${opening_fresh_premium_deployed_usd:.2f} + "
+                            f"${trade_premium_usd:.2f} > cap ${opening_premium_cap:.2f})."
+                        )
+                        continue
+                    opening_expensive_cap = max(0, int(getattr(config, "OPENING_MAX_EXPENSIVE_ENTRIES", 1) or 1))
+                    if is_expensive_symbol and opening_expensive_entries_today_count >= opening_expensive_cap:
+                        _mark_skip("opening_expensive_symbol_cap")
+                        _mark_stage4_reject(reason="opening_expensive_symbol_cap", ticker=ticker)
+                        print(
+                            f"[{ts(now_et)}] {ticker}: skip (opening expensive-name cap "
+                            f"{opening_expensive_entries_today_count}/{opening_expensive_cap})."
+                        )
+                        continue
+
                 initial_chain_ask = float(contract.get("ask_price", ask_price) or ask_price)
                 pre_submit_slippage = _slippage_pct(initial_chain_ask, ask_price)
                 if pre_submit_slippage > config.MAX_ENTRY_SLIPPAGE_PCT:
@@ -2720,7 +2882,6 @@ def main():
                     time.sleep(config.RATE_LIMIT_SLEEP_SECONDS)
                     continue
 
-                qty = 1
                 _mark_stage4_eligible(ticker=ticker)
                 if _is_in_opening_strict_window(now_et):
                     opening_entry_attempts_loop += 1
@@ -2820,6 +2981,12 @@ def main():
                 entry_times_rolling.append(now_et)
                 if _is_in_opening_strict_window(now_et):
                     opening_entries_today_count += 1
+                    entry_premium_usd = float((filled_avg_price or ask_price) * filled_qty * 100.0)
+                    opening_fresh_premium_deployed_usd += entry_premium_usd
+                    if ticker in set(str(s).upper() for s in getattr(config, "EXPENSIVE_PREMIUM_SYMBOLS", ())):
+                        opening_expensive_entries_today_count += 1
+                if ticker not in set(str(s).upper() for s in getattr(config, "PREFERRED_CORE_TICKERS", ())):
+                    non_core_entries_today_count += 1
                 entry_debug["entries_filled"] = int(entry_debug.get("entries_filled", 0)) + 1
                 _save_runtime_state()
                 time.sleep(config.RATE_LIMIT_SLEEP_SECONDS)
