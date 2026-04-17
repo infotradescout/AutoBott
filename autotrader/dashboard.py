@@ -47,6 +47,12 @@ LISA_FEED_NDJSON_PATH = DASHBOARD_DIR / "autobott_lisa_feed.ndjson"
 LISA_FEED_PUBLISHED_PATH = DASHBOARD_DIR / "autobott_lisa_feed_published.json"
 EASTERN = pytz.timezone(config.EASTERN_TZ)
 CENTRAL = pytz.timezone(config.CENTRAL_TZ)
+_DISPLAY_TZ_NAME = str(os.getenv("DASHBOARD_DISPLAY_TZ", "Etc/GMT+6") or "Etc/GMT+6").strip()
+try:
+  DISPLAY_TZ = pytz.timezone(_DISPLAY_TZ_NAME)
+except Exception:
+  DISPLAY_TZ = pytz.timezone("Etc/GMT+6")
+DISPLAY_TZ_LABEL = str(os.getenv("DASHBOARD_DISPLAY_TZ_LABEL", "CST") or "CST").strip() or "CST"
 _REVIEW_CACHE: dict[str, Any] = {"ts": None, "payload": None}
 CONTROL_TOKEN = str(config.DASHBOARD_CONTROL_TOKEN or "").strip()
 
@@ -62,9 +68,10 @@ def _now_et() -> datetime:
 
 
 def _to_ct_label(dt: datetime | None) -> str:
-    if dt is None:
-        return ""
-    return dt.astimezone(CENTRAL).strftime("%Y-%m-%d %H:%M:%S %Z")
+  if dt is None:
+    return ""
+  value = dt.astimezone(DISPLAY_TZ).strftime("%Y-%m-%d %H:%M:%S")
+  return f"{value} {DISPLAY_TZ_LABEL}"
 
 
 def _extract_underlying(symbol: str) -> str:
