@@ -147,8 +147,8 @@ NON_CORE_MIN_SIGNAL_SCORE           = 10.8
 
 MARKET_OPEN                        = "09:30"
 PREOPEN_READY_MINUTES              = 10
-HARD_CLOSE_TIME                    = "15:30"   # force-close all positions at this time
-OPTION_EXPIRY_EXIT_TIME            = "15:00"   # exit expiring contracts by this time
+HARD_CLOSE_TIME                    = "16:00"   # force-close all positions at market close
+OPTION_EXPIRY_EXIT_TIME            = "15:55"   # exit expiring contracts shortly before close
 OPTION_FORCE_EXIT_DAYS_BEFORE_EXPIRY = 1
 NO_NEW_TRADES_BEFORE               = "09:30"
 NO_NEW_TRADES_AFTER                = "16:00"   # full regular-session entry window
@@ -211,7 +211,7 @@ TRADE_STATE_PROTECT_TRIGGER_PCT             = 0.03   # +3%: move to protected
 TRADE_STATE_PROTECTED_STOP_FLOOR_PCT        = 0.001  # +0.1% floor once protected
 TRADE_STATE_BANK_OR_QUALIFY_TRIGGER_PCT     = 0.08   # +8%: bank-or-qualify decision
 TRADE_STATE_RUNNER_PROMOTION_STOP_FLOOR_PCT = 0.03   # +3% floor when promoted to runner
-RUNNER_DISABLE_AFTER_ET                     = "14:30"
+RUNNER_DISABLE_AFTER_ET                     = "16:00"
 
 # Fixed profit target (disabled — trailing stop rides winners instead)
 ENABLE_FIXED_PROFIT_TARGET = False
