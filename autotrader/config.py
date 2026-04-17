@@ -124,8 +124,8 @@ EXPENSIVE_PREMIUM_SYMBOLS = (
 PREFERRED_CORE_TICKERS = (
     "SPY", "QQQ", "IWM", "AAPL", "AMD", "INTC", "JPM", "XOM", "CRM", "ORCL",
 )
-MAX_NON_CORE_ENTRIES_PER_DAY        = 2
-NON_CORE_MIN_SIGNAL_SCORE           = 10.0
+MAX_NON_CORE_ENTRIES_PER_DAY        = 1
+NON_CORE_MIN_SIGNAL_SCORE           = 10.8
 
 
 # ---------------------------------------------------------------------------
@@ -172,10 +172,11 @@ OPENING_STRICT_MIN_DIRECTION_SCORE           = 0.65
 OPENING_STRICT_MIN_RVOL                      = 1.40
 OPENING_STRICT_MIN_ROC_PCT                   = 0.24
 OPENING_STRICT_MIN_VWAP_DISTANCE_PCT         = 0.12
-OPENING_MAX_SIGNAL_CANDIDATES                = 2
+OPENING_MAX_SIGNAL_CANDIDATES                = 1
 OPENING_MAX_FRESH_ENTRIES                    = 1
 OPENING_MAX_CONCURRENT_POSITIONS             = 2
 OPENING_MAX_NEW_ENTRY_ATTEMPTS_PER_LOOP      = 1
+MAX_NEW_ENTRY_ATTEMPTS_PER_LOOP              = 1
 OPENING_MAX_EXPENSIVE_ENTRIES                = 1
 OPENING_EXPENSIVE_MAX_PREMIUM_USD            = 140.0
 
@@ -251,7 +252,7 @@ MOVEMENT_WEAK_VWAP_MULT   = 1.00  # was effectively 1.5 in scanner; only block w
 
 # Direction conviction: minimum weighted-vote score to commit to call/put.
 # 0.0 = any majority; 0.5 = strongly one-sided required.
-DIRECTION_CONVICTION_MIN  = 0.1   # lowered from 0.2 — allows more split-but-leaning signals
+DIRECTION_CONVICTION_MIN  = 0.25  # require clearer directional consensus
 
 ROC_PERIOD                = 10
 ROC_BULL_MIN              = 0.05  # lowered from 0.12 — weak momentum is still momentum
@@ -270,7 +271,7 @@ IV_RANK_MIN               = 20.0
 IV_RANK_MAX               = 99.0
 
 ENABLE_SIGNAL_SCORING     = True
-MIN_SIGNAL_SCORE          = 5.8   # raise quality floor to reduce marginal entries
+MIN_SIGNAL_SCORE          = 6.4   # stronger baseline quality floor
 
 # Phase 3 enforcement knobs driven by review.py output.
 # Use blocked hours after you identify weak entry windows from analytics.
@@ -288,7 +289,7 @@ MAX_FILL_SLIPPAGE_PCT     = 3.0
 REENTRY_COOLDOWN_LOSS_MINUTES      = 20
 STOP_LOSS_REENTRY_COOLDOWN_MINUTES = 30
 
-ENABLE_OPENING_ENTRY_RELAX    = True
+ENABLE_OPENING_ENTRY_RELAX    = False
 OPENING_ENTRY_RELAX_MINUTES   = 7
 
 # Reject cooldowns (scanner control flow)
@@ -348,9 +349,21 @@ VIX_MAX                    = 80.0
 # ---------------------------------------------------------------------------
 
 ENABLE_ENTRY_CONFIRMATION              = True
-ENTRY_CONFIRM_BARS                     = 2
-ENTRY_CONFIRM_BYPASS_MIN_SIGNAL_SCORE  = 8.5
-ENTRY_CONFIRM_MOMENTUM_THRESHOLD_PCT   = 0.10
+ENTRY_CONFIRM_BARS                     = 3
+ENTRY_CONFIRM_BYPASS_MIN_SIGNAL_SCORE  = 999.0
+ENTRY_CONFIRM_MOMENTUM_THRESHOLD_PCT   = 0.14
+
+# Fast-start doctrine: only accept entries that should work quickly.
+FAST_START_MIN_SIGNAL_SCORE            = 7.0
+FAST_START_MIN_DIRECTION_SCORE         = 0.68
+FAST_START_MIN_RVOL                    = 1.25
+FAST_START_MIN_ABS_ROC_PCT             = 0.16
+FAST_START_MIN_VWAP_DISTANCE_PCT       = 0.10
+OPENING_FAST_START_MIN_SIGNAL_SCORE    = 7.8
+OPENING_FAST_START_MIN_DIRECTION_SCORE = 0.75
+OPENING_FAST_START_MIN_RVOL            = 1.60
+OPENING_FAST_START_MIN_ABS_ROC_PCT     = 0.24
+OPENING_FAST_START_MIN_VWAP_DISTANCE_PCT = 0.14
 
 
 # ---------------------------------------------------------------------------

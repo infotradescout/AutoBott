@@ -342,6 +342,48 @@ def _opening_entry_quality_ok(signal: dict[str, Any], now_et: datetime) -> tuple
     return True, ""
 
 
+def _fast_start_entry_quality_ok(signal: dict[str, Any], now_et: datetime) -> tuple[bool, str]:
+    """Require setups that should work quickly, not slow drifts."""
+    try:
+        signal_score = float(signal.get("signal_score", 0.0) or 0.0)
+        direction_score = abs(float(signal.get("direction_score", 0.0) or 0.0))
+        rvol = float(signal.get("rvol", 0.0) or 0.0)
+        roc_pct = abs(float(signal.get("roc", 0.0) or 0.0))
+        price = float(signal.get("price", 0.0) or 0.0)
+        vwap = float(signal.get("vwap", 0.0) or 0.0)
+    except (TypeError, ValueError):
+        return False, "fast-start parse failure"
+
+    min_signal = float(getattr(config, "FAST_START_MIN_SIGNAL_SCORE", 7.0) or 7.0)
+    min_direction = float(getattr(config, "FAST_START_MIN_DIRECTION_SCORE", 0.68) or 0.68)
+    min_rvol = float(getattr(config, "FAST_START_MIN_RVOL", 1.25) or 1.25)
+    min_abs_roc = float(getattr(config, "FAST_START_MIN_ABS_ROC_PCT", 0.16) or 0.16)
+    min_vwap_dist = float(getattr(config, "FAST_START_MIN_VWAP_DISTANCE_PCT", 0.10) or 0.10)
+
+    if _is_in_opening_strict_window(now_et):
+        min_signal = max(min_signal, float(getattr(config, "OPENING_FAST_START_MIN_SIGNAL_SCORE", min_signal) or min_signal))
+        min_direction = max(min_direction, float(getattr(config, "OPENING_FAST_START_MIN_DIRECTION_SCORE", min_direction) or min_direction))
+        min_rvol = max(min_rvol, float(getattr(config, "OPENING_FAST_START_MIN_RVOL", min_rvol) or min_rvol))
+        min_abs_roc = max(min_abs_roc, float(getattr(config, "OPENING_FAST_START_MIN_ABS_ROC_PCT", min_abs_roc) or min_abs_roc))
+        min_vwap_dist = max(min_vwap_dist, float(getattr(config, "OPENING_FAST_START_MIN_VWAP_DISTANCE_PCT", min_vwap_dist) or min_vwap_dist))
+
+    vwap_dist = 0.0
+    if vwap > 0 and price > 0:
+        vwap_dist = abs(price - vwap) / vwap * 100.0
+
+    if signal_score < min_signal:
+        return False, f"signal score too weak ({signal_score:.2f}<{min_signal:.2f})"
+    if direction_score < min_direction:
+        return False, f"direction conviction too weak ({direction_score:.2f}<{min_direction:.2f})"
+    if rvol < min_rvol:
+        return False, f"RVOL too weak ({rvol:.2f}<{min_rvol:.2f})"
+    if roc_pct < min_abs_roc:
+        return False, f"ROC too weak ({roc_pct:.2f}%<{min_abs_roc:.2f}%)"
+    if vwap_dist < min_vwap_dist:
+        return False, f"VWAP distance too shallow ({vwap_dist:.2f}%<{min_vwap_dist:.2f}%)"
+    return True, ""
+
+
 def _premium_cap_quality_override_ok(
     *,
     signal: dict[str, Any],
@@ -1061,17 +1103,13 @@ def _entry_confirmation_passes(
         if direction == "call":
             return (
                 last_close > prev_close
-                or last_close > two_bar_ref
-                or one_bar_move_pct >= momentum_threshold_pct
-                or two_bar_move_pct >= momentum_threshold_pct
-                or confirm_window_move_pct >= momentum_threshold_pct
+                and confirm_window_move_pct >= momentum_threshold_pct
+                and one_bar_move_pct >= (momentum_threshold_pct * 0.5)
             )
         return (
             last_close < prev_close
-            or last_close < two_bar_ref
-            or one_bar_move_pct <= -momentum_threshold_pct
-            or two_bar_move_pct <= -momentum_threshold_pct
-            or confirm_window_move_pct <= -momentum_threshold_pct
+            and confirm_window_move_pct <= -momentum_threshold_pct
+            and one_bar_move_pct <= -(momentum_threshold_pct * 0.5)
         )
     except Exception:
         return False
@@ -2441,8 +2479,10 @@ def main():
             "watchlist_count": len(watchlist),
             "watchlist_mode": watchlist_mode,
             "watchlist_tickers": list(watchlist_control_state.get("tickers") or []),
+            "signal_detected_count": len(signals),
             "scan_pass_count": len(signals),
             "signals_considered": 0,
+            "entry_eligible_count": 0,
             "entry_stage4_eligible_count": 0,
             "entry_stage4_reject_count": 0,
             "entry_stage4_reject_reasons": {},
@@ -2479,6 +2519,7 @@ def main():
 
         def _mark_stage4_eligible(*, ticker: str) -> None:
             entry_debug["entry_stage4_eligible_count"] = int(entry_debug.get("entry_stage4_eligible_count", 0)) + 1
+            entry_debug["entry_eligible_count"] = int(entry_debug.get("entry_stage4_eligible_count", 0))
             eligible_symbols = entry_debug.get("entry_stage4_eligible_symbols", [])
             if not isinstance(eligible_symbols, list):
                 eligible_symbols = []
@@ -2503,6 +2544,7 @@ def main():
             entry_debug["exceptions"] = exceptions
 
         opening_entry_attempts_loop = 0
+        entry_attempts_loop = 0
 
         for signal in signals:
             now_et = datetime.now(tz)
@@ -2566,6 +2608,15 @@ def main():
 
             ticker = signal["symbol"]
             direction = signal["direction"]
+
+            loop_attempt_cap = max(1, int(getattr(config, "MAX_NEW_ENTRY_ATTEMPTS_PER_LOOP", 1) or 1))
+            if entry_attempts_loop >= loop_attempt_cap:
+                _mark_skip("entry_attempt_cap")
+                print(
+                    f"[{ts(now_et)}] Entry-attempt cap reached ({entry_attempts_loop}/{loop_attempt_cap}) for this loop."
+                )
+                break
+
             if _is_in_opening_strict_window(now_et):
                 opening_attempt_cap = max(1, int(getattr(config, "OPENING_MAX_NEW_ENTRY_ATTEMPTS_PER_LOOP", 2) or 2))
                 if opening_entry_attempts_loop >= opening_attempt_cap:
@@ -2592,6 +2643,13 @@ def main():
                 _mark_skip("opening_quality_gate")
                 _mark_stage4_reject(reason="opening_quality_gate", ticker=ticker)
                 print(f"[{ts(now_et)}] {ticker}: skip ({opening_quality_reason}).")
+                continue
+
+            fast_start_ok, fast_start_reason = _fast_start_entry_quality_ok(signal, now_et)
+            if not fast_start_ok:
+                _mark_skip("fast_start_quality_gate")
+                _mark_stage4_reject(reason="fast_start_quality_gate", ticker=ticker)
+                print(f"[{ts(now_et)}] {ticker}: skip ({fast_start_reason}).")
                 continue
 
             if not _is_valid_long_direction(direction):
@@ -2982,6 +3040,7 @@ def main():
                     continue
 
                 _mark_stage4_eligible(ticker=ticker)
+                entry_attempts_loop += 1
                 if _is_in_opening_strict_window(now_et):
                     opening_entry_attempts_loop += 1
                 entry_result = _execute_limit_entry(

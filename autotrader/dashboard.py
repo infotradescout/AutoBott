@@ -3225,9 +3225,13 @@ def api_scansummary():
             return jsonify(
                 {
                     "universe_candidates": 0,
+              "signal_detected_count": 0,
                     "setup_passed_count": 0,
                     "rejected_count": 0,
                     "entry_eligible_count": 0,
+              "order_submitted_count": 0,
+              "order_filled_count": 0,
+              "real_pass_count": 0,
                     "stage_fail_counts": {},
                     "top_fail_reason": "No scan data yet",
                     "last_scan": "",
@@ -3247,9 +3251,10 @@ def api_scansummary():
             stage_fail_counts[stage] = stage_fail_counts.get(stage, 0) + 1
 
         stage_pipeline = {
-            "stage1_universe_candidates": len(same_loop),
-            "stage2_direction_passed": pass_count,
-            "stage3_setup_passed": pass_count,
+          "stage1_universe_candidates": len(same_loop),
+          "stage2_direction_passed": pass_count,
+          "stage3_setup_passed": pass_count,
+          "signal_detected": len(same_loop),
         }
 
         runtime_state = load_bot_state()
@@ -3290,18 +3295,25 @@ def api_scansummary():
           entry_stage4_source = "runtime_entry_debug"
 
         stage_pipeline["stage4_entry_eligible"] = entry_stage4_eligible_count
+        stage_pipeline["entry_eligible"] = entry_stage4_eligible_count
+        stage_pipeline["order_submitted"] = orders_submitted_count
+        stage_pipeline["order_filled"] = orders_filled_count
 
         return jsonify(
             {
                 "universe_candidates": len(same_loop),
+          "signal_detected_count": len(same_loop),
                 "setup_passed_count": pass_count,
                 "rejected_count": fail_count,
                 "entry_eligible_count": entry_stage4_eligible_count,
                 "entry_rejected_count": entry_stage4_reject_count,
                 "orders_submitted_count": orders_submitted_count,
                 "orders_filled_count": orders_filled_count,
+          "order_submitted_count": orders_submitted_count,
+          "order_filled_count": orders_filled_count,
                 "orders_rejected_or_canceled_count": orders_rejected_or_canceled_count,
                 "trades_filled_count": orders_filled_count,
+          "real_pass_count": orders_filled_count,
                 "realized_pnl_usd": realized_pnl_usd,
                 "stage_pipeline": stage_pipeline,
                 "stage_fail_counts": stage_fail_counts,
@@ -3312,7 +3324,7 @@ def api_scansummary():
                 "top_fail_reason": top_reason,
                 # Backward-compatible aliases for existing clients.
                 "setup_valid_count": pass_count,
-                "pass_count": pass_count,
+                "pass_count": orders_filled_count,
                 "fail_count": fail_count,
                 "top_reason": top_reason,
                 "last_scan": _to_ct_label(_parse_ts(str(last_ts))) or str(last_ts),
