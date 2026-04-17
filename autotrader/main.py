@@ -342,6 +342,44 @@ def _opening_entry_quality_ok(signal: dict[str, Any], now_et: datetime) -> tuple
     return True, ""
 
 
+def _premium_cap_quality_override_ok(
+    *,
+    signal: dict[str, Any],
+    entry_quote: dict[str, float | None],
+    now_et: datetime,
+) -> tuple[bool, str]:
+    """Allow expensive entries only when conviction and execution quality are exceptional."""
+    if not bool(getattr(config, "ENABLE_PREMIUM_CAP_QUALITY_OVERRIDE", True)):
+        return False, "premium quality override disabled"
+
+    try:
+        signal_score = float(signal.get("signal_score", 0.0) or 0.0)
+        direction_score = abs(float(signal.get("direction_score", 0.0) or 0.0))
+        rvol = float(signal.get("rvol", 0.0) or 0.0)
+        spread_pct = float(entry_quote.get("spread_pct") or 0.0)
+    except (TypeError, ValueError):
+        return False, "premium override parse failure"
+
+    min_signal_score = float(getattr(config, "EXPENSIVE_TRADE_MIN_SIGNAL_SCORE", 8.0) or 8.0)
+    min_direction_score = float(getattr(config, "EXPENSIVE_TRADE_MIN_DIRECTION_SCORE", 0.75) or 0.75)
+    min_rvol = float(getattr(config, "EXPENSIVE_TRADE_MIN_RVOL", 1.8) or 1.8)
+    max_spread_pct = float(getattr(config, "EXPENSIVE_TRADE_MAX_SPREAD_PCT", 8.0) or 8.0)
+
+    if _is_in_opening_strict_window(now_et):
+        opening_min_signal = float(getattr(config, "OPENING_EXPENSIVE_TRADE_MIN_SIGNAL_SCORE", min_signal_score) or min_signal_score)
+        min_signal_score = max(min_signal_score, opening_min_signal)
+
+    if signal_score < min_signal_score:
+        return False, f"signal score {signal_score:.2f}<{min_signal_score:.2f}"
+    if direction_score < min_direction_score:
+        return False, f"direction score {direction_score:.2f}<{min_direction_score:.2f}"
+    if rvol < min_rvol:
+        return False, f"RVOL {rvol:.2f}<{min_rvol:.2f}"
+    if spread_pct > max_spread_pct:
+        return False, f"spread {spread_pct:.2f}%>{max_spread_pct:.2f}%"
+    return True, "high-conviction override"
+
+
 def _entry_quote_spread_gate(
     *,
     option_symbol: str,
@@ -2807,14 +2845,26 @@ def main():
                 qty = 1
                 trade_premium_usd = ask_price * qty * 100.0
                 max_trade_premium = float(getattr(config, "MAX_PREMIUM_PER_TRADE_USD", 150.0) or 150.0)
+                premium_override_ok = False
+                premium_override_reason = ""
                 if trade_premium_usd > max_trade_premium:
-                    _mark_skip("premium_per_trade_cap")
-                    _mark_stage4_reject(reason="premium_per_trade_cap", ticker=ticker)
-                    print(
-                        f"[{ts(now_et)}] {ticker}: skip (premium ${trade_premium_usd:.2f} > "
-                        f"per-trade cap ${max_trade_premium:.2f})."
+                    premium_override_ok, premium_override_reason = _premium_cap_quality_override_ok(
+                        signal=signal,
+                        entry_quote=entry_quote,
+                        now_et=now_et,
                     )
-                    continue
+                    if not premium_override_ok:
+                        _mark_skip("premium_per_trade_cap")
+                        _mark_stage4_reject(reason="premium_per_trade_cap", ticker=ticker)
+                        print(
+                            f"[{ts(now_et)}] {ticker}: skip (premium ${trade_premium_usd:.2f} > "
+                            f"per-trade cap ${max_trade_premium:.2f}; {premium_override_reason})."
+                        )
+                        continue
+                    print(
+                        f"[{ts(now_et)}] {ticker}: premium override accepted "
+                        f"(${trade_premium_usd:.2f} > ${max_trade_premium:.2f}; {premium_override_reason})."
+                    )
 
                 total_open_premium = _current_open_premium_usd(option_positions, open_trade_meta)
                 max_total_open_premium = float(getattr(config, "MAX_TOTAL_OPEN_PREMIUM_USD", 600.0) or 600.0)
@@ -2832,22 +2882,32 @@ def main():
                 if _is_in_opening_strict_window(now_et):
                     opening_premium_cap = float(getattr(config, "OPENING_MAX_FRESH_PREMIUM_USD", 300.0) or 300.0)
                     if (opening_fresh_premium_deployed_usd + trade_premium_usd) > opening_premium_cap:
-                        _mark_skip("opening_fresh_premium_cap")
-                        _mark_stage4_reject(reason="opening_fresh_premium_cap", ticker=ticker)
+                        if not premium_override_ok:
+                            _mark_skip("opening_fresh_premium_cap")
+                            _mark_stage4_reject(reason="opening_fresh_premium_cap", ticker=ticker)
+                            print(
+                                f"[{ts(now_et)}] {ticker}: skip (opening premium ${opening_fresh_premium_deployed_usd:.2f} + "
+                                f"${trade_premium_usd:.2f} > cap ${opening_premium_cap:.2f})."
+                            )
+                            continue
                         print(
-                            f"[{ts(now_et)}] {ticker}: skip (opening premium ${opening_fresh_premium_deployed_usd:.2f} + "
-                            f"${trade_premium_usd:.2f} > cap ${opening_premium_cap:.2f})."
+                            f"[{ts(now_et)}] {ticker}: opening premium cap override accepted "
+                            f"(${opening_fresh_premium_deployed_usd + trade_premium_usd:.2f} > ${opening_premium_cap:.2f})."
                         )
-                        continue
                     opening_expensive_cap = max(0, int(getattr(config, "OPENING_MAX_EXPENSIVE_ENTRIES", 1) or 1))
                     if is_expensive_symbol and opening_expensive_entries_today_count >= opening_expensive_cap:
-                        _mark_skip("opening_expensive_symbol_cap")
-                        _mark_stage4_reject(reason="opening_expensive_symbol_cap", ticker=ticker)
+                        if not premium_override_ok:
+                            _mark_skip("opening_expensive_symbol_cap")
+                            _mark_stage4_reject(reason="opening_expensive_symbol_cap", ticker=ticker)
+                            print(
+                                f"[{ts(now_et)}] {ticker}: skip (opening expensive-name cap "
+                                f"{opening_expensive_entries_today_count}/{opening_expensive_cap})."
+                            )
+                            continue
                         print(
-                            f"[{ts(now_et)}] {ticker}: skip (opening expensive-name cap "
-                            f"{opening_expensive_entries_today_count}/{opening_expensive_cap})."
+                            f"[{ts(now_et)}] {ticker}: opening expensive-name cap override accepted "
+                            f"({opening_expensive_entries_today_count}/{opening_expensive_cap})."
                         )
-                        continue
 
                 initial_chain_ask = float(contract.get("ask_price", ask_price) or ask_price)
                 pre_submit_slippage = _slippage_pct(initial_chain_ask, ask_price)

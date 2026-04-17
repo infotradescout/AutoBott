@@ -101,10 +101,18 @@ WEEKLY_LOSS_LIMIT_USD               = 240.0
 CONSECUTIVE_LOSS_LIMIT              = 2
 
 # Capital doctrine for small live account preparation.
-MAX_PREMIUM_PER_TRADE_USD           = 110.0
+MAX_PREMIUM_PER_TRADE_USD           = 220.0
 MAX_TOTAL_OPEN_PREMIUM_USD          = 350.0
 OPENING_MAX_FRESH_PREMIUM_USD       = 180.0
 MAX_SAME_DIRECTION_POSITIONS        = 1
+
+# Allow expensive trades when setup quality and execution quality are exceptional.
+ENABLE_PREMIUM_CAP_QUALITY_OVERRIDE = True
+EXPENSIVE_TRADE_MIN_SIGNAL_SCORE    = 8.0
+EXPENSIVE_TRADE_MIN_DIRECTION_SCORE = 0.75
+EXPENSIVE_TRADE_MIN_RVOL            = 1.8
+EXPENSIVE_TRADE_MAX_SPREAD_PCT      = 8.0
+OPENING_EXPENSIVE_TRADE_MIN_SIGNAL_SCORE = 8.8
 
 # Expensive names are allowed only when premium stays inside per-trade budget;
 # opening window allows at most one expensive-name fresh entry.
