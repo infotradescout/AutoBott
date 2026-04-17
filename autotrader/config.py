@@ -57,6 +57,13 @@ TICKERS = [
     "SPY", "QQQ", "IWM", "DIA",
     "AAPL", "MSFT", "NVDA", "AMZN", "META", "GOOGL",
     "TSLA", "AMD", "NFLX", "CRM", "INTC",
+    "AVGO", "ADBE", "ORCL", "JPM", "XOM",
+    "BAC", "WFC", "GS", "C", "UNH",
+    "LLY", "ABBV", "PFE", "MRK", "JNJ",
+    "MU", "SMCI", "PLTR", "SHOP", "UBER",
+    "COIN", "HOOD", "SNOW", "PANW", "CRWD",
+    "DIS", "PYPL", "SQ", "BA", "CAT",
+    "CVX", "SLB", "OXY", "GE", "F",
 ]
 
 CORE_TICKERS = [
@@ -64,13 +71,19 @@ CORE_TICKERS = [
     "AAPL", "MSFT", "NVDA", "AMZN", "META", "GOOGL",
     "TSLA", "AMD", "NFLX", "CRM", "INTC",
     "AVGO", "ADBE", "ORCL", "JPM", "XOM",
+    "BAC", "WFC", "GS", "C", "UNH",
+    "LLY", "ABBV", "PFE", "MRK", "JNJ",
+    "MU", "SMCI", "PLTR", "SHOP", "UBER",
+    "COIN", "HOOD", "SNOW", "PANW", "CRWD",
+    "DIS", "PYPL", "SQ", "BA", "CAT",
+    "CVX", "SLB", "OXY", "GE", "F",
 ]
 
 AUTO_EXPAND_UNIVERSE_WITH_MOVERS = True
 UNIVERSE_MOVER_TOP                = 50
 UNIVERSE_MAX_TICKERS              = 300
-SCREENER_TOP_N                    = 20
-MOVER_SYMBOLS_PER_SIDE            = 10
+SCREENER_TOP_N                    = 100
+MOVER_SYMBOLS_PER_SIDE            = 40
 MIN_SHARE_PRICE                   = 10
 MAX_SHARE_PRICE                   = 2000
 
@@ -137,7 +150,7 @@ PREOPEN_READY_MINUTES              = 10
 HARD_CLOSE_TIME                    = "15:30"   # force-close all positions at this time
 OPTION_EXPIRY_EXIT_TIME            = "15:00"   # exit expiring contracts by this time
 OPTION_FORCE_EXIT_DAYS_BEFORE_EXPIRY = 1
-NO_NEW_TRADES_BEFORE               = "09:35"
+NO_NEW_TRADES_BEFORE               = "09:32"
 NO_NEW_TRADES_AFTER                = "14:30"   # stop new entries earlier to avoid late-session noise
 SCAN_MORNING_TIME                  = "09:30"
 OBSERVATION_END_TIME               = "10:00"
@@ -172,10 +185,10 @@ OPENING_STRICT_MIN_DIRECTION_SCORE           = 0.65
 OPENING_STRICT_MIN_RVOL                      = 1.40
 OPENING_STRICT_MIN_ROC_PCT                   = 0.24
 OPENING_STRICT_MIN_VWAP_DISTANCE_PCT         = 0.12
-OPENING_MAX_SIGNAL_CANDIDATES                = 1
-OPENING_MAX_FRESH_ENTRIES                    = 1
+OPENING_MAX_SIGNAL_CANDIDATES                = 3
+OPENING_MAX_FRESH_ENTRIES                    = 2
 OPENING_MAX_CONCURRENT_POSITIONS             = 2
-OPENING_MAX_NEW_ENTRY_ATTEMPTS_PER_LOOP      = 1
+OPENING_MAX_NEW_ENTRY_ATTEMPTS_PER_LOOP      = 2
 MAX_NEW_ENTRY_ATTEMPTS_PER_LOOP              = 1
 OPENING_MAX_EXPENSIVE_ENTRIES                = 1
 OPENING_EXPENSIVE_MAX_PREMIUM_USD            = 140.0
@@ -271,7 +284,7 @@ IV_RANK_MIN               = 20.0
 IV_RANK_MAX               = 99.0
 
 ENABLE_SIGNAL_SCORING     = True
-MIN_SIGNAL_SCORE          = 6.4   # stronger baseline quality floor
+MIN_SIGNAL_SCORE          = 5.8   # relaxed floor to increase opportunity flow
 
 # Phase 3 enforcement knobs driven by review.py output.
 # Use blocked hours after you identify weak entry windows from analytics.
@@ -354,11 +367,11 @@ ENTRY_CONFIRM_BYPASS_MIN_SIGNAL_SCORE  = 999.0
 ENTRY_CONFIRM_MOMENTUM_THRESHOLD_PCT   = 0.14
 
 # Fast-start doctrine: only accept entries that should work quickly.
-FAST_START_MIN_SIGNAL_SCORE            = 7.0
-FAST_START_MIN_DIRECTION_SCORE         = 0.68
-FAST_START_MIN_RVOL                    = 1.25
-FAST_START_MIN_ABS_ROC_PCT             = 0.16
-FAST_START_MIN_VWAP_DISTANCE_PCT       = 0.10
+FAST_START_MIN_SIGNAL_SCORE            = 6.4
+FAST_START_MIN_DIRECTION_SCORE         = 0.60
+FAST_START_MIN_RVOL                    = 1.0
+FAST_START_MIN_ABS_ROC_PCT             = 0.10
+FAST_START_MIN_VWAP_DISTANCE_PCT       = 0.06
 OPENING_FAST_START_MIN_SIGNAL_SCORE    = 7.8
 OPENING_FAST_START_MIN_DIRECTION_SCORE = 0.75
 OPENING_FAST_START_MIN_RVOL            = 1.60

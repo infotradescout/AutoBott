@@ -895,18 +895,21 @@ class IntradayScanner:
         self._reject_cooldowns.pop(str(symbol or "").upper(), None)
 
     def build_watchlist(self) -> list[str]:
-        base = list(config.CORE_TICKERS)
+        base = list(dict.fromkeys(list(config.TICKERS) + list(config.CORE_TICKERS)))
         gainers: list[str] = []
         losers: list[str] = []
-        try:
-            gainers, losers = self.data_client.get_top_movers(top=config.SCREENER_TOP_N)
-        except Exception as exc:  # noqa: BLE001
-            print(f"[{self._ts()}] Movers endpoint unavailable ({exc}). Using core tickers only.")
+        if bool(getattr(config, "AUTO_EXPAND_UNIVERSE_WITH_MOVERS", True)):
+            movers_top = int(getattr(config, "UNIVERSE_MOVER_TOP", getattr(config, "SCREENER_TOP_N", 20)) or 20)
+            try:
+                gainers, losers = self.data_client.get_top_movers(top=movers_top)
+            except Exception as exc:  # noqa: BLE001
+                print(f"[{self._ts()}] Movers endpoint unavailable ({exc}). Using core tickers only.")
 
         candidates = []
         candidates.extend(base)
-        candidates.extend(gainers[: config.MOVER_SYMBOLS_PER_SIDE])
-        candidates.extend(losers[: config.MOVER_SYMBOLS_PER_SIDE])
+        per_side = int(getattr(config, "MOVER_SYMBOLS_PER_SIDE", 10) or 10)
+        candidates.extend(gainers[:per_side])
+        candidates.extend(losers[:per_side])
 
         deduped: list[str] = []
         seen: set[str] = set()
@@ -934,7 +937,8 @@ class IntradayScanner:
                 continue
             time.sleep(config.RATE_LIMIT_SLEEP_SECONDS)
 
-        return filtered
+        max_tickers = max(1, int(getattr(config, "UNIVERSE_MAX_TICKERS", len(filtered)) or len(filtered)))
+        return filtered[:max_tickers]
 
     def run_scan(
         self,
