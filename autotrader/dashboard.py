@@ -3232,6 +3232,51 @@ def api_scansummary():
     try:
         last_ts, same_loop = _latest_scan_loop_rows(limit=1000)
         if not same_loop:
+          runtime_state = load_bot_state()
+          last_entry_debug = runtime_state.get("last_entry_debug") if isinstance(runtime_state, dict) else {}
+          if isinstance(last_entry_debug, dict) and last_entry_debug:
+            signal_detected = int(_safe_float(last_entry_debug.get("signal_detected_count"), 0))
+            eligible_count = int(_safe_float(last_entry_debug.get("entry_stage4_eligible_count"), 0))
+            rejected_count = int(_safe_float(last_entry_debug.get("entry_stage4_reject_count"), 0))
+            orders_submitted = int(_safe_float(last_entry_debug.get("entry_orders_submitted"), 0))
+            orders_filled = int(_safe_float(last_entry_debug.get("entries_filled"), 0))
+            raw_reasons = last_entry_debug.get("entry_stage4_reject_reasons")
+            reject_reasons = raw_reasons if isinstance(raw_reasons, dict) else {}
+            return jsonify(
+              {
+                "universe_candidates": signal_detected,
+                "signal_detected_count": signal_detected,
+                "setup_passed_count": signal_detected,
+                "rejected_count": 0,
+                "entry_eligible_count": eligible_count,
+                "entry_rejected_count": rejected_count,
+                "order_submitted_count": orders_submitted,
+                "order_filled_count": orders_filled,
+                "orders_submitted_count": orders_submitted,
+                "orders_filled_count": orders_filled,
+                "orders_rejected_or_canceled_count": 0,
+                "trades_filled_count": orders_filled,
+                "real_pass_count": orders_filled,
+                "realized_pnl_usd": 0.0,
+                "stage_pipeline": {
+                  "signal_detected": signal_detected,
+                  "entry_eligible": eligible_count,
+                  "order_submitted": orders_submitted,
+                  "order_filled": orders_filled,
+                },
+                "stage_fail_counts": {},
+                "stage4_entry_reject_reasons": reject_reasons,
+                "entry_stage4_source": "runtime_entry_debug_no_scanlog",
+                "entry_stage4_fresh": True,
+                "entry_stage4_loop_ts": str(last_entry_debug.get("loop_ts_et", "") or ""),
+                "top_fail_reason": "Scan log unavailable; using runtime entry telemetry",
+                "setup_valid_count": signal_detected,
+                "pass_count": orders_filled,
+                "fail_count": 0,
+                "top_reason": "Scan log unavailable",
+                "last_scan": str(last_entry_debug.get("loop_ts_et", "") or ""),
+              }
+            )
             return jsonify(
                 {
                     "universe_candidates": 0,
