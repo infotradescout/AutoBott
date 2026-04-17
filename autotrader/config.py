@@ -136,6 +136,15 @@ MAX_HOLD_MINUTES                   = 90
 # Reduces round-trip losses from early noise; lets winners establish momentum.
 ANTI_CHURN_HOLD_MINUTES            = 3
 
+# Opening strict mode (09:30+N minutes): trade fewer, stronger setups only.
+OPENING_STRICT_WINDOW_MINUTES                = 10
+OPENING_STRICT_MIN_SIGNAL_SCORE              = 6.0
+OPENING_STRICT_CONFIRM_BARS                  = 3
+OPENING_STRICT_CONFIRM_MOMENTUM_THRESHOLD_PCT = 0.18
+OPENING_MAX_SIGNAL_CANDIDATES                = 5
+OPENING_MAX_FRESH_ENTRIES                    = 3
+OPENING_MAX_CONCURRENT_POSITIONS             = 3
+
 
 # ---------------------------------------------------------------------------
 # Stop loss & trailing exit ladder

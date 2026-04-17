@@ -238,6 +238,16 @@ def _is_entry_hour_blocked(now_et: datetime, *, strategy_profile: str | None = N
     return now_et.hour in _runtime_entry_blocked_hours_et(strategy_profile=strategy_profile)
 
 
+def _is_in_opening_strict_window(now_et: datetime) -> bool:
+    try:
+        entry_open_minutes = _minutes_from_hhmm(str(getattr(config, "NO_NEW_TRADES_BEFORE", config.MARKET_OPEN)))
+    except ValueError:
+        return False
+    now_minutes = (now_et.hour * 60) + now_et.minute
+    window_minutes = max(0, int(getattr(config, "OPENING_STRICT_WINDOW_MINUTES", 10) or 10))
+    return entry_open_minutes <= now_minutes < (entry_open_minutes + window_minutes)
+
+
 def _entry_quote_spread_gate(
     *,
     option_symbol: str,
@@ -858,23 +868,46 @@ def _entry_confirmation_passes(
     if not config.ENABLE_ENTRY_CONFIRMATION:
         return True
     try:
+        confirm_bars = max(2, int(getattr(config, "ENTRY_CONFIRM_BARS", 2) or 2))
+        momentum_threshold_pct = float(getattr(config, "ENTRY_CONFIRM_MOMENTUM_THRESHOLD_PCT", 0.06) or 0.06)
+        opening_strict = _is_in_opening_strict_window(now_et)
+        if opening_strict:
+            confirm_bars = max(confirm_bars, int(getattr(config, "OPENING_STRICT_CONFIRM_BARS", confirm_bars) or confirm_bars))
+            momentum_threshold_pct = max(
+                momentum_threshold_pct,
+                float(
+                    getattr(
+                        config,
+                        "OPENING_STRICT_CONFIRM_MOMENTUM_THRESHOLD_PCT",
+                        momentum_threshold_pct,
+                    )
+                    or momentum_threshold_pct
+                ),
+            )
+
         bars = data_client.get_intraday_bars_since_open(
             symbol=ticker,
             now_et=now_et,
-            limit=max(3, int(config.ENTRY_CONFIRM_BARS)),
+            limit=max(3, confirm_bars),
         )
-        if bars is None or bars.empty or len(bars) < 2:
+        if bars is None or bars.empty or len(bars) < max(2, confirm_bars):
             return False
         closes = bars["close"].astype(float)
         last_close = float(closes.iloc[-1])
         prev_close = float(closes.iloc[-2])
         two_bar_ref = float(closes.iloc[-3]) if len(closes) >= 3 else prev_close
-        if two_bar_ref <= 0 or prev_close <= 0:
+        confirm_ref = float(closes.iloc[-confirm_bars]) if len(closes) >= confirm_bars else two_bar_ref
+        if two_bar_ref <= 0 or prev_close <= 0 or confirm_ref <= 0:
             return False
 
         one_bar_move_pct = ((last_close - prev_close) / prev_close) * 100.0
         two_bar_move_pct = ((last_close - two_bar_ref) / two_bar_ref) * 100.0
-        momentum_threshold_pct = float(getattr(config, "ENTRY_CONFIRM_MOMENTUM_THRESHOLD_PCT", 0.06) or 0.06)
+        confirm_window_move_pct = ((last_close - confirm_ref) / confirm_ref) * 100.0
+
+        if opening_strict:
+            if direction == "call":
+                return (last_close > prev_close) and (confirm_window_move_pct >= momentum_threshold_pct)
+            return (last_close < prev_close) and (confirm_window_move_pct <= -momentum_threshold_pct)
 
         if direction == "call":
             return (
@@ -882,12 +915,14 @@ def _entry_confirmation_passes(
                 or last_close > two_bar_ref
                 or one_bar_move_pct >= momentum_threshold_pct
                 or two_bar_move_pct >= momentum_threshold_pct
+                or confirm_window_move_pct >= momentum_threshold_pct
             )
         return (
             last_close < prev_close
             or last_close < two_bar_ref
             or one_bar_move_pct <= -momentum_threshold_pct
             or two_bar_move_pct <= -momentum_threshold_pct
+            or confirm_window_move_pct <= -momentum_threshold_pct
         )
     except Exception:
         return False
@@ -1178,6 +1213,7 @@ def main():
     trade_telemetry_total_pnl_usd = float(state.get("trade_telemetry_total_pnl_usd", 0.0) or 0.0)
     trade_telemetry_last_close_iso = str(state.get("trade_telemetry_last_close_iso", "") or "")
     trade_telemetry_last_log_error = str(state.get("trade_telemetry_last_log_error", "") or "")
+    opening_entries_today_count = int(state.get("opening_entries_today_count", 0) or 0)
     next_heartbeat_at = 0.0
     last_heartbeat_persist_at = 0.0
     manual_stop_latched = False
@@ -1303,6 +1339,7 @@ def main():
                 "trade_telemetry_total_pnl_usd": round(trade_telemetry_total_pnl_usd, 6),
                 "trade_telemetry_last_close_iso": trade_telemetry_last_close_iso,
                 "trade_telemetry_last_log_error": trade_telemetry_last_log_error,
+                "opening_entries_today_count": opening_entries_today_count,
             }
         )
 
@@ -2018,6 +2055,7 @@ def main():
             trade_telemetry_total_pnl_usd = 0.0
             trade_telemetry_last_close_iso = ""
             trade_telemetry_last_log_error = ""
+            opening_entries_today_count = 0
             set_catalyst_mode(False, "")
 
         option_positions = broker.get_open_option_positions()
@@ -2190,6 +2228,18 @@ def main():
             filtered_signals: list[dict] = []
             for s in signals:
                 floor = float(s.get("profile_min_signal_score", entry_min_signal_score) or entry_min_signal_score)
+                if _is_in_opening_strict_window(now_et):
+                    floor = max(
+                        floor,
+                        float(
+                            getattr(
+                                config,
+                                "OPENING_STRICT_MIN_SIGNAL_SCORE",
+                                floor,
+                            )
+                            or floor
+                        ),
+                    )
                 if float(s.get("signal_score", 0) or 0) >= floor:
                     filtered_signals.append(s)
             signals = filtered_signals
@@ -2197,6 +2247,23 @@ def main():
                 print(
                     f"[{ts(now_et)}] Entry signal-score gate (runtime floor {entry_min_signal_score:.2f}) "
                     f"filtered signals {before}->{len(signals)} (profile={strategy_profile})."
+                )
+
+        if signals and _is_in_opening_strict_window(now_et):
+            opening_signal_cap = max(1, int(getattr(config, "OPENING_MAX_SIGNAL_CANDIDATES", len(signals)) or len(signals)))
+            if len(signals) > opening_signal_cap:
+                signals.sort(
+                    key=lambda s: (
+                        float(s.get("signal_score", 0.0) or 0.0),
+                        float(s.get("rvol", 0.0) or 0.0),
+                    ),
+                    reverse=True,
+                )
+                before_opening = len(signals)
+                signals = signals[:opening_signal_cap]
+                print(
+                    f"[{ts(now_et)}] Opening strict shortlist capped signals "
+                    f"{before_opening}->{len(signals)} (cap={opening_signal_cap})."
                 )
 
         if not pdt_allowed:
@@ -2335,6 +2402,17 @@ def main():
 
             ticker = signal["symbol"]
             direction = signal["direction"]
+            if _is_in_opening_strict_window(now_et):
+                opening_max_fresh_entries = max(1, int(getattr(config, "OPENING_MAX_FRESH_ENTRIES", 3) or 3))
+                if opening_entries_today_count >= opening_max_fresh_entries:
+                    _mark_skip("opening_fresh_entry_cap")
+                    _mark_stage4_reject(reason="opening_fresh_entry_cap", ticker=ticker)
+                    print(
+                        f"[{ts(now_et)}] Opening fresh-entry cap reached "
+                        f"({opening_entries_today_count}/{opening_max_fresh_entries})."
+                    )
+                    break
+
             if not _is_valid_long_direction(direction):
                 _mark_skip("invalid_strategy_direction")
                 _mark_stage4_reject(reason="invalid_strategy_direction", ticker=ticker)
@@ -2448,6 +2526,16 @@ def main():
             # Re-check live position count right before placing a new order.
             option_positions = broker.get_open_option_positions()
             open_count = len(option_positions)
+            if _is_in_opening_strict_window(now_et):
+                opening_max_concurrent = max(1, int(getattr(config, "OPENING_MAX_CONCURRENT_POSITIONS", 3) or 3))
+                if open_count >= opening_max_concurrent:
+                    _mark_skip("opening_concurrent_position_cap")
+                    _mark_stage4_reject(reason="opening_concurrent_position_cap", ticker=ticker)
+                    print(
+                        f"[{ts(now_et)}] Opening concurrent-position cap reached "
+                        f"({open_count}/{opening_max_concurrent})."
+                    )
+                    break
             if not can_open_new_positions(open_count, config.MAX_POSITIONS):
                 _mark_skip("max_positions_reached")
                 _mark_stage4_reject(reason="max_positions_reached", ticker=ticker)
@@ -2677,6 +2765,8 @@ def main():
                 ticker_entry_counts[ticker] = prior_entries + 1
                 open_count += 1
                 entry_times_rolling.append(now_et)
+                if _is_in_opening_strict_window(now_et):
+                    opening_entries_today_count += 1
                 entry_debug["entries_filled"] = int(entry_debug.get("entries_filled", 0)) + 1
                 _save_runtime_state()
                 time.sleep(config.RATE_LIMIT_SLEEP_SECONDS)
@@ -2805,7 +2895,13 @@ def main():
 
             # Stage 2: Runner qualification at +8-12%
             # Decide: bank the win or promote to runner mode for larger gains?
-            if exit_reason is None and plpc >= 0.08 and plpc < 0.12 and not meta.get("runner_mode"):
+            if (
+                exit_reason is None
+                and plpc >= 0.08
+                and plpc < 0.12
+                and not meta.get("runner_mode")
+                and not _is_in_anti_churn_window(entry_time, now_et)
+            ):
                 # Check if this trade qualifies for runner mode (strong momentum, no early reversal)
                 ticker_for_eligibility = ticker_for_pos or ""
                 if ticker_for_eligibility and _is_runner_eligible(symbol, ticker_for_eligibility, meta, data_client, now_et):
