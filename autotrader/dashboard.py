@@ -1878,6 +1878,428 @@ def _persist_lisa_feed(payload: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _lens_confidence(score: float, rvol: float) -> float:
+    return round(_clamp(0.3 + (max(0.0, score) / 12.0) + min(0.25, max(0.0, rvol - 1.0) / 4.0), 0.2, 0.95), 2)
+
+
+def _tradeability_label(score: float, rvol: float) -> str:
+    if score >= 8.0 and rvol >= 1.5:
+      return "high"
+    if score >= 6.0 and rvol >= 1.1:
+      return "medium"
+    return "low"
+
+
+def _safe_pct_text(value: float | None) -> str:
+    if value is None:
+      return "n/a"
+    return f"{value:+.2f}%"
+
+
+def _build_internal_trader_layer() -> dict[str, Any]:
+    now = _now_et()
+    runtime_state = load_bot_state()
+    scan_rows = _today_scan_rows()
+    trade_rows = _today_trade_rows()
+    scan_summary = _build_scan_report_summary(scan_rows)
+    trade_summary = _build_trade_report_summary(trade_rows)
+    last_entry_debug = runtime_state.get("last_entry_debug") if isinstance(runtime_state, dict) else {}
+    open_trade_meta = runtime_state.get("open_trade_meta") if isinstance(runtime_state, dict) else {}
+
+    return {
+      "layer": "internal_trader",
+      "generated_at": now.strftime("%Y-%m-%d %H:%M:%S ET"),
+      "setup_validity": {
+        "setup_valid_count": int(scan_summary.get("setup_valid_count", scan_summary.get("pass_count", 0)) or 0),
+        "fail_count": int(scan_summary.get("fail_count", 0) or 0),
+        "top_fail_reasons": list(scan_summary.get("top_fail_reasons") or []),
+      },
+      "direction_score": {
+        "direction_counts": dict(scan_summary.get("direction_counts") or {}),
+      },
+      "entry_eligibility": {
+        "signals_considered": int((last_entry_debug or {}).get("signals_considered", 0) or 0),
+        "eligible_count": int((last_entry_debug or {}).get("entry_stage4_eligible_count", 0) or 0),
+        "rejected_count": int((last_entry_debug or {}).get("entry_stage4_reject_count", 0) or 0),
+        "rejected_reasons": dict((last_entry_debug or {}).get("entry_stage4_reject_reasons") or {}),
+      },
+      "execution_state": {
+        "orders_submitted": int((last_entry_debug or {}).get("entry_orders_submitted", 0) or 0),
+        "entries_filled": int((last_entry_debug or {}).get("entries_filled", 0) or 0),
+        "skips": dict((last_entry_debug or {}).get("skips") or {}),
+      },
+      "order_fill_lifecycle": {
+        "closed_trades_today": int(trade_summary.get("total_trades", 0) or 0),
+        "wins": int(trade_summary.get("wins", 0) or 0),
+        "losses": int(trade_summary.get("losses", 0) or 0),
+        "realized_pnl_usd": round(float(trade_summary.get("total_pnl_usd", 0.0) or 0.0), 2),
+      },
+      "position_state": {
+        "open_positions": len(open_trade_meta) if isinstance(open_trade_meta, dict) else 0,
+        "symbols": sorted(list(open_trade_meta.keys()))[:20] if isinstance(open_trade_meta, dict) else [],
+      },
+      "portfolio_risk": {
+        "daily_loss_limit_usd": float(getattr(config, "DAILY_LOSS_LIMIT_USD", 0.0) or 0.0),
+        "max_positions": int(getattr(config, "MAX_POSITIONS", 0) or 0),
+        "entry_max_spread_pct": float(getattr(config, "ENTRY_MAX_QUOTE_SPREAD_PCT", 0.0) or 0.0),
+        "premium_per_trade_cap_usd": float(getattr(config, "MAX_PREMIUM_PER_TRADE_USD", 0.0) or 0.0),
+      },
+    }
+
+
+def _build_public_livestream_layer() -> dict[str, Any]:
+    now = _now_et()
+    runtime_state = load_bot_state()
+    scan_rows = _today_scan_rows()
+    trade_rows = _today_trade_rows()
+    scan_summary = _build_scan_report_summary(scan_rows)
+    trade_summary = _build_trade_report_summary(trade_rows)
+
+    symbol_candidates = [
+      str(row.get("symbol", "") or "").upper()
+      for row in list(scan_summary.get("top_setup_valid") or scan_summary.get("top_passes") or [])
+      if str(row.get("symbol", "") or "").strip()
+    ]
+    symbol_candidates = [s for s in symbol_candidates if s][:6]
+    if not symbol_candidates:
+      symbol_candidates = ["SPY", "QQQ", "IWM"]
+
+    snapshots = _fetch_snapshots(symbol_candidates)
+    price_lens: list[dict[str, Any]] = []
+    news_lens: list[dict[str, Any]] = []
+
+    for symbol in symbol_candidates:
+      matching = [r for r in scan_rows if _scan_symbol(r) == symbol]
+      pass_n = sum(1 for r in matching if str(r.get("result", "") or "").lower() == "pass")
+      fail_n = sum(1 for r in matching if str(r.get("result", "") or "").lower() == "fail")
+      latest_row = matching[-1] if matching else {}
+      score = _safe_float((latest_row or {}).get("signal_score"), 0.0)
+      rvol = _safe_float((latest_row or {}).get("rvol"), 0.0)
+      direction = str((latest_row or {}).get("direction", "") or "").upper()
+
+      snap = snapshots.get(symbol, {}) if isinstance(snapshots, dict) else {}
+      daily = snap.get("dailyBar", {}) if isinstance(snap, dict) else {}
+      latest_trade = snap.get("latestTrade", {}) if isinstance(snap, dict) else {}
+      latest_price = _safe_float(latest_trade.get("p"), _safe_float(daily.get("c"), 0.0))
+      day_open = _safe_float(daily.get("o"), 0.0)
+      day_high = _safe_float(daily.get("h"), 0.0)
+      day_low = _safe_float(daily.get("l"), 0.0)
+      move_pct = ((latest_price - day_open) / day_open * 100.0) if latest_price > 0 and day_open > 0 else None
+      range_pos = ((latest_price - day_low) / (day_high - day_low) * 100.0) if latest_price > 0 and day_high > day_low else None
+
+      bias = "neutral"
+      if direction == "CALL" and pass_n >= fail_n:
+        bias = "bullish pressure"
+      elif direction == "PUT" and pass_n >= fail_n:
+        bias = "bearish pressure"
+
+      tradeability_quality = _tradeability_label(score, rvol)
+      confidence = _lens_confidence(score, rvol)
+      scanner_pressure = f"{pass_n} valid / {fail_n} rejected"
+
+      price_lens.append(
+        {
+          "symbol": symbol,
+          "daily_move_pct": round(move_pct, 2) if move_pct is not None else None,
+          "current_price": round(latest_price, 2) if latest_price > 0 else None,
+          "intraday_range_position_pct": round(range_pos, 1) if range_pos is not None else None,
+          "momentum_bias": bias,
+          "scanner_pressure": scanner_pressure,
+          "tradeability_quality": tradeability_quality,
+          "confidence": confidence,
+          "summary": (
+            f"{symbol} is {_safe_pct_text(move_pct)} today, trading near "
+            f"{(f'{range_pos:.0f}%' if range_pos is not None else 'n/a')} of its intraday range. "
+            f"Momentum bias is {bias} with {scanner_pressure}."
+          ),
+        }
+      )
+
+      news_state = (runtime_state.get("news_by_symbol") if isinstance(runtime_state, dict) else {}) or {}
+      symbol_news = news_state.get(symbol) if isinstance(news_state, dict) else None
+      if isinstance(symbol_news, dict) and str(symbol_news.get("summary", "")).strip():
+        headline_summary = str(symbol_news.get("summary", "") or "")
+        freshness = str(symbol_news.get("freshness", "recent") or "recent")
+        impact = str(symbol_news.get("impact", "mixed") or "mixed")
+        why = str(symbol_news.get("why_it_matters", "") or "")
+        news_confidence = round(_clamp(float(_safe_float(symbol_news.get("confidence"), confidence)), 0.2, 0.95), 2)
+      else:
+        headline_summary = f"No dominant fresh headline detected for {symbol}."
+        freshness = "live tape"
+        impact = "flow-led"
+        why = "Current movement appears driven more by price action and scanner flow than a single event."
+        news_confidence = round(_clamp(confidence - 0.1, 0.2, 0.9), 2)
+
+      news_lens.append(
+        {
+          "symbol": symbol,
+          "headline_summary": headline_summary,
+          "why_it_matters": why,
+          "likely_directional_impact": impact,
+          "confidence": news_confidence,
+          "freshness": freshness,
+        }
+      )
+
+    trade_lens: list[dict[str, Any]] = []
+    for row in list(trade_rows)[-6:]:
+      ticker = _trade_ticker(row)
+      if not ticker:
+        continue
+      pnl_usd = _pnl_usd_from_trade_row(row)
+      trade_lens.append(
+        {
+          "symbol": ticker,
+          "action": "closed_trade",
+          "call_or_put": str(row.get("direction", "") or "").upper(),
+          "contract_snapshot": str(row.get("option_symbol", "") or ""),
+          "why_taken": "Confirmed scanner pressure with execution-quality checks.",
+          "system_view": f"score={_safe_float(row.get('signal_score'), 0.0):.2f}, rvol={_safe_float(row.get('rvol'), 0.0):.2f}",
+          "still_open": False,
+          "closed_result": {
+            "pnl_usd": round(pnl_usd, 2),
+            "pnl_pct": round(_safe_float(row.get("pnl_pct"), 0.0) * 100.0, 2),
+            "exit_reason": str(row.get("exit_reason", "") or ""),
+          },
+          "timestamp": str(row.get("timestamp", "") or ""),
+        }
+      )
+
+    open_trade_meta = runtime_state.get("open_trade_meta") if isinstance(runtime_state, dict) else {}
+    if isinstance(open_trade_meta, dict):
+      for symbol, meta in list(open_trade_meta.items())[:6]:
+        ticker = str((meta or {}).get("ticker", "") or "").upper() or _extract_underlying(str(symbol))
+        trade_lens.append(
+          {
+            "symbol": ticker,
+            "action": "position_active",
+            "call_or_put": str((meta or {}).get("direction", "") or "").upper(),
+            "contract_snapshot": str(symbol),
+            "why_taken": "Active position from validated setup.",
+            "system_view": f"state={str((meta or {}).get('trade_state', 'unproven') or 'unproven')}",
+            "still_open": True,
+            "closed_result": None,
+            "timestamp": str((meta or {}).get("timestamp", "") or ""),
+          }
+        )
+
+    indices = _fetch_snapshots(["SPY", "QQQ", "IWM"])
+    idx_moves: dict[str, float] = {}
+    for idx in ("SPY", "QQQ", "IWM"):
+      snap = indices.get(idx, {}) if isinstance(indices, dict) else {}
+      daily = snap.get("dailyBar", {}) if isinstance(snap, dict) else {}
+      latest = _safe_float((snap.get("latestTrade") or {}).get("p"), _safe_float(daily.get("c"), 0.0))
+      day_open = _safe_float(daily.get("o"), 0.0)
+      if latest > 0 and day_open > 0:
+        idx_moves[idx] = round(((latest - day_open) / day_open) * 100.0, 2)
+
+    pos_idx = sum(1 for v in idx_moves.values() if v > 0)
+    neg_idx = sum(1 for v in idx_moves.values() if v < 0)
+    if pos_idx >= 2:
+      regime_label = "trend_up"
+      regime_text = "broad risk-on trend"
+    elif neg_idx >= 2:
+      regime_label = "trend_down"
+      regime_text = "broad risk-off tape"
+    else:
+      regime_label = "chop"
+      regime_text = "mixed/choppy session"
+
+    market_lens = {
+      "index_trend": idx_moves,
+      "breadth": f"{pos_idx} rising / {neg_idx} falling major indices",
+      "sectors_leading_lagging": "Tech/growth proxies leading when QQQ outperforms; defensives leading when IWM lags.",
+      "volatility_regime": regime_text,
+      "summary": f"Market lens: {regime_text}; index moves {idx_moves}.",
+    }
+
+    regime_lens = {
+      "regime": regime_label,
+      "language": regime_text,
+      "confidence": round(_clamp(0.35 + (abs(sum(idx_moves.values())) / 6.0), 0.2, 0.9), 2),
+    }
+
+    setup_valid = int(scan_summary.get("setup_valid_count", scan_summary.get("pass_count", 0)) or 0)
+    bot_lens = {
+      "watching_symbols": len({_scan_symbol(r) for r in scan_rows if _scan_symbol(r)}),
+      "trade_ready": setup_valid,
+      "active_positions": len(open_trade_meta) if isinstance(open_trade_meta, dict) else 0,
+      "strongest_pressure_symbols": [str(item.get("symbol", "") or "") for item in list(scan_summary.get("top_setup_valid") or [])[:3]],
+      "risk_mode": "reduced" if regime_label == "chop" else "normal",
+      "daily_pnl_usd": round(float(trade_summary.get("total_pnl_usd", 0.0) or 0.0), 2),
+      "summary": (
+        f"Bot is watching {len({_scan_symbol(r) for r in scan_rows if _scan_symbol(r)})} symbols, "
+        f"{setup_valid} trade-ready, {len(open_trade_meta) if isinstance(open_trade_meta, dict) else 0} active positions."
+      ),
+    }
+
+    rotation_order = ["price_lens", "news_lens", "trade_lens", "market_lens", "regime_lens", "bot_lens"]
+    rotation_idx = now.minute % len(rotation_order)
+    rotation_focus = rotation_order[rotation_idx]
+
+    return {
+      "layer": "public_market_intelligence",
+      "generated_at": now.strftime("%Y-%m-%d %H:%M:%S ET"),
+      "rotation_focus": rotation_focus,
+      "price_lens": price_lens,
+      "news_lens": news_lens,
+      "trade_lens": trade_lens,
+      "market_lens": market_lens,
+      "regime_lens": regime_lens,
+      "bot_lens": bot_lens,
+    }
+
+
+def _build_lisa_ingestion_layer(public_layer: dict[str, Any], internal_layer: dict[str, Any]) -> dict[str, Any]:
+    now = _now_et()
+    scan_rows = _today_scan_rows()
+    trade_rows = _today_trade_rows()
+    runtime_state = load_bot_state()
+    published_keys = _published_signal_keys()
+
+    symbol_state_packets: list[dict[str, Any]] = []
+    direction_conflict_packets: list[dict[str, Any]] = []
+    fail_family_counts: dict[str, int] = {}
+    symbol_direction: dict[str, dict[str, int]] = {}
+
+    for row in scan_rows:
+      symbol = _scan_symbol(row)
+      if not symbol:
+        continue
+      result = str(row.get("result", "") or "").lower()
+      direction = str(row.get("direction", "") or "").upper()
+      d = symbol_direction.setdefault(symbol, {"CALL": 0, "PUT": 0, "PASS": 0, "FAIL": 0})
+      if result == "pass":
+        d["PASS"] += 1
+        if direction in ("CALL", "PUT"):
+          d[direction] += 1
+      elif result == "fail":
+        d["FAIL"] += 1
+        family = _scan_fail_family(str(row.get("reason", "") or "unknown"))
+        fail_family_counts[family] = fail_family_counts.get(family, 0) + 1
+
+    for symbol, d in sorted(symbol_direction.items(), key=lambda item: (item[1].get("PASS", 0), -item[1].get("FAIL", 0)), reverse=True)[:20]:
+      has_conflict = d.get("CALL", 0) > 0 and d.get("PUT", 0) > 0
+      top_state = "CALL" if d.get("CALL", 0) >= d.get("PUT", 0) else "PUT"
+      packet_id = _signal_key("symbol_state_packet", symbol, "current_state")
+      symbol_state_packets.append(
+        {
+          "packet_id": packet_id,
+          "packet_type": "symbol_state_packet",
+          "symbol": symbol,
+          "current_direction": top_state,
+          "pass_count": int(d.get("PASS", 0)),
+          "fail_count": int(d.get("FAIL", 0)),
+          "direction_conflict": has_conflict,
+          "generated_at": now.strftime("%Y-%m-%d %H:%M:%S ET"),
+        }
+      )
+      if has_conflict:
+        direction_conflict_packets.append(
+          {
+            "packet_id": _signal_key("direction_conflict_packet", symbol, "direction_conflict"),
+            "packet_type": "direction_conflict_packet",
+            "symbol": symbol,
+            "counts": {"CALL": int(d.get("CALL", 0)), "PUT": int(d.get("PUT", 0))},
+            "generated_at": now.strftime("%Y-%m-%d %H:%M:%S ET"),
+          }
+        )
+
+    fail_summary_packet = {
+      "packet_id": _signal_key("fail_summary_packet", "ALL", "fail_family_grouped"),
+      "packet_type": "fail_summary_packet",
+      "fail_family_counts": dict(sorted(fail_family_counts.items(), key=lambda item: item[1], reverse=True)[:10]),
+      "generated_at": now.strftime("%Y-%m-%d %H:%M:%S ET"),
+    }
+
+    trade_event_packets: list[dict[str, Any]] = []
+    for row in list(trade_rows)[-20:]:
+      symbol = _trade_ticker(row)
+      if not symbol:
+        continue
+      title = f"{symbol}|{row.get('timestamp', '')}|{row.get('exit_reason', '')}"
+      trade_event_packets.append(
+        {
+          "packet_id": _signal_key("trade_event_packet", symbol, title),
+          "packet_type": "trade_event_packet",
+          "symbol": symbol,
+          "direction": str(row.get("direction", "") or "").upper(),
+          "option_symbol": str(row.get("option_symbol", "") or ""),
+          "entry_price": round(_safe_float(row.get("entry_price"), 0.0), 4),
+          "exit_price": round(_safe_float(row.get("exit_price"), 0.0), 4),
+          "pnl_pct": round(_safe_float(row.get("pnl_pct"), 0.0) * 100.0, 2),
+          "exit_reason": str(row.get("exit_reason", "") or ""),
+          "timestamp": str(row.get("timestamp", "") or ""),
+        }
+      )
+
+    news_packets: list[dict[str, Any]] = []
+    for row in list(public_layer.get("news_lens") or [])[:20]:
+      symbol = str(row.get("symbol", "") or "")
+      if not symbol:
+        continue
+      news_packets.append(
+        {
+          "packet_id": _signal_key("news_packet", symbol, str(row.get("headline_summary", "") or "")),
+          "packet_type": "news_packet",
+          "symbol": symbol,
+          "headline_summary": str(row.get("headline_summary", "") or ""),
+          "impact": str(row.get("likely_directional_impact", "") or ""),
+          "freshness": str(row.get("freshness", "") or ""),
+          "confidence": float(_safe_float(row.get("confidence"), 0.0)),
+        }
+      )
+
+    market_lens = public_layer.get("market_lens") if isinstance(public_layer, dict) else {}
+    regime_lens = public_layer.get("regime_lens") if isinstance(public_layer, dict) else {}
+    market_regime_packet = {
+      "packet_id": _signal_key("market_regime_packet", "ALL", str(regime_lens.get("regime", "chop") or "chop")),
+      "packet_type": "market_regime_packet",
+      "regime": str(regime_lens.get("regime", "chop") or "chop"),
+      "volatility_regime": str((market_lens or {}).get("volatility_regime", "mixed") or "mixed"),
+      "index_trend": dict((market_lens or {}).get("index_trend") or {}),
+      "confidence": float(_safe_float(regime_lens.get("confidence"), 0.0)),
+      "generated_at": now.strftime("%Y-%m-%d %H:%M:%S ET"),
+    }
+
+    all_packets = symbol_state_packets + direction_conflict_packets + [fail_summary_packet] + trade_event_packets + news_packets + [market_regime_packet]
+    published = set(published_keys)
+    deduped_packets = [p for p in all_packets if str(p.get("packet_id", "")) not in published]
+
+    return {
+      "layer": "lisa_ingestion",
+      "schema_version": "2.0.0",
+      "generated_at": now.strftime("%Y-%m-%d %H:%M:%S ET"),
+      "packet_count": len(deduped_packets),
+      "packets": deduped_packets,
+      "channels": {
+        "symbol_state_packet": len(symbol_state_packets),
+        "direction_conflict_packet": len(direction_conflict_packets),
+        "trade_event_packet": len(trade_event_packets),
+        "news_packet": len(news_packets),
+        "market_regime_packet": 1,
+      },
+      "internal_snapshot": {
+        "entry_eligibility": dict((internal_layer.get("entry_eligibility") if isinstance(internal_layer, dict) else {}) or {}),
+        "execution_state": dict((internal_layer.get("execution_state") if isinstance(internal_layer, dict) else {}) or {}),
+      },
+    }
+
+
+def _build_three_layer_payload() -> dict[str, Any]:
+    internal_layer = _build_internal_trader_layer()
+    public_layer = _build_public_livestream_layer()
+    lisa_layer = _build_lisa_ingestion_layer(public_layer, internal_layer)
+    return {
+      "generated_at": _now_et().strftime("%Y-%m-%d %H:%M:%S ET"),
+      "layers": {
+        "internal_trader": internal_layer,
+        "public_market_intelligence": public_layer,
+        "lisa_ingestion": lisa_layer,
+      },
+    }
+
+
 def _filtered_payload_delta(payload: dict[str, Any]) -> dict[str, Any]:
     published = _published_signal_keys()
     if not published:
@@ -2091,6 +2513,40 @@ def api_lisa_feed():
             _persist_lisa_feed(payload)
         return jsonify(payload)
     except Exception as exc:  # noqa: BLE001
+        return jsonify({"error": str(exc)}), 500
+
+
+    @app.get("/api/layers/all")
+    def api_layers_all():
+      try:
+        return jsonify(_build_three_layer_payload())
+      except Exception as exc:  # noqa: BLE001
+        return jsonify({"error": str(exc)}), 500
+
+
+    @app.get("/api/layer/internal")
+    def api_layer_internal():
+      try:
+        return jsonify(_build_internal_trader_layer())
+      except Exception as exc:  # noqa: BLE001
+        return jsonify({"error": str(exc)}), 500
+
+
+    @app.get("/api/layer/public")
+    def api_layer_public():
+      try:
+        return jsonify(_build_public_livestream_layer())
+      except Exception as exc:  # noqa: BLE001
+        return jsonify({"error": str(exc)}), 500
+
+
+    @app.get("/api/layer/lisa-ingestion")
+    def api_layer_lisa_ingestion():
+      try:
+        internal_layer = _build_internal_trader_layer()
+        public_layer = _build_public_livestream_layer()
+        return jsonify(_build_lisa_ingestion_layer(public_layer, internal_layer))
+      except Exception as exc:  # noqa: BLE001
         return jsonify({"error": str(exc)}), 500
 
 
