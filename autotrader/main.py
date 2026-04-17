@@ -1173,6 +1173,11 @@ def main():
     last_trader_heartbeat_et = str(state.get("last_trader_heartbeat_et", "") or "")
     last_alpaca_auth_error_et = str(state.get("last_alpaca_auth_error_et", "") or "")
     last_alpaca_auth_error = str(state.get("last_alpaca_auth_error", "") or "")
+    trade_telemetry_day = str(state.get("trade_telemetry_day", "") or "")
+    trade_telemetry_closed_count = int(state.get("trade_telemetry_closed_count", 0) or 0)
+    trade_telemetry_total_pnl_usd = float(state.get("trade_telemetry_total_pnl_usd", 0.0) or 0.0)
+    trade_telemetry_last_close_iso = str(state.get("trade_telemetry_last_close_iso", "") or "")
+    trade_telemetry_last_log_error = str(state.get("trade_telemetry_last_log_error", "") or "")
     next_heartbeat_at = 0.0
     last_heartbeat_persist_at = 0.0
     manual_stop_latched = False
@@ -1293,6 +1298,11 @@ def main():
                 "last_trader_heartbeat_et": last_trader_heartbeat_et,
                 "last_alpaca_auth_error_et": last_alpaca_auth_error_et,
                 "last_alpaca_auth_error": last_alpaca_auth_error,
+                "trade_telemetry_day": trade_telemetry_day,
+                "trade_telemetry_closed_count": trade_telemetry_closed_count,
+                "trade_telemetry_total_pnl_usd": round(trade_telemetry_total_pnl_usd, 6),
+                "trade_telemetry_last_close_iso": trade_telemetry_last_close_iso,
+                "trade_telemetry_last_log_error": trade_telemetry_last_log_error,
             }
         )
 
@@ -2003,6 +2013,11 @@ def main():
             premarket_scan_runs = 0
             premarket_last_scan_at = None
             bad_fill_tracker = {}
+            trade_telemetry_day = now_et.date().isoformat()
+            trade_telemetry_closed_count = 0
+            trade_telemetry_total_pnl_usd = 0.0
+            trade_telemetry_last_close_iso = ""
+            trade_telemetry_last_log_error = ""
             set_catalyst_mode(False, "")
 
         option_positions = broker.get_open_option_positions()
@@ -2978,60 +2993,75 @@ def main():
                     paper_reported_pnl_pct = round(realized_plpc * 100.0, 4)
                     max_favorable_excursion_pct = round(float(meta.get("max_plpc", 0.0) or 0.0) * 100.0, 4)
                     max_adverse_excursion_pct = round(float(meta.get("min_plpc", 0.0) or 0.0) * 100.0, 4)
-                    trade_logger.log_trade(
-                        {
-                            "timestamp": ts(now_et),
-                            "date": now_et.date().isoformat(),
-                            "ticker": meta.get("ticker", ""),
-                            "direction": meta.get("direction", ""),
-                            "strategy_profile": meta.get("strategy_profile", ""),
-                            "option_symbol": symbol,
-                            "strike": meta.get("strike", ""),
-                            "expiry": meta.get("expiry", ""),
-                            "qty": filled_close_qty,
-                            "signal_score": meta.get("signal_score", ""),
-                            "direction_score": meta.get("direction_score", ""),
-                            "rvol": meta.get("rvol", ""),
-                            "rsi": meta.get("rsi", ""),
-                            "roc": meta.get("roc", ""),
-                            "iv_rank": meta.get("iv_rank", ""),
-                            "contract_spread_pct": meta.get("contract_spread_pct", ""),
-                            "entry_time": meta.get("entry_time_iso", ""),
-                            "exit_time": now_et.isoformat(),
-                            "hold_seconds": hold_seconds,
-                            "entry_price": entry_price,
-                            "exit_price": exit_price,
-                            "realized_pnl_usd": round(trade_pnl_usd, 2),
-                            "pnl_pct": round(realized_plpc, 4),
-                            "paper_reported_pnl_usd": paper_reported_pnl_usd,
-                            "paper_reported_pnl_pct": paper_reported_pnl_pct,
-                            "conservative_executable_pnl_usd": conservative_pnl_usd,
-                            "conservative_executable_pnl_pct": conservative_pnl_pct,
-                            "max_favorable_excursion_pct": max_favorable_excursion_pct,
-                            "max_adverse_excursion_pct": max_adverse_excursion_pct,
-                            "entry_underlying_symbol": meta.get("ticker", ""),
-                            "entry_bid_submit": meta.get("entry_bid_submit", ""),
-                            "entry_ask_submit": meta.get("entry_ask_submit", ""),
-                            "entry_midpoint_submit": meta.get("entry_midpoint_submit", ""),
-                            "entry_intended_limit": meta.get("entry_intended_limit", ""),
-                            "entry_filled_price": meta.get("entry_filled_price", entry_price),
-                            "entry_spread_pct": meta.get("entry_spread_pct", ""),
-                            "entry_fill_slippage_vs_ask_pct": meta.get("entry_fill_slippage_vs_ask_pct", ""),
-                            "entry_fill_seconds": meta.get("entry_fill_seconds", ""),
-                            "entry_attempts": meta.get("entry_attempts", ""),
-                            "exit_underlying_symbol": meta.get("ticker", ""),
-                            "exit_bid_submit": close_execution.get("submit_bid", ""),
-                            "exit_ask_submit": close_execution.get("submit_ask", ""),
-                            "exit_midpoint_submit": close_execution.get("submit_midpoint", ""),
-                            "exit_intended_limit": close_execution.get("intended_limit", ""),
-                            "exit_filled_price": exit_price,
-                            "exit_spread_pct": close_execution.get("submit_spread_pct", ""),
-                            "exit_fill_slippage_vs_bid_pct": close_execution.get("fill_slippage_vs_bid_pct", ""),
-                            "exit_fill_seconds": close_execution.get("fill_seconds", ""),
-                            "exit_attempts": close_execution.get("attempts", ""),
-                            "exit_reason": exit_reason,
-                        }
-                    )
+                    if trade_telemetry_day != now_et.date().isoformat():
+                        trade_telemetry_day = now_et.date().isoformat()
+                        trade_telemetry_closed_count = 0
+                        trade_telemetry_total_pnl_usd = 0.0
+                        trade_telemetry_last_close_iso = ""
+                        trade_telemetry_last_log_error = ""
+
+                    trade_row = {
+                        "timestamp": ts(now_et),
+                        "date": now_et.date().isoformat(),
+                        "ticker": meta.get("ticker", ""),
+                        "direction": meta.get("direction", ""),
+                        "strategy_profile": meta.get("strategy_profile", ""),
+                        "option_symbol": symbol,
+                        "strike": meta.get("strike", ""),
+                        "expiry": meta.get("expiry", ""),
+                        "qty": filled_close_qty,
+                        "signal_score": meta.get("signal_score", ""),
+                        "direction_score": meta.get("direction_score", ""),
+                        "rvol": meta.get("rvol", ""),
+                        "rsi": meta.get("rsi", ""),
+                        "roc": meta.get("roc", ""),
+                        "iv_rank": meta.get("iv_rank", ""),
+                        "contract_spread_pct": meta.get("contract_spread_pct", ""),
+                        "entry_time": meta.get("entry_time_iso", ""),
+                        "exit_time": now_et.isoformat(),
+                        "hold_seconds": hold_seconds,
+                        "entry_price": entry_price,
+                        "exit_price": exit_price,
+                        "realized_pnl_usd": round(trade_pnl_usd, 2),
+                        "pnl_pct": round(realized_plpc, 4),
+                        "paper_reported_pnl_usd": paper_reported_pnl_usd,
+                        "paper_reported_pnl_pct": paper_reported_pnl_pct,
+                        "conservative_executable_pnl_usd": conservative_pnl_usd,
+                        "conservative_executable_pnl_pct": conservative_pnl_pct,
+                        "max_favorable_excursion_pct": max_favorable_excursion_pct,
+                        "max_adverse_excursion_pct": max_adverse_excursion_pct,
+                        "entry_underlying_symbol": meta.get("ticker", ""),
+                        "entry_bid_submit": meta.get("entry_bid_submit", ""),
+                        "entry_ask_submit": meta.get("entry_ask_submit", ""),
+                        "entry_midpoint_submit": meta.get("entry_midpoint_submit", ""),
+                        "entry_intended_limit": meta.get("entry_intended_limit", ""),
+                        "entry_filled_price": meta.get("entry_filled_price", entry_price),
+                        "entry_spread_pct": meta.get("entry_spread_pct", ""),
+                        "entry_fill_slippage_vs_ask_pct": meta.get("entry_fill_slippage_vs_ask_pct", ""),
+                        "entry_fill_seconds": meta.get("entry_fill_seconds", ""),
+                        "entry_attempts": meta.get("entry_attempts", ""),
+                        "exit_underlying_symbol": meta.get("ticker", ""),
+                        "exit_bid_submit": close_execution.get("submit_bid", ""),
+                        "exit_ask_submit": close_execution.get("submit_ask", ""),
+                        "exit_midpoint_submit": close_execution.get("submit_midpoint", ""),
+                        "exit_intended_limit": close_execution.get("intended_limit", ""),
+                        "exit_filled_price": exit_price,
+                        "exit_spread_pct": close_execution.get("submit_spread_pct", ""),
+                        "exit_fill_slippage_vs_bid_pct": close_execution.get("fill_slippage_vs_bid_pct", ""),
+                        "exit_fill_seconds": close_execution.get("fill_seconds", ""),
+                        "exit_attempts": close_execution.get("attempts", ""),
+                        "exit_reason": exit_reason,
+                    }
+                    try:
+                        trade_logger.log_trade(trade_row)
+                        trade_telemetry_last_log_error = ""
+                    except Exception as log_exc:  # noqa: BLE001
+                        trade_telemetry_last_log_error = str(log_exc)[:300]
+                        print(f"[{ts(now_et)}] trade log write failed: {log_exc}")
+
+                    trade_telemetry_closed_count += 1
+                    trade_telemetry_total_pnl_usd += trade_pnl_usd
+                    trade_telemetry_last_close_iso = now_et.isoformat()
 
                     if trade_pnl_usd < 0:
                         daily_realized_loss_usd += abs(trade_pnl_usd)

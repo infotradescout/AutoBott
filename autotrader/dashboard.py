@@ -820,6 +820,108 @@ def _build_morning_report_payload() -> dict[str, Any]:
     }
 
 
+    def _file_health(path: Path) -> dict[str, Any]:
+      try:
+        exists = path.exists()
+        if not exists:
+          return {
+            "path": str(path),
+            "exists": False,
+            "size_bytes": 0,
+            "modified_at": "",
+          }
+        stat = path.stat()
+        modified = datetime.fromtimestamp(stat.st_mtime, tz=EASTERN)
+        return {
+          "path": str(path),
+          "exists": True,
+          "size_bytes": int(stat.st_size),
+          "modified_at": modified.strftime("%Y-%m-%d %H:%M:%S ET"),
+        }
+      except Exception as exc:  # noqa: BLE001
+        return {
+          "path": str(path),
+          "exists": False,
+          "size_bytes": 0,
+          "modified_at": "",
+          "error": str(exc),
+        }
+
+
+    def _fetch_broker_order_telemetry() -> dict[str, Any]:
+      now = _now_et()
+      day_start_et = now.replace(hour=0, minute=0, second=0, microsecond=0)
+      day_start_utc = day_start_et.astimezone(pytz.UTC).isoformat().replace("+00:00", "Z")
+      try:
+        resp = requests.get(
+          f"{BASE_URL}/v2/orders",
+          headers=HEADERS,
+          params={
+            "status": "all",
+            "after": day_start_utc,
+            "direction": "desc",
+            "limit": 500,
+            "nested": "false",
+          },
+          timeout=12,
+        )
+        resp.raise_for_status()
+        payload = resp.json()
+        if not isinstance(payload, list):
+          return {
+            "ok": False,
+            "error": "unexpected response format",
+            "generated_at": now.strftime("%Y-%m-%d %H:%M:%S ET"),
+          }
+
+        option_orders_today = 0
+        option_filled_orders_today = 0
+        option_buy_fills_today = 0
+        option_sell_fills_today = 0
+        filled_qty_contracts = 0.0
+        symbols: set[str] = set()
+
+        for order in payload:
+          if not isinstance(order, dict):
+            continue
+          symbol = str(order.get("symbol", "") or "").upper()
+          if not _extract_underlying(symbol):
+            continue
+          submitted_dt = _parse_ts(str(order.get("submitted_at", "") or ""))
+          if submitted_dt is None or submitted_dt.date() != now.date():
+            continue
+          option_orders_today += 1
+          symbols.add(symbol)
+
+          status = str(order.get("status", "") or "").lower()
+          filled_qty = _safe_float(order.get("filled_qty"), 0.0)
+          side = str(order.get("side", "") or "").lower()
+          if status in {"filled", "partially_filled"} and filled_qty > 0:
+            option_filled_orders_today += 1
+            filled_qty_contracts += filled_qty
+            if side == "buy":
+              option_buy_fills_today += 1
+            elif side == "sell":
+              option_sell_fills_today += 1
+
+        return {
+          "ok": True,
+          "generated_at": now.strftime("%Y-%m-%d %H:%M:%S ET"),
+          "option_orders_today": option_orders_today,
+          "option_filled_orders_today": option_filled_orders_today,
+          "option_buy_fills_today": option_buy_fills_today,
+          "option_sell_fills_today": option_sell_fills_today,
+          "filled_qty_contracts": round(filled_qty_contracts, 2),
+          "unique_option_symbols": len(symbols),
+        }
+      except Exception as exc:  # noqa: BLE001
+        return {
+          "ok": False,
+          "error": str(exc),
+          "generated_at": now.strftime("%Y-%m-%d %H:%M:%S ET"),
+        }
+
+
 def _build_evening_report_payload() -> dict[str, Any]:
     now = _now_et()
     runtime_state = load_bot_state()
@@ -828,6 +930,36 @@ def _build_evening_report_payload() -> dict[str, Any]:
     trade_summary = _build_trade_report_summary(today_trades)
     scan_summary = _build_scan_report_summary(today_scans)
     daily_review = _build_daily_review_payload()
+      broker_telemetry = _fetch_broker_order_telemetry()
+
+      telemetry_trade_day = str(runtime_state.get("trade_telemetry_day", "") or "")
+      telemetry_closed_count = int(runtime_state.get("trade_telemetry_closed_count", 0) or 0)
+      telemetry_total_pnl = round(float(runtime_state.get("trade_telemetry_total_pnl_usd", 0.0) or 0.0), 2)
+      telemetry_last_close_iso = str(runtime_state.get("trade_telemetry_last_close_iso", "") or "")
+      telemetry_last_close_dt = _parse_state_iso(telemetry_last_close_iso)
+      telemetry_log_error = str(runtime_state.get("trade_telemetry_last_log_error", "") or "")
+
+      data_health = {
+        "trades_csv": _file_health(TRADES_CSV),
+        "scan_log_csv": _file_health(SCAN_LOG_CSV),
+        "last_trader_heartbeat_et": str(runtime_state.get("last_trader_heartbeat_et", "") or ""),
+      }
+
+      telemetry_alerts: list[str] = []
+      if telemetry_trade_day == now.date().isoformat() and telemetry_closed_count > int(trade_summary.get("total_trades", 0)):
+        telemetry_alerts.append(
+          (
+            f"Runtime recorded {telemetry_closed_count} closed trade(s) today but trades.csv only has "
+            f"{int(trade_summary.get('total_trades', 0))}. Local trade log is lagging or failed."
+          )
+        )
+      if broker_telemetry.get("ok") and int(broker_telemetry.get("option_sell_fills_today", 0)) > 0 and int(trade_summary.get("total_trades", 0)) == 0:
+        telemetry_alerts.append(
+          "Broker reports option sell fills today, but closed-trade rows are still zero. Check trade CSV writer health and runtime log errors."
+        )
+      if telemetry_log_error:
+        telemetry_alerts.append(f"Recent trade log write error: {telemetry_log_error}")
+
     open_trade_meta = runtime_state.get("open_trade_meta") or {}
     report_finalized = (not bool(open_trade_meta)) and ((now.hour * 60 + now.minute) >= _clock_hhmm_to_minutes(str(config.NO_NEW_TRADES_AFTER)))
 
@@ -841,6 +973,18 @@ def _build_evening_report_payload() -> dict[str, Any]:
         "ticker_leaders": _build_ticker_scorecard_rows(today_trades, limit=5),
         "daily_review": daily_review,
         "recommendations": _evening_recommendations(trade_summary, scan_summary),
+        "telemetry": {
+          "runtime_trades": {
+            "day": telemetry_trade_day,
+            "closed_count": telemetry_closed_count,
+            "total_pnl_usd": telemetry_total_pnl,
+            "last_close_at": telemetry_last_close_dt.strftime("%Y-%m-%d %H:%M:%S ET") if telemetry_last_close_dt else "",
+            "last_log_error": telemetry_log_error,
+          },
+          "broker_activity": broker_telemetry,
+          "data_health": data_health,
+          "alerts": telemetry_alerts,
+        },
     }
 
 
@@ -3410,8 +3554,14 @@ def reports_page():
       const trades = data.trade_summary || {};
       const scans = data.scan_summary || {};
       const dailyReview = data.daily_review || {};
+      const telemetry = data.telemetry || {};
+      const runtimeTrades = telemetry.runtime_trades || {};
+      const brokerActivity = telemetry.broker_activity || {};
+      const dataHealth = telemetry.data_health || {};
+      const telemetryAlerts = Array.isArray(telemetry.alerts) ? telemetry.alerts : [];
+      const brokerSellFills = Number(brokerActivity.option_sell_fills_today || 0);
       wrap.innerHTML = `
-        <div class="muted" style="margin-bottom:10px;">Generated ${escapeHtml(data.generated_at || "-")} | Closed trades ${Number(trades.total_trades || 0)} | Scan rows ${Number(scans.total_rows || 0)}</div>
+        <div class="muted" style="margin-bottom:10px;">Generated ${escapeHtml(data.generated_at || "-")} | Closed trades ${Number(trades.total_trades || 0)} | Broker sell fills ${brokerSellFills} | Scan rows ${Number(scans.total_rows || 0)}</div>
         <div class="metrics">
           <div class="metric"><div class="label">Today P&L</div><div class="value ${cls(trades.total_pnl_usd)}">${fmtMoney(trades.total_pnl_usd)}</div></div>
           <div class="metric"><div class="label">Win Rate</div><div class="value ${cls((Number(trades.win_rate_pct || 0)) - 50)}">${Number(trades.win_rate_pct || 0).toFixed(1)}%</div></div>
@@ -3449,6 +3599,30 @@ def reports_page():
           <div>
             <div class="section-title"><h2>Ticker Leaders</h2></div>
             ${tickerTable(data.ticker_leaders || [])}
+          </div>
+        </div>
+        <div class="section-title" style="margin-top:12px;"><h2>Telemetry Health</h2></div>
+        <div class="two-col">
+          <div>
+            ${listHtml(
+              telemetryAlerts.length
+                ? telemetryAlerts
+                : [
+                    `Runtime closed trades: ${Number(runtimeTrades.closed_count || 0)} (${escapeHtml(runtimeTrades.day || "n/a")})`,
+                    `Runtime trade P&L: ${fmtMoney(runtimeTrades.total_pnl_usd || 0)}`,
+                    `Broker option fills: ${Number(brokerActivity.option_filled_orders_today || 0)} (buy ${Number(brokerActivity.option_buy_fills_today || 0)} / sell ${Number(brokerActivity.option_sell_fills_today || 0)})`,
+                  ]
+            )}
+          </div>
+          <div>
+            ${listHtml([
+              `trades.csv exists: ${String((dataHealth.trades_csv || {}).exists ? "yes" : "no")}`,
+              `trades.csv modified: ${String((dataHealth.trades_csv || {}).modified_at || "n/a")}`,
+              `scan_log.csv exists: ${String((dataHealth.scan_log_csv || {}).exists ? "yes" : "no")}`,
+              `scan_log.csv modified: ${String((dataHealth.scan_log_csv || {}).modified_at || "n/a")}`,
+              `Trader heartbeat: ${String(dataHealth.last_trader_heartbeat_et || "n/a")}`,
+              brokerActivity.ok ? "Broker activity probe: ok" : `Broker activity probe: ${escapeHtml(String(brokerActivity.error || "failed"))}`,
+            ])}
           </div>
         </div>
       `;
