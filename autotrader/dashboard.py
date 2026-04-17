@@ -6117,6 +6117,7 @@ def home():
           const ordersRejectedOrCanceled = Number(scansummary.orders_rejected_or_canceled_count ?? 0);
           const realizedPnlUsd = Number(scansummary.realized_pnl_usd ?? 0);
           const color = tradesFilled > 0 ? "#00c853" : "#ff9800";
+          const marketOpen = Boolean(status && !status.error && status.market_open);
           const stageFailCounts = scansummary.stage_fail_counts && typeof scansummary.stage_fail_counts === "object"
             ? scansummary.stage_fail_counts
             : {};
@@ -6159,6 +6160,7 @@ def home():
               <br><small style="color:#888">Stage rejects: ${stageFailText || "—"}</small>
               <br><small style="color:#888">Stage4 entry rejects: ${stage4RejectText || "—"}</small>
               <br><small style="color:#888">Stage4 source: ${stage4Source}${stage4Fresh ? " (fresh)" : " (fallback/proxy)"}</small>
+              ${candidates === 0 ? `<br><small style="color:#8fa1b8">No active scan loop yet${marketOpen ? "" : " (market closed)"}.</small>` : ""}
           `;
         } else {
           const fallbackScanRows = Array.isArray(scanlog) ? scanlog.length : 0;
