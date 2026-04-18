@@ -4198,6 +4198,37 @@ def api_evening_report():
         return jsonify({"error": str(exc)}), 500
 
 
+@app.get("/api/signals")
+def api_signals():
+  """Public machine-readable signal endpoint for LISA source polling."""
+  try:
+    return jsonify(
+      {
+        "source": "autobott",
+        "generated_at": _now_et().strftime("%Y-%m-%dT%H:%M:%S%z"),
+        "count": 1,
+        "signals": [
+          {
+            "id": int(time.time()),
+            "lane": "market",
+            "signal_kind": "source_heartbeat",
+            "confidence": 0.91,
+            "score": 59,
+            "impact_level": "low",
+            "trend": "neutral",
+            "velocity": "steady",
+            "action_hint": "autobott source healthy",
+            "tags": ["autobott", "heartbeat"],
+            "source_class": "source_api",
+            "observed_fact": "AutoBott API heartbeat is healthy",
+          }
+        ],
+      }
+    )
+  except Exception as exc:  # noqa: BLE001
+    return jsonify({"error": str(exc)}), 500
+
+
 @app.get("/reports")
 def reports_page():
     return render_template_string(
