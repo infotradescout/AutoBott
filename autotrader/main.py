@@ -2703,6 +2703,52 @@ def main():
                 )
                 break
 
+            # --- Net P&L circuit breaker ---
+            intraday_net_loss_limit = abs(float(getattr(config, "INTRADAY_NET_LOSS_LIMIT_USD", 0.0) or 0.0))
+            if intraday_net_loss_limit > 0 and trade_telemetry_total_pnl_usd <= -intraday_net_loss_limit:
+                _mark_skip("intraday_net_loss_limit")
+                print(
+                    f"[{ts(now_et)}] INTRADAY NET LOSS LIMIT hit: "
+                    f"net=${trade_telemetry_total_pnl_usd:.2f} <= -${intraday_net_loss_limit:.2f}. "
+                    "Pausing new entries for the rest of the day."
+                )
+                alerts.send(
+                    "intraday_net_loss_limit",
+                    (
+                        f"Intraday net loss limit hit: net=${trade_telemetry_total_pnl_usd:.2f} "
+                        f"(limit -${intraday_net_loss_limit:.2f}). New entries paused."
+                    ),
+                    level="warning",
+                    dedupe_key=f"intraday-net-loss-{now_et.date().isoformat()}",
+                )
+                break
+
+            # --- Early-red guard ---
+            if bool(getattr(config, "EARLY_RED_GUARD_ENABLED", False)):
+                early_red_min_closed = max(1, int(getattr(config, "EARLY_RED_GUARD_MIN_CLOSED_TRADES", 4) or 4))
+                early_red_max_net_pnl = float(getattr(config, "EARLY_RED_GUARD_MAX_NET_PNL_USD", -0.01) or -0.01)
+                if (
+                    trade_telemetry_closed_count >= early_red_min_closed
+                    and trade_telemetry_total_pnl_usd <= early_red_max_net_pnl
+                ):
+                    _mark_skip("early_red_guard")
+                    print(
+                        f"[{ts(now_et)}] EARLY RED GUARD hit: "
+                        f"closed={trade_telemetry_closed_count} net=${trade_telemetry_total_pnl_usd:.2f} "
+                        f"(threshold <= ${early_red_max_net_pnl:.2f}). "
+                        "Pausing new entries for the rest of the day."
+                    )
+                    alerts.send(
+                        "early_red_guard",
+                        (
+                            f"Early red guard paused entries: {trade_telemetry_closed_count} closed trades, "
+                            f"net=${trade_telemetry_total_pnl_usd:.2f} (threshold ${early_red_max_net_pnl:.2f})."
+                        ),
+                        level="warning",
+                        dedupe_key=f"early-red-{now_et.date().isoformat()}",
+                    )
+                    break
+
             # --- PDT guard (only blocks if ENFORCE_PDT_GUARD=True) ---
             if local_trade_budget_hit:
                 _mark_skip("pdt_local_budget_hit")

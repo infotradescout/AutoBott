@@ -112,6 +112,15 @@ DRAWDOWN_SIZE_MULTIPLIER            = 0.5
 DAILY_LOSS_LIMIT_USD                = 75.0
 WEEKLY_LOSS_LIMIT_USD               = 240.0
 CONSECUTIVE_LOSS_LIMIT              = 2
+# Net P&L circuit breaker (runtime telemetry-based):
+# Pause new entries once the day is sufficiently red in realized net P&L.
+INTRADAY_NET_LOSS_LIMIT_USD         = 20.0
+# Early-red guard:
+# If we've already taken this many closed trades and are still net red,
+# stop new entries for the rest of the day.
+EARLY_RED_GUARD_ENABLED             = True
+EARLY_RED_GUARD_MIN_CLOSED_TRADES   = 4
+EARLY_RED_GUARD_MAX_NET_PNL_USD     = -0.01
 
 # Capital doctrine for small live account preparation.
 MAX_PREMIUM_PER_TRADE_USD           = 220.0
@@ -505,6 +514,11 @@ FEATURE_TICKER_SCORECARDS            = False
 FEATURE_STRATEGY_PROFILES            = False
 FEATURE_BAD_FILL_DETECTOR            = False
 FEATURE_WEEKLY_REVIEW_GENERATOR      = False
+
+# Service boot behavior:
+# If True, any persisted manual_stop latch is cleared at process start so
+# trading resumes automatically after deploy/restart.
+AUTO_RESUME_TRADING_ON_BOOT          = True
 
 
 # ---------------------------------------------------------------------------

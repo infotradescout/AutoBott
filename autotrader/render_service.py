@@ -46,7 +46,7 @@ from broker import AlpacaBroker
 from dashboard import app
 from main import main as trader_main
 from state_store import load_bot_state, save_bot_state
-from trading_control import load_trading_control
+from trading_control import load_trading_control, set_manual_stop
 
 try:
     import pytz
@@ -151,6 +151,22 @@ def _print_startup_readiness() -> None:
     print(f"[render_service] dry_run={bool(control.get('dry_run', False))}")
 
 
+def _apply_boot_auto_resume() -> None:
+    if not bool(getattr(config, "AUTO_RESUME_TRADING_ON_BOOT", True)):
+        return
+    try:
+        control = load_trading_control()
+        if bool(control.get("manual_stop", False)):
+            updated = set_manual_stop(False, reason="boot_auto_resume")
+            print(
+                "[render_service] AUTO_RESUME_TRADING_ON_BOOT cleared manual_stop "
+                f"(previous reason={str(control.get('reason', '') or '')!r}, "
+                f"updated_at={str(updated.get('updated_at_et', '') or '')!r})."
+            )
+    except Exception as exc:  # noqa: BLE001
+        print(f"[render_service] boot auto-resume failed: {exc}")
+
+
 def _run_trader_forever() -> None:
     restart_count = 0
     while True:
@@ -245,6 +261,7 @@ def _run_independent_stoploss_guard() -> None:
 
 
 if __name__ == "__main__":
+    _apply_boot_auto_resume()
     _print_startup_readiness()
     trader_thread = threading.Thread(target=_run_trader_forever, daemon=True)
     trader_thread.start()
