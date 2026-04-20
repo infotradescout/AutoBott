@@ -583,6 +583,22 @@ class AlpacaDataClient:
             raise last_exc
         return [], []
 
+    def get_most_actives(self, top: int = 30) -> list[str]:
+        """Return the most actively traded stocks by volume from Alpaca's screener."""
+        capped_top = max(1, min(int(top or 30), 50))
+        endpoint = f"{self.data_base_url}/v1beta1/screener/stocks/most-actives"
+        try:
+            resp = self.data_session.get(
+                endpoint,
+                params={"top": capped_top, "by": "volume"},
+                timeout=15,
+            )
+            resp.raise_for_status()
+            body = resp.json()
+            return [item.get("symbol", "") for item in body.get("most_actives", []) if item.get("symbol")]
+        except Exception:  # noqa: BLE001
+            return []
+
     def get_asset(self, symbol: str) -> dict[str, Any]:
         resp = self.trade_session.get(f"{self.base_url}/v2/assets/{symbol}", timeout=15)
         resp.raise_for_status()

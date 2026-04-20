@@ -83,10 +83,10 @@ CORE_TICKERS = [
 ]
 
 AUTO_EXPAND_UNIVERSE_WITH_MOVERS = True
-UNIVERSE_MOVER_TOP                = 20
-UNIVERSE_MAX_TICKERS              = 60   # smaller universe = faster scan loop
-SCREENER_TOP_N                    = 30
-MOVER_SYMBOLS_PER_SIDE            = 15
+UNIVERSE_MOVER_TOP                = 50   # fetch top 50 gainers + 50 losers
+UNIVERSE_MAX_TICKERS              = 150  # wider universe catches more movers
+SCREENER_TOP_N                    = 50
+MOVER_SYMBOLS_PER_SIDE            = 25
 MIN_SHARE_PRICE                   = 10
 MAX_SHARE_PRICE                   = 2000
 

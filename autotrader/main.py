@@ -1269,12 +1269,19 @@ def _build_scan_universe(data_client: AlpacaDataClient) -> list[str]:
     base = list(dict.fromkeys(base + core))
     mover_candidates: list[str] = []
     if config.AUTO_EXPAND_UNIVERSE_WITH_MOVERS:
+        # 1. Top price movers (gainers + losers)
         try:
             gainers, losers = data_client.get_top_movers(top=int(config.UNIVERSE_MOVER_TOP))
             mover_candidates.extend(str(sym).upper() for sym in gainers if str(sym).strip())
             mover_candidates.extend(str(sym).upper() for sym in losers if str(sym).strip())
         except Exception as exc:  # noqa: BLE001
-            print(f"[{ts()}] Universe expansion skipped (movers unavailable): {exc}")
+            print(f"[{ts()}] Universe expansion (movers) skipped: {exc}")
+        # 2. Most actives by volume — captures high-volume names that may not be top % movers
+        try:
+            actives = data_client.get_most_actives(top=30)
+            mover_candidates.extend(str(sym).upper() for sym in actives if str(sym).strip())
+        except Exception as exc:  # noqa: BLE001
+            print(f"[{ts()}] Universe expansion (most-actives) skipped: {exc}")
 
     mover_candidates = [s for s in list(dict.fromkeys(mover_candidates)) if s not in protected]
     filtered_movers = _filter_mover_candidates(
