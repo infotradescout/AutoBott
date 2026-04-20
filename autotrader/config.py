@@ -184,8 +184,8 @@ VOL_OPEN_PREMIUM_CAP_MULT_EXTREME   = 0.75
 MARKET_OPEN                        = "09:30"
 PREOPEN_READY_MINUTES              = 10
 HARD_CLOSE_TIME                    = "16:00"   # force-close all positions at market close
-OPTION_EXPIRY_EXIT_TIME            = "15:55"   # exit expiring contracts shortly before close
-OPTION_FORCE_EXIT_DAYS_BEFORE_EXPIRY = 1
+OPTION_EXPIRY_EXIT_TIME            = "15:45"   # exit expiring 0-2DTE contracts 15 min before close
+OPTION_FORCE_EXIT_DAYS_BEFORE_EXPIRY = 0    # exit on expiry day itself (intraday)
 NO_NEW_TRADES_BEFORE               = "09:30"
 NO_NEW_TRADES_AFTER                = "16:00"   # full regular-session entry window
 SCAN_MORNING_TIME                  = "09:30"
@@ -202,15 +202,15 @@ PREMARKET_SCAN_INTERVAL_SECONDS    = 120
 PREMARKET_SCAN_MAX_RUNS            = 0
 
 # Poll every 15 seconds for fast exit response on scalp trades
-LOOP_INTERVAL_SECONDS              = 15
+LOOP_INTERVAL_SECONDS              = 10   # faster loop for 0-2DTE monitoring
 
 # Allow trades to run up to 90 min — trailing stop exits winners well before this
-MAX_HOLD_MINUTES                   = 90
+MAX_HOLD_MINUTES                   = 60    # intraday scalp: max 60-min hold
 
 # Anti-churn entry hold: prevent discretionary exits (reversal, immediate take-profit)
 # during first N minutes after entry. Stop loss still fires immediately.
 # Reduces round-trip losses from early noise; lets winners establish momentum.
-ANTI_CHURN_HOLD_MINUTES            = 3
+ANTI_CHURN_HOLD_MINUTES            = 2    # shorter hold window for fast intraday scalps
 
 # Opening strict mode (09:30+N minutes): trade fewer, stronger setups only.
 OPENING_STRICT_WINDOW_MINUTES                = 20
@@ -333,8 +333,8 @@ ENTRY_BLOCKED_HOURS_ET    = ()
 
 # Execution-time spread gate using the live quote right before order submission.
 # Keep this tighter than MAX_OPTION_SPREAD_PCT, which is only used during chain selection.
-ENTRY_MAX_QUOTE_SPREAD_PCT         = 12.0
-OPENING_ENTRY_MAX_QUOTE_SPREAD_PCT = 15.0
+ENTRY_MAX_QUOTE_SPREAD_PCT         = 10.0  # tight live-quote spread gate for 0-2DTE
+OPENING_ENTRY_MAX_QUOTE_SPREAD_PCT = 12.0
 
 MAX_ENTRY_SLIPPAGE_PCT    = 3.0
 MAX_FILL_SLIPPAGE_PCT     = 3.0
@@ -426,16 +426,16 @@ OPENING_FAST_START_MIN_VWAP_DISTANCE_PCT = 0.14
 
 MIN_OPTION_OPEN_INTEREST          = 10   # lowered from 25 — TSLA/MSFT were at 24/25 OI
 MIN_OPTION_DAILY_VOLUME           = 3    # lowered from 5
-MAX_OPTION_SPREAD_PCT             = 30.0
+MAX_OPTION_SPREAD_PCT             = 20.0  # tighter spread gate for short-dated contracts
 ENABLE_OPTION_LIQUIDITY_RELAX     = True
 OPTION_CONTRACTS_ALLOW_LIVE_FALLBACK = False
-MIN_DTE_TRADING_DAYS              = 0
-MAX_DTE_TRADING_DAYS              = 5    # widened from 2 — on Mondays next expiry is Friday (4 days)
-MIN_OPTION_OPEN_INTEREST_0DTE     = 25   # lowered from 50
+MIN_DTE_TRADING_DAYS              = 0    # allow same-day (0DTE) entries
+MAX_DTE_TRADING_DAYS              = 2    # intraday focus: 0, 1, or 2 DTE only
+MIN_OPTION_OPEN_INTEREST_0DTE     = 50    # 0DTE needs decent liquidity
 ENABLE_DELTA_TARGETING            = True
-TARGET_DELTA_MIN                  = 0.40
-TARGET_DELTA_MAX                  = 0.55
-TARGET_DELTA_FALLBACK             = 0.50
+TARGET_DELTA_MIN                  = 0.45  # slightly ITM for faster response on short-dated contracts
+TARGET_DELTA_MAX                  = 0.60
+TARGET_DELTA_FALLBACK             = 0.50  # ATM fallback
 EMERGENCY_EXECUTION_MODE          = False
 ALLOW_MARKET_ENTRY_WITHOUT_QUOTE  = False
 
