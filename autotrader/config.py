@@ -126,9 +126,9 @@ EARLY_RED_GUARD_MIN_CLOSED_TRADES   = 4
 EARLY_RED_GUARD_MAX_NET_PNL_USD     = -0.01
 
 # Loss throttle (no full lock): after losses, only allow A+ setups.
-LOSS_THROTTLE_AFTER_CONSEC_LOSSES   = 1
-LOSS_THROTTLE_SIGNAL_SCORE_ADD      = 1.2
-LOSS_THROTTLE_MIN_VOLATILITY_SCORE  = 6.5
+LOSS_THROTTLE_AFTER_CONSEC_LOSSES   = 99  # effectively disabled: don't throttle after losses
+LOSS_THROTTLE_SIGNAL_SCORE_ADD      = 0.0
+LOSS_THROTTLE_MIN_VOLATILITY_SCORE  = 0.0
 
 # Capital doctrine for small live account preparation.
 MAX_PREMIUM_PER_TRADE_USD           = 600.0
@@ -155,7 +155,7 @@ PREFERRED_CORE_TICKERS = (
     "SPY", "QQQ", "IWM", "AAPL", "AMD", "INTC", "JPM", "XOM", "CRM", "ORCL",
 )
 MAX_NON_CORE_ENTRIES_PER_DAY        = 999   # aggressive: trade any valid signal
-NON_CORE_MIN_SIGNAL_SCORE           = 10.8
+NON_CORE_MIN_SIGNAL_SCORE           = 4.0   # same floor as core tickers
 
 # Volatility-adaptive risk sizing:
 # Uses scanner metrics (ATR%, RVOL, IV Rank) to classify each setup as
@@ -190,7 +190,7 @@ NO_NEW_TRADES_BEFORE               = "09:30"
 NO_NEW_TRADES_AFTER                = "16:00"   # full regular-session entry window
 SCAN_MORNING_TIME                  = "09:30"
 OBSERVATION_END_TIME               = "10:00"
-OBSERVATION_ENABLED                = True
+OBSERVATION_ENABLED                = False  # disabled: skip observation window, trade from 09:30
 ENABLE_PREMARKET_OPENING_SIGNALS   = True
 PREMARKET_SIGNAL_WINDOW_START      = "08:00"
 PREMARKET_SIGNAL_WINDOW_END        = "09:30"
@@ -214,13 +214,13 @@ ANTI_CHURN_HOLD_MINUTES            = 2    # shorter hold window for fast intrada
 
 # Opening strict mode (09:30+N minutes): trade fewer, stronger setups only.
 OPENING_STRICT_WINDOW_MINUTES                = 20
-OPENING_STRICT_MIN_SIGNAL_SCORE              = 6.8
+OPENING_STRICT_MIN_SIGNAL_SCORE              = 4.0
 OPENING_STRICT_CONFIRM_BARS                  = 3
 OPENING_STRICT_CONFIRM_MOMENTUM_THRESHOLD_PCT = 0.22
-OPENING_STRICT_MIN_DIRECTION_SCORE           = 0.65
-OPENING_STRICT_MIN_RVOL                      = 1.40
-OPENING_STRICT_MIN_ROC_PCT                   = 0.24
-OPENING_STRICT_MIN_VWAP_DISTANCE_PCT         = 0.12
+OPENING_STRICT_MIN_DIRECTION_SCORE           = 0.20
+OPENING_STRICT_MIN_RVOL                      = 0.35
+OPENING_STRICT_MIN_ROC_PCT                   = 0.03
+OPENING_STRICT_MIN_VWAP_DISTANCE_PCT         = 0.01
 OPENING_MAX_SIGNAL_CANDIDATES                = 3
 OPENING_MAX_FRESH_ENTRIES                    = 999
 OPENING_MAX_CONCURRENT_POSITIONS             = 999
@@ -288,21 +288,21 @@ REVERSAL_CONFIRM_SIGNALS     = 2      # require 2 of 3 signals to confirm revers
 # Scanner thresholds
 # ---------------------------------------------------------------------------
 
-RVOL_MIN                  = 0.9
-OPENING_RVOL_MIN          = 0.35
+RVOL_MIN                  = 0.35  # accept low-volume setups
+OPENING_RVOL_MIN          = 0.20
 RVOL_STRICT_UNTIL         = "10:30"
 RVOL_RELAX_AFTER          = "10:00"
-RVOL_RELAXED_MIN          = 0.7
+RVOL_RELAXED_MIN          = 0.25
 RVOL_IGNORE_AFTER         = "10:30"
-ATR_PCT_MIN               = 1.0   # lowered from 1.8 — ETFs like SPY/QQQ have lower ATR
+ATR_PCT_MIN               = 0.3   # very low ATR floor — don't filter out ETFs
 VWAP_NEUTRAL_BAND_PCT     = 0.05  # tightened from 0.15 — 0.15% was rejecting stocks barely off VWAP
 MOVEMENT_FORCE_MIN_PCT    = 0.02  # was 0.03 (scanner default); allow borderline tape to be evaluated
 MOVEMENT_WEAK_VWAP_MULT   = 1.00  # was effectively 1.5 in scanner; only block when very close to VWAP
 
 # Direction conviction: minimum weighted-vote score to commit to call/put.
 # 0.0 = any majority; 0.5 = strongly one-sided required.
-DIRECTION_CONVICTION_MIN  = 0.25  # require clearer directional consensus
-DIRECTION_MIN_ALIGNED_VOTES = 3   # require at least N directional votes to agree
+DIRECTION_CONVICTION_MIN  = 0.10  # minimal directional consensus required
+DIRECTION_MIN_ALIGNED_VOTES = 2   # only 2 votes needed to agree
 DIRECTION_FAST_ROC_PERIOD  = 5    # short-horizon ROC used in directional voting
 
 ROC_PERIOD                = 10
@@ -318,11 +318,11 @@ RSI_CALL_MAX              = 85.0  # widened from 75 — don't block strong momen
 RSI_PUT_MIN               = 15.0  # widened from 25
 RSI_PUT_MAX               = 55.0  # widened from 48 — allow puts when RSI is neutral-to-bearish
 
-IV_RANK_MIN               = 20.0
+IV_RANK_MIN               = 0.0   # no minimum IV rank — trade any setup
 IV_RANK_MAX               = 99.0
 
 ENABLE_SIGNAL_SCORING     = True
-MIN_SIGNAL_SCORE          = 5.8   # relaxed floor to increase opportunity flow
+MIN_SIGNAL_SCORE          = 4.0   # aggressive floor: maximise opportunity flow
 VOLATILITY_PRIORITY_WEIGHT = 3.0  # make volatility the top signal driver
 TREND_PRIORITY_WEIGHT      = 1.0
 FLOW_PRIORITY_WEIGHT       = 1.0
@@ -340,8 +340,8 @@ MAX_ENTRY_SLIPPAGE_PCT    = 3.0
 MAX_FILL_SLIPPAGE_PCT     = 3.0
 
 # Churn control: block immediate re-entry on a ticker after a losing exit.
-REENTRY_COOLDOWN_LOSS_MINUTES      = 20
-STOP_LOSS_REENTRY_COOLDOWN_MINUTES = 30
+REENTRY_COOLDOWN_LOSS_MINUTES      = 5    # short cooldown after loss
+STOP_LOSS_REENTRY_COOLDOWN_MINUTES = 5    # short cooldown after stop-loss hit
 
 ENABLE_OPENING_ENTRY_RELAX    = False
 OPENING_ENTRY_RELAX_MINUTES   = 7
@@ -402,22 +402,22 @@ VIX_MAX                    = 80.0
 # Entry confirmation
 # ---------------------------------------------------------------------------
 
-ENABLE_ENTRY_CONFIRMATION              = True
+ENABLE_ENTRY_CONFIRMATION              = False  # disabled: no bar-confirmation wait, enter immediately
 ENTRY_CONFIRM_BARS                     = 3
-ENTRY_CONFIRM_BYPASS_MIN_SIGNAL_SCORE  = 999.0
+ENTRY_CONFIRM_BYPASS_MIN_SIGNAL_SCORE  = 0.0   # always bypass if confirmation somehow re-enabled
 ENTRY_CONFIRM_MOMENTUM_THRESHOLD_PCT   = 0.14
 
 # Fast-start doctrine: only accept entries that should work quickly.
-FAST_START_MIN_SIGNAL_SCORE            = 6.4
-FAST_START_MIN_DIRECTION_SCORE         = 0.60
-FAST_START_MIN_RVOL                    = 1.0
-FAST_START_MIN_ABS_ROC_PCT             = 0.10
-FAST_START_MIN_VWAP_DISTANCE_PCT       = 0.06
-OPENING_FAST_START_MIN_SIGNAL_SCORE    = 7.8
-OPENING_FAST_START_MIN_DIRECTION_SCORE = 0.75
-OPENING_FAST_START_MIN_RVOL            = 1.60
-OPENING_FAST_START_MIN_ABS_ROC_PCT     = 0.24
-OPENING_FAST_START_MIN_VWAP_DISTANCE_PCT = 0.14
+FAST_START_MIN_SIGNAL_SCORE            = 4.0   # lowered: accept more setups
+FAST_START_MIN_DIRECTION_SCORE         = 0.20  # lowered: accept weaker directional conviction
+FAST_START_MIN_RVOL                    = 0.5   # lowered: accept lower relative volume
+FAST_START_MIN_ABS_ROC_PCT             = 0.03  # lowered: accept minimal momentum
+FAST_START_MIN_VWAP_DISTANCE_PCT       = 0.01  # lowered: accept near-VWAP entries
+OPENING_FAST_START_MIN_SIGNAL_SCORE    = 4.0
+OPENING_FAST_START_MIN_DIRECTION_SCORE = 0.20
+OPENING_FAST_START_MIN_RVOL            = 0.35
+OPENING_FAST_START_MIN_ABS_ROC_PCT     = 0.03
+OPENING_FAST_START_MIN_VWAP_DISTANCE_PCT = 0.01
 
 
 # ---------------------------------------------------------------------------
