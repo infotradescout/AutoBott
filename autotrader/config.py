@@ -140,6 +140,25 @@ PREFERRED_CORE_TICKERS = (
 MAX_NON_CORE_ENTRIES_PER_DAY        = 1
 NON_CORE_MIN_SIGNAL_SCORE           = 10.8
 
+# Volatility-adaptive risk sizing:
+# Uses scanner metrics (ATR%, RVOL, IV Rank) to classify each setup as
+# normal/high/extreme volatility and auto-adjust stop and premium exposure.
+ENABLE_VOLATILITY_ADAPTIVE_RISK     = True
+VOL_RISK_ATR_PCT_HIGH               = 2.0
+VOL_RISK_ATR_PCT_EXTREME            = 3.0
+VOL_RISK_RVOL_HIGH                  = 1.8
+VOL_RISK_RVOL_EXTREME               = 2.8
+VOL_RISK_IV_RANK_HIGH               = 70.0
+VOL_RISK_IV_RANK_EXTREME            = 85.0
+VOL_RISK_SCORE_HIGH                 = 3
+VOL_RISK_SCORE_EXTREME              = 5
+VOL_STOP_LOSS_MULT_HIGH             = 1.20
+VOL_STOP_LOSS_MULT_EXTREME          = 1.35
+VOL_PREMIUM_CAP_MULT_HIGH           = 0.85
+VOL_PREMIUM_CAP_MULT_EXTREME        = 0.70
+VOL_OPEN_PREMIUM_CAP_MULT_HIGH      = 0.90
+VOL_OPEN_PREMIUM_CAP_MULT_EXTREME   = 0.75
+
 
 # ---------------------------------------------------------------------------
 # Timing & session windows
@@ -285,6 +304,9 @@ IV_RANK_MAX               = 99.0
 
 ENABLE_SIGNAL_SCORING     = True
 MIN_SIGNAL_SCORE          = 5.8   # relaxed floor to increase opportunity flow
+VOLATILITY_PRIORITY_WEIGHT = 3.0  # make volatility the top signal driver
+TREND_PRIORITY_WEIGHT      = 1.0
+FLOW_PRIORITY_WEIGHT       = 1.0
 
 # Phase 3 enforcement knobs driven by review.py output.
 # Use blocked hours after you identify weak entry windows from analytics.

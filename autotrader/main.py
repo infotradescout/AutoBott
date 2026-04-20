@@ -164,6 +164,78 @@ def _quote_spread_pct(bid: float | None, ask: float | None) -> float:
     return ((ask_value - bid_value) / midpoint) * 100.0
 
 
+def _safe_signal_float(value, default: float = 0.0) -> float:
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError):
+        return float(default)
+    if math.isnan(parsed) or math.isinf(parsed):
+        return float(default)
+    return parsed
+
+
+def _signal_volatility_profile(signal: dict) -> dict[str, float | str | int]:
+    atr_pct = _safe_signal_float(signal.get("atr_pct"), 0.0)
+    rvol = _safe_signal_float(signal.get("rvol"), 0.0)
+    iv_rank_raw = signal.get("iv_rank")
+    iv_rank = _safe_signal_float(iv_rank_raw, -1.0)
+    iv_available = iv_rank >= 0.0
+
+    score = 0
+    atr_high = float(getattr(config, "VOL_RISK_ATR_PCT_HIGH", 2.0) or 2.0)
+    atr_extreme = float(getattr(config, "VOL_RISK_ATR_PCT_EXTREME", 3.0) or 3.0)
+    rvol_high = float(getattr(config, "VOL_RISK_RVOL_HIGH", 1.8) or 1.8)
+    rvol_extreme = float(getattr(config, "VOL_RISK_RVOL_EXTREME", 2.8) or 2.8)
+    iv_high = float(getattr(config, "VOL_RISK_IV_RANK_HIGH", 70.0) or 70.0)
+    iv_extreme = float(getattr(config, "VOL_RISK_IV_RANK_EXTREME", 85.0) or 85.0)
+
+    if atr_pct >= atr_high:
+        score += 1
+    if atr_pct >= atr_extreme:
+        score += 1
+    if rvol >= rvol_high:
+        score += 1
+    if rvol >= rvol_extreme:
+        score += 1
+    if iv_available and iv_rank >= iv_high:
+        score += 1
+    if iv_available and iv_rank >= iv_extreme:
+        score += 1
+
+    score_high = int(getattr(config, "VOL_RISK_SCORE_HIGH", 3) or 3)
+    score_extreme = int(getattr(config, "VOL_RISK_SCORE_EXTREME", 5) or 5)
+    label = "normal"
+    if score >= score_extreme:
+        label = "extreme"
+    elif score >= score_high:
+        label = "high"
+
+    stop_loss_mult = 1.0
+    premium_cap_mult = 1.0
+    opening_premium_cap_mult = 1.0
+    if bool(getattr(config, "ENABLE_VOLATILITY_ADAPTIVE_RISK", True)):
+        if label == "extreme":
+            stop_loss_mult = float(getattr(config, "VOL_STOP_LOSS_MULT_EXTREME", 1.35) or 1.35)
+            premium_cap_mult = float(getattr(config, "VOL_PREMIUM_CAP_MULT_EXTREME", 0.70) or 0.70)
+            opening_premium_cap_mult = float(getattr(config, "VOL_OPEN_PREMIUM_CAP_MULT_EXTREME", 0.75) or 0.75)
+        elif label == "high":
+            stop_loss_mult = float(getattr(config, "VOL_STOP_LOSS_MULT_HIGH", 1.20) or 1.20)
+            premium_cap_mult = float(getattr(config, "VOL_PREMIUM_CAP_MULT_HIGH", 0.85) or 0.85)
+            opening_premium_cap_mult = float(getattr(config, "VOL_OPEN_PREMIUM_CAP_MULT_HIGH", 0.90) or 0.90)
+
+    return {
+        "label": label,
+        "score": int(score),
+        "atr_pct": round(float(atr_pct), 4),
+        "rvol": round(float(rvol), 4),
+        "iv_rank": round(float(iv_rank), 4) if iv_available else -1.0,
+        "iv_available": int(iv_available),
+        "stop_loss_mult": float(stop_loss_mult),
+        "premium_cap_mult": float(premium_cap_mult),
+        "opening_premium_cap_mult": float(opening_premium_cap_mult),
+    }
+
+
 def _option_quote_snapshot(data_client: AlpacaDataClient, option_symbol: str) -> dict[str, float | None]:
     quote = data_client.get_latest_option_quote(option_symbol)
     bid_raw = quote.get("bid")
@@ -2897,7 +2969,12 @@ def main():
                 )
                 signal_strategy_profile = str(signal.get("strategy_profile", "") or "generic")
                 signal_entry_max_spread = signal.get("entry_max_quote_spread_pct")
-                signal_stop_loss_usd = float(signal.get("stop_loss_usd", _runtime_stop_loss_usd()) or _runtime_stop_loss_usd())
+                volatility_profile = _signal_volatility_profile(signal)
+                base_signal_stop_loss_usd = float(signal.get("stop_loss_usd", _runtime_stop_loss_usd()) or _runtime_stop_loss_usd())
+                signal_stop_loss_usd = round(
+                    max(1.0, base_signal_stop_loss_usd * float(volatility_profile["stop_loss_mult"])),
+                    2,
+                )
                 signal_take_profit_pct = float(
                     signal.get("immediate_take_profit_pct", getattr(config, "IMMEDIATE_TAKE_PROFIT_PCT", 1.0))
                     or getattr(config, "IMMEDIATE_TAKE_PROFIT_PCT", 1.0)
@@ -2957,7 +3034,10 @@ def main():
 
                 qty = 1
                 trade_premium_usd = ask_price * qty * 100.0
-                max_trade_premium = float(getattr(config, "MAX_PREMIUM_PER_TRADE_USD", 150.0) or 150.0)
+                volatility_premium_mult = max(0.1, float(volatility_profile["premium_cap_mult"]))
+                volatility_opening_premium_mult = max(0.1, float(volatility_profile["opening_premium_cap_mult"]))
+                max_trade_premium_base = float(getattr(config, "MAX_PREMIUM_PER_TRADE_USD", 150.0) or 150.0)
+                max_trade_premium = max(25.0, max_trade_premium_base * volatility_premium_mult)
                 premium_override_ok = False
                 premium_override_reason = ""
                 if trade_premium_usd > max_trade_premium:
@@ -2980,7 +3060,8 @@ def main():
                     )
 
                 total_open_premium = _current_open_premium_usd(option_positions, open_trade_meta)
-                max_total_open_premium = float(getattr(config, "MAX_TOTAL_OPEN_PREMIUM_USD", 600.0) or 600.0)
+                max_total_open_premium_base = float(getattr(config, "MAX_TOTAL_OPEN_PREMIUM_USD", 600.0) or 600.0)
+                max_total_open_premium = max(75.0, max_total_open_premium_base * volatility_premium_mult)
                 if (total_open_premium + trade_premium_usd) > max_total_open_premium:
                     _mark_skip("total_open_premium_cap")
                     _mark_stage4_reject(reason="total_open_premium_cap", ticker=ticker)
@@ -2993,7 +3074,8 @@ def main():
                 expensive_symbols = set(str(s).upper() for s in getattr(config, "EXPENSIVE_PREMIUM_SYMBOLS", ()))
                 is_expensive_symbol = ticker in expensive_symbols
                 if _is_in_opening_strict_window(now_et):
-                    opening_premium_cap = float(getattr(config, "OPENING_MAX_FRESH_PREMIUM_USD", 300.0) or 300.0)
+                    opening_premium_cap_base = float(getattr(config, "OPENING_MAX_FRESH_PREMIUM_USD", 300.0) or 300.0)
+                    opening_premium_cap = max(75.0, opening_premium_cap_base * volatility_opening_premium_mult)
 
                     # In opening strict mode, expensive names are blocked unless
                     # they are core names or fit an extra-tight premium budget.
@@ -3039,6 +3121,18 @@ def main():
                             f"[{ts(now_et)}] {ticker}: opening expensive-name cap override accepted "
                             f"({opening_expensive_entries_today_count}/{opening_expensive_cap})."
                         )
+
+                if str(volatility_profile.get("label", "normal")) != "normal":
+                    iv_rank_text = "n/a"
+                    if int(volatility_profile.get("iv_available", 0) or 0):
+                        iv_rank_text = f"{float(volatility_profile.get('iv_rank', 0.0) or 0.0):.1f}"
+                    print(
+                        f"[{ts(now_et)}] {ticker}: volatility={volatility_profile.get('label')} "
+                        f"(score={int(volatility_profile.get('score', 0) or 0)}, "
+                        f"atr={float(volatility_profile.get('atr_pct', 0.0) or 0.0):.2f}%, "
+                        f"rvol={float(volatility_profile.get('rvol', 0.0) or 0.0):.2f}, ivr={iv_rank_text}) "
+                        f"-> stop=${signal_stop_loss_usd:.2f}, trade cap=${max_trade_premium:.2f}."
+                    )
 
                 initial_chain_ask = float(contract.get("ask_price", ask_price) or ask_price)
                 pre_submit_slippage = _slippage_pct(initial_chain_ask, ask_price)
@@ -3158,6 +3252,11 @@ def main():
                     "roc": round(float(signal.get("roc", 0.0) or 0.0), 4),
                     "iv_rank": round(float(signal.get("iv_rank", 0.0) or 0.0), 4),
                     "contract_spread_pct": round(float(entry_result.get("submit_spread_pct", 0.0) or 0.0), 4),
+                    "atr_pct": round(float(volatility_profile.get("atr_pct", 0.0) or 0.0), 4),
+                    "volatility_regime": str(volatility_profile.get("label", "normal") or "normal"),
+                    "volatility_score": int(volatility_profile.get("score", 0) or 0),
+                    "volatility_stop_loss_mult": round(float(volatility_profile.get("stop_loss_mult", 1.0) or 1.0), 4),
+                    "volatility_premium_cap_mult": round(float(volatility_profile.get("premium_cap_mult", 1.0) or 1.0), 4),
                     "entry_bid_submit": entry_result.get("submit_bid"),
                     "entry_ask_submit": entry_result.get("submit_ask"),
                     "entry_midpoint_submit": entry_result.get("submit_midpoint"),

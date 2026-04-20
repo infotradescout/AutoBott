@@ -32,6 +32,7 @@ SCAN_LOG_COLUMNS = [
     "rsi",
     "roc",
     "iv_rank",
+    "volatility_score",
     "regime_score",
     "signal_score",
     "flow_score",
@@ -362,19 +363,36 @@ def _combined_signal_score(
     roc: float,
     iv_rank: float,
     regime_score: float,
+    volatility_score: float,
+    flow_score: float | None = None,
     ema_aligned: bool = True,
 ) -> float:
-    score = 0.0
-    score += min(2.0, max(0.0, rvol / 2.0))
-    score += min(1.5, max(0.0, atr_pct / 2.0))
-    score += min(1.5, max(0.0, abs(roc) / 1.5))
-    iv_center_distance = abs(iv_rank - 40.0)
-    score += max(0.0, 1.0 - (iv_center_distance / 40.0))
-    score += min(5.0, max(0.0, regime_score))
-    # EMA alignment is a bonus, not a blocker
+    vol_weight = float(getattr(config, "VOLATILITY_PRIORITY_WEIGHT", 3.0) or 3.0)
+    trend_weight = float(getattr(config, "TREND_PRIORITY_WEIGHT", 1.0) or 1.0)
+    flow_weight = float(getattr(config, "FLOW_PRIORITY_WEIGHT", 1.0) or 1.0)
+
+    trend_component = 0.0
+    trend_component += min(2.0, max(0.0, abs(roc) / 1.5))
+    trend_component += min(5.0, max(0.0, regime_score))
     if ema_aligned:
-        score += 1.0
+        trend_component += 1.0
+
+    # Keep flow bounded so it cannot dominate volatility.
+    flow_component = 0.0
+    if flow_score is not None:
+        flow_component = min(1.0, max(0.0, (float(flow_score) + 1.0) / 2.0))
+
+    score = (vol_weight * float(volatility_score)) + (trend_weight * trend_component) + (flow_weight * flow_component)
     return round(score, 2)
+
+
+def _volatility_priority_score(rvol: float, atr_pct: float, iv_rank: float | None) -> float:
+    rvol_component = min(4.0, max(0.0, float(rvol) * 1.2))
+    atr_component = min(4.0, max(0.0, float(atr_pct) * 1.1))
+    iv_component = 0.0
+    if iv_rank is not None:
+        iv_component = min(2.0, max(0.0, float(iv_rank) / 50.0))
+    return round(rvol_component + atr_component + iv_component, 2)
 
 
 def _htf_trend_confirmation(
@@ -753,12 +771,20 @@ def _scan_ticker_details(
             f"historical regime score {regime_score:.2f} below {config.MIN_HISTORICAL_REGIME_SCORE:.2f}"
         )
 
+    volatility_score = _volatility_priority_score(
+        rvol=float(rvol),
+        atr_pct=float(atr_pct),
+        iv_rank=(float(iv_rank) if iv_rank is not None else None),
+    )
+
     signal_score = _combined_signal_score(
         rvol=float(rvol),
         atr_pct=float(atr_pct),
         roc=float(roc),
         iv_rank=iv_rank_for_score,
         regime_score=float(regime_score),
+        volatility_score=float(volatility_score),
+        flow_score=flow_score,
         ema_aligned=ema_aligned,
     )
 
@@ -786,12 +812,13 @@ def _scan_ticker_details(
         "iv": round(iv_value, 4) if iv_value is not None else None,
         "iv_rank": round(float(iv_rank), 2) if iv_rank is not None else None,
         "regime_score": round(regime_score, 2),
+        "volatility_score": round(volatility_score, 2),
         "signal_score": round(signal_score, 2),
         "flow_score": round(flow_score, 4) if flow_score is not None else None,
         "htf_reason": htf_reason,
         "reason": (
             f"RVOL {rvol:.1f}x | {above_below} | Dir {direction_score:+.2f} [{vote_log}] | {ema_note} | "
-            f"ROC {roc:+.2f}% | {ivr_reason_text} | Regime {regime_score:.2f} | "
+            f"ROC {roc:+.2f}% | {ivr_reason_text} | Vol {volatility_score:.2f} | Regime {regime_score:.2f} | "
             f"Flow {(flow_score if flow_score is not None else 0):+.2f} | Score {signal_score:.2f}"
         ) + (f" | Catalyst {_CATALYST_MODE_REASON}" if _CATALYST_MODE_ACTIVE and _CATALYST_MODE_REASON else ""),
         "regime_reason": regime_reason,
@@ -1112,11 +1139,13 @@ class IntradayScanner:
                 by_symbol[symbol] = item
                 continue
             left = (
+                float(item.get("volatility_score", 0.0) or 0.0),
                 float(item.get("signal_score", 0.0) or 0.0),
                 -int(item.get("profile_priority", 99) or 99),
                 float(item.get("rvol", 0.0) or 0.0),
             )
             right = (
+                float(current.get("volatility_score", 0.0) or 0.0),
                 float(current.get("signal_score", 0.0) or 0.0),
                 -int(current.get("profile_priority", 99) or 99),
                 float(current.get("rvol", 0.0) or 0.0),
@@ -1128,6 +1157,7 @@ class IntradayScanner:
         if premarket_mode:
             passed.sort(
                 key=lambda item: (
+                    float(item.get("volatility_score", 0.0) or 0.0),
                     float(item.get("signal_score", 0.0) or 0.0),
                     float(item.get("rvol", 0.0) or 0.0),
                 ),
@@ -1136,6 +1166,7 @@ class IntradayScanner:
         else:
             passed.sort(
                 key=lambda item: (
+                    float(item.get("volatility_score", 0.0) or 0.0),
                     float(item.get("signal_score", 0.0) or 0.0),
                     float(item.get("rvol", 0.0) or 0.0),
                 ),
@@ -1155,7 +1186,8 @@ class IntradayScanner:
             print(
                 f"  + {item['symbol']:<5} | {str(item.get('strategy_profile', 'base')):<18} | "
                 f"{item['direction'].upper():<4} | RVOL {item['rvol']:.1f}x | "
-                f"RSI {item['rsi']:.0f} | ROC {item['roc']:+.1f}% | IVR {ivr_print} | {vwap_side}"
+                f"RSI {item['rsi']:.0f} | ROC {item['roc']:+.1f}% | IVR {ivr_print} | "
+                f"VOL {float(item.get('volatility_score', 0.0) or 0.0):.2f} | {vwap_side}"
             )
         for item in failed[:8]:
             print(f"  - {item['symbol']:<5} | failed: {item['reason']}")
@@ -1183,6 +1215,7 @@ class IntradayScanner:
                         "rsi": item.get("rsi", ""),
                         "roc": item.get("roc", ""),
                         "iv_rank": item.get("iv_rank", ""),
+                        "volatility_score": item.get("volatility_score", ""),
                         "regime_score": item.get("regime_score", ""),
                         "signal_score": item.get("signal_score", ""),
                         "flow_score": item.get("flow_score", ""),
@@ -1202,6 +1235,7 @@ class IntradayScanner:
                         "rsi": "",
                         "roc": "",
                         "iv_rank": "",
+                        "volatility_score": "",
                         "regime_score": "",
                         "signal_score": "",
                         "flow_score": "",
