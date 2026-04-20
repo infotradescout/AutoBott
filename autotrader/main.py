@@ -1411,6 +1411,8 @@ def main():
     state = load_bot_state()
     open_trade_meta: dict[str, dict] = dict(state.get("open_trade_meta") or {})
     watchlist: list[str] = []
+    _watchlist_last_built_at: float = 0.0
+    _WATCHLIST_REBUILD_INTERVAL = 300  # rebuild universe every 5 minutes, not every loop
     observation_done = bool(state.get("observation_done", False))
     hot_tickers: list[str] = list(state.get("hot_tickers") or [])
     entry_times_rolling: list[datetime] = [
@@ -2356,7 +2358,10 @@ def main():
 
         watchlist_control_state = load_watchlist_control()
         watchlist_mode = str(watchlist_control_state.get("mode", "off") or "off").lower()
-        watchlist = _build_scan_universe(data_client)
+        _now_ts = time.time()
+        if not watchlist or (_now_ts - _watchlist_last_built_at) >= _WATCHLIST_REBUILD_INTERVAL:
+            watchlist = _build_scan_universe(data_client)
+            _watchlist_last_built_at = _now_ts
         watchlist = _apply_watchlist_mode(watchlist, watchlist_control_state)
         if hot_tickers:
             watchlist = hot_tickers + [s for s in watchlist if s not in hot_tickers]

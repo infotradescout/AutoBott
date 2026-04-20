@@ -83,10 +83,10 @@ CORE_TICKERS = [
 ]
 
 AUTO_EXPAND_UNIVERSE_WITH_MOVERS = True
-UNIVERSE_MOVER_TOP                = 50
-UNIVERSE_MAX_TICKERS              = 300
-SCREENER_TOP_N                    = 100
-MOVER_SYMBOLS_PER_SIDE            = 40
+UNIVERSE_MOVER_TOP                = 20
+UNIVERSE_MAX_TICKERS              = 60   # smaller universe = faster scan loop
+SCREENER_TOP_N                    = 30
+MOVER_SYMBOLS_PER_SIDE            = 15
 MIN_SHARE_PRICE                   = 10
 MAX_SHARE_PRICE                   = 2000
 
@@ -202,7 +202,7 @@ PREMARKET_SCAN_INTERVAL_SECONDS    = 120
 PREMARKET_SCAN_MAX_RUNS            = 0
 
 # Poll every 15 seconds for fast exit response on scalp trades
-LOOP_INTERVAL_SECONDS              = 10   # faster loop for 0-2DTE monitoring
+LOOP_INTERVAL_SECONDS              = 30   # 30s loop: fast enough for 0-2DTE, avoids stale heartbeat
 
 # Allow trades to run up to 90 min — trailing stop exits winners well before this
 MAX_HOLD_MINUTES                   = 60    # intraday scalp: max 60-min hold
@@ -480,11 +480,11 @@ ENABLE_STOPLOSS_REVERSAL_REENTRY = False
 
 EASTERN_TZ                         = "US/Eastern"
 CENTRAL_TZ                         = "US/Central"
-RATE_LIMIT_SLEEP_SECONDS           = 0.3
+RATE_LIMIT_SLEEP_SECONDS           = 0.1   # faster API pacing
 CLOSED_MIN_SLEEP_SECONDS           = 60
 CLOSED_MAX_SLEEP_SECONDS           = 900
 MANUAL_PAUSE_SLEEP_SECONDS         = 30
-HEARTBEAT_SECONDS                  = 300
+HEARTBEAT_SECONDS                  = 60    # heartbeat every 60s
 ALERT_COOLDOWN_SECONDS             = 300
 ENTRY_ORDER_STATUS_WAIT_SECONDS    = 8
 ENTRY_RETRY_STATUS_WAIT_SECONDS    = 5
