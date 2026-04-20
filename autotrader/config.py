@@ -202,7 +202,7 @@ PREMARKET_SCAN_INTERVAL_SECONDS    = 120
 PREMARKET_SCAN_MAX_RUNS            = 0
 
 # Poll every 15 seconds for fast exit response on scalp trades
-LOOP_INTERVAL_SECONDS              = 30   # 30s loop: fast enough for 0-2DTE, avoids stale heartbeat
+LOOP_INTERVAL_SECONDS              = 45   # 45s: stale threshold = max(60, 45*4)=180s; HTF results cached 5min so loop stays well under threshold
 
 # Allow trades to run up to 90 min — trailing stop exits winners well before this
 MAX_HOLD_MINUTES                   = 60    # intraday scalp: max 60-min hold

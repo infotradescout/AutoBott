@@ -396,11 +396,22 @@ def _volatility_priority_score(rvol: float, atr_pct: float, iv_rank: float | Non
     return round(rvol_component + atr_component + iv_component, 2)
 
 
+# Cache HTF results for 5 minutes to avoid one API call per ticker per loop.
+# Without this, 150 tickers × ~1s per HTF call = 150s per loop → loop stale.
+_HTF_CACHE: dict[str, tuple[float, bool, str]] = {}  # symbol -> (expiry_ts, ok, reason)
+_HTF_CACHE_TTL_SECONDS = 300  # 5 minutes
+
+
 def _htf_trend_confirmation(
     symbol: str,
     direction: str,
     data_client: AlpacaDataClient,
 ) -> tuple[bool, str]:
+    import time as _time
+    cache_key = f"{symbol}:{direction}"
+    cached = _HTF_CACHE.get(cache_key)
+    if cached is not None and _time.monotonic() < cached[0]:
+        return cached[1], cached[2] + " (cached)"
     bars = data_client.get_stock_bars(
         symbol=symbol,
         limit=max(20, int(config.HTF_LOOKBACK_BARS)),
@@ -426,6 +437,9 @@ def _htf_trend_confirmation(
         ok = last_ema9 < last_ema21 and slope_pct <= 0
     relation = "above" if last_ema9 > last_ema21 else "below"
     reason = f"HTF ema9 {relation} ema21, ema21_slope={slope_pct:+.2f}%"
+    # Write to cache so subsequent tickers in the same loop use the cached result.
+    import time as _time
+    _HTF_CACHE[f"{symbol}:{direction}"] = (_time.monotonic() + _HTF_CACHE_TTL_SECONDS, ok, reason)
     return ok, reason
 
 
