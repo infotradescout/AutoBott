@@ -299,6 +299,8 @@ MOVEMENT_WEAK_VWAP_MULT   = 1.00  # was effectively 1.5 in scanner; only block w
 # Direction conviction: minimum weighted-vote score to commit to call/put.
 # 0.0 = any majority; 0.5 = strongly one-sided required.
 DIRECTION_CONVICTION_MIN  = 0.25  # require clearer directional consensus
+DIRECTION_MIN_ALIGNED_VOTES = 3   # require at least N directional votes to agree
+DIRECTION_FAST_ROC_PERIOD  = 5    # short-horizon ROC used in directional voting
 
 ROC_PERIOD                = 10
 ROC_BULL_MIN              = 0.05  # lowered from 0.12 — weak momentum is still momentum

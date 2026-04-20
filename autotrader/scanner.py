@@ -632,17 +632,25 @@ def _scan_ticker_details(
 
     above_vwap = price > vwap
 
-    # Simple direction model: anchor to VWAP side, confirm with momentum,
-    # and use EMA only as a light tiebreaker to keep responsiveness high.
-    roc_early = calculate_roc(closes, period=config.ROC_PERIOD)
+    # Direction model: combine VWAP side, fast/slow momentum, and EMA structure.
+    roc_period = max(2, int(getattr(config, "ROC_PERIOD", 10) or 10))
+    fast_roc_period = max(2, int(getattr(config, "DIRECTION_FAST_ROC_PERIOD", 5) or 5))
+    roc_early = calculate_roc(closes, period=roc_period)
+    roc_fast = calculate_roc(closes, period=fast_roc_period)
     ema9_pre = closes.ewm(span=9, adjust=False).mean()
     ema21_pre = closes.ewm(span=21, adjust=False).mean()
 
     vwap_vote = 1.0 if above_vwap else -1.0
     roc_vote = 0.0 if math.isnan(roc_early) or abs(roc_early) < 0.01 else (1.0 if roc_early > 0 else -1.0)
+    roc_fast_vote = 0.0 if math.isnan(roc_fast) or abs(roc_fast) < 0.01 else (1.0 if roc_fast > 0 else -1.0)
     ema_vote = 0.0
+    ema_slope_vote = 0.0
     if len(ema9_pre) >= 3 and len(ema21_pre) >= 3:
         ema_vote = 1.0 if ema9_pre.iloc[-1] > ema21_pre.iloc[-1] else -1.0
+    if len(ema21_pre) >= 6:
+        ema_slope = float(ema21_pre.iloc[-1] - ema21_pre.iloc[-5])
+        if abs(ema_slope) >= 1e-9:
+            ema_slope_vote = 1.0 if ema_slope > 0 else -1.0
 
     movement_force_min = float(getattr(config, "MOVEMENT_FORCE_MIN_PCT", 0.03) or 0.03)
     weak_vwap_mult = float(getattr(config, "MOVEMENT_WEAK_VWAP_MULT", 1.5) or 1.5)
@@ -650,21 +658,47 @@ def _scan_ticker_details(
         return _scan_failure(f"movement too weak (ROC {roc_early:+.2f}%, VWAP dist {distance_pct:.2f}%)")
 
     vwap_weight = 0.50 if vwap_neutral else 1.00
-    direction_bias = (vwap_weight * vwap_vote) + (1.10 * roc_vote) + (0.40 * ema_vote)
-    direction_score = max(-1.0, min(1.0, direction_bias / 2.2))
+    direction_weights = {
+        "vwap": float(vwap_weight),
+        "roc": 1.10,
+        "roc_fast": 0.90,
+        "ema_cross": 0.50,
+        "ema_slope": 0.50,
+    }
+    direction_bias = (
+        (direction_weights["vwap"] * vwap_vote)
+        + (direction_weights["roc"] * roc_vote)
+        + (direction_weights["roc_fast"] * roc_fast_vote)
+        + (direction_weights["ema_cross"] * ema_vote)
+        + (direction_weights["ema_slope"] * ema_slope_vote)
+    )
+    total_direction_weight = sum(direction_weights.values())
+    direction_score = max(-1.0, min(1.0, direction_bias / total_direction_weight))
     direction = "call" if direction_bias >= 0 else "put"
+    required_conviction = max(0.0, float(getattr(config, "DIRECTION_CONVICTION_MIN", 0.25) or 0.25))
+    if abs(direction_score) < required_conviction:
+        return _scan_failure(
+            f"direction conviction weak ({direction_score:+.2f} < {required_conviction:.2f})"
+        )
 
-    # If momentum is clearly opposite, follow momentum rather than reject outright.
-    if not math.isnan(roc_early) and abs(float(roc_early)) >= 0.15:
-        if roc_early > 0:
-            direction = "call"
-        elif roc_early < 0:
-            direction = "put"
+    vote_values = [vwap_vote, roc_vote, roc_fast_vote, ema_vote, ema_slope_vote]
+    aligned_votes = sum(
+        1
+        for vote in vote_values
+        if vote != 0.0 and ((direction == "call" and vote > 0.0) or (direction == "put" and vote < 0.0))
+    )
+    min_aligned_votes = max(2, int(getattr(config, "DIRECTION_MIN_ALIGNED_VOTES", 3) or 3))
+    if aligned_votes < min_aligned_votes:
+        return _scan_failure(
+            f"direction vote alignment weak ({aligned_votes}/{len(vote_values)}<{min_aligned_votes})"
+        )
 
     direction_votes: list[tuple[str, float, float]] = [
-        ("vwap", vwap_weight, vwap_vote),
-        ("roc", 1.1, roc_vote),
-        ("ema", 0.4, ema_vote),
+        ("vwap", direction_weights["vwap"], vwap_vote),
+        ("roc", direction_weights["roc"], roc_vote),
+        ("roc_fast", direction_weights["roc_fast"], roc_fast_vote),
+        ("ema_cross", direction_weights["ema_cross"], ema_vote),
+        ("ema_slope", direction_weights["ema_slope"], ema_slope_vote),
     ]
 
     htf_reason = ""
