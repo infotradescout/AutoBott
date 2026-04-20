@@ -3489,7 +3489,11 @@ def main():
             if exit_reason is None and should_force_same_day_exit(entry_time, now_et):
                 exit_reason = "overnight_forced_close"
             # Rule 1: fixed-dollar stop loss
-            stop_loss_usd_cap = float(meta.get("stop_loss_usd", _runtime_stop_loss_usd()) or _runtime_stop_loss_usd())
+            # Always use the MINIMUM of the stored meta value and the current runtime value.
+            # This ensures that when config is tightened, existing positions get the tighter stop immediately.
+            _meta_sl = float(meta.get("stop_loss_usd") or 0)
+            _runtime_sl = _runtime_stop_loss_usd()
+            stop_loss_usd_cap = min(_meta_sl, _runtime_sl) if _meta_sl > 0 else _runtime_sl
             if exit_reason is None and should_trigger_stop_loss(unrealized_usd, stop_loss_usd_cap):
                 exit_reason = "stop_loss"
 

@@ -114,16 +114,16 @@ RISK_PER_TRADE_PCT                  = 0.025
 MAX_POSITION_SIZE_USD               = 150.0
 DRAWDOWN_REDUCE_AFTER_CONSEC_LOSSES = 2
 DRAWDOWN_SIZE_MULTIPLIER            = 0.75
-DAILY_LOSS_LIMIT_USD                = 150.0 # 2.5% daily max drawdown — hard stop for the day
-WEEKLY_LOSS_LIMIT_USD               = 450.0 # 7.5% weekly max drawdown
-CONSECUTIVE_LOSS_LIMIT              = 3     # stop after 3 consecutive losses, reassess
+DAILY_LOSS_LIMIT_USD                = 100.0 # 1.7% daily max drawdown — hard stop for the day
+WEEKLY_LOSS_LIMIT_USD               = 300.0 # 5% weekly max drawdown
+CONSECUTIVE_LOSS_LIMIT              = 2     # stop after 2 consecutive losses, reassess
 # Net P&L circuit breaker (runtime telemetry-based):
 # Pause new entries once the day is sufficiently red in realized net P&L.
-INTRADAY_NET_LOSS_LIMIT_USD         = 150.0  # halt new entries if down $150 on the day
+INTRADAY_NET_LOSS_LIMIT_USD         = 100.0  # halt new entries if down $100 on the day
 # Early-red guard: stop new entries if still net red after first few trades.
 EARLY_RED_GUARD_ENABLED             = True
 EARLY_RED_GUARD_MIN_CLOSED_TRADES   = 3
-EARLY_RED_GUARD_MAX_NET_PNL_USD     = -75.0  # halt if down $75 after first 3 trades
+EARLY_RED_GUARD_MAX_NET_PNL_USD     = -50.0  # halt if down $50 after first 3 trades
 
 # Loss throttle: after 2 consecutive losses, require stronger setups.
 LOSS_THROTTLE_AFTER_CONSEC_LOSSES   = 2
@@ -131,9 +131,9 @@ LOSS_THROTTLE_SIGNAL_SCORE_ADD      = 1.5   # require score 7.0+ after 2 losses
 LOSS_THROTTLE_MIN_VOLATILITY_SCORE  = 0.0
 
 # Capital doctrine: $150 max per trade, $450 max total open at once (3 positions × $150).
-MAX_PREMIUM_PER_TRADE_USD           = 150.0  # max $1.50/share × 100 = $150 per contract
-MAX_TOTAL_OPEN_PREMIUM_USD          = 450.0  # 3 positions × $150
-OPENING_MAX_FRESH_PREMIUM_USD       = 300.0  # 2 positions in the opening window
+MAX_PREMIUM_PER_TRADE_USD           = 100.0  # max $1.00/share × 100 = $100 per contract
+MAX_TOTAL_OPEN_PREMIUM_USD          = 300.0  # 3 positions × $100
+OPENING_MAX_FRESH_PREMIUM_USD       = 200.0  # 2 positions in the opening window
 MAX_SAME_DIRECTION_POSITIONS        = 2      # max 2 calls or 2 puts at once
 
 # Disable premium override — never allow expensive trades on a $6k account.
@@ -234,10 +234,10 @@ OPENING_EXPENSIVE_MAX_PREMIUM_USD            = 220.0
 # Stop loss & trailing exit ladder
 # ---------------------------------------------------------------------------
 
-# Stop loss wide enough to survive bid/ask spread noise on cheap options.
-# Options fluctuate 8-15% just from the spread; a 5% stop fires immediately.
-STOP_LOSS_USD          = 150.0  # 25% of $600 position — give trades room to breathe
-STOP_LOSS_PCT          = 0.25   # 25% hard stop (options need wide stops)
+# Stop loss: $35 per trade = 35% of $100 max premium.
+# Wide enough to survive bid/ask spread noise (~10%), tight enough to cut losers fast.
+STOP_LOSS_USD          = 35.0   # 35% of $100 max premium — cut losers before they become disasters
+STOP_LOSS_PCT          = 0.35   # 35% hard stop
 
 # Legacy immediate TP knob retained for backward compatibility only.
 # Stateful manager (protect -> bank/qualify -> runner) is now primary.
@@ -431,12 +431,13 @@ OPENING_FAST_START_MIN_VWAP_DISTANCE_PCT = 0.0
 
 MIN_OPTION_OPEN_INTEREST          = 10   # lowered from 25 — TSLA/MSFT were at 24/25 OI
 MIN_OPTION_DAILY_VOLUME           = 3    # lowered from 5
-MIN_OPTION_PREMIUM_USD            = 0.50  # avoid cheap options with huge bid/ask spreads
+MIN_OPTION_PREMIUM_USD            = 0.60  # avoid cheap options with huge bid/ask spreads (min $60/contract)
 MAX_OPTION_SPREAD_PCT             = 15.0  # tighter spread gate: reject wide-spread contracts
 ENABLE_OPTION_LIQUIDITY_RELAX     = True
 OPTION_CONTRACTS_ALLOW_LIVE_FALLBACK = False
-MIN_DTE_TRADING_DAYS              = 0    # allow same-day (0DTE) entries
+MIN_DTE_TRADING_DAYS              = 0    # allow same-day (0DTE) entries (morning only — see NO_NEW_0DTE_AFTER)
 MAX_DTE_TRADING_DAYS              = 2    # intraday focus: 0, 1, or 2 DTE only
+NO_NEW_0DTE_AFTER                 = "11:30"  # CRITICAL: no new 0DTE entries after 11:30am — theta decay accelerates
 MIN_OPTION_OPEN_INTEREST_0DTE     = 50    # 0DTE needs decent liquidity
 ENABLE_DELTA_TARGETING            = True
 TARGET_DELTA_MIN                  = 0.35  # slightly OTM: cheaper premium, better R:R for scalping

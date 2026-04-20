@@ -147,7 +147,20 @@ def select_atm_option_contract_with_reason(
 
     now_et = now_et or datetime.now(pytz.timezone(config.EASTERN_TZ))
     today = now_et.date()
-    expiry_floor = _add_trading_days(today, config.MIN_DTE_TRADING_DAYS)
+
+    # 0DTE time gate: after NO_NEW_0DTE_AFTER, theta decay accelerates — only allow 1DTE+.
+    _no_0dte_after = str(getattr(config, "NO_NEW_0DTE_AFTER", "11:30") or "11:30")
+    _now_hhmm = now_et.strftime("%H:%M")
+    _min_dte = int(getattr(config, "MIN_DTE_TRADING_DAYS", 0) or 0)
+    if _min_dte == 0 and _now_hhmm >= _no_0dte_after:
+        # Past the 0DTE cutoff — force minimum 1DTE to avoid theta decay trap
+        _min_dte = 1
+        print(
+            f"[options] 0DTE blocked after {_no_0dte_after} ET (now {_now_hhmm}): "
+            f"forcing MIN_DTE=1 for {underlying_symbol} {direction}"
+        )
+
+    expiry_floor = _add_trading_days(today, _min_dte)
     expiry_ceiling = _add_trading_days(today, config.MAX_DTE_TRADING_DAYS)
 
     contracts = data_client.get_option_contracts(
