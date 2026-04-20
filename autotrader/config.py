@@ -106,12 +106,12 @@ SCAN_DAILY_BARS     = 30
 # Position sizing & risk
 # ---------------------------------------------------------------------------
 
-# $6000 account: max 3 concurrent positions, 2.5% of account per trade = $150 max premium.
-# Single contract on a $5 option = $500 = 8.3% of account. That is too much for intraday scalping.
+# $6000 account: max 3 concurrent positions, 1.7% of account per trade = $100 max premium.
+# Single contract on a $1 option = $100 = 1.7% of account. Tight enough to survive 3 consecutive stops.
 MAX_POSITIONS                       = 3     # hard cap: never hold more than 3 options at once
-POSITION_SIZE_USD                   = 150   # 2.5% of $6000 account per trade
-RISK_PER_TRADE_PCT                  = 0.025
-MAX_POSITION_SIZE_USD               = 150.0
+POSITION_SIZE_USD                   = 100   # 1.7% of $6000 account per trade
+RISK_PER_TRADE_PCT                  = 0.017
+MAX_POSITION_SIZE_USD               = 100.0  # aligned with MAX_PREMIUM_PER_TRADE_USD
 DRAWDOWN_REDUCE_AFTER_CONSEC_LOSSES = 2
 DRAWDOWN_SIZE_MULTIPLIER            = 0.75
 DAILY_LOSS_LIMIT_USD                = 100.0 # 1.7% daily max drawdown — hard stop for the day
@@ -128,7 +128,7 @@ EARLY_RED_GUARD_MAX_NET_PNL_USD     = -50.0  # halt if down $50 after first 3 tr
 # Loss throttle: after 2 consecutive losses, require stronger setups.
 LOSS_THROTTLE_AFTER_CONSEC_LOSSES   = 2
 LOSS_THROTTLE_SIGNAL_SCORE_ADD      = 1.5   # require score 7.0+ after 2 losses
-LOSS_THROTTLE_MIN_VOLATILITY_SCORE  = 0.0
+LOSS_THROTTLE_MIN_VOLATILITY_SCORE  = 1.5  # after 2 losses require volatility_score >= 1.5 (low bar but not zero)
 
 # Capital doctrine: $150 max per trade, $450 max total open at once (3 positions × $150).
 MAX_PREMIUM_PER_TRADE_USD           = 100.0  # max $1.00/share × 100 = $100 per contract
@@ -222,12 +222,12 @@ OPENING_STRICT_MIN_RVOL                      = 0.0
 OPENING_STRICT_MIN_ROC_PCT                   = 0.0
 OPENING_STRICT_MIN_VWAP_DISTANCE_PCT         = 0.0
 OPENING_MAX_SIGNAL_CANDIDATES                = 3
-OPENING_MAX_FRESH_ENTRIES                    = 999
-OPENING_MAX_CONCURRENT_POSITIONS             = 999
-OPENING_MAX_NEW_ENTRY_ATTEMPTS_PER_LOOP      = 5
-MAX_NEW_ENTRY_ATTEMPTS_PER_LOOP              = 5
-OPENING_MAX_EXPENSIVE_ENTRIES                = 999
-OPENING_EXPENSIVE_MAX_PREMIUM_USD            = 220.0
+OPENING_MAX_FRESH_ENTRIES                    = 2    # max 2 fresh entries in the opening window
+OPENING_MAX_CONCURRENT_POSITIONS             = 2    # max 2 concurrent positions in opening window
+OPENING_MAX_NEW_ENTRY_ATTEMPTS_PER_LOOP      = 3
+MAX_NEW_ENTRY_ATTEMPTS_PER_LOOP              = 3
+OPENING_MAX_EXPENSIVE_ENTRIES                = 0    # no expensive entries in opening window on $6k account
+OPENING_EXPENSIVE_MAX_PREMIUM_USD            = 100.0  # same cap as regular trades
 
 
 # ---------------------------------------------------------------------------
@@ -290,12 +290,12 @@ REVERSAL_CONFIRM_SIGNALS     = 2      # require 2 of 3 signals to confirm revers
 # Scanner thresholds
 # ---------------------------------------------------------------------------
 
-RVOL_MIN                  = 0.35  # accept low-volume setups
-OPENING_RVOL_MIN          = 0.20
+RVOL_MIN                  = 0.60  # raised: require real relative volume — 0.6x minimum all day
+OPENING_RVOL_MIN          = 0.40  # opening window slightly relaxed
 RVOL_STRICT_UNTIL         = "10:30"
 RVOL_RELAX_AFTER          = "10:00"
-RVOL_RELAXED_MIN          = 0.25
-RVOL_IGNORE_AFTER         = "10:30"
+RVOL_RELAXED_MIN          = 0.50  # relaxed floor after 10am — still requires meaningful volume
+RVOL_IGNORE_AFTER         = "16:00"  # CRITICAL FIX: was 10:30 — never fully disable RVOL gate
 ATR_PCT_MIN               = 0.3   # very low ATR floor — don't filter out ETFs
 VWAP_NEUTRAL_BAND_PCT     = 0.15  # wider neutral band: within 0.15% of VWAP = neutral, halve VWAP vote weight
 MOVEMENT_FORCE_MIN_PCT    = 0.02  # was 0.03 (scanner default); allow borderline tape to be evaluated
@@ -325,7 +325,7 @@ IV_RANK_MIN               = 0.0   # no minimum IV rank — trade any setup
 IV_RANK_MAX               = 99.0
 
 ENABLE_SIGNAL_SCORING     = True
-MIN_SIGNAL_SCORE          = 5.5   # raised: only take quality setups, not marginal ones
+MIN_SIGNAL_SCORE          = 8.0   # CRITICAL FIX: was 5.5 — regime_score inflation means every stock scored 15+; 8.0 requires real momentum
 VOLATILITY_PRIORITY_WEIGHT = 3.0  # make volatility the top signal driver
 TREND_PRIORITY_WEIGHT      = 1.0
 FLOW_PRIORITY_WEIGHT       = 1.0
@@ -469,8 +469,8 @@ EARNINGS_SKIP_SYMBOLS    = ("SPY", "QQQ", "IWM", "DIA", "VIX", "^VIX")
 # Re-entry
 # ---------------------------------------------------------------------------
 
-MAX_ENTRIES_PER_TICKER_PER_DAY = 999
-MAX_REENTRIES_PER_TICKER = 999
+MAX_ENTRIES_PER_TICKER_PER_DAY = 2   # max 2 entries per ticker per day (1 initial + 1 re-entry)
+MAX_REENTRIES_PER_TICKER = 1         # max 1 re-entry per ticker per day — prevent churn on losing tickers
 
 # Hard churn-kill: quick losers get a longer cooldown to avoid repeated tuition
 # on the same tape. Applies only when realized loss and short hold-time are both true.
