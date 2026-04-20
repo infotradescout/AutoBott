@@ -2195,6 +2195,7 @@ def main():
         f"({closed_market_lead_minutes}m before open) or market already open. Starting loop."
     )
     while True:
+      try:
         now_et = datetime.now(tz)
         now_ct = datetime.now(pytz.timezone(config.CENTRAL_TZ))
         _touch_heartbeat(force=True)
@@ -3923,7 +3924,17 @@ def main():
 
         _save_runtime_state()
         time.sleep(config.LOOP_INTERVAL_SECONDS)
-
+      except Exception as _loop_exc:  # noqa: BLE001
+        import traceback as _tb
+        _loop_err_msg = f"[loop_error] Unhandled exception in trader loop (continuing): {_loop_exc}"
+        print(_loop_err_msg)
+        _tb.print_exc()
+        try:
+            _touch_heartbeat(force=True)
+            _save_runtime_state()
+        except Exception:
+            pass
+        time.sleep(max(5, int(config.LOOP_INTERVAL_SECONDS) // 3))
     print(f"[{ts()}] Trader stopped.")
 
 
