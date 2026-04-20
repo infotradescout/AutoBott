@@ -103,7 +103,7 @@ SCAN_DAILY_BARS     = 30
 # Position sizing & risk
 # ---------------------------------------------------------------------------
 
-MAX_POSITIONS                       = 2     # hard cap for concurrent option positions (small live account doctrine)
+MAX_POSITIONS                       = 5     # concurrent option positions for ~6k account deployment
 POSITION_SIZE_USD                   = 350
 RISK_PER_TRADE_PCT                  = 0.01
 MAX_POSITION_SIZE_USD               = 500.0
@@ -128,10 +128,10 @@ LOSS_THROTTLE_SIGNAL_SCORE_ADD      = 1.2
 LOSS_THROTTLE_MIN_VOLATILITY_SCORE  = 6.5
 
 # Capital doctrine for small live account preparation.
-MAX_PREMIUM_PER_TRADE_USD           = 220.0
-MAX_TOTAL_OPEN_PREMIUM_USD          = 350.0
-OPENING_MAX_FRESH_PREMIUM_USD       = 180.0
-MAX_SAME_DIRECTION_POSITIONS        = 1
+MAX_PREMIUM_PER_TRADE_USD           = 320.0
+MAX_TOTAL_OPEN_PREMIUM_USD          = 1400.0
+OPENING_MAX_FRESH_PREMIUM_USD       = 700.0
+MAX_SAME_DIRECTION_POSITIONS        = 2
 
 # Allow expensive trades when setup quality and execution quality are exceptional.
 ENABLE_PREMIUM_CAP_QUALITY_OVERRIDE = True
@@ -219,12 +219,12 @@ OPENING_STRICT_MIN_RVOL                      = 1.40
 OPENING_STRICT_MIN_ROC_PCT                   = 0.24
 OPENING_STRICT_MIN_VWAP_DISTANCE_PCT         = 0.12
 OPENING_MAX_SIGNAL_CANDIDATES                = 3
-OPENING_MAX_FRESH_ENTRIES                    = 2
-OPENING_MAX_CONCURRENT_POSITIONS             = 2
+OPENING_MAX_FRESH_ENTRIES                    = 4
+OPENING_MAX_CONCURRENT_POSITIONS             = 4
 OPENING_MAX_NEW_ENTRY_ATTEMPTS_PER_LOOP      = 2
 MAX_NEW_ENTRY_ATTEMPTS_PER_LOOP              = 1
-OPENING_MAX_EXPENSIVE_ENTRIES                = 1
-OPENING_EXPENSIVE_MAX_PREMIUM_USD            = 140.0
+OPENING_MAX_EXPENSIVE_ENTRIES                = 2
+OPENING_EXPENSIVE_MAX_PREMIUM_USD            = 220.0
 
 
 # ---------------------------------------------------------------------------
