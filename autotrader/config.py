@@ -106,14 +106,14 @@ SCAN_DAILY_BARS     = 30
 # Position sizing & risk
 # ---------------------------------------------------------------------------
 
-MAX_POSITIONS                       = 5     # concurrent option positions for ~6k account deployment
-POSITION_SIZE_USD                   = 350
+MAX_POSITIONS                       = 999   # aggressive: no arbitrary cap on concurrent positions
+POSITION_SIZE_USD                   = 600   # 10% of $6000 account per trade
 RISK_PER_TRADE_PCT                  = 0.01
-MAX_POSITION_SIZE_USD               = 500.0
+MAX_POSITION_SIZE_USD               = 1200.0
 DRAWDOWN_REDUCE_AFTER_CONSEC_LOSSES = 2
 DRAWDOWN_SIZE_MULTIPLIER            = 0.5
-DAILY_LOSS_LIMIT_USD                = 75.0
-WEEKLY_LOSS_LIMIT_USD               = 240.0
+DAILY_LOSS_LIMIT_USD                = 300.0 # 5% daily max drawdown
+WEEKLY_LOSS_LIMIT_USD               = 900.0 # 15% weekly max drawdown
 CONSECUTIVE_LOSS_LIMIT              = 99
 # Net P&L circuit breaker (runtime telemetry-based):
 # Pause new entries once the day is sufficiently red in realized net P&L.
@@ -131,10 +131,10 @@ LOSS_THROTTLE_SIGNAL_SCORE_ADD      = 1.2
 LOSS_THROTTLE_MIN_VOLATILITY_SCORE  = 6.5
 
 # Capital doctrine for small live account preparation.
-MAX_PREMIUM_PER_TRADE_USD           = 320.0
-MAX_TOTAL_OPEN_PREMIUM_USD          = 1400.0
-OPENING_MAX_FRESH_PREMIUM_USD       = 700.0
-MAX_SAME_DIRECTION_POSITIONS        = 2
+MAX_PREMIUM_PER_TRADE_USD           = 600.0
+MAX_TOTAL_OPEN_PREMIUM_USD          = 4500.0 # Allow heavy deployment of the $6000 account
+OPENING_MAX_FRESH_PREMIUM_USD       = 2000.0
+MAX_SAME_DIRECTION_POSITIONS        = 999   # aggressive: no limit on same direction
 
 # Allow expensive trades when setup quality and execution quality are exceptional.
 ENABLE_PREMIUM_CAP_QUALITY_OVERRIDE = True
@@ -154,7 +154,7 @@ EXPENSIVE_PREMIUM_SYMBOLS = (
 PREFERRED_CORE_TICKERS = (
     "SPY", "QQQ", "IWM", "AAPL", "AMD", "INTC", "JPM", "XOM", "CRM", "ORCL",
 )
-MAX_NON_CORE_ENTRIES_PER_DAY        = 1
+MAX_NON_CORE_ENTRIES_PER_DAY        = 999   # aggressive: trade any valid signal
 NON_CORE_MIN_SIGNAL_SCORE           = 10.8
 
 # Volatility-adaptive risk sizing:
@@ -222,11 +222,11 @@ OPENING_STRICT_MIN_RVOL                      = 1.40
 OPENING_STRICT_MIN_ROC_PCT                   = 0.24
 OPENING_STRICT_MIN_VWAP_DISTANCE_PCT         = 0.12
 OPENING_MAX_SIGNAL_CANDIDATES                = 3
-OPENING_MAX_FRESH_ENTRIES                    = 4
-OPENING_MAX_CONCURRENT_POSITIONS             = 4
-OPENING_MAX_NEW_ENTRY_ATTEMPTS_PER_LOOP      = 2
-MAX_NEW_ENTRY_ATTEMPTS_PER_LOOP              = 1
-OPENING_MAX_EXPENSIVE_ENTRIES                = 2
+OPENING_MAX_FRESH_ENTRIES                    = 999
+OPENING_MAX_CONCURRENT_POSITIONS             = 999
+OPENING_MAX_NEW_ENTRY_ATTEMPTS_PER_LOOP      = 5
+MAX_NEW_ENTRY_ATTEMPTS_PER_LOOP              = 5
+OPENING_MAX_EXPENSIVE_ENTRIES                = 999
 OPENING_EXPENSIVE_MAX_PREMIUM_USD            = 220.0
 
 
@@ -235,18 +235,18 @@ OPENING_EXPENSIVE_MAX_PREMIUM_USD            = 220.0
 # ---------------------------------------------------------------------------
 
 # Slightly wider stop to reduce chop noise exits.
-STOP_LOSS_USD          = 9.0    # tighter loss cap per trade in capital-preservation mode
-STOP_LOSS_PCT          = 0.03   # legacy fallback reference for older state/debug fields
+STOP_LOSS_USD          = 30.0   # 5% of $6000 position size (cut losers quickly)
+STOP_LOSS_PCT          = 0.05   # 5% hard stop
 
 # Legacy immediate TP knob retained for backward compatibility only.
 # Stateful manager (protect -> bank/qualify -> runner) is now primary.
 IMMEDIATE_TAKE_PROFIT_PCT = 0.50
 
 # Explicit stateful winner-management transitions.
-TRADE_STATE_PROTECT_TRIGGER_PCT             = 0.03   # +3%: move to protected
+TRADE_STATE_PROTECT_TRIGGER_PCT             = 0.05   # +5%: move to protected
 TRADE_STATE_PROTECTED_STOP_FLOOR_PCT        = 0.001  # +0.1% floor once protected
-TRADE_STATE_BANK_OR_QUALIFY_TRIGGER_PCT     = 0.08   # +8%: bank-or-qualify decision
-TRADE_STATE_RUNNER_PROMOTION_STOP_FLOOR_PCT = 0.03   # +3% floor when promoted to runner
+TRADE_STATE_BANK_OR_QUALIFY_TRIGGER_PCT     = 0.12   # +12%: bank-or-qualify decision
+TRADE_STATE_RUNNER_PROMOTION_STOP_FLOOR_PCT = 0.05   # +5% floor when promoted to runner
 RUNNER_DISABLE_AFTER_ET                     = "16:00"
 
 # Fixed profit target (disabled — trailing stop rides winners instead)
@@ -258,13 +258,13 @@ PROFIT_TARGET_PCT          = 0.60   # only used if ENABLE_FIXED_PROFIT_TARGET = 
 #   +8%   → +20%  : floor = +3%   (locked in a small win)
 #   +20%  → +35%  : floor = +10%  (locked in a solid gain)
 #   +35%+ (deep)  : floor = peak − 6%  (dynamic trail, ride momentum)
-TRAIL_LOCK1_TRIGGER_PCT = 0.08
-TRAIL_LOCK1_STOP_PCT    = 0.03
-TRAIL_LOCK2_TRIGGER_PCT = 0.20
-TRAIL_LOCK2_STOP_PCT    = 0.10
-TRAIL_LOCK3_TRIGGER_PCT = 0.35
-TRAIL_LOCK3_STOP_PCT    = 0.20
-TRAIL_PULLBACK_PCT      = 0.06   # trail 6% below peak when deep in profit
+TRAIL_LOCK1_TRIGGER_PCT = 0.12
+TRAIL_LOCK1_STOP_PCT    = 0.05
+TRAIL_LOCK2_TRIGGER_PCT = 0.25
+TRAIL_LOCK2_STOP_PCT    = 0.15
+TRAIL_LOCK3_TRIGGER_PCT = 0.40
+TRAIL_LOCK3_STOP_PCT    = 0.25
+TRAIL_PULLBACK_PCT      = 0.10   # trail 10% below peak when deep in profit (let winners run)
 
 
 # ---------------------------------------------------------------------------
@@ -462,8 +462,8 @@ EARNINGS_SKIP_SYMBOLS    = ("SPY", "QQQ", "IWM", "DIA", "VIX", "^VIX")
 # Re-entry
 # ---------------------------------------------------------------------------
 
-MAX_ENTRIES_PER_TICKER_PER_DAY = 2
-MAX_REENTRIES_PER_TICKER = 1
+MAX_ENTRIES_PER_TICKER_PER_DAY = 999
+MAX_REENTRIES_PER_TICKER = 999
 
 # Hard churn-kill: quick losers get a longer cooldown to avoid repeated tuition
 # on the same tape. Applies only when realized loss and short hold-time are both true.
