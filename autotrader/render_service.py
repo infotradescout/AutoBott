@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import shutil
 import threading
 import time
 import traceback
@@ -17,8 +18,27 @@ load_runtime_env()
 
 def _force_writable_data_dir() -> None:
     current = (os.getenv("DATA_DIR") or "").strip()
+    persistent_default = Path("/data")
+
+    def _first_writable(paths: list[Path]) -> Path | None:
+        for path in paths:
+            try:
+                path.mkdir(parents=True, exist_ok=True)
+                probe = path / ".write_test"
+                with probe.open("w", encoding="utf-8") as f:
+                    f.write("ok")
+                probe.unlink(missing_ok=True)
+                return path
+            except Exception:
+                continue
+        return None
+
     if not current:
-        os.environ["DATA_DIR"] = "/tmp/autotrader-data"
+        chosen = _first_writable([persistent_default, Path("/tmp/autotrader-data")])
+        if chosen is None:
+            chosen = Path("/tmp/autotrader-data")
+            chosen.mkdir(parents=True, exist_ok=True)
+        os.environ["DATA_DIR"] = str(chosen)
         return
 
     target = Path(current)
@@ -29,7 +49,7 @@ def _force_writable_data_dir() -> None:
             f.write("ok")
         probe.unlink(missing_ok=True)
     except Exception:
-        fallback = Path("/tmp/autotrader-data")
+        fallback = _first_writable([persistent_default, Path("/tmp/autotrader-data")]) or Path("/tmp/autotrader-data")
         fallback.mkdir(parents=True, exist_ok=True)
         os.environ["DATA_DIR"] = str(fallback)
         print(
@@ -38,7 +58,50 @@ def _force_writable_data_dir() -> None:
         )
 
 
+def _migrate_runtime_files_to_active_data_dir() -> None:
+    target_dir = Path((os.getenv("DATA_DIR") or "").strip() or "/tmp/autotrader-data")
+    try:
+        target_dir.mkdir(parents=True, exist_ok=True)
+    except Exception:
+        return
+
+    runtime_files = (
+        "trades.csv",
+        "scan_log.csv",
+        "runtime_state.json",
+        "trading_control.json",
+        "watchlist_control.json",
+        "observation_log.csv",
+        "feature_flags.json",
+    )
+
+    legacy_candidates = [
+        Path(__file__).resolve().parent,  # older default behavior: autotrader/ dir
+        Path("/tmp/autotrader-data"),
+    ]
+    copied = 0
+    for filename in runtime_files:
+        target_file = target_dir / filename
+        if target_file.exists():
+            continue
+        for legacy_dir in legacy_candidates:
+            if legacy_dir.resolve() == target_dir.resolve():
+                continue
+            legacy_file = legacy_dir / filename
+            if not legacy_file.exists():
+                continue
+            try:
+                shutil.copy2(legacy_file, target_file)
+                copied += 1
+                break
+            except Exception:
+                continue
+    if copied > 0:
+        print(f"[render_service] Migrated {copied} runtime file(s) into DATA_DIR '{target_dir}'.")
+
+
 _force_writable_data_dir()
+_migrate_runtime_files_to_active_data_dir()
 import config
 
 from alerts import AlertManager

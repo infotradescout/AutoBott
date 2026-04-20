@@ -32,6 +32,8 @@ def _resolve_data_dir() -> Path:
     candidates: list[Path] = []
     if env_path:
         candidates.append(Path(env_path))
+    # Render persistent disk default mount path.
+    candidates.append(Path("/data"))
     candidates.append(_DEFAULT_DATA_DIR)
     candidates.append(Path("/tmp/autotrader-data"))
     for candidate in candidates:
@@ -47,6 +49,7 @@ def _resolve_data_dir() -> Path:
 
 _DEFAULT_DATA_DIR = Path(__file__).resolve().parent
 _DATA_DIR = _resolve_data_dir()
+DATA_DIR = _DATA_DIR
 
 
 # ---------------------------------------------------------------------------
