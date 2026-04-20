@@ -234,19 +234,21 @@ OPENING_EXPENSIVE_MAX_PREMIUM_USD            = 220.0
 # Stop loss & trailing exit ladder
 # ---------------------------------------------------------------------------
 
-# Slightly wider stop to reduce chop noise exits.
-STOP_LOSS_USD          = 30.0   # 5% of $6000 position size (cut losers quickly)
-STOP_LOSS_PCT          = 0.05   # 5% hard stop
+# Stop loss wide enough to survive bid/ask spread noise on cheap options.
+# Options fluctuate 8-15% just from the spread; a 5% stop fires immediately.
+STOP_LOSS_USD          = 150.0  # 25% of $600 position — give trades room to breathe
+STOP_LOSS_PCT          = 0.25   # 25% hard stop (options need wide stops)
 
 # Legacy immediate TP knob retained for backward compatibility only.
 # Stateful manager (protect -> bank/qualify -> runner) is now primary.
 IMMEDIATE_TAKE_PROFIT_PCT = 0.50
 
 # Explicit stateful winner-management transitions.
-TRADE_STATE_PROTECT_TRIGGER_PCT             = 0.05   # +5%: move to protected
-TRADE_STATE_PROTECTED_STOP_FLOOR_PCT        = 0.001  # +0.1% floor once protected
-TRADE_STATE_BANK_OR_QUALIFY_TRIGGER_PCT     = 0.12   # +12%: bank-or-qualify decision
-TRADE_STATE_RUNNER_PROMOTION_STOP_FLOOR_PCT = 0.05   # +5% floor when promoted to runner
+# Raised thresholds: spread noise is 8-15%, so protect only triggers on real gains.
+TRADE_STATE_PROTECT_TRIGGER_PCT             = 0.20   # +20%: move to protected (above spread noise)
+TRADE_STATE_PROTECTED_STOP_FLOOR_PCT        = 0.05   # +5% floor once protected (lock in real gain)
+TRADE_STATE_BANK_OR_QUALIFY_TRIGGER_PCT     = 0.40   # +40%: bank-or-qualify decision
+TRADE_STATE_RUNNER_PROMOTION_STOP_FLOOR_PCT = 0.20   # +20% floor when promoted to runner
 RUNNER_DISABLE_AFTER_ET                     = "16:00"
 
 # Fixed profit target (disabled — trailing stop rides winners instead)
@@ -254,17 +256,17 @@ ENABLE_FIXED_PROFIT_TARGET = False
 PROFIT_TARGET_PCT          = 0.60   # only used if ENABLE_FIXED_PROFIT_TARGET = True
 
 # Trailing stop ratchet (stop floor only moves UP, never down):
-#   Entry → +8%   : floor = -3%   (cut fast if wrong direction)
-#   +8%   → +20%  : floor = +3%   (locked in a small win)
-#   +20%  → +35%  : floor = +10%  (locked in a solid gain)
-#   +35%+ (deep)  : floor = peak − 6%  (dynamic trail, ride momentum)
-TRAIL_LOCK1_TRIGGER_PCT = 0.12
-TRAIL_LOCK1_STOP_PCT    = 0.05
-TRAIL_LOCK2_TRIGGER_PCT = 0.25
-TRAIL_LOCK2_STOP_PCT    = 0.15
-TRAIL_LOCK3_TRIGGER_PCT = 0.40
-TRAIL_LOCK3_STOP_PCT    = 0.25
-TRAIL_PULLBACK_PCT      = 0.10   # trail 10% below peak when deep in profit (let winners run)
+#   Entry → +25%  : hard stop at -25% (survive spread noise)
+#   +25%  → +50%  : floor = +10%  (locked in a real gain)
+#   +50%  → +80%  : floor = +30%  (locked in a strong gain)
+#   +80%+ (deep)  : floor = peak − 15% (dynamic trail, ride momentum)
+TRAIL_LOCK1_TRIGGER_PCT = 0.25
+TRAIL_LOCK1_STOP_PCT    = 0.10
+TRAIL_LOCK2_TRIGGER_PCT = 0.50
+TRAIL_LOCK2_STOP_PCT    = 0.30
+TRAIL_LOCK3_TRIGGER_PCT = 0.80
+TRAIL_LOCK3_STOP_PCT    = 0.50
+TRAIL_PULLBACK_PCT      = 0.15   # trail 15% below peak when deep in profit (let winners run)
 
 
 # ---------------------------------------------------------------------------
@@ -428,7 +430,8 @@ OPENING_FAST_START_MIN_VWAP_DISTANCE_PCT = 0.0
 
 MIN_OPTION_OPEN_INTEREST          = 10   # lowered from 25 — TSLA/MSFT were at 24/25 OI
 MIN_OPTION_DAILY_VOLUME           = 3    # lowered from 5
-MAX_OPTION_SPREAD_PCT             = 20.0  # tighter spread gate for short-dated contracts
+MIN_OPTION_PREMIUM_USD            = 0.50  # avoid cheap options with huge bid/ask spreads
+MAX_OPTION_SPREAD_PCT             = 15.0  # tighter spread gate: reject wide-spread contracts
 ENABLE_OPTION_LIQUIDITY_RELAX     = True
 OPTION_CONTRACTS_ALLOW_LIVE_FALLBACK = False
 MIN_DTE_TRADING_DAYS              = 0    # allow same-day (0DTE) entries

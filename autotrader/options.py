@@ -357,6 +357,12 @@ def select_atm_option_contract_with_reason(
             quote_fail_counts["spread_too_wide"] += 1
             time.sleep(config.RATE_LIMIT_SLEEP_SECONDS)
             continue
+        # Reject contracts below minimum premium floor to avoid wide-spread cheap options.
+        min_premium = float(getattr(config, "MIN_OPTION_PREMIUM_USD", 0.0) or 0.0)
+        if min_premium > 0 and mid < min_premium:
+            quote_fail_counts["spread_too_wide"] += 1  # reuse bucket for logging
+            time.sleep(config.RATE_LIMIT_SLEEP_SECONDS)
+            continue
 
         contract["bid_price"] = bid
         contract["ask_price"] = ask
