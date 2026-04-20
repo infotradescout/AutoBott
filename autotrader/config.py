@@ -297,14 +297,15 @@ RVOL_RELAX_AFTER          = "10:00"
 RVOL_RELAXED_MIN          = 0.25
 RVOL_IGNORE_AFTER         = "10:30"
 ATR_PCT_MIN               = 0.3   # very low ATR floor — don't filter out ETFs
-VWAP_NEUTRAL_BAND_PCT     = 0.05  # tightened from 0.15 — 0.15% was rejecting stocks barely off VWAP
+VWAP_NEUTRAL_BAND_PCT     = 0.15  # wider neutral band: within 0.15% of VWAP = neutral, halve VWAP vote weight
 MOVEMENT_FORCE_MIN_PCT    = 0.02  # was 0.03 (scanner default); allow borderline tape to be evaluated
 MOVEMENT_WEAK_VWAP_MULT   = 1.00  # was effectively 1.5 in scanner; only block when very close to VWAP
 
 # Direction conviction: minimum weighted-vote score to commit to call/put.
 # 0.0 = any majority; 0.5 = strongly one-sided required.
-DIRECTION_CONVICTION_MIN  = 0.10  # minimal directional consensus required
-DIRECTION_MIN_ALIGNED_VOTES = 2   # only 2 votes needed to agree
+# Raised from 0.10: too low was allowing calls on bearish stocks (3 bull vs 2 bear votes = 0.20 score).
+DIRECTION_CONVICTION_MIN  = 0.30  # require clear directional majority (raised from 0.10)
+DIRECTION_MIN_ALIGNED_VOTES = 3   # require 3 of 5 votes to agree (raised from 2)
 DIRECTION_FAST_ROC_PERIOD  = 5    # short-horizon ROC used in directional voting
 
 ROC_PERIOD                = 10
@@ -315,10 +316,10 @@ ENABLE_ROC_FILTER         = True
 RSI_EARLY_MIN_PERIOD      = 5
 RSI_STRICT_AFTER_TIME     = "10:15"
 ENABLE_RSI_FILTER         = True
-RSI_CALL_MIN              = 45.0  # widened from 52 — allow calls when RSI is neutral-to-bullish
-RSI_CALL_MAX              = 85.0  # widened from 75 — don't block strong momentum
-RSI_PUT_MIN               = 15.0  # widened from 25
-RSI_PUT_MAX               = 55.0  # widened from 48 — allow puts when RSI is neutral-to-bearish
+RSI_CALL_MIN              = 52.0  # require actual bullish RSI for calls (raised from 45)
+RSI_CALL_MAX              = 85.0  # don't block strong momentum
+RSI_PUT_MIN               = 15.0  # allow deeply oversold puts
+RSI_PUT_MAX               = 48.0  # require actual bearish RSI for puts (lowered from 55)
 
 IV_RANK_MIN               = 0.0   # no minimum IV rank — trade any setup
 IV_RANK_MAX               = 99.0
