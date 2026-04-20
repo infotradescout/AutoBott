@@ -106,43 +106,43 @@ SCAN_DAILY_BARS     = 30
 # Position sizing & risk
 # ---------------------------------------------------------------------------
 
-MAX_POSITIONS                       = 999   # aggressive: no arbitrary cap on concurrent positions
-POSITION_SIZE_USD                   = 600   # 10% of $6000 account per trade
-RISK_PER_TRADE_PCT                  = 0.01
-MAX_POSITION_SIZE_USD               = 1200.0
+# $6000 account: max 3 concurrent positions, 2.5% of account per trade = $150 max premium.
+# Single contract on a $5 option = $500 = 8.3% of account. That is too much for intraday scalping.
+MAX_POSITIONS                       = 3     # hard cap: never hold more than 3 options at once
+POSITION_SIZE_USD                   = 150   # 2.5% of $6000 account per trade
+RISK_PER_TRADE_PCT                  = 0.025
+MAX_POSITION_SIZE_USD               = 150.0
 DRAWDOWN_REDUCE_AFTER_CONSEC_LOSSES = 2
-DRAWDOWN_SIZE_MULTIPLIER            = 0.5
-DAILY_LOSS_LIMIT_USD                = 300.0 # 5% daily max drawdown
-WEEKLY_LOSS_LIMIT_USD               = 900.0 # 15% weekly max drawdown
-CONSECUTIVE_LOSS_LIMIT              = 99
+DRAWDOWN_SIZE_MULTIPLIER            = 0.75
+DAILY_LOSS_LIMIT_USD                = 150.0 # 2.5% daily max drawdown — hard stop for the day
+WEEKLY_LOSS_LIMIT_USD               = 450.0 # 7.5% weekly max drawdown
+CONSECUTIVE_LOSS_LIMIT              = 3     # stop after 3 consecutive losses, reassess
 # Net P&L circuit breaker (runtime telemetry-based):
 # Pause new entries once the day is sufficiently red in realized net P&L.
-INTRADAY_NET_LOSS_LIMIT_USD         = 0.0
-# Early-red guard:
-# If we've already taken this many closed trades and are still net red,
-# stop new entries for the rest of the day.
-EARLY_RED_GUARD_ENABLED             = False
-EARLY_RED_GUARD_MIN_CLOSED_TRADES   = 4
-EARLY_RED_GUARD_MAX_NET_PNL_USD     = -0.01
+INTRADAY_NET_LOSS_LIMIT_USD         = 150.0  # halt new entries if down $150 on the day
+# Early-red guard: stop new entries if still net red after first few trades.
+EARLY_RED_GUARD_ENABLED             = True
+EARLY_RED_GUARD_MIN_CLOSED_TRADES   = 3
+EARLY_RED_GUARD_MAX_NET_PNL_USD     = -75.0  # halt if down $75 after first 3 trades
 
-# Loss throttle (no full lock): after losses, only allow A+ setups.
-LOSS_THROTTLE_AFTER_CONSEC_LOSSES   = 99  # effectively disabled: don't throttle after losses
-LOSS_THROTTLE_SIGNAL_SCORE_ADD      = 0.0
+# Loss throttle: after 2 consecutive losses, require stronger setups.
+LOSS_THROTTLE_AFTER_CONSEC_LOSSES   = 2
+LOSS_THROTTLE_SIGNAL_SCORE_ADD      = 1.5   # require score 7.0+ after 2 losses
 LOSS_THROTTLE_MIN_VOLATILITY_SCORE  = 0.0
 
-# Capital doctrine for small live account preparation.
-MAX_PREMIUM_PER_TRADE_USD           = 600.0
-MAX_TOTAL_OPEN_PREMIUM_USD          = 4500.0 # Allow heavy deployment of the $6000 account
-OPENING_MAX_FRESH_PREMIUM_USD       = 2000.0
-MAX_SAME_DIRECTION_POSITIONS        = 999   # aggressive: no limit on same direction
+# Capital doctrine: $150 max per trade, $450 max total open at once (3 positions × $150).
+MAX_PREMIUM_PER_TRADE_USD           = 150.0  # max $1.50/share × 100 = $150 per contract
+MAX_TOTAL_OPEN_PREMIUM_USD          = 450.0  # 3 positions × $150
+OPENING_MAX_FRESH_PREMIUM_USD       = 300.0  # 2 positions in the opening window
+MAX_SAME_DIRECTION_POSITIONS        = 2      # max 2 calls or 2 puts at once
 
-# Allow expensive trades when setup quality and execution quality are exceptional.
-ENABLE_PREMIUM_CAP_QUALITY_OVERRIDE = True
-EXPENSIVE_TRADE_MIN_SIGNAL_SCORE    = 8.0
-EXPENSIVE_TRADE_MIN_DIRECTION_SCORE = 0.75
-EXPENSIVE_TRADE_MIN_RVOL            = 1.8
-EXPENSIVE_TRADE_MAX_SPREAD_PCT      = 8.0
-OPENING_EXPENSIVE_TRADE_MIN_SIGNAL_SCORE = 8.8
+# Disable premium override — never allow expensive trades on a $6k account.
+ENABLE_PREMIUM_CAP_QUALITY_OVERRIDE = False
+EXPENSIVE_TRADE_MIN_SIGNAL_SCORE    = 9.9
+EXPENSIVE_TRADE_MIN_DIRECTION_SCORE = 0.90
+EXPENSIVE_TRADE_MIN_RVOL            = 2.5
+EXPENSIVE_TRADE_MAX_SPREAD_PCT      = 5.0
+OPENING_EXPENSIVE_TRADE_MIN_SIGNAL_SCORE = 9.9
 
 # Expensive names are allowed only when premium stays inside per-trade budget;
 # opening window allows at most one expensive-name fresh entry.
@@ -325,7 +325,7 @@ IV_RANK_MIN               = 0.0   # no minimum IV rank — trade any setup
 IV_RANK_MAX               = 99.0
 
 ENABLE_SIGNAL_SCORING     = True
-MIN_SIGNAL_SCORE          = 4.0   # aggressive floor: maximise opportunity flow
+MIN_SIGNAL_SCORE          = 5.5   # raised: only take quality setups, not marginal ones
 VOLATILITY_PRIORITY_WEIGHT = 3.0  # make volatility the top signal driver
 TREND_PRIORITY_WEIGHT      = 1.0
 FLOW_PRIORITY_WEIGHT       = 1.0
@@ -439,9 +439,9 @@ MIN_DTE_TRADING_DAYS              = 0    # allow same-day (0DTE) entries
 MAX_DTE_TRADING_DAYS              = 2    # intraday focus: 0, 1, or 2 DTE only
 MIN_OPTION_OPEN_INTEREST_0DTE     = 50    # 0DTE needs decent liquidity
 ENABLE_DELTA_TARGETING            = True
-TARGET_DELTA_MIN                  = 0.45  # slightly ITM for faster response on short-dated contracts
-TARGET_DELTA_MAX                  = 0.60
-TARGET_DELTA_FALLBACK             = 0.50  # ATM fallback
+TARGET_DELTA_MIN                  = 0.35  # slightly OTM: cheaper premium, better R:R for scalping
+TARGET_DELTA_MAX                  = 0.50  # ATM max: avoid expensive deep ITM contracts
+TARGET_DELTA_FALLBACK             = 0.40  # OTM-leaning fallback
 EMERGENCY_EXECUTION_MODE          = False
 ALLOW_MARKET_ENTRY_WITHOUT_QUOTE  = False
 
