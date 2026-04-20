@@ -392,13 +392,16 @@ NEWS_BLOCK_DATES_ET        = ()
 ENABLE_HISTORICAL_REGIME_SCORE = False
 MIN_HISTORICAL_REGIME_SCORE    = 2.0
 
-ENABLE_INDEX_BIAS_FILTER   = False
-INDEX_BIAS_TIMEFRAME       = "5m"
-INDEX_BIAS_LOOKBACK        = 30
+ENABLE_INDEX_BIAS_FILTER   = True   # ENABLED: filter signals to match SPY/QQQ macro direction
+INDEX_BIAS_TIMEFRAME       = "5m"   # 5-minute bars for SPY/QQQ trend check
+INDEX_BIAS_LOOKBACK        = 30    # 30 bars = 150 minutes of 5m history
+INDEX_BIAS_ROC_PERIODS     = 6     # ROC over last 6 bars (30 min) for fast trend detection
+INDEX_BIAS_ROC_THRESHOLD   = 0.10  # SPY/QQQ must move >0.10% in 30 min to declare a bias direction
+INDEX_BIAS_REQUIRE_BOTH    = True  # both SPY AND QQQ must agree before filtering
 
-ENABLE_VIX_GUARD           = False
-VIX_MIN                    = 13.0
-VIX_MAX                    = 80.0
+ENABLE_VIX_GUARD           = True  # ENABLED: block entries when VIX is outside tradeable range
+VIX_MIN                    = 12.0  # below 12 = complacency, spreads too tight for edge
+VIX_MAX                    = 60.0  # above 60 = panic, options too wide and unpredictable
 
 
 # ---------------------------------------------------------------------------

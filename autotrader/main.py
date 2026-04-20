@@ -1092,8 +1092,17 @@ def _subtract_trading_days(end_date: date, days: int) -> date:
 
 
 def _index_regime_bias(data_client: AlpacaDataClient, now_et: datetime) -> str:
+    """Determine macro market bias using SPY and QQQ on 5-minute bars.
+
+    Uses three signals per index: EMA cross, EMA slope, and short-term ROC.
+    Requires both SPY and QQQ to agree (when INDEX_BIAS_REQUIRE_BOTH=True).
+    Falls back to 'both' (no filter) if data is unavailable or indices disagree.
+    """
     if not config.ENABLE_INDEX_BIAS_FILTER:
         return "both"
+    roc_periods = max(2, int(getattr(config, "INDEX_BIAS_ROC_PERIODS", 6) or 6))
+    roc_threshold = abs(float(getattr(config, "INDEX_BIAS_ROC_THRESHOLD", 0.10) or 0.10))
+    require_both = bool(getattr(config, "INDEX_BIAS_REQUIRE_BOTH", True))
     trend_votes: list[str] = []
     for symbol in ("SPY", "QQQ"):
         try:
@@ -1102,22 +1111,55 @@ def _index_regime_bias(data_client: AlpacaDataClient, now_et: datetime) -> str:
                 timeframe=config.INDEX_BIAS_TIMEFRAME,
                 limit=max(25, int(config.INDEX_BIAS_LOOKBACK)),
             )
-            if bars is None or bars.empty or len(bars) < 21:
+            if bars is None or bars.empty or len(bars) < max(21, roc_periods + 1):
+                trend_votes.append("both")
                 continue
             closes = bars["close"].astype(float)
             ema9 = closes.ewm(span=9, adjust=False).mean()
             ema21 = closes.ewm(span=21, adjust=False).mean()
-            if ema9.iloc[-1] > ema21.iloc[-1] and ema21.iloc[-1] > ema21.iloc[-2]:
-                trend_votes.append("call")
-            elif ema9.iloc[-1] < ema21.iloc[-1] and ema21.iloc[-1] < ema21.iloc[-2]:
-                trend_votes.append("put")
+            # Signal 1: EMA9 vs EMA21 cross
+            ema_cross = "call" if ema9.iloc[-1] > ema21.iloc[-1] else "put"
+            # Signal 2: EMA21 slope (rising or falling over last 2 bars)
+            ema_slope = "call" if ema21.iloc[-1] > ema21.iloc[-2] else "put"
+            # Signal 3: Short-term ROC over last N bars (fast momentum)
+            roc_val = (closes.iloc[-1] - closes.iloc[-roc_periods]) / closes.iloc[-roc_periods] * 100.0
+            if abs(roc_val) < roc_threshold:
+                roc_dir = "both"  # too flat to declare a direction
             else:
-                trend_votes.append("both")
-        except Exception:
+                roc_dir = "call" if roc_val > 0 else "put"
+            # Need 2 of 3 signals to agree
+            signals = [ema_cross, ema_slope, roc_dir]
+            call_count = signals.count("call")
+            put_count = signals.count("put")
+            if call_count >= 2:
+                vote = "call"
+            elif put_count >= 2:
+                vote = "put"
+            else:
+                vote = "both"
+            trend_votes.append(vote)
+            print(
+                f"[index_bias] {symbol}: ema_cross={ema_cross} ema_slope={ema_slope} "
+                f"roc={roc_val:+.2f}%({roc_dir}) -> {vote}"
+            )
+        except Exception as exc:  # noqa: BLE001
+            print(f"[index_bias] {symbol} error: {exc}")
             trend_votes.append("both")
-    if trend_votes and all(v == "call" for v in trend_votes):
+    if not trend_votes:
+        return "both"
+    if require_both:
+        # Both indices must agree on the same non-neutral direction
+        if all(v == "call" for v in trend_votes):
+            return "call"
+        if all(v == "put" for v in trend_votes):
+            return "put"
+        return "both"
+    # Majority rules (fallback when require_both=False)
+    call_count = trend_votes.count("call")
+    put_count = trend_votes.count("put")
+    if call_count > put_count:
         return "call"
-    if trend_votes and all(v == "put" for v in trend_votes):
+    if put_count > call_count:
         return "put"
     return "both"
 
