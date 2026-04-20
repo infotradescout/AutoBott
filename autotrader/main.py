@@ -2761,6 +2761,24 @@ def main():
             direction = signal["direction"]
             _set_signal_outcome(ticker=ticker, disposition="setup_pass")
 
+            # --- Loss throttle (keep trading, but demand stronger setups after losses) ---
+            throttle_after_losses = max(1, int(getattr(config, "LOSS_THROTTLE_AFTER_CONSEC_LOSSES", 1) or 1))
+            if consecutive_losses >= throttle_after_losses:
+                signal_score_now = float(signal.get("signal_score", 0.0) or 0.0)
+                volatility_score_now = float(signal.get("volatility_score", 0.0) or 0.0)
+                min_signal_add = float(getattr(config, "LOSS_THROTTLE_SIGNAL_SCORE_ADD", 1.0) or 1.0)
+                min_volatility_score = float(getattr(config, "LOSS_THROTTLE_MIN_VOLATILITY_SCORE", 6.0) or 6.0)
+                throttle_min_signal = _runtime_entry_min_signal_score() + min_signal_add
+                if signal_score_now < throttle_min_signal or volatility_score_now < min_volatility_score:
+                    _mark_skip("loss_throttle_quality_gate")
+                    _mark_stage4_reject(reason="loss_throttle_quality_gate", ticker=ticker)
+                    print(
+                        f"[{ts(now_et)}] {ticker}: skip (loss throttle active after {consecutive_losses} losses; "
+                        f"score {signal_score_now:.2f}/{throttle_min_signal:.2f}, "
+                        f"vol {volatility_score_now:.2f}/{min_volatility_score:.2f})."
+                    )
+                    continue
+
             loop_attempt_cap = max(1, int(getattr(config, "MAX_NEW_ENTRY_ATTEMPTS_PER_LOOP", 1) or 1))
             if entry_attempts_loop >= loop_attempt_cap:
                 _mark_skip("entry_attempt_cap")

@@ -111,16 +111,21 @@ DRAWDOWN_REDUCE_AFTER_CONSEC_LOSSES = 2
 DRAWDOWN_SIZE_MULTIPLIER            = 0.5
 DAILY_LOSS_LIMIT_USD                = 75.0
 WEEKLY_LOSS_LIMIT_USD               = 240.0
-CONSECUTIVE_LOSS_LIMIT              = 2
+CONSECUTIVE_LOSS_LIMIT              = 99
 # Net P&L circuit breaker (runtime telemetry-based):
 # Pause new entries once the day is sufficiently red in realized net P&L.
-INTRADAY_NET_LOSS_LIMIT_USD         = 20.0
+INTRADAY_NET_LOSS_LIMIT_USD         = 0.0
 # Early-red guard:
 # If we've already taken this many closed trades and are still net red,
 # stop new entries for the rest of the day.
-EARLY_RED_GUARD_ENABLED             = True
+EARLY_RED_GUARD_ENABLED             = False
 EARLY_RED_GUARD_MIN_CLOSED_TRADES   = 4
 EARLY_RED_GUARD_MAX_NET_PNL_USD     = -0.01
+
+# Loss throttle (no full lock): after losses, only allow A+ setups.
+LOSS_THROTTLE_AFTER_CONSEC_LOSSES   = 1
+LOSS_THROTTLE_SIGNAL_SCORE_ADD      = 1.2
+LOSS_THROTTLE_MIN_VOLATILITY_SCORE  = 6.5
 
 # Capital doctrine for small live account preparation.
 MAX_PREMIUM_PER_TRADE_USD           = 220.0
