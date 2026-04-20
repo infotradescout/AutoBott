@@ -253,10 +253,10 @@ def _profile_signals_for_candidate(
         profile_ok = False
         profile_reason = ""
         if profile.name == "open_drive_momentum":
-            profile_ok = rvol >= 0.70 and abs(roc) >= 0.06 and distance_from_vwap_pct >= 0.02
+            profile_ok = rvol >= 0.20 and abs(roc) >= 0.01 and distance_from_vwap_pct >= 0.005
             profile_reason = "open-drive momentum"
         elif profile.name == "vwap_continuation":
-            profile_ok = distance_from_vwap_pct <= 1.20 and rvol >= 0.55 and abs(roc) >= 0.03
+            profile_ok = distance_from_vwap_pct <= 3.0 and rvol >= 0.20 and abs(roc) >= 0.01
             profile_reason = "vwap continuation"
         elif profile.name == "reversal_snapback":
             if distance_from_vwap_pct >= 0.20 and abs(last2_roc) >= 0.10:
@@ -269,7 +269,7 @@ def _profile_signals_for_candidate(
                 profile_ok = base_signal.get("direction") in ("call", "put")
             profile_reason = "reversal snapback"
         elif profile.name == "catalyst_impulse":
-            profile_ok = (catalyst_mode_active and rvol >= 0.55) or (rvol >= 1.20 and abs(roc) >= 0.10)
+            profile_ok = rvol >= 0.20 and abs(roc) >= 0.01
             profile_reason = "catalyst impulse"
 
         if not profile_ok:
@@ -281,9 +281,10 @@ def _profile_signals_for_candidate(
         passed.append(enriched)
 
     # ── Generic fallback (priority 5) ─────────────────────────────────────
-    # Only fires for core/permissive names that matched nothing above.
-    # Criteria: price is directional (clear VWAP side + any ROC signal).
-    if not passed and is_core:
+    # Universal safety net: fires for ANY symbol that passed the scanner but
+    # didn't match a named profile. Previously restricted to core names only;
+    # now open to all symbols so movers and non-core tickers can trade.
+    if not passed:
         generic = PROFILES.get("generic_intraday_continuation")
         if generic is not None:
             generic_ok = False
