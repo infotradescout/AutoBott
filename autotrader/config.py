@@ -304,8 +304,8 @@ MOVEMENT_WEAK_VWAP_MULT   = 1.00  # was effectively 1.5 in scanner; only block w
 # Direction conviction: minimum weighted-vote score to commit to call/put.
 # 0.0 = any majority; 0.5 = strongly one-sided required.
 # Raised from 0.10: too low was allowing calls on bearish stocks (3 bull vs 2 bear votes = 0.20 score).
-DIRECTION_CONVICTION_MIN  = 0.30  # require clear directional majority (raised from 0.10)
-DIRECTION_MIN_ALIGNED_VOTES = 3   # require 3 of 5 votes to agree (raised from 2)
+DIRECTION_CONVICTION_MIN  = 0.40  # raised from 0.30: require strong directional majority
+DIRECTION_MIN_ALIGNED_VOTES = 3   # require 3 of 5 votes to agree
 DIRECTION_FAST_ROC_PERIOD  = 5    # short-horizon ROC used in directional voting
 
 ROC_PERIOD                = 10
@@ -374,7 +374,7 @@ CATALYST_RELAXED_MIN_SIGNAL_SCORE = 2.5
 # Optional filters (all off by default for simple call/put scalping)
 # ---------------------------------------------------------------------------
 
-ENABLE_HTF_CONFIRM         = False
+ENABLE_HTF_CONFIRM         = True   # enabled: 15-min HTF must agree with entry direction
 HTF_TIMEFRAME              = "15m"
 HTF_LOOKBACK_BARS          = 30
 

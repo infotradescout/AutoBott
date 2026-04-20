@@ -658,12 +658,14 @@ def _scan_ticker_details(
     if not math.isnan(roc_early) and abs(roc_early) < movement_force_min and distance_pct < (vwap_band * weak_vwap_mult):
         return _scan_failure(f"movement too weak (ROC {roc_early:+.2f}%, VWAP dist {distance_pct:.2f}%)")
 
-    vwap_weight = 0.50 if vwap_neutral else 1.00
+    # VWAP is the most reliable intraday direction indicator — give it dominant weight.
+    # EMA cross on 1-min bars lags 30-45 min and causes wrong-direction entries; reduce its weight.
+    vwap_weight = 1.00 if vwap_neutral else 2.00
     direction_weights = {
         "vwap": float(vwap_weight),
         "roc": 1.10,
         "roc_fast": 0.90,
-        "ema_cross": 0.50,
+        "ema_cross": 0.25,  # reduced from 0.50: 1-min EMA cross lags too much
         "ema_slope": 0.50,
     }
     direction_bias = (
