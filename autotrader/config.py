@@ -217,10 +217,10 @@ OPENING_STRICT_WINDOW_MINUTES                = 20
 OPENING_STRICT_MIN_SIGNAL_SCORE              = 4.0
 OPENING_STRICT_CONFIRM_BARS                  = 3
 OPENING_STRICT_CONFIRM_MOMENTUM_THRESHOLD_PCT = 0.22
-OPENING_STRICT_MIN_DIRECTION_SCORE           = 0.20
-OPENING_STRICT_MIN_RVOL                      = 0.35
-OPENING_STRICT_MIN_ROC_PCT                   = 0.03
-OPENING_STRICT_MIN_VWAP_DISTANCE_PCT         = 0.01
+OPENING_STRICT_MIN_DIRECTION_SCORE           = 0.0
+OPENING_STRICT_MIN_RVOL                      = 0.0
+OPENING_STRICT_MIN_ROC_PCT                   = 0.0
+OPENING_STRICT_MIN_VWAP_DISTANCE_PCT         = 0.0
 OPENING_MAX_SIGNAL_CANDIDATES                = 3
 OPENING_MAX_FRESH_ENTRIES                    = 999
 OPENING_MAX_CONCURRENT_POSITIONS             = 999
@@ -407,17 +407,19 @@ ENTRY_CONFIRM_BARS                     = 3
 ENTRY_CONFIRM_BYPASS_MIN_SIGNAL_SCORE  = 0.0   # always bypass if confirmation somehow re-enabled
 ENTRY_CONFIRM_MOMENTUM_THRESHOLD_PCT   = 0.14
 
-# Fast-start doctrine: only accept entries that should work quickly.
-FAST_START_MIN_SIGNAL_SCORE            = 4.0   # lowered: accept more setups
-FAST_START_MIN_DIRECTION_SCORE         = 0.20  # lowered: accept weaker directional conviction
-FAST_START_MIN_RVOL                    = 0.5   # lowered: accept lower relative volume
-FAST_START_MIN_ABS_ROC_PCT             = 0.03  # lowered: accept minimal momentum
-FAST_START_MIN_VWAP_DISTANCE_PCT       = 0.01  # lowered: accept near-VWAP entries
-OPENING_FAST_START_MIN_SIGNAL_SCORE    = 4.0
-OPENING_FAST_START_MIN_DIRECTION_SCORE = 0.20
-OPENING_FAST_START_MIN_RVOL            = 0.35
-OPENING_FAST_START_MIN_ABS_ROC_PCT     = 0.03
-OPENING_FAST_START_MIN_VWAP_DISTANCE_PCT = 0.01
+# Fast-start doctrine: disabled — scanner already enforces direction conviction and RVOL.
+# Keeping thresholds at 0 so the gate is a no-op; the scanner's own gates are sufficient.
+ENABLE_FAST_START_QUALITY_GATE         = False  # disable: redundant with scanner gates
+FAST_START_MIN_SIGNAL_SCORE            = 0.0
+FAST_START_MIN_DIRECTION_SCORE         = 0.0
+FAST_START_MIN_RVOL                    = 0.0
+FAST_START_MIN_ABS_ROC_PCT             = 0.0
+FAST_START_MIN_VWAP_DISTANCE_PCT       = 0.0
+OPENING_FAST_START_MIN_SIGNAL_SCORE    = 0.0
+OPENING_FAST_START_MIN_DIRECTION_SCORE = 0.0
+OPENING_FAST_START_MIN_RVOL            = 0.0
+OPENING_FAST_START_MIN_ABS_ROC_PCT     = 0.0
+OPENING_FAST_START_MIN_VWAP_DISTANCE_PCT = 0.0
 
 
 # ---------------------------------------------------------------------------

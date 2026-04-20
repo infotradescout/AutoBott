@@ -2827,12 +2827,13 @@ def main():
                 print(f"[{ts(now_et)}] {ticker}: skip ({opening_quality_reason}).")
                 continue
 
-            fast_start_ok, fast_start_reason = _fast_start_entry_quality_ok(signal, now_et)
-            if not fast_start_ok:
-                _mark_skip("fast_start_quality_gate")
-                _mark_stage4_reject(reason="fast_start_quality_gate", ticker=ticker)
-                print(f"[{ts(now_et)}] {ticker}: skip ({fast_start_reason}).")
-                continue
+            if bool(getattr(config, "ENABLE_FAST_START_QUALITY_GATE", True)):
+                fast_start_ok, fast_start_reason = _fast_start_entry_quality_ok(signal, now_et)
+                if not fast_start_ok:
+                    _mark_skip("fast_start_quality_gate")
+                    _mark_stage4_reject(reason="fast_start_quality_gate", ticker=ticker)
+                    print(f"[{ts(now_et)}] {ticker}: skip ({fast_start_reason}).")
+                    continue
 
             if not _is_valid_long_direction(direction):
                 _mark_skip("invalid_strategy_direction")
