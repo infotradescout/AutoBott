@@ -83,7 +83,7 @@ CORE_TICKERS = [
 ]
 
 AUTO_EXPAND_UNIVERSE_WITH_MOVERS = True
-UNIVERSE_MOVER_TOP                = 50   # fetch top 50 gainers + 50 losers
+UNIVERSE_MOVER_TOP                = 50
 UNIVERSE_MAX_TICKERS              = 150  # wider universe catches more movers
 SCREENER_TOP_N                    = 50
 MOVER_SYMBOLS_PER_SIDE            = 25
@@ -197,7 +197,7 @@ PREMARKET_SIGNAL_WINDOW_END        = "09:30"
 PREMARKET_REPORT_READY_TIME        = "08:20"
 PREMARKET_LOOKBACK_MINUTES         = 75
 PREMARKET_MAX_SIGNALS              = 6
-PREMARKET_APPLY_UNTIL              = "09:35"
+PREMARKET_APPLY_UNTIL              = "09:40"
 PREMARKET_SCAN_INTERVAL_SECONDS    = 120
 PREMARKET_SCAN_MAX_RUNS            = 0
 
@@ -325,7 +325,7 @@ IV_RANK_MIN               = 0.0   # no minimum IV rank — trade any setup
 IV_RANK_MAX               = 99.0
 
 ENABLE_SIGNAL_SCORING     = True
-MIN_SIGNAL_SCORE          = 8.0   # CRITICAL FIX: was 5.5 — regime_score inflation means every stock scored 15+; 8.0 requires real momentum
+MIN_SIGNAL_SCORE          = 6.4   # balanced floor: trade flow without admitting weak tape
 VOLATILITY_PRIORITY_WEIGHT = 3.0  # make volatility the top signal driver
 TREND_PRIORITY_WEIGHT      = 1.0
 FLOW_PRIORITY_WEIGHT       = 1.0
@@ -426,6 +426,10 @@ OPENING_FAST_START_MIN_DIRECTION_SCORE = 0.0
 OPENING_FAST_START_MIN_RVOL            = 0.0
 OPENING_FAST_START_MIN_ABS_ROC_PCT     = 0.0
 OPENING_FAST_START_MIN_VWAP_DISTANCE_PCT = 0.0
+
+# Feed freshness guardrail for intraday bars (scanner).
+# If data timestamps are older than this, signals are rejected as stale.
+STALE_BAR_MAX_AGE_SECONDS              = 900
 
 
 # ---------------------------------------------------------------------------

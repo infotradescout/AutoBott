@@ -585,13 +585,6 @@ def _scan_ticker_details(
     if ts_last.tzinfo is None:
         ts_last = pytz.UTC.localize(ts_last)
     ts_last_et = ts_last.astimezone(pytz.timezone(config.EASTERN_TZ))
-    market_open = ts_last_et.replace(hour=9, minute=30, second=0, microsecond=0)
-    minutes_since_open = max(1, int((ts_last_et - market_open).total_seconds() // 60))
-    now_et = ts_last_et
-    opening_relax = bool(config.ENABLE_OPENING_ENTRY_RELAX) and (
-        minutes_since_open <= int(config.OPENING_ENTRY_RELAX_MINUTES)
-    )
-    base_min_bars = max(1, int(config.SCAN_MIN_BARS))
     bar_interval_minutes = 1
     if len(bars_df) >= 2:
         ts_series = pd.to_datetime(bars_df["timestamp"], errors="coerce")
@@ -600,6 +593,24 @@ def _scan_ticker_details(
             median_delta_sec = float(deltas.median())
             if median_delta_sec > 0:
                 bar_interval_minutes = max(1, int(round(median_delta_sec / 60.0)))
+    now_et_actual = datetime.now(pytz.timezone(config.EASTERN_TZ))
+    bar_age_seconds = max(0.0, (now_et_actual - ts_last_et).total_seconds())
+    # Reject delayed intraday feeds before any signal logic runs.
+    # Allow up to roughly two bar intervals (+ buffer) to tolerate feed jitter.
+    configured_stale_limit = float(getattr(config, "STALE_BAR_MAX_AGE_SECONDS", 0) or 0)
+    dynamic_stale_limit = float(max(120, (bar_interval_minutes * 120) + 30))
+    stale_limit_seconds = max(dynamic_stale_limit, configured_stale_limit)
+    if bar_age_seconds > stale_limit_seconds:
+        return _scan_failure(
+            f"stale intraday bars ({int(bar_age_seconds)}s old; limit {int(stale_limit_seconds)}s)"
+        )
+    market_open = now_et_actual.replace(hour=9, minute=30, second=0, microsecond=0)
+    minutes_since_open = max(1, int((now_et_actual - market_open).total_seconds() // 60))
+    now_et = now_et_actual
+    opening_relax = bool(config.ENABLE_OPENING_ENTRY_RELAX) and (
+        minutes_since_open <= int(config.OPENING_ENTRY_RELAX_MINUTES)
+    )
+    base_min_bars = max(1, int(config.SCAN_MIN_BARS))
     completed_bars = max(1, minutes_since_open // max(1, bar_interval_minutes))
     min_bars_required = 1 if opening_relax else min(base_min_bars, completed_bars)
     if len(bars_df) < min_bars_required:
@@ -647,7 +658,7 @@ def _scan_ticker_details(
 
     above_vwap = price > vwap
 
-    # Direction model: combine VWAP side, fast/slow momentum, and EMA structure.
+    # Direction model (simple): momentum up -> CALL, momentum down -> PUT.
     roc_period = max(2, int(getattr(config, "ROC_PERIOD", 10) or 10))
     fast_roc_period = max(2, int(getattr(config, "DIRECTION_FAST_ROC_PERIOD", 5) or 5))
     roc_early = calculate_roc(closes, period=roc_period)
@@ -655,67 +666,26 @@ def _scan_ticker_details(
     ema9_pre = closes.ewm(span=9, adjust=False).mean()
     ema21_pre = closes.ewm(span=21, adjust=False).mean()
 
-    vwap_vote = 1.0 if above_vwap else -1.0
-    roc_vote = 0.0 if math.isnan(roc_early) or abs(roc_early) < 0.01 else (1.0 if roc_early > 0 else -1.0)
-    roc_fast_vote = 0.0 if math.isnan(roc_fast) or abs(roc_fast) < 0.01 else (1.0 if roc_fast > 0 else -1.0)
-    ema_vote = 0.0
-    ema_slope_vote = 0.0
-    if len(ema9_pre) >= 3 and len(ema21_pre) >= 3:
-        ema_vote = 1.0 if ema9_pre.iloc[-1] > ema21_pre.iloc[-1] else -1.0
-    if len(ema21_pre) >= 6:
-        ema_slope = float(ema21_pre.iloc[-1] - ema21_pre.iloc[-5])
-        if abs(ema_slope) >= 1e-9:
-            ema_slope_vote = 1.0 if ema_slope > 0 else -1.0
-
     movement_force_min = float(getattr(config, "MOVEMENT_FORCE_MIN_PCT", 0.03) or 0.03)
     weak_vwap_mult = float(getattr(config, "MOVEMENT_WEAK_VWAP_MULT", 1.5) or 1.5)
-    if not math.isnan(roc_early) and abs(roc_early) < movement_force_min and distance_pct < (vwap_band * weak_vwap_mult):
-        return _scan_failure(f"movement too weak (ROC {roc_early:+.2f}%, VWAP dist {distance_pct:.2f}%)")
+    direction_roc = roc_fast if not math.isnan(roc_fast) else roc_early
+    if math.isnan(direction_roc):
+        return _scan_failure("momentum unavailable")
+    if abs(direction_roc) < movement_force_min and distance_pct < (vwap_band * weak_vwap_mult):
+        return _scan_failure(f"movement too weak (ROC {direction_roc:+.2f}%, VWAP dist {distance_pct:.2f}%)")
 
-    # VWAP is the most reliable intraday direction indicator — give it dominant weight.
-    # EMA cross on 1-min bars lags 30-45 min and causes wrong-direction entries; reduce its weight.
-    vwap_weight = 1.00 if vwap_neutral else 2.00
-    direction_weights = {
-        "vwap": float(vwap_weight),
-        "roc": 1.10,
-        "roc_fast": 0.90,
-        "ema_cross": 0.25,  # reduced from 0.50: 1-min EMA cross lags too much
-        "ema_slope": 0.50,
-    }
-    direction_bias = (
-        (direction_weights["vwap"] * vwap_vote)
-        + (direction_weights["roc"] * roc_vote)
-        + (direction_weights["roc_fast"] * roc_fast_vote)
-        + (direction_weights["ema_cross"] * ema_vote)
-        + (direction_weights["ema_slope"] * ema_slope_vote)
-    )
-    total_direction_weight = sum(direction_weights.values())
-    direction_score = max(-1.0, min(1.0, direction_bias / total_direction_weight))
-    direction = "call" if direction_bias >= 0 else "put"
-    required_conviction = max(0.0, float(getattr(config, "DIRECTION_CONVICTION_MIN", 0.25) or 0.25))
-    if abs(direction_score) < required_conviction:
-        return _scan_failure(
-            f"direction conviction weak ({direction_score:+.2f} < {required_conviction:.2f})"
-        )
+    if direction_roc == 0:
+        return _scan_failure("momentum flat")
+    direction = "call" if direction_roc > 0 else "put"
+    # Normalize momentum into [-1, 1] so downstream quality gates keep working.
+    score_den = max(0.10, movement_force_min * 4.0)
+    score_mag = min(1.0, abs(direction_roc) / score_den)
+    direction_score = score_mag if direction == "call" else -score_mag
 
-    vote_values = [vwap_vote, roc_vote, roc_fast_vote, ema_vote, ema_slope_vote]
-    aligned_votes = sum(
-        1
-        for vote in vote_values
-        if vote != 0.0 and ((direction == "call" and vote > 0.0) or (direction == "put" and vote < 0.0))
-    )
-    min_aligned_votes = max(2, int(getattr(config, "DIRECTION_MIN_ALIGNED_VOTES", 3) or 3))
-    if aligned_votes < min_aligned_votes:
-        return _scan_failure(
-            f"direction vote alignment weak ({aligned_votes}/{len(vote_values)}<{min_aligned_votes})"
-        )
-
+    vwap_vote = 1.0 if above_vwap else -1.0
     direction_votes: list[tuple[str, float, float]] = [
-        ("vwap", direction_weights["vwap"], vwap_vote),
-        ("roc", direction_weights["roc"], roc_vote),
-        ("roc_fast", direction_weights["roc_fast"], roc_fast_vote),
-        ("ema_cross", direction_weights["ema_cross"], ema_vote),
-        ("ema_slope", direction_weights["ema_slope"], ema_slope_vote),
+        ("momentum", 1.0, 1.0 if direction_roc > 0 else -1.0),
+        ("vwap_side", 0.2, vwap_vote),
     ]
 
     htf_reason = ""
@@ -735,10 +705,9 @@ def _scan_ticker_details(
         if direction == "put" and flow_score > -threshold:
             return _scan_failure(f"order flow weak for put ({flow_score:+.2f})", stage="execution_reject")
 
-    # ROC and EMA are already computed above in the direction vote block.
-    # Re-use those values here for downstream filters and scoring.
-    roc = roc_early if not math.isnan(roc_early) else 0.0
-    if config.ENABLE_ROC_FILTER and not math.isnan(roc_early):
+    # Re-use momentum ROC for downstream filters and scoring.
+    roc = direction_roc
+    if config.ENABLE_ROC_FILTER and not math.isnan(roc):
         weak_floor = max(0.01, movement_force_min / 2.0)
         if abs(roc) < weak_floor and distance_pct < (vwap_band * 2.0):
             return _scan_failure(f"ROC {roc:+.2f}% too weak for active move")

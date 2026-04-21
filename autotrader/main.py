@@ -2532,10 +2532,25 @@ def main():
             and is_at_or_after(now_et, config.NO_NEW_TRADES_BEFORE)
             and not is_at_or_after(now_et, config.PREMARKET_APPLY_UNTIL)
         ):
-            merged = _dedupe_signals_by_symbol(list(premarket_opening_signals) + list(signals))
+            # Only carry staged premarket ideas forward when the symbol also
+            # passes a fresh live scan at decision time. This avoids stale
+            # opening entries driven by premarket-only snapshots.
+            live_by_symbol: dict[str, dict] = {}
+            for live in signals:
+                sym = str(live.get("symbol", "") or "").upper()
+                if sym:
+                    live_by_symbol[sym] = live
+            staged_confirmed = [
+                s
+                for s in premarket_opening_signals
+                if str(s.get("symbol", "") or "").upper() in live_by_symbol
+            ]
+            merged = _dedupe_signals_by_symbol(list(staged_confirmed) + list(signals))
+            dropped = len(premarket_opening_signals) - len(staged_confirmed)
             print(
                 f"[{ts(now_et)}] Applied premarket opening set: "
-                f"{len(premarket_opening_signals)} staged + {len(signals)} live -> {len(merged)} unique signals."
+                f"{len(staged_confirmed)}/{len(premarket_opening_signals)} staged confirmed "
+                f"({dropped} dropped stale) + {len(signals)} live -> {len(merged)} unique signals."
             )
             signals = merged
             premarket_opening_signals = []
