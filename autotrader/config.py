@@ -316,10 +316,10 @@ ENABLE_ROC_FILTER         = True
 RSI_EARLY_MIN_PERIOD      = 5
 RSI_STRICT_AFTER_TIME     = "10:15"
 ENABLE_RSI_FILTER         = True
-RSI_CALL_MIN              = 52.0  # require actual bullish RSI for calls (raised from 45)
-RSI_CALL_MAX              = 85.0  # don't block strong momentum
-RSI_PUT_MIN               = 15.0  # allow deeply oversold puts
-RSI_PUT_MAX               = 48.0  # require actual bearish RSI for puts (lowered from 55)
+RSI_CALL_MIN              = 45.0  # widen call acceptance to improve setup throughput
+RSI_CALL_MAX              = 92.0  # avoid rejecting strong extension during trend days
+RSI_PUT_MIN               = 8.0   # allow deeper selloff continuation setups
+RSI_PUT_MAX               = 55.0  # widen bearish acceptance to reduce false rejects
 
 IV_RANK_MIN               = 0.0   # no minimum IV rank — trade any setup
 IV_RANK_MAX               = 99.0
@@ -374,7 +374,7 @@ CATALYST_RELAXED_MIN_SIGNAL_SCORE = 2.5
 # Optional filters (all off by default for simple call/put scalping)
 # ---------------------------------------------------------------------------
 
-ENABLE_HTF_CONFIRM         = True   # enabled: 15-min HTF must agree with entry direction
+ENABLE_HTF_CONFIRM         = False  # disabled for faster intraday participation
 HTF_TIMEFRAME              = "15m"
 HTF_LOOKBACK_BARS          = 30
 
