@@ -23,6 +23,18 @@ _EARNINGS_SKIP_SYMBOLS = {str(s).upper() for s in config.EARNINGS_SKIP_SYMBOLS}
 _LIVE_TRADE_BASE_URL = "https://api.alpaca.markets"
 
 
+def _stock_bar_feed_candidates() -> list[str]:
+    raw = getattr(config, "ALPACA_STOCK_BAR_FEEDS", ("iex", "sip"))
+    if isinstance(raw, str):
+        parts = [p.strip().lower() for p in raw.split(",") if p.strip()]
+        return parts or ["iex", "sip"]
+    try:
+        parts = [str(p).strip().lower() for p in raw if str(p).strip()]
+        return parts or ["iex", "sip"]
+    except Exception:
+        return ["iex", "sip"]
+
+
 class AlpacaDataClient:
     def __init__(self, api_key: str, secret_key: str, paper: bool = True):
         self.api_key = api_key
@@ -106,49 +118,50 @@ class AlpacaDataClient:
 
         # Primary source: Alpaca bars API (keeps volume basis aligned with intraday feed)
         if alpaca_tf:
-            try:
-                now_utc = datetime.now(pytz.UTC)
-                if tf in ("1d",):
-                    lookback_days = max(45, int(limit * 2))
-                else:
-                    lookback_days = 10
-                start_utc = (now_utc - timedelta(days=lookback_days)).isoformat().replace("+00:00", "Z")
-                end_utc = now_utc.isoformat().replace("+00:00", "Z")
-                resp = self.data_session.get(
-                    f"{self.data_base_url}/v2/stocks/bars",
-                    params={
-                        "symbols": symbol,
-                        "timeframe": alpaca_tf,
-                        "start": start_utc,
-                        "end": end_utc,
-                        "limit": max(50, int(limit) + 25),
-                        "adjustment": "raw",
-                        "feed": "iex",
-                    },
-                    timeout=15,
-                )
-                resp.raise_for_status()
-                body = resp.json()
-                bars_map = body.get("bars", {}) if isinstance(body, dict) else {}
-                rows = bars_map.get(symbol, []) if isinstance(bars_map, dict) else []
-                if rows:
-                    df = pd.DataFrame(rows)
-                    if not df.empty and {"t", "o", "h", "l", "c", "v"}.issubset(set(df.columns)):
-                        df = df.rename(
-                            columns={
-                                "t": "timestamp",
-                                "o": "open",
-                                "h": "high",
-                                "l": "low",
-                                "c": "close",
-                                "v": "volume",
-                            }
-                        )
-                        df["timestamp"] = pd.to_datetime(df["timestamp"], utc=True).dt.tz_convert(tz_et)
-                        df = df.tail(limit).reset_index(drop=True)
-                        return df[["timestamp", "open", "high", "low", "close", "volume"]]
-            except Exception as exc:  # noqa: BLE001
-                print(f"[data] get_stock_bars Alpaca failed for {symbol} tf={timeframe}: {exc}")
+            now_utc = datetime.now(pytz.UTC)
+            if tf in ("1d",):
+                lookback_days = max(45, int(limit * 2))
+            else:
+                lookback_days = 10
+            start_utc = (now_utc - timedelta(days=lookback_days)).isoformat().replace("+00:00", "Z")
+            end_utc = now_utc.isoformat().replace("+00:00", "Z")
+            for feed in _stock_bar_feed_candidates():
+                try:
+                    resp = self.data_session.get(
+                        f"{self.data_base_url}/v2/stocks/bars",
+                        params={
+                            "symbols": symbol,
+                            "timeframe": alpaca_tf,
+                            "start": start_utc,
+                            "end": end_utc,
+                            "limit": max(50, int(limit) + 25),
+                            "adjustment": "raw",
+                            "feed": feed,
+                        },
+                        timeout=15,
+                    )
+                    resp.raise_for_status()
+                    body = resp.json()
+                    bars_map = body.get("bars", {}) if isinstance(body, dict) else {}
+                    rows = bars_map.get(symbol, []) if isinstance(bars_map, dict) else []
+                    if rows:
+                        df = pd.DataFrame(rows)
+                        if not df.empty and {"t", "o", "h", "l", "c", "v"}.issubset(set(df.columns)):
+                            df = df.rename(
+                                columns={
+                                    "t": "timestamp",
+                                    "o": "open",
+                                    "h": "high",
+                                    "l": "low",
+                                    "c": "close",
+                                    "v": "volume",
+                                }
+                            )
+                            df["timestamp"] = pd.to_datetime(df["timestamp"], utc=True).dt.tz_convert(tz_et)
+                            df = df.tail(limit).reset_index(drop=True)
+                            return df[["timestamp", "open", "high", "low", "close", "volume"]]
+                except Exception as exc:  # noqa: BLE001
+                    print(f"[data] get_stock_bars Alpaca failed for {symbol} tf={timeframe} feed={feed}: {exc}")
 
         # Fallback: yfinance
         try:
@@ -231,46 +244,47 @@ class AlpacaDataClient:
             timeframe = "1Min" if use_one_minute else "5Min"
 
         # Primary source: Alpaca bars API (more stable intraday for live trading loops)
-        try:
-            start_utc = market_open.astimezone(pytz.UTC).isoformat().replace("+00:00", "Z")
-            end_utc = now_et.astimezone(pytz.UTC).isoformat().replace("+00:00", "Z")
-            resp = self.data_session.get(
-                f"{self.data_base_url}/v2/stocks/bars",
-                params={
-                    "symbols": symbol,
-                    "timeframe": timeframe,
-                    "start": start_utc,
-                    "end": end_utc,
-                    "limit": max(limit, 500),
-                    "adjustment": "raw",
-                    "feed": "iex",
-                },
-                timeout=15,
-            )
-            resp.raise_for_status()
-            body = resp.json()
-            bars_map = body.get("bars", {}) if isinstance(body, dict) else {}
-            rows = bars_map.get(symbol, []) if isinstance(bars_map, dict) else []
-            if rows:
-                df = pd.DataFrame(rows)
-                if not df.empty and {"t", "o", "h", "l", "c", "v"}.issubset(set(df.columns)):
-                    df = df.rename(
-                        columns={
-                            "t": "timestamp",
-                            "o": "open",
-                            "h": "high",
-                            "l": "low",
-                            "c": "close",
-                            "v": "volume",
-                        }
-                    )
-                    df["timestamp"] = pd.to_datetime(df["timestamp"], utc=True).dt.tz_convert(tz_et)
-                    df = df[(df["timestamp"] >= market_open) & (df["timestamp"] <= now_et)]
-                    df = df.tail(limit).reset_index(drop=True)
-                    if not df.empty:
-                        return df[["timestamp", "open", "high", "low", "close", "volume"]]
-        except Exception as exc:  # noqa: BLE001
-            print(f"[data] get_intraday_bars_since_open Alpaca failed for {symbol}: {exc}")
+        start_utc = market_open.astimezone(pytz.UTC).isoformat().replace("+00:00", "Z")
+        end_utc = now_et.astimezone(pytz.UTC).isoformat().replace("+00:00", "Z")
+        for feed in _stock_bar_feed_candidates():
+            try:
+                resp = self.data_session.get(
+                    f"{self.data_base_url}/v2/stocks/bars",
+                    params={
+                        "symbols": symbol,
+                        "timeframe": timeframe,
+                        "start": start_utc,
+                        "end": end_utc,
+                        "limit": max(limit, 500),
+                        "adjustment": "raw",
+                        "feed": feed,
+                    },
+                    timeout=15,
+                )
+                resp.raise_for_status()
+                body = resp.json()
+                bars_map = body.get("bars", {}) if isinstance(body, dict) else {}
+                rows = bars_map.get(symbol, []) if isinstance(bars_map, dict) else []
+                if rows:
+                    df = pd.DataFrame(rows)
+                    if not df.empty and {"t", "o", "h", "l", "c", "v"}.issubset(set(df.columns)):
+                        df = df.rename(
+                            columns={
+                                "t": "timestamp",
+                                "o": "open",
+                                "h": "high",
+                                "l": "low",
+                                "c": "close",
+                                "v": "volume",
+                            }
+                        )
+                        df["timestamp"] = pd.to_datetime(df["timestamp"], utc=True).dt.tz_convert(tz_et)
+                        df = df[(df["timestamp"] >= market_open) & (df["timestamp"] <= now_et)]
+                        df = df.tail(limit).reset_index(drop=True)
+                        if not df.empty:
+                            return df[["timestamp", "open", "high", "low", "close", "volume"]]
+            except Exception as exc:  # noqa: BLE001
+                print(f"[data] get_intraday_bars_since_open Alpaca failed for {symbol} feed={feed}: {exc}")
 
         # Fallback: yfinance
         try:
@@ -326,46 +340,47 @@ class AlpacaDataClient:
         timeframe = "1Min" if minutes_span <= 20 else "5Min"
 
         # Primary source: Alpaca bars API
-        try:
-            start_utc = start_et.astimezone(pytz.UTC).isoformat().replace("+00:00", "Z")
-            end_utc = end_et.astimezone(pytz.UTC).isoformat().replace("+00:00", "Z")
-            resp = self.data_session.get(
-                f"{self.data_base_url}/v2/stocks/bars",
-                params={
-                    "symbols": symbol,
-                    "timeframe": timeframe,
-                    "start": start_utc,
-                    "end": end_utc,
-                    "limit": max(limit, 500),
-                    "adjustment": "raw",
-                    "feed": "iex",
-                },
-                timeout=15,
-            )
-            resp.raise_for_status()
-            body = resp.json()
-            bars_map = body.get("bars", {}) if isinstance(body, dict) else {}
-            rows = bars_map.get(symbol, []) if isinstance(bars_map, dict) else []
-            if rows:
-                df = pd.DataFrame(rows)
-                if not df.empty and {"t", "o", "h", "l", "c", "v"}.issubset(set(df.columns)):
-                    df = df.rename(
-                        columns={
-                            "t": "timestamp",
-                            "o": "open",
-                            "h": "high",
-                            "l": "low",
-                            "c": "close",
-                            "v": "volume",
-                        }
-                    )
-                    df["timestamp"] = pd.to_datetime(df["timestamp"], utc=True).dt.tz_convert(tz_et)
-                    df = df[(df["timestamp"] >= start_et) & (df["timestamp"] <= end_et)]
-                    df = df.tail(limit).reset_index(drop=True)
-                    if not df.empty:
-                        return df[["timestamp", "open", "high", "low", "close", "volume"]]
-        except Exception as exc:  # noqa: BLE001
-            print(f"[data] get_intraday_bars_window Alpaca failed for {symbol}: {exc}")
+        start_utc = start_et.astimezone(pytz.UTC).isoformat().replace("+00:00", "Z")
+        end_utc = end_et.astimezone(pytz.UTC).isoformat().replace("+00:00", "Z")
+        for feed in _stock_bar_feed_candidates():
+            try:
+                resp = self.data_session.get(
+                    f"{self.data_base_url}/v2/stocks/bars",
+                    params={
+                        "symbols": symbol,
+                        "timeframe": timeframe,
+                        "start": start_utc,
+                        "end": end_utc,
+                        "limit": max(limit, 500),
+                        "adjustment": "raw",
+                        "feed": feed,
+                    },
+                    timeout=15,
+                )
+                resp.raise_for_status()
+                body = resp.json()
+                bars_map = body.get("bars", {}) if isinstance(body, dict) else {}
+                rows = bars_map.get(symbol, []) if isinstance(bars_map, dict) else []
+                if rows:
+                    df = pd.DataFrame(rows)
+                    if not df.empty and {"t", "o", "h", "l", "c", "v"}.issubset(set(df.columns)):
+                        df = df.rename(
+                            columns={
+                                "t": "timestamp",
+                                "o": "open",
+                                "h": "high",
+                                "l": "low",
+                                "c": "close",
+                                "v": "volume",
+                            }
+                        )
+                        df["timestamp"] = pd.to_datetime(df["timestamp"], utc=True).dt.tz_convert(tz_et)
+                        df = df[(df["timestamp"] >= start_et) & (df["timestamp"] <= end_et)]
+                        df = df.tail(limit).reset_index(drop=True)
+                        if not df.empty:
+                            return df[["timestamp", "open", "high", "low", "close", "volume"]]
+            except Exception as exc:  # noqa: BLE001
+                print(f"[data] get_intraday_bars_window Alpaca failed for {symbol} feed={feed}: {exc}")
 
         # Fallback: yfinance
         try:
