@@ -13,7 +13,10 @@ import yfinance as yf
 from env_config import get_required_env, load_runtime_env
 load_runtime_env()
 
-import config
+try:
+    from autotrader import config
+except ImportError:
+    import config
 from alerts import AlertManager
 from broker import AlpacaBroker
 from data import AlpacaDataClient

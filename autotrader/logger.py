@@ -5,7 +5,10 @@ from __future__ import annotations
 import csv
 from pathlib import Path
 
-import config
+try:
+    from autotrader import config
+except ImportError:
+    import config
 
 
 class TradeLogger:

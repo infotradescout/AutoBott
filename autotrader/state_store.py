@@ -6,7 +6,10 @@ import json
 from datetime import datetime, timezone
 from pathlib import Path
 
-import config
+try:
+    from autotrader import config
+except ImportError:
+    import config
 from kv_store import load_json, redis_key, save_json
 
 _STATE_KEY = redis_key("runtime_state")

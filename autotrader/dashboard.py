@@ -19,7 +19,10 @@ from flask import Flask, Response, jsonify, render_template_string, request
 from env_config import get_required_env, load_runtime_env
 
 load_runtime_env()
-import config
+try:
+    from autotrader import config
+except ImportError:
+    import config
 from feature_flags import get_feature_flags_snapshot
 from feature_flags import is_enabled as feature_enabled
 from state_store import load_bot_state

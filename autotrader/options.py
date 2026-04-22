@@ -8,7 +8,10 @@ from typing import Any
 
 import pytz
 
-import config
+try:
+    from autotrader import config
+except ImportError:
+    import config
 from data import AlpacaDataClient
 
 

@@ -10,7 +10,10 @@ from typing import Iterable
 
 import pytz
 
-import config
+try:
+    from autotrader import config
+except ImportError:
+    import config
 from kv_store import load_json, redis_key, save_json
 
 _WATCHLIST_KEY = redis_key("watchlist_control")

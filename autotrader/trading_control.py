@@ -8,7 +8,10 @@ from pathlib import Path
 
 import pytz
 
-import config
+try:
+    from autotrader import config
+except ImportError:
+    import config
 from kv_store import load_json, redis_key, save_json
 
 _CONTROL_KEY = redis_key("trading_control")

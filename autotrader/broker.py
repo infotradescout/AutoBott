@@ -9,7 +9,10 @@ from alpaca.trading.client import TradingClient
 from alpaca.trading.enums import OrderSide, TimeInForce
 from alpaca.trading.requests import LimitOrderRequest, MarketOrderRequest
 
-import config
+try:
+    from autotrader import config
+except ImportError:
+    import config
 
 _OPTION_SYMBOL_RE = re.compile(r"^[A-Z.]+\d{6}[CP]\d{8}$")
 

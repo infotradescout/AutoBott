@@ -9,7 +9,10 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-import config
+try:
+    from autotrader import config
+except ImportError:
+    import config
 
 _KNOWN_FLAGS = (
     "FEATURE_SESSION_GUARDRAIL_PANEL",

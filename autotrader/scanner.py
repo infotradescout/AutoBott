@@ -13,7 +13,10 @@ import numpy as np
 import pandas as pd
 import pytz
 
-import config
+try:
+    from autotrader import config
+except ImportError:
+    import config
 from data import AlpacaDataClient
 from intraday_profiles import PROFILES, enrich_signal_for_profile, is_profile_window_open
 from risk import is_at_or_after

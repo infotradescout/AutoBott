@@ -102,7 +102,10 @@ def _migrate_runtime_files_to_active_data_dir() -> None:
 
 _force_writable_data_dir()
 _migrate_runtime_files_to_active_data_dir()
-import config
+try:
+    from autotrader import config
+except ImportError:
+    import config
 
 from alerts import AlertManager
 from broker import AlpacaBroker

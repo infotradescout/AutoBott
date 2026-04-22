@@ -10,7 +10,10 @@ import pytz
 import requests
 import yfinance as yf
 
-import config
+try:
+    from autotrader import config
+except ImportError:
+    import config
 
 _EARNINGS_SKIP_SYMBOLS = {str(s).upper() for s in config.EARNINGS_SKIP_SYMBOLS}
 

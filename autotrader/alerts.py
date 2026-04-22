@@ -8,7 +8,10 @@ from typing import Any
 
 import requests
 
-import config
+try:
+    from autotrader import config
+except ImportError:
+    import config
 from feature_flags import is_enabled
 
 
