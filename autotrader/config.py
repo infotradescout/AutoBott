@@ -134,7 +134,7 @@ LOSS_THROTTLE_MIN_VOLATILITY_SCORE  = 1.5  # after 2 losses require volatility_s
 MAX_PREMIUM_PER_TRADE_USD           = 125.0  # moderate bump for better fillable/liquid contracts
 MAX_TOTAL_OPEN_PREMIUM_USD          = 500.0  # 4 positions × $125
 OPENING_MAX_FRESH_PREMIUM_USD       = 200.0  # 2 positions in the opening window
-MAX_SAME_DIRECTION_POSITIONS        = 3      # allow one additional same-direction slot to reduce flow starvation
+MAX_SAME_DIRECTION_POSITIONS        = 4      # raise cap to reduce same-direction blocking in mixed tape
 
 # Disable premium override — never allow expensive trades on a $6k account.
 ENABLE_PREMIUM_CAP_QUALITY_OVERRIDE = False
@@ -303,11 +303,11 @@ OPTION_BEHAVIOR_SPREAD_GRACE_MINUTES        = 5    # wait a bit before spread-ba
 # Scanner thresholds
 # ---------------------------------------------------------------------------
 
-RVOL_MIN                  = 0.35  # relaxed to avoid over-filtering broad, mixed tapes
+RVOL_MIN                  = 0.20  # further relaxed for mixed intraday tape
 OPENING_RVOL_MIN          = 0.25  # opening window relaxed further for earlier setup throughput
 RVOL_STRICT_UNTIL         = "10:30"
 RVOL_RELAX_AFTER          = "10:00"
-RVOL_RELAXED_MIN          = 0.30  # after 10am, allow moderate-volume continuation setups
+RVOL_RELAXED_MIN          = 0.20  # keep post-10am floor permissive for rotation
 RVOL_IGNORE_AFTER         = "16:00"  # CRITICAL FIX: was 10:30 — never fully disable RVOL gate
 ATR_PCT_MIN               = 0.3   # very low ATR floor — don't filter out ETFs
 VWAP_NEUTRAL_BAND_PCT     = 0.15  # wider neutral band: within 0.15% of VWAP = neutral, halve VWAP vote weight
@@ -322,7 +322,7 @@ ROC_ACTIVE_MOVE_MIN_PCT   = 0.006
 # Direction conviction: minimum weighted-vote score to commit to call/put.
 # 0.0 = any majority; 0.5 = strongly one-sided required.
 # Raised from 0.10: too low was allowing calls on bearish stocks (3 bull vs 2 bear votes = 0.20 score).
-DIRECTION_CONVICTION_MIN  = 0.25  # less consensus required before acting
+DIRECTION_CONVICTION_MIN  = 0.15  # align with call/put/no-trade doctrine
 DIRECTION_MIN_ALIGNED_VOTES = 3   # require 3 of 5 votes to agree
 DIRECTION_FAST_ROC_PERIOD  = 5    # short-horizon ROC used in directional voting
 
@@ -370,7 +370,7 @@ OPENING_ENTRY_RELAX_MINUTES   = 7
 # Reject cooldowns (scanner control flow)
 REJECT_COOLDOWN_SHORT_MINUTES  = 2   # transient data issues: keep scanner responsive
 REJECT_COOLDOWN_MEDIUM_MINUTES = 15  # shorter tradability cooldown to avoid starving symbols
-REJECT_COOLDOWN_EVENT_MINUTES  = 20  # earnings/news cooldown without default overnight lockout
+REJECT_COOLDOWN_EVENT_MINUTES  = 8   # shorter event cooldown for intraday rotation
 
 # Adaptive learning from collected scan bars/results (day/week/month windows).
 LEARNING_REFRESH_SECONDS   = 300    # recompute adaptive profile every 5 minutes
