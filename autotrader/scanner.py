@@ -667,7 +667,7 @@ def _scan_ticker_details(
 
     above_vwap = price > vwap
 
-    # Direction model (simple): momentum up -> CALL, momentum down -> PUT.
+    # Direction model: use recent price direction first, then validate with momentum.
     roc_period = max(2, int(getattr(config, "ROC_PERIOD", 10) or 10))
     fast_roc_period = max(2, int(getattr(config, "DIRECTION_FAST_ROC_PERIOD", 5) or 5))
     roc_early = calculate_roc(closes, period=roc_period)
@@ -680,12 +680,27 @@ def _scan_ticker_details(
     direction_roc = roc_fast if not math.isnan(roc_fast) else roc_early
     if math.isnan(direction_roc):
         return _scan_failure("momentum unavailable")
+
+    price_dir_lookback = min(len(closes) - 1, max(1, int(getattr(config, "DIRECTION_PRICE_LOOKBACK_BARS", 3) or 3)))
+    start_price = float(closes.iloc[-price_dir_lookback - 1])
+    if start_price <= 0:
+        return _scan_failure("direction unavailable")
+    price_change_pct = ((price - start_price) / start_price) * 100
+
     if abs(direction_roc) < movement_force_min and distance_pct < (vwap_band * weak_vwap_mult):
         return _scan_failure(f"movement too weak (ROC {direction_roc:+.2f}%, VWAP dist {distance_pct:.2f}%)")
 
-    if direction_roc == 0:
-        return _scan_failure("momentum flat")
-    direction = "call" if direction_roc > 0 else "put"
+    if abs(price_change_pct) < max(0.01, movement_force_min / 2.0):
+        return _scan_failure(f"price direction too weak ({price_change_pct:+.2f}%)")
+
+    price_sign = 1.0 if price_change_pct > 0 else -1.0
+    momentum_sign = 1.0 if direction_roc > 0 else -1.0
+    if price_sign != momentum_sign and abs(direction_roc) >= max(0.01, movement_force_min / 2.0):
+        return _scan_failure(
+            f"direction conflict (price {price_change_pct:+.2f}% vs ROC {direction_roc:+.2f}%)"
+        )
+
+    direction = "call" if price_sign > 0 else "put"
     # Normalize momentum into [-1, 1] so downstream quality gates keep working.
     score_den = max(0.10, movement_force_min * 4.0)
     score_mag = min(1.0, abs(direction_roc) / score_den)
@@ -693,7 +708,8 @@ def _scan_ticker_details(
 
     vwap_vote = 1.0 if above_vwap else -1.0
     direction_votes: list[tuple[str, float, float]] = [
-        ("momentum", 1.0, 1.0 if direction_roc > 0 else -1.0),
+        ("price", 1.0, price_sign),
+        ("momentum", 0.7, momentum_sign),
         ("vwap_side", 0.2, vwap_vote),
     ]
 
