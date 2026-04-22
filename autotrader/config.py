@@ -134,7 +134,7 @@ LOSS_THROTTLE_MIN_VOLATILITY_SCORE  = 1.5  # after 2 losses require volatility_s
 MAX_PREMIUM_PER_TRADE_USD           = 125.0  # moderate bump for better fillable/liquid contracts
 MAX_TOTAL_OPEN_PREMIUM_USD          = 500.0  # 4 positions × $125
 OPENING_MAX_FRESH_PREMIUM_USD       = 200.0  # 2 positions in the opening window
-MAX_SAME_DIRECTION_POSITIONS        = 4      # raise cap to reduce same-direction blocking in mixed tape
+MAX_SAME_DIRECTION_POSITIONS        = 5      # one more notch to reduce same-direction entry starvation
 
 # Disable premium override — never allow expensive trades on a $6k account.
 ENABLE_PREMIUM_CAP_QUALITY_OVERRIDE = False
@@ -303,11 +303,11 @@ OPTION_BEHAVIOR_SPREAD_GRACE_MINUTES        = 5    # wait a bit before spread-ba
 # Scanner thresholds
 # ---------------------------------------------------------------------------
 
-RVOL_MIN                  = 0.20  # further relaxed for mixed intraday tape
-OPENING_RVOL_MIN          = 0.25  # opening window relaxed further for earlier setup throughput
+RVOL_MIN                  = 0.15  # permissive floor for quiet intraday tape without going blind
+OPENING_RVOL_MIN          = 0.15  # match base RVOL floor during opening rotation
 RVOL_STRICT_UNTIL         = "10:30"
 RVOL_RELAX_AFTER          = "10:00"
-RVOL_RELAXED_MIN          = 0.20  # keep post-10am floor permissive for rotation
+RVOL_RELAXED_MIN          = 0.15  # lower relaxed floor one more step for throughput
 RVOL_IGNORE_AFTER         = "16:00"  # CRITICAL FIX: was 10:30 — never fully disable RVOL gate
 ATR_PCT_MIN               = 0.3   # very low ATR floor — don't filter out ETFs
 VWAP_NEUTRAL_BAND_PCT     = 0.15  # wider neutral band: within 0.15% of VWAP = neutral, halve VWAP vote weight
