@@ -690,12 +690,18 @@ def _scan_ticker_details(
     if abs(direction_roc) < movement_force_min and distance_pct < (vwap_band * weak_vwap_mult):
         return _scan_failure(f"movement too weak (ROC {direction_roc:+.2f}%, VWAP dist {distance_pct:.2f}%)")
 
-    if abs(price_change_pct) < max(0.01, movement_force_min / 2.0):
+    price_dir_min = float(getattr(config, "DIRECTION_PRICE_MIN_PCT", max(0.005, movement_force_min / 2.0)) or 0.005)
+    if abs(price_change_pct) < price_dir_min:
         return _scan_failure(f"price direction too weak ({price_change_pct:+.2f}%)")
 
     price_sign = 1.0 if price_change_pct > 0 else -1.0
     momentum_sign = 1.0 if direction_roc > 0 else -1.0
-    if price_sign != momentum_sign and abs(direction_roc) >= max(0.01, movement_force_min / 2.0):
+    conflict_roc_min = float(
+        getattr(config, "DIRECTION_CONFLICT_ROC_MIN_PCT", max(0.01, movement_force_min / 2.0))
+        or max(0.01, movement_force_min / 2.0)
+    )
+    direction_conflict = price_sign != momentum_sign and abs(direction_roc) >= conflict_roc_min
+    if direction_conflict and bool(getattr(config, "DIRECTION_CONFLICT_HARD_REJECT", False)):
         return _scan_failure(
             f"direction conflict (price {price_change_pct:+.2f}% vs ROC {direction_roc:+.2f}%)"
         )
@@ -705,6 +711,9 @@ def _scan_ticker_details(
     score_den = max(0.10, movement_force_min * 4.0)
     score_mag = min(1.0, abs(direction_roc) / score_den)
     direction_score = score_mag if direction == "call" else -score_mag
+    if direction_conflict:
+        conflict_mult = float(getattr(config, "DIRECTION_CONFLICT_SCORE_MULT", 0.55) or 0.55)
+        direction_score *= max(0.1, min(1.0, conflict_mult))
 
     vwap_vote = 1.0 if above_vwap else -1.0
     direction_votes: list[tuple[str, float, float]] = [
@@ -733,7 +742,7 @@ def _scan_ticker_details(
     # Re-use momentum ROC for downstream filters and scoring.
     roc = direction_roc
     if config.ENABLE_ROC_FILTER and not math.isnan(roc):
-        weak_floor = max(0.01, movement_force_min / 2.0)
+        weak_floor = float(getattr(config, "ROC_ACTIVE_MOVE_MIN_PCT", max(0.005, movement_force_min / 2.0)) or 0.005)
         if abs(roc) < weak_floor and distance_pct < (vwap_band * 2.0):
             return _scan_failure(f"ROC {roc:+.2f}% too weak for active move")
 
@@ -841,6 +850,11 @@ def _scan_ticker_details(
         return _scan_failure(f"signal score {signal_score:.2f} below {effective_min_signal_score:.2f}")
 
     above_below = "Above VWAP" if direction == "call" else "Below VWAP"
+    conflict_note = (
+        f" | conflict price {price_change_pct:+.2f}% vs ROC {direction_roc:+.2f}%"
+        if direction_conflict
+        else ""
+    )
     vote_log = ", ".join(f"{n}={'+' if v > 0 else ''}{v:.0f}" for n, _, v in direction_votes)
     return {
         "symbol": symbol,
@@ -864,7 +878,7 @@ def _scan_ticker_details(
         "reason": (
             f"RVOL {rvol:.1f}x | {above_below} | Dir {direction_score:+.2f} [{vote_log}] | {ema_note} | "
             f"ROC {roc:+.2f}% | {ivr_reason_text} | Vol {volatility_score:.2f} | Regime {regime_score:.2f} | "
-            f"Flow {(flow_score if flow_score is not None else 0):+.2f} | Score {signal_score:.2f}"
+            f"Flow {(flow_score if flow_score is not None else 0):+.2f} | Score {signal_score:.2f}{conflict_note}"
         ) + (f" | Catalyst {_CATALYST_MODE_REASON}" if _CATALYST_MODE_ACTIVE and _CATALYST_MODE_REASON else ""),
         "regime_reason": regime_reason,
     }
@@ -897,21 +911,30 @@ class IntradayScanner:
             "setup_reject: movement too weak",
             "setup_reject: roc",
             "setup_reject: signal score",
+            "setup_reject: direction conflict",
+            "setup_reject: price direction too weak",
+            "setup_reject: rsi",
             "near vwap",
             "momentum opposes setup",
         )
         if any(token in text for token in no_cooldown_tokens):
             return None
 
-        hard_tokens = (
-            "hard_block: earnings",
+        long_tokens = (
             "hard_block: manual deny",
             "hard_block: manual block",
+        )
+        if any(token in text for token in long_tokens):
+            return ("long", self._next_session_open(now_et))
+
+        event_tokens = (
+            "hard_block: earnings",
             "hard_block: news/event block",
             "hard_block: explicit event/news block",
         )
-        if any(token in text for token in hard_tokens):
-            return ("long", self._next_session_open(now_et))
+        if any(token in text for token in event_tokens):
+            minutes = int(getattr(config, "REJECT_COOLDOWN_EVENT_MINUTES", 20) or 20)
+            return ("event", now_et + timedelta(minutes=max(5, min(30, minutes))))
 
         medium_tokens = (
             "no valid contract",
@@ -922,8 +945,8 @@ class IntradayScanner:
             "contract selection failed",
         )
         if any(token in text for token in medium_tokens):
-            minutes = int(getattr(config, "REJECT_COOLDOWN_MEDIUM_MINUTES", 30) or 30)
-            return ("medium", now_et + timedelta(minutes=max(15, min(60, minutes))))
+            minutes = int(getattr(config, "REJECT_COOLDOWN_MEDIUM_MINUTES", 15) or 15)
+            return ("medium", now_et + timedelta(minutes=max(5, min(30, minutes))))
 
         short_tokens = (
             "no premarket bars",
@@ -933,8 +956,8 @@ class IntradayScanner:
             "no latest stock price",
         )
         if any(token in text for token in short_tokens):
-            minutes = int(getattr(config, "REJECT_COOLDOWN_SHORT_MINUTES", 3) or 3)
-            return ("short", now_et + timedelta(minutes=max(1, min(5, minutes))))
+            minutes = int(getattr(config, "REJECT_COOLDOWN_SHORT_MINUTES", 2) or 2)
+            return ("short", now_et + timedelta(minutes=max(1, min(3, minutes))))
 
         return None
 

@@ -134,7 +134,7 @@ LOSS_THROTTLE_MIN_VOLATILITY_SCORE  = 1.5  # after 2 losses require volatility_s
 MAX_PREMIUM_PER_TRADE_USD           = 100.0  # max $1.00/share × 100 = $100 per contract
 MAX_TOTAL_OPEN_PREMIUM_USD          = 300.0  # 3 positions × $100
 OPENING_MAX_FRESH_PREMIUM_USD       = 200.0  # 2 positions in the opening window
-MAX_SAME_DIRECTION_POSITIONS        = 2      # max 2 calls or 2 puts at once
+MAX_SAME_DIRECTION_POSITIONS        = 3      # allow one additional same-direction slot to reduce flow starvation
 
 # Disable premium override — never allow expensive trades on a $6k account.
 ENABLE_PREMIUM_CAP_QUALITY_OVERRIDE = False
@@ -298,8 +298,13 @@ RVOL_RELAXED_MIN          = 0.30  # after 10am, allow moderate-volume continuati
 RVOL_IGNORE_AFTER         = "16:00"  # CRITICAL FIX: was 10:30 — never fully disable RVOL gate
 ATR_PCT_MIN               = 0.3   # very low ATR floor — don't filter out ETFs
 VWAP_NEUTRAL_BAND_PCT     = 0.15  # wider neutral band: within 0.15% of VWAP = neutral, halve VWAP vote weight
-MOVEMENT_FORCE_MIN_PCT    = 0.02  # was 0.03 (scanner default); allow borderline tape to be evaluated
+MOVEMENT_FORCE_MIN_PCT    = 0.014  # further relaxed for early-session/transition tape
 MOVEMENT_WEAK_VWAP_MULT   = 1.00  # was effectively 1.5 in scanner; only block when very close to VWAP
+DIRECTION_PRICE_MIN_PCT   = 0.006  # minimum recent price move to classify direction
+DIRECTION_CONFLICT_HARD_REJECT = False
+DIRECTION_CONFLICT_SCORE_MULT  = 0.55  # penalize (not veto) when price and ROC disagree
+DIRECTION_CONFLICT_ROC_MIN_PCT = 0.008
+ROC_ACTIVE_MOVE_MIN_PCT   = 0.006
 
 # Direction conviction: minimum weighted-vote score to commit to call/put.
 # 0.0 = any majority; 0.5 = strongly one-sided required.
@@ -316,10 +321,10 @@ ENABLE_ROC_FILTER         = True
 RSI_EARLY_MIN_PERIOD      = 5
 RSI_STRICT_AFTER_TIME     = "10:15"
 ENABLE_RSI_FILTER         = True
-RSI_CALL_MIN              = 45.0  # widen call acceptance to improve setup throughput
-RSI_CALL_MAX              = 92.0  # avoid rejecting strong extension during trend days
-RSI_PUT_MIN               = 8.0   # allow deeper selloff continuation setups
-RSI_PUT_MAX               = 55.0  # widen bearish acceptance to reduce false rejects
+RSI_CALL_MIN              = 40.0  # allow continuation entries before RSI fully expands
+RSI_CALL_MAX              = 95.0  # avoid rejecting trend continuation in high momentum tape
+RSI_PUT_MIN               = 5.0   # allow deeper downside continuation setups
+RSI_PUT_MAX               = 60.0  # widen bearish acceptance around transition zones
 
 IV_RANK_MIN               = 0.0   # no minimum IV rank — trade any setup
 IV_RANK_MAX               = 99.0
@@ -350,8 +355,9 @@ ENABLE_OPENING_ENTRY_RELAX    = False
 OPENING_ENTRY_RELAX_MINUTES   = 7
 
 # Reject cooldowns (scanner control flow)
-REJECT_COOLDOWN_SHORT_MINUTES  = 3   # transient data issues: 1-5m range enforced in scanner
-REJECT_COOLDOWN_MEDIUM_MINUTES = 30  # tradability/chain issues: 15-60m range enforced in scanner
+REJECT_COOLDOWN_SHORT_MINUTES  = 2   # transient data issues: keep scanner responsive
+REJECT_COOLDOWN_MEDIUM_MINUTES = 15  # shorter tradability cooldown to avoid starving symbols
+REJECT_COOLDOWN_EVENT_MINUTES  = 20  # earnings/news cooldown without default overnight lockout
 
 
 # ---------------------------------------------------------------------------
