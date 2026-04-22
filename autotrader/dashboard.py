@@ -3303,6 +3303,7 @@ def api_scansummary():
                 "universe_candidates": signal_detected,
                 "signal_detected_count": signal_detected,
                 "setup_passed_count": signal_detected,
+                "scanner_pass_count": signal_detected,
                 "rejected_count": 0,
                 "entry_eligible_count": eligible_count,
                 "entry_rejected_count": rejected_count,
@@ -3327,7 +3328,7 @@ def api_scansummary():
                 "entry_stage4_loop_ts": str(last_entry_debug.get("loop_ts_et", "") or ""),
                 "top_fail_reason": "Scan log unavailable; using runtime entry telemetry",
                 "setup_valid_count": signal_detected,
-                "pass_count": orders_filled,
+                "pass_count": signal_detected,
                 "fail_count": 0,
                 "top_reason": "Scan log unavailable",
                 "last_scan": str(last_entry_debug.get("loop_ts_et", "") or ""),
@@ -3415,6 +3416,7 @@ def api_scansummary():
                 "universe_candidates": len(same_loop),
           "signal_detected_count": len(same_loop),
                 "setup_passed_count": pass_count,
+            "scanner_pass_count": pass_count,
                 "rejected_count": fail_count,
                 "entry_eligible_count": entry_stage4_eligible_count,
                 "entry_rejected_count": entry_stage4_reject_count,
@@ -3435,7 +3437,7 @@ def api_scansummary():
                 "top_fail_reason": top_reason,
                 # Backward-compatible aliases for existing clients.
                 "setup_valid_count": pass_count,
-                "pass_count": orders_filled_count,
+                "pass_count": pass_count,
                 "fail_count": fail_count,
                 "top_reason": top_reason,
                 "last_scan": _to_ct_label(_parse_ts(str(last_ts))) or str(last_ts),
@@ -6239,7 +6241,7 @@ def home():
       const sumEl = document.getElementById("scan-summary");
       if (sumEl) {
         if (scansummary && !scansummary.error) {
-          const setupValid = Number(scansummary.setup_valid_count ?? scansummary.setup_passed_count ?? scansummary.pass_count ?? 0);
+          const setupValid = Number(scansummary.setup_valid_count ?? scansummary.setup_passed_count ?? scansummary.scanner_pass_count ?? scansummary.pass_count ?? 0);
           const rejected = Number(scansummary.rejected_count ?? scansummary.fail_count ?? 0);
           const candidates = Number(scansummary.universe_candidates ?? (setupValid + rejected));
           const entryEligible = Number(scansummary.entry_eligible_count ?? setupValid);
@@ -6269,9 +6271,9 @@ def home():
           const stage4Source = String(scansummary.entry_stage4_source || "proxy_scanner_pass");
           const stage4Fresh = Boolean(scansummary.entry_stage4_fresh);
           sumEl.innerHTML = `
-              <span style="color:${color}">✓ Trades Filled (PASS): ${tradesFilled}</span>
+              <span style="color:${color}">✓ Broker Fills Today: ${tradesFilled}</span>
               &nbsp;|&nbsp;
-              <span style="color:#888">Signal (scanner-valid): ${setupValid}</span>
+              <span style="color:#888">Scanner Pass (signal-valid): ${setupValid}</span>
               &nbsp;|&nbsp;
               <span style="color:#888">Universe Candidates: ${candidates}</span>
               &nbsp;|&nbsp;
@@ -6292,6 +6294,7 @@ def home():
               <br><small style="color:#888">Stage rejects: ${stageFailText || "—"}</small>
               <br><small style="color:#888">Stage4 entry rejects: ${stage4RejectText || "—"}</small>
               <br><small style="color:#888">Stage4 source: ${stage4Source}${stage4Fresh ? " (fresh)" : " (fallback/proxy)"}</small>
+                ${!stage4Fresh ? `<br><small style="color:#8fa1b8">Fallback/proxy mode: scanner pass does not imply a live entry trigger for this loop.</small>` : ""}
               ${candidates === 0 ? `<br><small style="color:#8fa1b8">No active scan loop yet${marketOpen ? "" : " (market closed)"}.</small>` : ""}
           `;
         } else {
