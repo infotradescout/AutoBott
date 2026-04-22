@@ -290,11 +290,11 @@ REVERSAL_CONFIRM_SIGNALS     = 2      # require 2 of 3 signals to confirm revers
 # Scanner thresholds
 # ---------------------------------------------------------------------------
 
-RVOL_MIN                  = 0.60  # raised: require real relative volume — 0.6x minimum all day
-OPENING_RVOL_MIN          = 0.40  # opening window slightly relaxed
+RVOL_MIN                  = 0.35  # relaxed to avoid over-filtering broad, mixed tapes
+OPENING_RVOL_MIN          = 0.25  # opening window relaxed further for earlier setup throughput
 RVOL_STRICT_UNTIL         = "10:30"
 RVOL_RELAX_AFTER          = "10:00"
-RVOL_RELAXED_MIN          = 0.50  # relaxed floor after 10am — still requires meaningful volume
+RVOL_RELAXED_MIN          = 0.30  # after 10am, allow moderate-volume continuation setups
 RVOL_IGNORE_AFTER         = "16:00"  # CRITICAL FIX: was 10:30 — never fully disable RVOL gate
 ATR_PCT_MIN               = 0.3   # very low ATR floor — don't filter out ETFs
 VWAP_NEUTRAL_BAND_PCT     = 0.15  # wider neutral band: within 0.15% of VWAP = neutral, halve VWAP vote weight
@@ -467,7 +467,7 @@ ENFORCE_PDT_GUARD      = False
 # Earnings filter
 # ---------------------------------------------------------------------------
 
-EARNINGS_LOOKAHEAD_DAYS  = 2
+EARNINGS_LOOKAHEAD_DAYS  = 1
 EARNINGS_CHECK_STRICT    = False
 EARNINGS_SKIP_SYMBOLS    = ("SPY", "QQQ", "IWM", "DIA", "VIX", "^VIX")
 

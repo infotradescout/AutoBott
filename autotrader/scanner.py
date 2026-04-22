@@ -72,7 +72,13 @@ def calculate_rsi(closes: pd.Series, period: int = 14) -> float:
 
 
 def calculate_roc(closes: pd.Series, period: int = 10) -> float:
+    if len(closes) < 2:
+        return float("nan")
+    # Early-session fallback: if requested lookback is longer than available bars,
+    # use the longest safe lookback instead of returning NaN.
     if len(closes) <= period:
+        period = len(closes) - 1
+    if period < 1:
         return float("nan")
     prev = float(closes.iloc[-period - 1])
     curr = float(closes.iloc[-1])
