@@ -285,6 +285,19 @@ RUNNER_REVERSAL_EXIT_MIN_PROFIT_PCT = 0.08
 REVERSAL_ROC_THRESHOLD_PCT   = 0.30   # 0.3% move in 2 bars counts as reversal signal
 REVERSAL_CONFIRM_SIGNALS     = 2      # require 2 of 3 signals to confirm reversal
 
+# Option-behavior exits (post-entry doctrine):
+# underlying sets bias; option premium behavior decides if trade still has edge.
+ENABLE_OPTION_BEHAVIOR_EXIT                 = True
+OPTION_BEHAVIOR_MIN_HOLD_MINUTES            = 3    # ignore micro-noise in first few minutes
+OPTION_BEHAVIOR_NO_PROGRESS_MINUTES         = 6    # if not proving out by then, rotate capital
+OPTION_BEHAVIOR_MIN_PROGRESS_PLPC           = 0.02 # require at least +2% premium progress
+OPTION_BEHAVIOR_MOMENTUM_LOOKBACK_CHECKS    = 4    # loop-history bars for momentum decay check
+OPTION_BEHAVIOR_MOMENTUM_MIN_DELTA_PLPC     = -0.01 # if premium trend decays >1% over lookback, exit
+OPTION_BEHAVIOR_PEAK_PULLBACK_TRIGGER_PLPC  = 0.08 # once +8% achieved, enforce pullback discipline
+OPTION_BEHAVIOR_PEAK_PULLBACK_EXIT_PCT      = 0.30 # exit if giving back >=30% of peak premium gain
+OPTION_BEHAVIOR_MAX_SPREAD_PCT              = 25.0 # spread blowout threshold during management
+OPTION_BEHAVIOR_SPREAD_GRACE_MINUTES        = 5    # wait a bit before spread-based exits
+
 
 # ---------------------------------------------------------------------------
 # Scanner thresholds

@@ -845,18 +845,19 @@ def _live_option_mark_and_plpc(
     data_client: AlpacaDataClient,
     option_symbol: str,
     entry_price: float,
-) -> tuple[float | None, float | None]:
+) -> tuple[float | None, float | None, float | None]:
     if entry_price <= 0:
-        return None, None
+        return None, None, None
     try:
         quote = _option_quote_snapshot(data_client, option_symbol)
         bid = float(quote.get("bid") or 0.0)
+        spread_pct = float(quote.get("spread_pct") or 0.0)
         if bid <= 0:
-            return None, None
-        return bid, ((bid - entry_price) / entry_price)
+            return None, None, spread_pct
+        return bid, ((bid - entry_price) / entry_price), spread_pct
     except Exception as exc:  # noqa: BLE001
         print(f"[main] live option quote unavailable for {option_symbol}: {exc}")
-        return None, None
+        return None, None, None
 
 
 def _order_reject_reason(order) -> str:
@@ -3477,7 +3478,7 @@ def main():
 
             meta = open_trade_meta.get(symbol, {})
             entry_price_for_monitor = float(meta.get("entry_price", getattr(pos, "avg_entry_price", 0) or 0) or 0)
-            live_mark_price, live_plpc = _live_option_mark_and_plpc(
+            live_mark_price, live_plpc, live_spread_pct = _live_option_mark_and_plpc(
                 data_client=data_client,
                 option_symbol=symbol,
                 entry_price=entry_price_for_monitor,
@@ -3525,6 +3526,7 @@ def main():
                     "ts": now_et.isoformat(),
                     "plpc": round(float(plpc) * 100.0, 4),
                     "mark": round(float(live_mark_price), 6) if live_mark_price is not None else None,
+                    "spread_pct": round(float(live_spread_pct), 4) if live_spread_pct is not None else None,
                 }
             )
             # Keep only the most recent ~3 hours at 15s loop cadence.
@@ -3556,6 +3558,53 @@ def main():
             stop_loss_usd_cap = min(_meta_sl, _runtime_sl) if _meta_sl > 0 else _runtime_sl
             if exit_reason is None and should_trigger_stop_loss(unrealized_usd, stop_loss_usd_cap):
                 exit_reason = "stop_loss"
+
+            # --- Option-behavior exits (contract premium is primary after entry) ---
+            if exit_reason is None and bool(getattr(config, "ENABLE_OPTION_BEHAVIOR_EXIT", True)):
+                held_minutes = None
+                if entry_time is not None:
+                    held_minutes = max(0.0, (now_et - entry_time).total_seconds() / 60.0)
+
+                min_hold = float(getattr(config, "OPTION_BEHAVIOR_MIN_HOLD_MINUTES", 3) or 3)
+                no_progress_after = float(getattr(config, "OPTION_BEHAVIOR_NO_PROGRESS_MINUTES", 6) or 6)
+                min_progress_plpc = float(getattr(config, "OPTION_BEHAVIOR_MIN_PROGRESS_PLPC", 0.02) or 0.02)
+                spread_grace = float(getattr(config, "OPTION_BEHAVIOR_SPREAD_GRACE_MINUTES", 5) or 5)
+                max_spread_pct = float(getattr(config, "OPTION_BEHAVIOR_MAX_SPREAD_PCT", 25.0) or 25.0)
+
+                if held_minutes is not None and held_minutes >= max(min_hold, no_progress_after):
+                    max_plpc_seen = float(meta.get("max_plpc", plpc) or plpc)
+                    if max_plpc_seen < min_progress_plpc and plpc <= 0.01:
+                        exit_reason = "option_no_progress"
+
+                if exit_reason is None and held_minutes is not None and held_minutes >= min_hold:
+                    lookback_checks = max(2, int(getattr(config, "OPTION_BEHAVIOR_MOMENTUM_LOOKBACK_CHECKS", 4) or 4))
+                    momentum_floor = float(getattr(config, "OPTION_BEHAVIOR_MOMENTUM_MIN_DELTA_PLPC", -0.01) or -0.01)
+                    if len(history_rows) >= (lookback_checks + 1):
+                        older = history_rows[-(lookback_checks + 1)]
+                        older_plpc = float(older.get("plpc", 0.0) or 0.0) / 100.0
+                        premium_delta = float(plpc) - older_plpc
+                        if plpc > 0 and premium_delta <= momentum_floor and not _is_in_anti_churn_window(entry_time, now_et):
+                            exit_reason = "option_momentum_stall"
+
+                if exit_reason is None and held_minutes is not None and held_minutes >= min_hold:
+                    peak_trigger = float(getattr(config, "OPTION_BEHAVIOR_PEAK_PULLBACK_TRIGGER_PLPC", 0.08) or 0.08)
+                    pullback_exit_pct = float(getattr(config, "OPTION_BEHAVIOR_PEAK_PULLBACK_EXIT_PCT", 0.30) or 0.30)
+                    max_plpc_seen = float(meta.get("max_plpc", plpc) or plpc)
+                    if max_plpc_seen >= peak_trigger:
+                        giveback = max_plpc_seen - float(plpc)
+                        pullback_limit = max_plpc_seen * pullback_exit_pct
+                        if giveback >= pullback_limit and not _is_in_anti_churn_window(entry_time, now_et):
+                            exit_reason = "option_peak_pullback"
+
+                if (
+                    exit_reason is None
+                    and held_minutes is not None
+                    and held_minutes >= spread_grace
+                    and live_spread_pct is not None
+                    and live_spread_pct >= max_spread_pct
+                    and plpc <= 0.02
+                ):
+                    exit_reason = "option_spread_blowout"
 
             # --- Stateful profit management ---
             trade_state = _trade_state_from_meta(meta)
