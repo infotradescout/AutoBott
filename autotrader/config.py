@@ -289,8 +289,8 @@ REVERSAL_CONFIRM_SIGNALS     = 2      # require 2 of 3 signals to confirm revers
 # underlying sets bias; option premium behavior decides if trade still has edge.
 ENABLE_OPTION_BEHAVIOR_EXIT                 = True
 OPTION_BEHAVIOR_MIN_HOLD_MINUTES            = 3    # ignore micro-noise in first few minutes
-OPTION_BEHAVIOR_NO_PROGRESS_MINUTES         = 6    # if not proving out by then, rotate capital
-OPTION_BEHAVIOR_MIN_PROGRESS_PLPC           = 0.02 # require at least +2% premium progress
+OPTION_BEHAVIOR_NO_PROGRESS_MINUTES         = 5    # tighter no-progress clock for weak/choppy tape
+OPTION_BEHAVIOR_MIN_PROGRESS_PLPC           = 0.03 # require at least +3% premium progress
 OPTION_BEHAVIOR_MOMENTUM_LOOKBACK_CHECKS    = 4    # loop-history bars for momentum decay check
 OPTION_BEHAVIOR_MOMENTUM_MIN_DELTA_PLPC     = -0.01 # if premium trend decays >1% over lookback, exit
 OPTION_BEHAVIOR_PEAK_PULLBACK_TRIGGER_PLPC  = 0.08 # once +8% achieved, enforce pullback discipline
@@ -371,6 +371,18 @@ OPENING_ENTRY_RELAX_MINUTES   = 7
 REJECT_COOLDOWN_SHORT_MINUTES  = 2   # transient data issues: keep scanner responsive
 REJECT_COOLDOWN_MEDIUM_MINUTES = 15  # shorter tradability cooldown to avoid starving symbols
 REJECT_COOLDOWN_EVENT_MINUTES  = 8   # shorter event cooldown for intraday rotation
+
+# Chop/no-trade regime guard (reduce force-trading in dead tape).
+ENABLE_CHOP_NO_TRADE_FILTER                   = True
+CHOP_NO_TRADE_MIN_SIGNAL_SAMPLE               = 8
+CHOP_NO_TRADE_WEAK_SHARE_TRIGGER              = 0.65
+CHOP_NO_TRADE_MAX_RVOL                        = 0.35
+CHOP_NO_TRADE_MAX_ABS_ROC_PCT                 = 0.12
+CHOP_NO_TRADE_MAX_ABS_DIRECTION_SCORE         = 0.30
+CHOP_NO_TRADE_REQUIRE_NEUTRAL_INDEX_BIAS      = True
+CHOP_NO_TRADE_PAUSE_MINUTES                   = 12
+CHOP_NO_TRADE_OPTION_EXIT_CLUSTER_WINDOW_MINUTES = 45
+CHOP_NO_TRADE_OPTION_EXIT_CLUSTER_MIN_COUNT   = 3
 
 # Adaptive learning from collected scan bars/results (day/week/month windows).
 LEARNING_REFRESH_SECONDS   = 300    # recompute adaptive profile every 5 minutes

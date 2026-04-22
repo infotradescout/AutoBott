@@ -1519,6 +1519,8 @@ def main():
     premarket_signals_day = str(state.get("premarket_signals_day", "") or "")
     premarket_scan_runs = int(state.get("premarket_scan_runs", 0) or 0)
     premarket_last_scan_at = _parse_state_datetime(state.get("premarket_last_scan_at_iso"))
+    chop_pause_until = _parse_state_datetime(state.get("chop_pause_until_iso"))
+    recent_option_behavior_exits = list(state.get("recent_option_behavior_exits") or [])
     bad_fill_tracker: dict[str, dict] = dict(state.get("bad_fill_tracker") or {})
     watchlist_control_state: dict = dict(state.get("watchlist_control") or {})
     last_trader_heartbeat_et = str(state.get("last_trader_heartbeat_et", "") or "")
@@ -1648,6 +1650,8 @@ def main():
                 "premarket_signals_day": premarket_signals_day,
                 "premarket_scan_runs": premarket_scan_runs,
                 "premarket_last_scan_at_iso": premarket_last_scan_at.isoformat() if premarket_last_scan_at else "",
+                "chop_pause_until_iso": chop_pause_until.isoformat() if chop_pause_until else "",
+                "recent_option_behavior_exits": recent_option_behavior_exits[-200:],
                 "bad_fill_tracker": bad_fill_tracker,
                 "watchlist_control": watchlist_control_state,
                 "last_trader_heartbeat_et": last_trader_heartbeat_et,
@@ -1686,6 +1690,33 @@ def main():
             ticker_loss_cooldown_until.pop(key, None)
             return None
         return until_dt
+
+    def _prune_recent_option_behavior_exits(now_et: datetime) -> int:
+        nonlocal recent_option_behavior_exits
+        window_minutes = int(getattr(config, "CHOP_NO_TRADE_OPTION_EXIT_CLUSTER_WINDOW_MINUTES", 45) or 45)
+        cutoff = now_et - timedelta(minutes=max(5, window_minutes))
+        kept: list[dict[str, str]] = []
+        for item in recent_option_behavior_exits:
+            if not isinstance(item, dict):
+                continue
+            reason = str(item.get("reason", "") or "").strip().lower()
+            ts_iso = str(item.get("ts", "") or "")
+            ts_dt = _parse_state_datetime(ts_iso)
+            if not ts_dt or ts_dt < cutoff:
+                continue
+            if reason not in {"option_no_progress", "option_momentum_stall"}:
+                continue
+            kept.append({"reason": reason, "ts": ts_dt.isoformat()})
+        recent_option_behavior_exits = kept[-200:]
+        return len(recent_option_behavior_exits)
+
+    def _record_option_behavior_exit(reason: str, now_et: datetime) -> None:
+        nonlocal recent_option_behavior_exits
+        token = str(reason or "").strip().lower()
+        if token not in {"option_no_progress", "option_momentum_stall"}:
+            return
+        recent_option_behavior_exits.append({"reason": token, "ts": now_et.isoformat()})
+        _prune_recent_option_behavior_exits(now_et)
 
     def _set_ticker_loss_cooldown(ticker: str, now_et: datetime, *, minutes: int, reason: str) -> None:
         key = str(ticker or "").upper()
@@ -1884,6 +1915,7 @@ def main():
                 "entry_time_iso": now_et.isoformat(),
                 "strategy_profile": "reversal_snapback",
                 "ticker": ticker,
+                "index_bias_at_entry": str(index_bias or "both"),
                 "direction": direction,
                 "option_symbol": option_symbol,
                 "strike": contract.get("strike_price", ""),
@@ -2529,6 +2561,11 @@ def main():
             vix_block_notice = None
             signals = run_scan(watchlist) if watchlist else []
 
+        chop_filter_active = False
+        chop_filter_reason = ""
+        chop_weak_signal_share = 0.0
+        chop_recent_option_exit_count = _prune_recent_option_behavior_exits(now_et)
+
         if (
             bool(getattr(config, "ENABLE_PREMARKET_OPENING_SIGNALS", False))
             and premarket_opening_signals
@@ -2567,6 +2604,58 @@ def main():
             print(f"[{ts(now_et)}] Index bias={index_bias.upper()} filtered signals {before}->{len(signals)}.")
         elif signals:
             print(f"[{ts(now_et)}] Index bias neutral; keeping both call/put signals.")
+
+        if bool(getattr(config, "ENABLE_CHOP_NO_TRADE_FILTER", False)):
+            if chop_pause_until is not None and now_et < chop_pause_until:
+                chop_filter_active = True
+                chop_filter_reason = f"chop_pause_active_until_{ts(chop_pause_until)}"
+                if signals:
+                    print(f"[{ts(now_et)}] Chop pause active; suppressing {len(signals)} signal(s) until {ts(chop_pause_until)}.")
+                signals = []
+            elif signals:
+                min_sample = max(3, int(getattr(config, "CHOP_NO_TRADE_MIN_SIGNAL_SAMPLE", 8) or 8))
+                weak_share_trigger = float(getattr(config, "CHOP_NO_TRADE_WEAK_SHARE_TRIGGER", 0.65) or 0.65)
+                weak_rvol_max = float(getattr(config, "CHOP_NO_TRADE_MAX_RVOL", 0.35) or 0.35)
+                weak_roc_max = float(getattr(config, "CHOP_NO_TRADE_MAX_ABS_ROC_PCT", 0.12) or 0.12)
+                weak_dir_score_max = float(getattr(config, "CHOP_NO_TRADE_MAX_ABS_DIRECTION_SCORE", 0.30) or 0.30)
+                require_neutral_bias = bool(getattr(config, "CHOP_NO_TRADE_REQUIRE_NEUTRAL_INDEX_BIAS", True))
+                cluster_min = max(1, int(getattr(config, "CHOP_NO_TRADE_OPTION_EXIT_CLUSTER_MIN_COUNT", 3) or 3))
+                pause_minutes = max(3, int(getattr(config, "CHOP_NO_TRADE_PAUSE_MINUTES", 12) or 12))
+
+                weak_signal_count = 0
+                for s in signals:
+                    s_rvol = float(s.get("rvol", 0.0) or 0.0)
+                    s_roc = abs(float(s.get("roc", 0.0) or 0.0))
+                    s_dir = abs(float(s.get("direction_score", 0.0) or 0.0))
+                    if s_rvol <= weak_rvol_max and s_roc <= weak_roc_max and s_dir <= weak_dir_score_max:
+                        weak_signal_count += 1
+                chop_weak_signal_share = weak_signal_count / max(1, len(signals))
+
+                weak_tape_trigger = len(signals) >= min_sample and chop_weak_signal_share >= weak_share_trigger
+                if require_neutral_bias:
+                    weak_tape_trigger = weak_tape_trigger and (index_bias == "both")
+
+                exit_cluster_trigger = (
+                    chop_recent_option_exit_count >= cluster_min
+                    and chop_weak_signal_share >= max(0.40, weak_share_trigger - 0.20)
+                )
+
+                if weak_tape_trigger or exit_cluster_trigger:
+                    chop_filter_active = True
+                    trigger_bits: list[str] = []
+                    if weak_tape_trigger:
+                        trigger_bits.append(
+                            f"weak_tape({weak_signal_count}/{len(signals)}={chop_weak_signal_share:.2f})"
+                        )
+                    if exit_cluster_trigger:
+                        trigger_bits.append(f"option_exit_cluster({chop_recent_option_exit_count})")
+                    chop_filter_reason = " + ".join(trigger_bits)
+                    chop_pause_until = now_et + timedelta(minutes=pause_minutes)
+                    print(
+                        f"[{ts(now_et)}] Chop no-trade filter engaged: {chop_filter_reason}; "
+                        f"pausing new entries until {ts(chop_pause_until)}."
+                    )
+                    signals = []
 
         entry_min_signal_score = _runtime_entry_min_signal_score()
         if signals:
@@ -2625,6 +2714,12 @@ def main():
             "watchlist_count": len(watchlist),
             "watchlist_mode": watchlist_mode,
             "watchlist_tickers": list(watchlist_control_state.get("tickers") or []),
+            "index_bias": str(index_bias or "both"),
+            "chop_filter_active": bool(chop_filter_active),
+            "chop_filter_reason": str(chop_filter_reason or ""),
+            "chop_weak_signal_share": round(float(chop_weak_signal_share), 4),
+            "chop_recent_option_exits": int(chop_recent_option_exit_count),
+            "chop_pause_until": ts(chop_pause_until) if chop_pause_until else "",
             "signal_detected_count": len(signals),
             "scan_pass_count": len(signals),
             "signals_considered": 0,
@@ -2666,6 +2761,22 @@ def main():
                 "detail": str(detail or "").strip(),
             }
             entry_debug["signal_outcomes"] = outcomes
+
+        def _seconds_to_first_green(entry_time: datetime | None, history_rows: list[dict[str, Any]]) -> int | None:
+            if entry_time is None:
+                return None
+            for row in history_rows:
+                try:
+                    plpc_pct = float(row.get("plpc", 0.0) or 0.0)
+                except (TypeError, ValueError):
+                    continue
+                if plpc_pct <= 0.0:
+                    continue
+                ts_dt = _parse_state_datetime(str(row.get("ts", "") or ""))
+                if ts_dt is None:
+                    continue
+                return max(0, int((ts_dt - entry_time).total_seconds()))
+            return None
 
         def _mark_skip(reason: str) -> None:
             skips = entry_debug.get("skips", {})
@@ -3378,6 +3489,7 @@ def main():
                     "entry_time_iso": now_et.isoformat(),
                     "strategy_profile": signal_strategy_profile,
                     "ticker": ticker,
+                    "index_bias_at_entry": str(index_bias or "both"),
                     "direction": direction,
                     "option_symbol": option_symbol,
                     "strike": contract.get("strike_price", ""),
@@ -3849,6 +3961,7 @@ def main():
                         "entry_time": meta.get("entry_time_iso", ""),
                         "exit_time": now_et.isoformat(),
                         "hold_seconds": hold_seconds,
+                        "time_to_first_green_seconds": _seconds_to_first_green(entry_time, history_rows),
                         "entry_price": entry_price,
                         "exit_price": exit_price,
                         "realized_pnl_usd": round(trade_pnl_usd, 2),
@@ -3869,6 +3982,8 @@ def main():
                         "entry_fill_slippage_vs_ask_pct": meta.get("entry_fill_slippage_vs_ask_pct", ""),
                         "entry_fill_seconds": meta.get("entry_fill_seconds", ""),
                         "entry_attempts": meta.get("entry_attempts", ""),
+                        "index_bias_at_entry": str(meta.get("index_bias_at_entry", "") or ""),
+                        "weak_index_bias_trade": "yes" if str(meta.get("index_bias_at_entry", "") or "").lower() == "both" else "no",
                         "exit_underlying_symbol": meta.get("ticker", ""),
                         "exit_bid_submit": close_execution.get("submit_bid", ""),
                         "exit_ask_submit": close_execution.get("submit_ask", ""),
@@ -3887,6 +4002,8 @@ def main():
                     except Exception as log_exc:  # noqa: BLE001
                         trade_telemetry_last_log_error = str(log_exc)[:300]
                         print(f"[{ts(now_et)}] trade log write failed: {log_exc}")
+
+                    _record_option_behavior_exit(exit_reason, now_et)
 
                     trade_telemetry_closed_count += 1
                     trade_telemetry_total_pnl_usd += trade_pnl_usd

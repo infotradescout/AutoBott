@@ -617,6 +617,10 @@ def _build_trade_report_summary(trade_rows: list[dict[str, str]]) -> dict[str, A
     total_pnl_usd = 0.0
     total_pnl_pct = 0.0
     exit_reasons: dict[str, int] = {}
+    option_no_progress_exit_count = 0
+    option_momentum_stall_exit_count = 0
+    weak_index_bias_trade_count = 0
+    first_green_seconds: list[float] = []
     best_trade: dict[str, Any] | None = None
     worst_trade: dict[str, Any] | None = None
 
@@ -639,6 +643,16 @@ def _build_trade_report_summary(trade_rows: list[dict[str, str]]) -> dict[str, A
         total_pnl_usd += pnl_usd
         total_pnl_pct += pnl_pct
         exit_reasons[exit_reason] = exit_reasons.get(exit_reason, 0) + 1
+        if exit_reason == "option_no_progress":
+            option_no_progress_exit_count += 1
+        if exit_reason == "option_momentum_stall":
+            option_momentum_stall_exit_count += 1
+        weak_bias_raw = str(row.get("weak_index_bias_trade", "") or "").strip().lower()
+        if weak_bias_raw in {"1", "true", "yes", "y"}:
+            weak_index_bias_trade_count += 1
+        first_green_raw = _safe_float(row.get("time_to_first_green_seconds"), -1.0)
+        if first_green_raw >= 0:
+            first_green_seconds.append(float(first_green_raw))
         if pnl_usd > 0:
             wins += 1
         elif pnl_usd < 0:
@@ -660,6 +674,17 @@ def _build_trade_report_summary(trade_rows: list[dict[str, str]]) -> dict[str, A
         "total_pnl_usd": round(total_pnl_usd, 2),
         "avg_trade_pnl_usd": round(total_pnl_usd / total, 2) if total > 0 else 0.0,
         "avg_trade_pnl_pct": round(total_pnl_pct / total, 2) if total > 0 else 0.0,
+        "avg_time_to_first_green_seconds": (
+            round(sum(first_green_seconds) / len(first_green_seconds), 1)
+            if first_green_seconds
+            else None
+        ),
+        "option_no_progress_exit_count": option_no_progress_exit_count,
+        "option_momentum_stall_exit_count": option_momentum_stall_exit_count,
+        "weak_index_bias_trade_count": weak_index_bias_trade_count,
+        "weak_index_bias_trade_share_pct": (
+            round((weak_index_bias_trade_count / total) * 100.0, 2) if total > 0 else 0.0
+        ),
         "best_trade": best_trade,
         "worst_trade": worst_trade,
         "exit_reasons": ordered_exit_reasons,
@@ -3296,6 +3321,8 @@ def api_scansummary():
             rejected_count = int(_safe_float(last_entry_debug.get("entry_stage4_reject_count"), 0))
             orders_submitted = int(_safe_float(last_entry_debug.get("entry_orders_submitted"), 0))
             orders_filled = int(_safe_float(last_entry_debug.get("entries_filled"), 0))
+            today_trades = _today_trade_rows()
+            trade_summary = _build_trade_report_summary(today_trades)
             raw_reasons = last_entry_debug.get("entry_stage4_reject_reasons")
             reject_reasons = raw_reasons if isinstance(raw_reasons, dict) else {}
             return jsonify(
@@ -3326,6 +3353,16 @@ def api_scansummary():
                 "entry_stage4_source": "runtime_entry_debug_no_scanlog",
                 "entry_stage4_fresh": True,
                 "entry_stage4_loop_ts": str(last_entry_debug.get("loop_ts_et", "") or ""),
+                "index_bias": str(last_entry_debug.get("index_bias", "both") or "both"),
+                "chop_filter_active": bool(last_entry_debug.get("chop_filter_active", False)),
+                "chop_filter_reason": str(last_entry_debug.get("chop_filter_reason", "") or ""),
+                "chop_weak_signal_share": float(last_entry_debug.get("chop_weak_signal_share", 0.0) or 0.0),
+                "chop_recent_option_exits": int(last_entry_debug.get("chop_recent_option_exits", 0) or 0),
+                "chop_pause_until": str(last_entry_debug.get("chop_pause_until", "") or ""),
+                "avg_time_to_first_green_seconds": trade_summary.get("avg_time_to_first_green_seconds"),
+                "option_no_progress_exit_count": int(trade_summary.get("option_no_progress_exit_count", 0) or 0),
+                "option_momentum_stall_exit_count": int(trade_summary.get("option_momentum_stall_exit_count", 0) or 0),
+                "weak_index_bias_trade_count": int(trade_summary.get("weak_index_bias_trade_count", 0) or 0),
                 "top_fail_reason": "Scan log unavailable; using runtime entry telemetry",
                 "setup_valid_count": signal_detected,
                 "pass_count": signal_detected,
@@ -3388,6 +3425,7 @@ def api_scansummary():
 
         today_trades = _today_trade_rows()
         realized_pnl_usd = round(sum(_pnl_usd_from_trade_row(row) for row in today_trades), 2)
+        trade_summary = _build_trade_report_summary(today_trades)
 
         scan_dt = _parse_ts(str(last_ts))
         entry_dt = _parse_ts(entry_loop_ts)
@@ -3434,6 +3472,16 @@ def api_scansummary():
                 "entry_stage4_source": entry_stage4_source,
                 "entry_stage4_fresh": entry_debug_fresh,
                 "entry_stage4_loop_ts": _to_ct_label(entry_dt) if entry_dt else entry_loop_ts,
+                "index_bias": str(last_entry_debug.get("index_bias", "both") or "both") if isinstance(last_entry_debug, dict) else "both",
+                "chop_filter_active": bool(last_entry_debug.get("chop_filter_active", False)) if isinstance(last_entry_debug, dict) else False,
+                "chop_filter_reason": str(last_entry_debug.get("chop_filter_reason", "") or "") if isinstance(last_entry_debug, dict) else "",
+                "chop_weak_signal_share": float(last_entry_debug.get("chop_weak_signal_share", 0.0) or 0.0) if isinstance(last_entry_debug, dict) else 0.0,
+                "chop_recent_option_exits": int(last_entry_debug.get("chop_recent_option_exits", 0) or 0) if isinstance(last_entry_debug, dict) else 0,
+                "chop_pause_until": str(last_entry_debug.get("chop_pause_until", "") or "") if isinstance(last_entry_debug, dict) else "",
+                "avg_time_to_first_green_seconds": trade_summary.get("avg_time_to_first_green_seconds"),
+                "option_no_progress_exit_count": int(trade_summary.get("option_no_progress_exit_count", 0) or 0),
+                "option_momentum_stall_exit_count": int(trade_summary.get("option_momentum_stall_exit_count", 0) or 0),
+                "weak_index_bias_trade_count": int(trade_summary.get("weak_index_bias_trade_count", 0) or 0),
                 "top_fail_reason": top_reason,
                 # Backward-compatible aliases for existing clients.
                 "setup_valid_count": pass_count,
