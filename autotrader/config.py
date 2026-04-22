@@ -359,6 +359,10 @@ REJECT_COOLDOWN_SHORT_MINUTES  = 2   # transient data issues: keep scanner respo
 REJECT_COOLDOWN_MEDIUM_MINUTES = 15  # shorter tradability cooldown to avoid starving symbols
 REJECT_COOLDOWN_EVENT_MINUTES  = 20  # earnings/news cooldown without default overnight lockout
 
+# Adaptive learning from collected scan bars/results (day/week/month windows).
+LEARNING_REFRESH_SECONDS   = 300    # recompute adaptive profile every 5 minutes
+LEARNING_SCAN_LOG_MAX_ROWS = 12000  # cap CSV reads for runtime efficiency
+
 
 # ---------------------------------------------------------------------------
 # Catalyst mode

@@ -5,6 +5,8 @@ from __future__ import annotations
 import math
 import re
 import time
+import csv
+from collections import deque
 from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -57,6 +59,175 @@ _SCAN_SYMBOL_RE = re.compile(r"^[A-Z][A-Z.]{0,5}$")
 _CORE_LIQUID_PROFILE_SYMBOLS = {
     "SPY", "QQQ", "IWM", "DIA", "AAPL", "MSFT", "NVDA", "AMZN", "META", "GOOGL", "TSLA", "AMD",
 }
+_LEARNING_PROFILE_CACHE: dict[str, Any] = {
+    "updated_at": None,
+    "profile": None,
+}
+
+
+def _default_learning_profile() -> dict[str, Any]:
+    return {
+        "move_threshold_mult": 1.0,
+        "rvol_min_mult": 1.0,
+        "rsi_expand_points": 0.0,
+        "shares": {
+            "day": {"rsi": 0.0, "weak_move": 0.0, "rvol": 0.0},
+            "week": {"rsi": 0.0, "weak_move": 0.0, "rvol": 0.0},
+            "month": {"rsi": 0.0, "weak_move": 0.0, "rvol": 0.0},
+        },
+    }
+
+
+def _parse_scan_ts(raw: str) -> datetime | None:
+    text = str(raw or "").strip()
+    if not text:
+        return None
+    try:
+        if text.endswith(" ET"):
+            naive = datetime.strptime(text[:-3].strip(), "%Y-%m-%d %H:%M:%S")
+            return pytz.timezone(config.EASTERN_TZ).localize(naive)
+        if text.endswith(" EDT"):
+            naive = datetime.strptime(text[:-4].strip(), "%Y-%m-%d %H:%M:%S")
+            return pytz.timezone(config.EASTERN_TZ).localize(naive)
+        if text.endswith(" EST"):
+            naive = datetime.strptime(text[:-4].strip(), "%Y-%m-%d %H:%M:%S")
+            return pytz.timezone(config.EASTERN_TZ).localize(naive)
+        parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+        if parsed.tzinfo is None:
+            return pytz.timezone(config.EASTERN_TZ).localize(parsed)
+        return parsed.astimezone(pytz.timezone(config.EASTERN_TZ))
+    except Exception:
+        return None
+
+
+def _reject_feature_counts(rows: list[dict[str, str]]) -> tuple[int, dict[str, int]]:
+    total = 0
+    counts = {"rsi": 0, "weak_move": 0, "rvol": 0}
+    for row in rows:
+        reason = str(row.get("reason", "") or "").lower()
+        if "fail" not in str(row.get("result", "") or "").lower() and "setup_reject" not in reason:
+            continue
+        total += 1
+        if "setup_reject: rsi" in reason:
+            counts["rsi"] += 1
+        if (
+            "setup_reject: movement too weak" in reason
+            or "setup_reject: price direction too weak" in reason
+            or "setup_reject: roc" in reason
+        ):
+            counts["weak_move"] += 1
+        if "setup_reject: rvol" in reason:
+            counts["rvol"] += 1
+    return total, counts
+
+
+def _build_learning_profile(now_et: datetime) -> dict[str, Any]:
+    profile = _default_learning_profile()
+    if not SCAN_LOG_PATH.exists():
+        return profile
+
+    lookback_rows = int(getattr(config, "LEARNING_SCAN_LOG_MAX_ROWS", 12000) or 12000)
+    if lookback_rows < 1000:
+        lookback_rows = 1000
+
+    day_cutoff = now_et - timedelta(days=1)
+    week_cutoff = now_et - timedelta(days=7)
+    month_cutoff = now_et - timedelta(days=30)
+
+    try:
+        with SCAN_LOG_PATH.open("r", newline="", encoding="utf-8") as f:
+            reader = csv.DictReader(f)
+            rows = list(deque(reader, maxlen=lookback_rows))
+    except Exception:
+        return profile
+
+    day_rows: list[dict[str, str]] = []
+    week_rows: list[dict[str, str]] = []
+    month_rows: list[dict[str, str]] = []
+    for row in rows:
+        ts = _parse_scan_ts(str(row.get("timestamp", "") or ""))
+        if ts is None:
+            continue
+        ts_et = ts.astimezone(pytz.timezone(config.EASTERN_TZ))
+        if ts_et >= month_cutoff:
+            month_rows.append(row)
+        if ts_et >= week_cutoff:
+            week_rows.append(row)
+        if ts_et >= day_cutoff:
+            day_rows.append(row)
+
+    day_total, day_counts = _reject_feature_counts(day_rows)
+    week_total, week_counts = _reject_feature_counts(week_rows)
+    month_total, month_counts = _reject_feature_counts(month_rows)
+
+    def _share(total: int, count: int) -> float:
+        if total <= 0:
+            return 0.0
+        return float(count) / float(total)
+
+    shares = {
+        "day": {
+            "rsi": _share(day_total, day_counts["rsi"]),
+            "weak_move": _share(day_total, day_counts["weak_move"]),
+            "rvol": _share(day_total, day_counts["rvol"]),
+        },
+        "week": {
+            "rsi": _share(week_total, week_counts["rsi"]),
+            "weak_move": _share(week_total, week_counts["weak_move"]),
+            "rvol": _share(week_total, week_counts["rvol"]),
+        },
+        "month": {
+            "rsi": _share(month_total, month_counts["rsi"]),
+            "weak_move": _share(month_total, month_counts["weak_move"]),
+            "rvol": _share(month_total, month_counts["rvol"]),
+        },
+    }
+
+    move_threshold_mult = 1.0
+    if shares["day"]["weak_move"] >= 0.22:
+        move_threshold_mult = 0.70
+    elif shares["day"]["weak_move"] >= 0.15:
+        move_threshold_mult = 0.82
+    elif shares["week"]["weak_move"] >= 0.12:
+        move_threshold_mult = 0.90
+
+    rvol_min_mult = 1.0
+    if shares["day"]["rvol"] >= 0.28:
+        rvol_min_mult = 0.75
+    elif shares["day"]["rvol"] >= 0.20:
+        rvol_min_mult = 0.88
+    elif shares["week"]["rvol"] >= 0.18:
+        rvol_min_mult = 0.92
+
+    rsi_expand_points = 0.0
+    if shares["day"]["rsi"] >= 0.20:
+        rsi_expand_points = 8.0
+    elif shares["day"]["rsi"] >= 0.14:
+        rsi_expand_points = 5.0
+    elif shares["week"]["rsi"] >= 0.11:
+        rsi_expand_points = 3.0
+
+    profile["move_threshold_mult"] = float(max(0.60, min(1.0, move_threshold_mult)))
+    profile["rvol_min_mult"] = float(max(0.70, min(1.0, rvol_min_mult)))
+    profile["rsi_expand_points"] = float(max(0.0, min(10.0, rsi_expand_points)))
+    profile["shares"] = shares
+    return profile
+
+
+def _learning_profile(now_et: datetime) -> dict[str, Any]:
+    cache_seconds = int(getattr(config, "LEARNING_REFRESH_SECONDS", 300) or 300)
+    updated_at = _LEARNING_PROFILE_CACHE.get("updated_at")
+    if isinstance(updated_at, datetime):
+        age = (now_et - updated_at).total_seconds()
+        if age >= 0 and age < max(30, cache_seconds):
+            cached = _LEARNING_PROFILE_CACHE.get("profile")
+            if isinstance(cached, dict):
+                return cached
+
+    profile = _build_learning_profile(now_et)
+    _LEARNING_PROFILE_CACHE["updated_at"] = now_et
+    _LEARNING_PROFILE_CACHE["profile"] = profile
+    return profile
 
 
 def calculate_rsi(closes: pd.Series, period: int = 14) -> float:
@@ -616,6 +787,7 @@ def _scan_ticker_details(
     market_open = now_et_actual.replace(hour=9, minute=30, second=0, microsecond=0)
     minutes_since_open = max(1, int((now_et_actual - market_open).total_seconds() // 60))
     now_et = now_et_actual
+    learning = _learning_profile(now_et)
     opening_relax = bool(config.ENABLE_OPENING_ENTRY_RELAX) and (
         minutes_since_open <= int(config.OPENING_ENTRY_RELAX_MINUTES)
     )
@@ -648,6 +820,7 @@ def _scan_ticker_details(
             effective_rvol_min = min(effective_rvol_min, float(config.RVOL_RELAXED_MIN))
         if force_relaxed_rvol:
             effective_rvol_min = min(effective_rvol_min, 0.05)
+        effective_rvol_min = max(0.05, effective_rvol_min * float(learning.get("rvol_min_mult", 1.0) or 1.0))
         if rvol < effective_rvol_min:
             return _scan_failure(f"RVOL {rvol:.1f}x (too low)")
 
@@ -676,6 +849,7 @@ def _scan_ticker_details(
     ema21_pre = closes.ewm(span=21, adjust=False).mean()
 
     movement_force_min = float(getattr(config, "MOVEMENT_FORCE_MIN_PCT", 0.03) or 0.03)
+    movement_force_min *= float(learning.get("move_threshold_mult", 1.0) or 1.0)
     weak_vwap_mult = float(getattr(config, "MOVEMENT_WEAK_VWAP_MULT", 1.5) or 1.5)
     direction_roc = roc_fast if not math.isnan(roc_fast) else roc_early
     if math.isnan(direction_roc):
@@ -773,13 +947,18 @@ def _scan_ticker_details(
             return _scan_failure("RSI unavailable")
         rsi = 50.0
     if config.ENABLE_RSI_FILTER and not (_CATALYST_MODE_ACTIVE and config.CATALYST_DISABLE_RSI):
-        if direction == "call" and not (float(config.RSI_CALL_MIN) <= rsi <= float(config.RSI_CALL_MAX)):
+        rsi_expand = float(learning.get("rsi_expand_points", 0.0) or 0.0)
+        call_min = max(1.0, float(config.RSI_CALL_MIN) - rsi_expand)
+        call_max = min(99.0, float(config.RSI_CALL_MAX) + rsi_expand)
+        put_min = max(1.0, float(config.RSI_PUT_MIN) - rsi_expand)
+        put_max = min(99.0, float(config.RSI_PUT_MAX) + rsi_expand)
+        if direction == "call" and not (call_min <= rsi <= call_max):
             return _scan_failure(
-                f"RSI {rsi:.0f} outside call range ({float(config.RSI_CALL_MIN):.0f}-{float(config.RSI_CALL_MAX):.0f})"
+                f"RSI {rsi:.0f} outside call range ({call_min:.0f}-{call_max:.0f})"
             )
-        if direction == "put" and not (float(config.RSI_PUT_MIN) <= rsi <= float(config.RSI_PUT_MAX)):
+        if direction == "put" and not (put_min <= rsi <= put_max):
             return _scan_failure(
-                f"RSI {rsi:.0f} outside put range ({float(config.RSI_PUT_MIN):.0f}-{float(config.RSI_PUT_MAX):.0f})"
+                f"RSI {rsi:.0f} outside put range ({put_min:.0f}-{put_max:.0f})"
             )
 
     expiry_gte = _add_trading_days(now_et.date(), config.MIN_DTE_TRADING_DAYS)
@@ -855,6 +1034,12 @@ def _scan_ticker_details(
         if direction_conflict
         else ""
     )
+    day_shares = learning.get("shares", {}).get("day", {}) if isinstance(learning, dict) else {}
+    learn_note = (
+        f" | Learn d(rsi={float(day_shares.get('rsi', 0.0))*100:.0f}%"
+        f",weak={float(day_shares.get('weak_move', 0.0))*100:.0f}%"
+        f",rvol={float(day_shares.get('rvol', 0.0))*100:.0f}%)"
+    )
     vote_log = ", ".join(f"{n}={'+' if v > 0 else ''}{v:.0f}" for n, _, v in direction_votes)
     return {
         "symbol": symbol,
@@ -878,7 +1063,7 @@ def _scan_ticker_details(
         "reason": (
             f"RVOL {rvol:.1f}x | {above_below} | Dir {direction_score:+.2f} [{vote_log}] | {ema_note} | "
             f"ROC {roc:+.2f}% | {ivr_reason_text} | Vol {volatility_score:.2f} | Regime {regime_score:.2f} | "
-            f"Flow {(flow_score if flow_score is not None else 0):+.2f} | Score {signal_score:.2f}{conflict_note}"
+            f"Flow {(flow_score if flow_score is not None else 0):+.2f} | Score {signal_score:.2f}{conflict_note}{learn_note}"
         ) + (f" | Catalyst {_CATALYST_MODE_REASON}" if _CATALYST_MODE_ACTIVE and _CATALYST_MODE_REASON else ""),
         "regime_reason": regime_reason,
     }
