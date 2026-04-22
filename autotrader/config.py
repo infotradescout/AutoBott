@@ -108,10 +108,10 @@ SCAN_DAILY_BARS     = 30
 
 # $6000 account: max 3 concurrent positions, 1.7% of account per trade = $100 max premium.
 # Single contract on a $1 option = $100 = 1.7% of account. Tight enough to survive 3 consecutive stops.
-MAX_POSITIONS                       = 3     # hard cap: never hold more than 3 options at once
-POSITION_SIZE_USD                   = 100   # 1.7% of $6000 account per trade
+MAX_POSITIONS                       = 4     # allow one additional slot so a bad hold does not choke rotation
+POSITION_SIZE_USD                   = 125   # first-pass doctrine bump for better contract quality
 RISK_PER_TRADE_PCT                  = 0.017
-MAX_POSITION_SIZE_USD               = 100.0  # aligned with MAX_PREMIUM_PER_TRADE_USD
+MAX_POSITION_SIZE_USD               = 125.0  # aligned with MAX_PREMIUM_PER_TRADE_USD
 DRAWDOWN_REDUCE_AFTER_CONSEC_LOSSES = 2
 DRAWDOWN_SIZE_MULTIPLIER            = 0.75
 DAILY_LOSS_LIMIT_USD                = 100.0 # 1.7% daily max drawdown — hard stop for the day
@@ -131,8 +131,8 @@ LOSS_THROTTLE_SIGNAL_SCORE_ADD      = 1.5   # require score 7.0+ after 2 losses
 LOSS_THROTTLE_MIN_VOLATILITY_SCORE  = 1.5  # after 2 losses require volatility_score >= 1.5 (low bar but not zero)
 
 # Capital doctrine: $150 max per trade, $450 max total open at once (3 positions × $150).
-MAX_PREMIUM_PER_TRADE_USD           = 100.0  # max $1.00/share × 100 = $100 per contract
-MAX_TOTAL_OPEN_PREMIUM_USD          = 300.0  # 3 positions × $100
+MAX_PREMIUM_PER_TRADE_USD           = 125.0  # moderate bump for better fillable/liquid contracts
+MAX_TOTAL_OPEN_PREMIUM_USD          = 500.0  # 4 positions × $125
 OPENING_MAX_FRESH_PREMIUM_USD       = 200.0  # 2 positions in the opening window
 MAX_SAME_DIRECTION_POSITIONS        = 3      # allow one additional same-direction slot to reduce flow starvation
 
@@ -205,7 +205,7 @@ PREMARKET_SCAN_MAX_RUNS            = 0
 LOOP_INTERVAL_SECONDS              = 45   # 45s: stale threshold = max(60, 45*4)=180s; HTF results cached 5min so loop stays well under threshold
 
 # Allow trades to run up to 90 min — trailing stop exits winners well before this
-MAX_HOLD_MINUTES                   = 60    # intraday scalp: max 60-min hold
+MAX_HOLD_MINUTES                   = 45    # rotate capital sooner when trades fail to prove out
 
 # Anti-churn entry hold: prevent discretionary exits (reversal, immediate take-profit)
 # during first N minutes after entry. Stop loss still fires immediately.
@@ -309,7 +309,7 @@ ROC_ACTIVE_MOVE_MIN_PCT   = 0.006
 # Direction conviction: minimum weighted-vote score to commit to call/put.
 # 0.0 = any majority; 0.5 = strongly one-sided required.
 # Raised from 0.10: too low was allowing calls on bearish stocks (3 bull vs 2 bear votes = 0.20 score).
-DIRECTION_CONVICTION_MIN  = 0.40  # raised from 0.30: require strong directional majority
+DIRECTION_CONVICTION_MIN  = 0.25  # less consensus required before acting
 DIRECTION_MIN_ALIGNED_VOTES = 3   # require 3 of 5 votes to agree
 DIRECTION_FAST_ROC_PERIOD  = 5    # short-horizon ROC used in directional voting
 
@@ -330,7 +330,7 @@ IV_RANK_MIN               = 0.0   # no minimum IV rank — trade any setup
 IV_RANK_MAX               = 99.0
 
 ENABLE_SIGNAL_SCORING     = True
-MIN_SIGNAL_SCORE          = 6.4   # balanced floor: trade flow without admitting weak tape
+MIN_SIGNAL_SCORE          = 5.6   # first-pass relaxation to reduce setup starvation
 VOLATILITY_PRIORITY_WEIGHT = 3.0  # make volatility the top signal driver
 TREND_PRIORITY_WEIGHT      = 1.0
 FLOW_PRIORITY_WEIGHT       = 1.0
@@ -492,7 +492,7 @@ MAX_REENTRIES_PER_TICKER = 1         # max 1 re-entry per ticker per day — pre
 # Hard churn-kill: quick losers get a longer cooldown to avoid repeated tuition
 # on the same tape. Applies only when realized loss and short hold-time are both true.
 QUICK_LOSER_MAX_HOLD_MINUTES         = 4
-QUICK_LOSER_REENTRY_COOLDOWN_MINUTES = 45
+QUICK_LOSER_REENTRY_COOLDOWN_MINUTES = 10
 
 # Optional reversal entry after stop-loss. Disable by default to reduce churn.
 ENABLE_STOPLOSS_REVERSAL_REENTRY = False

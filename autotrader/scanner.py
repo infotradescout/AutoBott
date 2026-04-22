@@ -896,6 +896,12 @@ def _scan_ticker_details(
         ("vwap_side", 0.2, vwap_vote),
     ]
 
+    conviction_min = float(getattr(config, "DIRECTION_CONVICTION_MIN", 0.25) or 0.25)
+    if abs(direction_score) < conviction_min:
+        return _scan_failure(
+            f"direction conviction {abs(direction_score):.2f} below {conviction_min:.2f}"
+        )
+
     htf_reason = ""
     if config.ENABLE_HTF_CONFIRM:
         htf_ok, htf_reason = _htf_trend_confirmation(symbol=symbol, direction=direction, data_client=data_client)
