@@ -318,7 +318,7 @@ VWAP_NEUTRAL_BAND_PCT     = 0.15  # wider neutral band: within 0.15% of VWAP = n
 MOVEMENT_FORCE_MIN_PCT    = 0.014  # further relaxed for early-session/transition tape
 MOVEMENT_WEAK_VWAP_MULT   = 1.00  # was effectively 1.5 in scanner; only block when very close to VWAP
 DIRECTION_PRICE_MIN_PCT   = 0.006  # minimum recent price move to classify direction
-DIRECTION_CONFLICT_HARD_REJECT = False
+DIRECTION_CONFLICT_HARD_REJECT = True
 DIRECTION_CONFLICT_SCORE_MULT  = 0.55  # penalize (not veto) when price and ROC disagree
 DIRECTION_CONFLICT_ROC_MIN_PCT = 0.008
 ROC_ACTIVE_MOVE_MIN_PCT   = 0.006
@@ -326,7 +326,7 @@ ROC_ACTIVE_MOVE_MIN_PCT   = 0.006
 # Direction conviction: minimum weighted-vote score to commit to call/put.
 # 0.0 = any majority; 0.5 = strongly one-sided required.
 # Raised from 0.10: too low was allowing calls on bearish stocks (3 bull vs 2 bear votes = 0.20 score).
-DIRECTION_CONVICTION_MIN  = 0.15  # align with call/put/no-trade doctrine
+DIRECTION_CONVICTION_MIN  = 0.30  # stricter directional agreement before entry
 DIRECTION_MIN_ALIGNED_VOTES = 3   # require 3 of 5 votes to agree
 DIRECTION_FAST_ROC_PERIOD  = 5    # short-horizon ROC used in directional voting
 
@@ -347,7 +347,7 @@ IV_RANK_MIN               = 0.0   # no minimum IV rank — trade any setup
 IV_RANK_MAX               = 99.0
 
 ENABLE_SIGNAL_SCORING     = True
-MIN_SIGNAL_SCORE          = 5.6   # first-pass relaxation to reduce setup starvation
+MIN_SIGNAL_SCORE          = 7.2   # reject weak setups; quality over quantity
 VOLATILITY_PRIORITY_WEIGHT = 3.0  # make volatility the top signal driver
 TREND_PRIORITY_WEIGHT      = 1.0
 FLOW_PRIORITY_WEIGHT       = 1.0
@@ -358,8 +358,8 @@ ENTRY_BLOCKED_HOURS_ET    = ()
 
 # Execution-time spread gate using the live quote right before order submission.
 # Keep this tighter than MAX_OPTION_SPREAD_PCT, which is only used during chain selection.
-ENTRY_MAX_QUOTE_SPREAD_PCT         = 10.0  # tight live-quote spread gate for 0-2DTE
-OPENING_ENTRY_MAX_QUOTE_SPREAD_PCT = 12.0
+ENTRY_MAX_QUOTE_SPREAD_PCT         = 8.0   # stricter fill-quality gate
+OPENING_ENTRY_MAX_QUOTE_SPREAD_PCT = 9.0
 
 MAX_ENTRY_SLIPPAGE_PCT    = 3.0
 MAX_FILL_SLIPPAGE_PCT     = 3.0
@@ -413,12 +413,12 @@ CATALYST_RELAXED_MIN_SIGNAL_SCORE = 2.5
 # Optional filters (all off by default for simple call/put scalping)
 # ---------------------------------------------------------------------------
 
-ENABLE_HTF_CONFIRM         = False  # disabled for faster intraday participation
+ENABLE_HTF_CONFIRM         = True   # confirm with higher timeframe to reduce false entries
 HTF_TIMEFRAME              = "15m"
 HTF_LOOKBACK_BARS          = 30
 
-ENABLE_ORDER_FLOW_FILTER   = False
-MIN_FLOW_SCORE             = 0.05
+ENABLE_ORDER_FLOW_FILTER   = True
+MIN_FLOW_SCORE             = 0.20
 
 ENABLE_NEWS_EVENT_BLOCK    = False
 NEWS_LOOKBACK_MINUTES      = 90
@@ -428,7 +428,7 @@ NEWS_BLOCK_KEYWORDS        = (
 )
 NEWS_BLOCK_DATES_ET        = ()
 
-ENABLE_HISTORICAL_REGIME_SCORE = False
+ENABLE_HISTORICAL_REGIME_SCORE = True
 MIN_HISTORICAL_REGIME_SCORE    = 2.0
 
 ENABLE_INDEX_BIAS_FILTER   = True   # ENABLED: filter signals to match SPY/QQQ macro direction
@@ -454,17 +454,17 @@ ENTRY_CONFIRM_MOMENTUM_THRESHOLD_PCT   = 0.14
 
 # Fast-start doctrine: disabled — scanner already enforces direction conviction and RVOL.
 # Keeping thresholds at 0 so the gate is a no-op; the scanner's own gates are sufficient.
-ENABLE_FAST_START_QUALITY_GATE         = False  # disable: redundant with scanner gates
-FAST_START_MIN_SIGNAL_SCORE            = 0.0
-FAST_START_MIN_DIRECTION_SCORE         = 0.0
-FAST_START_MIN_RVOL                    = 0.0
-FAST_START_MIN_ABS_ROC_PCT             = 0.0
-FAST_START_MIN_VWAP_DISTANCE_PCT       = 0.0
-OPENING_FAST_START_MIN_SIGNAL_SCORE    = 0.0
-OPENING_FAST_START_MIN_DIRECTION_SCORE = 0.0
-OPENING_FAST_START_MIN_RVOL            = 0.0
-OPENING_FAST_START_MIN_ABS_ROC_PCT     = 0.0
-OPENING_FAST_START_MIN_VWAP_DISTANCE_PCT = 0.0
+ENABLE_FAST_START_QUALITY_GATE         = True
+FAST_START_MIN_SIGNAL_SCORE            = 7.2
+FAST_START_MIN_DIRECTION_SCORE         = 0.30
+FAST_START_MIN_RVOL                    = 0.45
+FAST_START_MIN_ABS_ROC_PCT             = 0.10
+FAST_START_MIN_VWAP_DISTANCE_PCT       = 0.05
+OPENING_FAST_START_MIN_SIGNAL_SCORE    = 7.5
+OPENING_FAST_START_MIN_DIRECTION_SCORE = 0.35
+OPENING_FAST_START_MIN_RVOL            = 0.50
+OPENING_FAST_START_MIN_ABS_ROC_PCT     = 0.12
+OPENING_FAST_START_MIN_VWAP_DISTANCE_PCT = 0.06
 
 # Feed freshness guardrail for intraday bars (scanner).
 # If data timestamps are older than this, signals are rejected as stale.
@@ -542,9 +542,9 @@ ALERT_COOLDOWN_SECONDS             = 300
 ENTRY_ORDER_STATUS_WAIT_SECONDS    = 10
 ENTRY_RETRY_STATUS_WAIT_SECONDS    = 7
 ENTRY_MARKET_FALLBACK_WAIT_SECONDS = 4
-ENABLE_ENTRY_MARKET_FALLBACK       = True
+ENABLE_ENTRY_MARKET_FALLBACK       = False
 ENTRY_MARKET_FALLBACK_MAX_SPREAD_PCT = 12.0
-ENTRY_RETRY_LIMIT_PCT              = 0.05
+ENTRY_RETRY_LIMIT_PCT              = 0.02
 EXIT_ORDER_STATUS_POLL_SECONDS     = 2
 EXIT_ORDER_MAX_WAIT_SECONDS        = 20
 EXIT_CLOSE_RETRY_ATTEMPTS          = 2
