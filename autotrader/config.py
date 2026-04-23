@@ -92,6 +92,7 @@ UNIVERSE_MOVER_TOP                = 300
 UNIVERSE_MAX_TICKERS              = 500  # broad exchange-wide mover sweep
 SCREENER_TOP_N                    = 300
 MOVER_SYMBOLS_PER_SIDE            = 150
+MIN_MOVER_CANDIDATES_BEFORE_BASE_FALLBACK = 40
 MIN_SHARE_PRICE                   = 10
 MAX_SHARE_PRICE                   = 2000
 

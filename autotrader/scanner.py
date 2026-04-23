@@ -1199,10 +1199,14 @@ class IntradayScanner:
                 print(f"[{self._ts()}] Movers endpoint unavailable ({exc}). Using core tickers only.")
 
         candidates = []
-        candidates.extend(base)
+        # Prefer live movers first to avoid wasting cycles on sleepy symbols.
+        # Static base symbols are only used as fallback when mover coverage is thin.
         per_side = int(getattr(config, "MOVER_SYMBOLS_PER_SIDE", 10) or 10)
         candidates.extend(gainers[:per_side])
         candidates.extend(losers[:per_side])
+        min_mover_candidates = max(20, int(getattr(config, "MIN_MOVER_CANDIDATES_BEFORE_BASE_FALLBACK", 40) or 40))
+        if len(candidates) < min_mover_candidates:
+            candidates.extend(base)
 
         deduped: list[str] = []
         seen: set[str] = set()
