@@ -416,6 +416,8 @@ CATALYST_RELAXED_MIN_SIGNAL_SCORE = 2.5
 ENABLE_HTF_CONFIRM         = True   # confirm with higher timeframe to reduce false entries
 HTF_TIMEFRAME              = "15m"
 HTF_LOOKBACK_BARS          = 30
+HTF_SLOPE_TOLERANCE_PCT    = 0.12   # allow near-flat HTF without hard reject
+HTF_EMA_GAP_TOLERANCE_PCT  = 0.05   # allow tiny EMA overlap noise
 
 ENABLE_ORDER_FLOW_FILTER   = True
 MIN_FLOW_SCORE             = 0.20

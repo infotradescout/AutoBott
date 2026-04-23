@@ -611,12 +611,16 @@ def _htf_trend_confirmation(
     prev_ema21 = float(ema21.iloc[-4])
     slope_pct = ((last_ema21 - prev_ema21) / prev_ema21 * 100) if prev_ema21 != 0 else 0.0
 
+    # Soft tolerance avoids rejecting good setups when HTF is flat/noisy.
+    gap_pct = ((last_ema9 - last_ema21) / last_ema21 * 100) if last_ema21 != 0 else 0.0
+    slope_tol = float(getattr(config, "HTF_SLOPE_TOLERANCE_PCT", 0.12) or 0.12)
+    gap_tol = float(getattr(config, "HTF_EMA_GAP_TOLERANCE_PCT", 0.05) or 0.05)
     if direction == "call":
-        ok = last_ema9 > last_ema21 and slope_pct >= 0
+        ok = gap_pct >= -gap_tol and slope_pct >= -slope_tol
     else:
-        ok = last_ema9 < last_ema21 and slope_pct <= 0
+        ok = gap_pct <= gap_tol and slope_pct <= slope_tol
     relation = "above" if last_ema9 > last_ema21 else "below"
-    reason = f"HTF ema9 {relation} ema21, ema21_slope={slope_pct:+.2f}%"
+    reason = f"HTF ema9 {relation} ema21, ema_gap={gap_pct:+.2f}%, ema21_slope={slope_pct:+.2f}%"
     # Write to cache so subsequent tickers in the same loop use the cached result.
     import time as _time
     _HTF_CACHE[f"{symbol}:{direction}"] = (_time.monotonic() + _HTF_CACHE_TTL_SECONDS, ok, reason)
@@ -911,12 +915,15 @@ def _scan_ticker_details(
     flow_score: float | None = None
     if config.ENABLE_ORDER_FLOW_FILTER:
         flow_score = _order_flow_score(symbol=symbol, data_client=data_client)
+        # Do not hard-reject when quote-size flow is unavailable; this would
+        # suppress too many otherwise-valid setups in thin or noisy quote moments.
         if flow_score is None:
-            return _scan_failure("order flow unavailable", stage="execution_reject")
+            flow_score = 0.0
         threshold = float(config.MIN_FLOW_SCORE)
-        if direction == "call" and flow_score < threshold:
+        # Reject only when flow is explicitly opposite enough, not just weak/neutral.
+        if direction == "call" and flow_score < -threshold:
             return _scan_failure(f"order flow weak for call ({flow_score:+.2f})", stage="execution_reject")
-        if direction == "put" and flow_score > -threshold:
+        if direction == "put" and flow_score > threshold:
             return _scan_failure(f"order flow weak for put ({flow_score:+.2f})", stage="execution_reject")
 
     # Re-use momentum ROC for downstream filters and scoring.
