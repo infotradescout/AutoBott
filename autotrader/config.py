@@ -29,17 +29,22 @@ def _is_writable_dir(path: Path) -> bool:
 
 def _resolve_data_dir() -> Path:
     env_path = os.getenv("DATA_DIR")
-    candidates: list[Path] = []
     if env_path:
-        candidates.append(Path(env_path))
-    # Render persistent disk default mount path.
-    candidates.append(Path("/data"))
+        env_candidate = Path(env_path)
+        if _is_writable_dir(env_candidate):
+            return env_candidate
+        print(f"[config] DATA_DIR '{env_path}' not writable. Falling back to defaults.")
+
+    candidates: list[Path] = []
+    # Render persistent disk default mount path (only when mounted/present).
+    render_data_mount = Path("/data")
+    if os.name != "nt" and render_data_mount.exists() and render_data_mount.is_dir():
+        candidates.append(render_data_mount)
     candidates.append(_DEFAULT_DATA_DIR)
     candidates.append(Path("/tmp/autotrader-data"))
+
     for candidate in candidates:
         if _is_writable_dir(candidate):
-            if env_path and str(candidate) != str(Path(env_path)):
-                print(f"[config] DATA_DIR '{env_path}' not writable. Using '{candidate}'.")
             return candidate
     cwd = Path.cwd()
     cwd.mkdir(parents=True, exist_ok=True)
@@ -83,10 +88,10 @@ CORE_TICKERS = [
 ]
 
 AUTO_EXPAND_UNIVERSE_WITH_MOVERS = True
-UNIVERSE_MOVER_TOP                = 50
-UNIVERSE_MAX_TICKERS              = 150  # wider universe catches more movers
-SCREENER_TOP_N                    = 50
-MOVER_SYMBOLS_PER_SIDE            = 25
+UNIVERSE_MOVER_TOP                = 300
+UNIVERSE_MAX_TICKERS              = 500  # broad exchange-wide mover sweep
+SCREENER_TOP_N                    = 300
+MOVER_SYMBOLS_PER_SIDE            = 150
 MIN_SHARE_PRICE                   = 10
 MAX_SHARE_PRICE                   = 2000
 
@@ -150,12 +155,11 @@ EXPENSIVE_PREMIUM_SYMBOLS = (
     "TSLA", "MSFT", "AVGO", "NFLX", "META", "GOOGL", "AMZN",
 )
 
-# Preferred core names for small-account behavior (used for guidance/reporting).
-PREFERRED_CORE_TICKERS = (
-    "SPY", "QQQ", "IWM", "AAPL", "AMD", "INTC", "JPM", "XOM", "CRM", "ORCL",
-)
-MAX_NON_CORE_ENTRIES_PER_DAY        = 999   # aggressive: trade any valid signal
-NON_CORE_MIN_SIGNAL_SCORE           = 4.0   # same floor as core tickers
+# Preferred core names for small-account behavior.
+# Leave empty to disable core-vs-non-core entry bias and allow exchange-wide movers.
+PREFERRED_CORE_TICKERS = ()
+MAX_NON_CORE_ENTRIES_PER_DAY        = 9999
+NON_CORE_MIN_SIGNAL_SCORE           = 0.0
 
 # Volatility-adaptive risk sizing:
 # Uses scanner metrics (ATR%, RVOL, IV Rank) to classify each setup as
@@ -224,8 +228,8 @@ OPENING_STRICT_MIN_VWAP_DISTANCE_PCT         = 0.0
 OPENING_MAX_SIGNAL_CANDIDATES                = 3
 OPENING_MAX_FRESH_ENTRIES                    = 2    # max 2 fresh entries in the opening window
 OPENING_MAX_CONCURRENT_POSITIONS             = 2    # max 2 concurrent positions in opening window
-OPENING_MAX_NEW_ENTRY_ATTEMPTS_PER_LOOP      = 3
-MAX_NEW_ENTRY_ATTEMPTS_PER_LOOP              = 3
+OPENING_MAX_NEW_ENTRY_ATTEMPTS_PER_LOOP      = 6
+MAX_NEW_ENTRY_ATTEMPTS_PER_LOOP              = 6
 OPENING_MAX_EXPENSIVE_ENTRIES                = 0    # no expensive entries in opening window on $6k account
 OPENING_EXPENSIVE_MAX_PREMIUM_USD            = 100.0  # same cap as regular trades
 
@@ -535,10 +539,12 @@ CLOSED_MAX_SLEEP_SECONDS           = 900
 MANUAL_PAUSE_SLEEP_SECONDS         = 30
 HEARTBEAT_SECONDS                  = 60    # heartbeat every 60s
 ALERT_COOLDOWN_SECONDS             = 300
-ENTRY_ORDER_STATUS_WAIT_SECONDS    = 8
-ENTRY_RETRY_STATUS_WAIT_SECONDS    = 5
-ENTRY_MARKET_FALLBACK_WAIT_SECONDS = 3
-ENTRY_RETRY_LIMIT_PCT              = 0.02
+ENTRY_ORDER_STATUS_WAIT_SECONDS    = 10
+ENTRY_RETRY_STATUS_WAIT_SECONDS    = 7
+ENTRY_MARKET_FALLBACK_WAIT_SECONDS = 4
+ENABLE_ENTRY_MARKET_FALLBACK       = True
+ENTRY_MARKET_FALLBACK_MAX_SPREAD_PCT = 12.0
+ENTRY_RETRY_LIMIT_PCT              = 0.05
 EXIT_ORDER_STATUS_POLL_SECONDS     = 2
 EXIT_ORDER_MAX_WAIT_SECONDS        = 20
 EXIT_CLOSE_RETRY_ATTEMPTS          = 2

@@ -803,6 +803,52 @@ def _execute_limit_entry(
         if still_open:
             time.sleep(1)
 
+    # Optional market fallback: improve fill probability when limit retries fail.
+    if bool(getattr(config, "ENABLE_ENTRY_MARKET_FALLBACK", True)):
+        fallback_quote = _option_quote_snapshot(data_client, option_symbol)
+        fallback_spread_pct = float(fallback_quote.get("spread_pct") or 0.0)
+        max_fallback_spread = float(getattr(config, "ENTRY_MARKET_FALLBACK_MAX_SPREAD_PCT", 10.0) or 10.0)
+        if fallback_spread_pct > 0 and fallback_spread_pct <= max_fallback_spread:
+            submit_ts = time.time()
+            order = broker.place_option_market_buy(option_symbol, qty)
+            filled_qty, fill_price, status, still_open = _await_order_fill(
+                broker,
+                order_id=str(getattr(order, "id", "") or ""),
+                requested_qty=qty,
+                now_et=now_et,
+                label=f"{label} market-fallback",
+                poll_seconds=1,
+                max_wait_seconds=max(1, int(getattr(config, "ENTRY_MARKET_FALLBACK_WAIT_SECONDS", 3) or 3)),
+            )
+            fill_seconds = max(0.0, time.time() - submit_ts)
+            if filled_qty > 0:
+                return {
+                    "filled": True,
+                    "status": status or "filled_market_fallback",
+                    "filled_qty": filled_qty,
+                    "filled_price": fill_price,
+                    "attempts": len(attempt_quotes) + 1,
+                    "submit_bid": fallback_quote.get("bid"),
+                    "submit_ask": fallback_quote.get("ask"),
+                    "submit_midpoint": fallback_quote.get("midpoint"),
+                    "submit_spread_pct": fallback_quote.get("spread_pct"),
+                    "intended_limit": None,
+                    "fill_seconds": round(fill_seconds, 3),
+                    "fill_slippage_vs_ask_pct": round(_buy_fill_slippage_vs_ask_pct(fallback_quote.get("ask"), fill_price), 4),
+                    "order_id": str(getattr(order, "id", "") or ""),
+                }
+
+            order_id = str(getattr(order, "id", "") or "")
+            if order_id:
+                try:
+                    broker.cancel_order(order_id)
+                except Exception as exc:  # noqa: BLE001
+                    print(f"[{ts(now_et)}] {label}: cancel market-fallback entry order {order_id} failed: {exc}")
+            if still_open:
+                time.sleep(1)
+            return {"filled": False, "status": "market_fallback_not_filled", "attempts": len(attempt_quotes) + 1}
+        return {"filled": False, "status": "market_fallback_spread_blocked", "attempts": len(attempt_quotes)}
+
     return {"filled": False, "status": "not_filled", "attempts": len(attempt_quotes)}
 
 
@@ -3015,7 +3061,8 @@ def main():
                 continue
 
             preferred_core = set(str(s).upper() for s in getattr(config, "PREFERRED_CORE_TICKERS", ()))
-            is_non_core = ticker not in preferred_core
+            core_bias_enabled = bool(preferred_core)
+            is_non_core = core_bias_enabled and (ticker not in preferred_core)
             if is_non_core:
                 non_core_cap = max(0, int(getattr(config, "MAX_NON_CORE_ENTRIES_PER_DAY", 4) or 4))
                 if non_core_entries_today_count >= non_core_cap:
@@ -3335,7 +3382,7 @@ def main():
                             getattr(config, "OPENING_EXPENSIVE_MAX_PREMIUM_USD", max_trade_premium) or max_trade_premium
                         )
                         is_core_name = ticker in core_set
-                        if not is_core_name and trade_premium_usd > tight_opening_expensive_premium:
+                        if core_set and (not is_core_name) and trade_premium_usd > tight_opening_expensive_premium:
                             _mark_skip("opening_expensive_name_gate")
                             _mark_stage4_reject(reason="opening_expensive_name_gate", ticker=ticker)
                             print(
@@ -3539,7 +3586,7 @@ def main():
                     opening_fresh_premium_deployed_usd += entry_premium_usd
                     if ticker in set(str(s).upper() for s in getattr(config, "EXPENSIVE_PREMIUM_SYMBOLS", ())):
                         opening_expensive_entries_today_count += 1
-                if ticker not in set(str(s).upper() for s in getattr(config, "PREFERRED_CORE_TICKERS", ())):
+                if preferred_core and ticker not in preferred_core:
                     non_core_entries_today_count += 1
                 entry_debug["entries_filled"] = int(entry_debug.get("entries_filled", 0)) + 1
                 _set_signal_outcome(ticker=ticker, disposition="order_filled")

@@ -21,7 +21,7 @@ def _default_state() -> dict:
     return {
         "manual_stop": False,
         "dry_run": False,
-        "strategy_profile": "conservative",
+        "strategy_profile": "aggressive",
         "updated_at_et": "",
         "reason": "",
     }

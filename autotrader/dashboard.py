@@ -3284,23 +3284,52 @@ def api_scanfails():
         _last_ts, rows = _latest_scan_loop_rows(limit=1000)
         fails = [r for r in rows if str(r.get("result", "")).lower() == "fail"]
         out: list[dict[str, Any]] = []
-        deduped: list[dict[str, Any]] = []
-        seen: set[str] = set()
+
+        def _is_cooldown_row(row: dict[str, Any]) -> bool:
+            reason = str(row.get("reason", "") or "").strip().lower()
+            stage = _scan_fail_stage(reason)
+            return stage == "cooldown_skip" or reason.startswith("cooldown_skip:")
+
+        # Dedupe by symbol, but prioritize actionable rejects over routine cooldown rows.
+        seen_symbols: set[str] = set()
+        actionable: list[dict[str, Any]] = []
+        cooldown: list[dict[str, Any]] = []
         for row in fails:
             symbol = str(row.get("symbol", "") or "").upper()
-            key = symbol or f"__row_{len(seen)}"
-            if key in seen:
+            key = symbol or f"__row_{len(seen_symbols)}"
+            if key in seen_symbols:
                 continue
-            seen.add(key)
-            deduped.append(row)
+            seen_symbols.add(key)
+            if _is_cooldown_row(row):
+                cooldown.append(row)
+            else:
+                actionable.append(row)
 
-        for row in deduped[:20]:
+        selected: list[dict[str, Any]] = actionable[:20]
+        if len(selected) < 20 and cooldown:
+            selected.append(
+                {
+                    "timestamp": _to_ct_label(_now_et()),
+                    "symbol": "*",
+                    "reason": (
+                        f"suppressed {len(cooldown)} cooldown_skip row(s); "
+                        "showing actionable rejects first"
+                    ),
+                    "stage": "cooldown_summary",
+                    "final_state": "setup_reject",
+                }
+            )
+
+        for row in selected[:20]:
             ts_raw = str(row.get("timestamp", "") or "")
             ts_dt = _parse_ts(ts_raw)
             patched = dict(row)
-            patched["timestamp"] = _to_ct_label(ts_dt) or ts_raw
-            patched["stage"] = _scan_fail_stage(patched.get("reason", ""))
-            patched["final_state"] = "setup_reject"
+            if not str(patched.get("stage", "")).strip():
+                patched["stage"] = _scan_fail_stage(patched.get("reason", ""))
+            if not str(patched.get("final_state", "")).strip():
+                patched["final_state"] = "setup_reject"
+            if ts_raw:
+                patched["timestamp"] = _to_ct_label(ts_dt) or ts_raw
             out.append(patched)
         return jsonify(out)
     except Exception as exc:  # noqa: BLE001
@@ -3338,6 +3367,9 @@ def api_scansummary():
                 "order_filled_count": orders_filled,
                 "orders_submitted_count": orders_submitted,
                 "orders_filled_count": orders_filled,
+                "orders_buy_filled_count": orders_filled,
+                "orders_sell_filled_count": 0,
+                "orders_total_filled_count": orders_filled,
                 "orders_rejected_or_canceled_count": 0,
                 "trades_filled_count": orders_filled,
                 "real_pass_count": orders_filled,
@@ -3418,7 +3450,9 @@ def api_scansummary():
 
         broker_telemetry = _fetch_broker_order_telemetry()
         orders_submitted_count = int(broker_telemetry.get("option_orders_today", 0) or 0) if broker_telemetry.get("ok") else 0
-        orders_filled_count = int(broker_telemetry.get("option_buy_fills_today", 0) or 0) if broker_telemetry.get("ok") else 0
+        orders_buy_filled_count = int(broker_telemetry.get("option_buy_fills_today", 0) or 0) if broker_telemetry.get("ok") else 0
+        orders_sell_filled_count = int(broker_telemetry.get("option_sell_fills_today", 0) or 0) if broker_telemetry.get("ok") else 0
+        orders_total_filled_count = int(broker_telemetry.get("option_filled_orders_today", 0) or 0) if broker_telemetry.get("ok") else 0
         orders_rejected_or_canceled_count = (
           int(broker_telemetry.get("option_rejected_or_canceled_today", 0) or 0) if broker_telemetry.get("ok") else 0
         )
@@ -3447,7 +3481,7 @@ def api_scansummary():
         stage_pipeline["stage4_entry_eligible"] = entry_stage4_eligible_count
         stage_pipeline["entry_eligible"] = entry_stage4_eligible_count
         stage_pipeline["order_submitted"] = orders_submitted_count
-        stage_pipeline["order_filled"] = orders_filled_count
+        stage_pipeline["order_filled"] = orders_total_filled_count
 
         return jsonify(
             {
@@ -3459,12 +3493,15 @@ def api_scansummary():
                 "entry_eligible_count": entry_stage4_eligible_count,
                 "entry_rejected_count": entry_stage4_reject_count,
                 "orders_submitted_count": orders_submitted_count,
-                "orders_filled_count": orders_filled_count,
+                "orders_filled_count": orders_total_filled_count,
+                "orders_buy_filled_count": orders_buy_filled_count,
+                "orders_sell_filled_count": orders_sell_filled_count,
+                "orders_total_filled_count": orders_total_filled_count,
           "order_submitted_count": orders_submitted_count,
-          "order_filled_count": orders_filled_count,
+          "order_filled_count": orders_total_filled_count,
                 "orders_rejected_or_canceled_count": orders_rejected_or_canceled_count,
-                "trades_filled_count": orders_filled_count,
-          "real_pass_count": orders_filled_count,
+                "trades_filled_count": orders_total_filled_count,
+          "real_pass_count": orders_total_filled_count,
                 "realized_pnl_usd": realized_pnl_usd,
                 "stage_pipeline": stage_pipeline,
                 "stage_fail_counts": stage_fail_counts,
@@ -5431,7 +5468,7 @@ def home():
       <div class="label">SCANNER STATUS</div>
       <div id="scan-summary">Loading...</div>
       <div style="margin-top:10px; font-size:12px; color:#888">
-        Current loop final rejects (up to 20):
+        Current loop final rejects (actionable first, up to 20):
       </div>
       <table id="scan-fails-table">
         <thead><tr><th>Time</th><th>Symbol</th><th>Stage</th><th>Reason</th></tr></thead>
@@ -6294,11 +6331,18 @@ def home():
           const candidates = Number(scansummary.universe_candidates ?? (setupValid + rejected));
           const entryEligible = Number(scansummary.entry_eligible_count ?? setupValid);
           const entryRejected = Number(scansummary.entry_rejected_count ?? 0);
-          const tradesFilled = Number(scansummary.trades_filled_count ?? scansummary.orders_filled_count ?? 0);
+          const brokerFillsTotal = Number(
+            scansummary.orders_total_filled_count
+            ?? scansummary.trades_filled_count
+            ?? scansummary.orders_filled_count
+            ?? 0
+          );
+          const brokerBuyFills = Number(scansummary.orders_buy_filled_count ?? scansummary.orders_filled_count ?? 0);
+          const brokerSellFills = Number(scansummary.orders_sell_filled_count ?? 0);
           const ordersSubmitted = Number(scansummary.orders_submitted_count ?? 0);
           const ordersRejectedOrCanceled = Number(scansummary.orders_rejected_or_canceled_count ?? 0);
           const realizedPnlUsd = Number(scansummary.realized_pnl_usd ?? 0);
-          const color = tradesFilled > 0 ? "#00c853" : "#ff9800";
+          const color = brokerFillsTotal > 0 ? "#00c853" : "#ff9800";
           const marketOpen = Boolean(status && !status.error && status.market_open);
           const stageFailCounts = scansummary.stage_fail_counts && typeof scansummary.stage_fail_counts === "object"
             ? scansummary.stage_fail_counts
@@ -6319,7 +6363,7 @@ def home():
           const stage4Source = String(scansummary.entry_stage4_source || "proxy_scanner_pass");
           const stage4Fresh = Boolean(scansummary.entry_stage4_fresh);
           sumEl.innerHTML = `
-              <span style="color:${color}">✓ Broker Fills Today: ${tradesFilled}</span>
+              <span style="color:${color}">✓ Broker Fills Today: ${brokerFillsTotal} (buy ${brokerBuyFills} / sell ${brokerSellFills})</span>
               &nbsp;|&nbsp;
               <span style="color:#888">Scanner Pass (signal-valid): ${setupValid}</span>
               &nbsp;|&nbsp;
