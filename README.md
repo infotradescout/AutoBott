@@ -34,7 +34,7 @@ startCommand: python -u autotrader/render_service.py
    - `ALPACA_API_KEY`
    - `ALPACA_SECRET_KEY`
    - `DASHBOARD_CONTROL_TOKEN`
-5. Add these if you are paper trading options and need live options contract/quote lookups:
+5. When `PAPER_TRADING=true` for options, also set these (required for options contract/quote lookups):
    - `ALPACA_LIVE_API_KEY`
    - `ALPACA_LIVE_SECRET_KEY`
 6. Keep `DATA_DIR=/data` so runtime files survive restarts on the persistent disk.
@@ -61,6 +61,7 @@ python -m venv .venv
 pip install -r requirements.txt
 Copy-Item .env.example .env
 # fill in real Alpaca keys in .env
+# Starts dashboard only (does not start trader loop)
 python dashboard.py
 
 # Safety smoke check (compile + key dashboard endpoints)
@@ -91,6 +92,10 @@ The trader includes:
 Configure these in `autotrader/.env` (see `autotrader/.env.example`).
 
 ## Trade analytics
+
+Notes:
+- This is a report-only CLI (`autotrader/review.py`).
+- It reads existing trade logs; it does not run trading.
 
 Run the terminal report:
 
