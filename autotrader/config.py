@@ -257,6 +257,19 @@ TRADE_STATE_BANK_OR_QUALIFY_TRIGGER_PCT     = 0.40   # +40%: bank-or-qualify dec
 TRADE_STATE_RUNNER_PROMOTION_STOP_FLOOR_PCT = 0.20   # +20% floor when promoted to runner
 RUNNER_DISABLE_AFTER_ET                     = "16:00"
 RUNNER_AUTO_PROMOTE_MIN_PCT                 = 0.18
+ENABLE_RUNNER_MODE                          = True
+RUNNER_PROMOTE_PCT                          = 0.35
+RUNNER_PROTECT_FLOOR_PCT                    = 0.20
+RUNNER_MAX_CONCURRENT                       = 1
+NON_RUNNER_FLATTEN_TIME                     = "15:15"
+
+# Basket-level management: when open PnL is meaningfully green, harvest winners
+# and cut laggards instead of waiting for each position independently.
+ENABLE_BASKET_MANAGER                       = True
+BASKET_HARVEST_UNREALIZED_USD               = 40.0
+BASKET_LAGGARD_CUT_PCT                      = -0.12
+BASKET_WINNER_HARVEST_MIN_PCT               = 0.25
+BASKET_WINNER_LOCK_FLOOR_PCT                = 0.05
 
 # Fixed profit target (disabled — trailing stop rides winners instead)
 ENABLE_FIXED_PROFIT_TARGET = False

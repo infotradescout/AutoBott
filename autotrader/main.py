@@ -3687,6 +3687,30 @@ def main():
             ticker_total_qty[p_ticker] = int(ticker_total_qty.get(p_ticker, 0)) + p_qty
             if p_ticker not in ticker_first_symbol:
                 ticker_first_symbol[p_ticker] = p_symbol
+
+        basket_total_unrealized_usd = 0.0
+        runner_count_current = 0
+        for p in option_positions:
+            p_symbol = str(getattr(p, "symbol", "") or "")
+            p_qty = position_qty_as_int(getattr(p, "qty", 0))
+            if not p_symbol or p_qty <= 0:
+                continue
+            p_meta = open_trade_meta.get(p_symbol, {})
+            p_entry = float(p_meta.get("entry_price", getattr(p, "avg_entry_price", 0) or 0) or 0)
+            p_plpc = _position_plpc_snapshot(p)
+            if p_plpc is None:
+                p_plpc = 0.0
+            try:
+                p_unrealized = float(getattr(p, "unrealized_pl", 0) or 0)
+            except (TypeError, ValueError):
+                p_unrealized = float(p_plpc) * p_entry * p_qty * 100.0 if p_entry > 0 else 0.0
+            basket_total_unrealized_usd += float(p_unrealized)
+            if bool(p_meta.get("runner_mode", False)):
+                runner_count_current += 1
+
+        basket_harvest_active = bool(getattr(config, "ENABLE_BASKET_MANAGER", True)) and (
+            basket_total_unrealized_usd >= float(getattr(config, "BASKET_HARVEST_UNREALIZED_USD", 40.0) or 40.0)
+        )
         for pos in option_positions:
             now_et = datetime.now(tz)
             _touch_heartbeat()
@@ -3735,6 +3759,21 @@ def main():
                 # Legacy meta compatibility: ensure a default state exists.
                 if not str(meta.get("trade_state", "") or "").strip():
                     meta["trade_state"] = "runner" if bool(meta.get("runner_mode")) else "unproven"
+                open_trade_meta[symbol] = meta
+
+            if (
+                bool(getattr(config, "ENABLE_RUNNER_MODE", True))
+                and not bool(meta.get("runner_mode", False))
+                and plpc >= float(getattr(config, "RUNNER_PROMOTE_PCT", 0.35) or 0.35)
+                and runner_count_current < int(getattr(config, "RUNNER_MAX_CONCURRENT", 1) or 1)
+                and not is_at_or_after(now_et, str(getattr(config, "RUNNER_DISABLE_AFTER_ET", "16:00") or "16:00"))
+            ):
+                meta["runner_mode"] = True
+                meta["trade_state"] = "runner"
+                runner_count_current += 1
+                promoted_floor = float(getattr(config, "RUNNER_PROTECT_FLOOR_PCT", 0.20) or 0.20)
+                current_floor = float(meta.get("stop_floor_plpc", -float(config.STOP_LOSS_PCT)) or -float(config.STOP_LOSS_PCT))
+                meta["stop_floor_plpc"] = max(current_floor, promoted_floor)
                 open_trade_meta[symbol] = meta
 
             history_rows = open_position_pl_history.get(symbol)
@@ -3844,6 +3883,12 @@ def main():
 
             if exit_reason is None and trade_state in {"protected", "bank_or_qualify", "runner"}:
                 floor_plpc = float(meta.get("stop_floor_plpc", -float(config.STOP_LOSS_PCT)) or -float(config.STOP_LOSS_PCT))
+                if basket_harvest_active and plpc > 0 and not bool(meta.get("runner_mode", False)):
+                    basket_floor = float(getattr(config, "BASKET_WINNER_LOCK_FLOOR_PCT", 0.05) or 0.05)
+                    if basket_floor > floor_plpc:
+                        floor_plpc = basket_floor
+                        meta["stop_floor_plpc"] = floor_plpc
+                        open_trade_meta[symbol] = meta
                 if plpc <= floor_plpc:
                     exit_reason = "protected_floor_breach"
 
@@ -3956,6 +4001,22 @@ def main():
                             )
                 except Exception as _rev_exc:  # noqa: BLE001
                     pass  # reversal check is best-effort; never block exit management
+            if exit_reason is None:
+                if basket_harvest_active and plpc <= float(getattr(config, "BASKET_LAGGARD_CUT_PCT", -0.12) or -0.12):
+                    exit_reason = "basket_laggard_cut"
+            if exit_reason is None:
+                if (
+                    basket_harvest_active
+                    and plpc >= float(getattr(config, "BASKET_WINNER_HARVEST_MIN_PCT", 0.25) or 0.25)
+                    and not bool(meta.get("runner_mode", False))
+                ):
+                    exit_reason = "basket_harvest_win"
+            if exit_reason is None:
+                if not bool(meta.get("runner_mode", False)) and is_at_or_after(
+                    now_et,
+                    str(getattr(config, "NON_RUNNER_FLATTEN_TIME", "15:15") or "15:15"),
+                ):
+                    exit_reason = "non_runner_flatten"
             if exit_reason is None:
                 expiry_date = _resolve_option_expiry(symbol, meta)
                 if expiry_date is not None:
