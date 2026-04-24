@@ -3870,8 +3870,21 @@ def main():
                     trade_state = "runner"
                     print(f"[{ts(now_et)}] RUNNER ELIGIBLE: {symbol} at +{plpc:.2%}, promoted to runner mode")
                 else:
-                    exit_reason = "base_win_bank"
-                    print(f"[{ts(now_et)}] BASE WIN BANK: {symbol} at +{plpc:.2%}, not runner eligible, taking profit")
+                    auto_runner_min = float(getattr(config, "RUNNER_AUTO_PROMOTE_MIN_PCT", 0.0) or 0.0)
+                    if auto_runner_min > 0 and plpc >= auto_runner_min and not _runner_near_close_blocked(now_et):
+                        meta["runner_mode"] = True
+                        meta["trade_state"] = "runner"
+                        runner_floor = float(getattr(config, "TRADE_STATE_RUNNER_PROMOTION_STOP_FLOOR_PCT", 0.03) or 0.03)
+                        current_floor = float(meta.get("stop_floor_plpc", 0.0) or 0.0)
+                        meta["stop_floor_plpc"] = max(current_floor, runner_floor)
+                        trade_state = "runner"
+                        print(
+                            f"[{ts(now_et)}] AUTO RUNNER: {symbol} at +{plpc:.2%} "
+                            f"(>= {auto_runner_min:.2%}), promoted despite strict qualifier miss"
+                        )
+                    else:
+                        exit_reason = "base_win_bank"
+                        print(f"[{ts(now_et)}] BASE WIN BANK: {symbol} at +{plpc:.2%}, not runner eligible, taking profit")
 
             # --- Reversal detection exit ---
             # Reversal logic is a protected/runner-state manager (not an early scalp trigger).

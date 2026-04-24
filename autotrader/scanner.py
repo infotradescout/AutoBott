@@ -869,7 +869,7 @@ def _scan_ticker_details(
         return _scan_failure(f"movement too weak (ROC {direction_roc:+.2f}%, VWAP dist {distance_pct:.2f}%)")
 
     price_dir_min = float(getattr(config, "DIRECTION_PRICE_MIN_PCT", max(0.005, movement_force_min / 2.0)) or 0.005)
-    if abs(price_change_pct) < price_dir_min:
+    if abs(price_change_pct) < price_dir_min and abs(direction_roc) < (movement_force_min * 1.2):
         return _scan_failure(f"price direction too weak ({price_change_pct:+.2f}%)")
 
     price_sign = 1.0 if price_change_pct > 0 else -1.0
@@ -910,7 +910,9 @@ def _scan_ticker_details(
     if config.ENABLE_HTF_CONFIRM:
         htf_ok, htf_reason = _htf_trend_confirmation(symbol=symbol, direction=direction, data_client=data_client)
         if not htf_ok:
-            return _scan_failure(f"HTF trend mismatch: {htf_reason}", stage="execution_reject")
+            if bool(getattr(config, "HTF_MISMATCH_HARD_REJECT", False)):
+                return _scan_failure(f"HTF trend mismatch: {htf_reason}", stage="execution_reject")
+            direction_score *= 0.75
 
     flow_score: float | None = None
     if config.ENABLE_ORDER_FLOW_FILTER:

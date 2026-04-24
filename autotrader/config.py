@@ -114,14 +114,14 @@ SCAN_DAILY_BARS     = 30
 
 # $6000 account: max 3 concurrent positions, 1.7% of account per trade = $100 max premium.
 # Single contract on a $1 option = $100 = 1.7% of account. Tight enough to survive 3 consecutive stops.
-MAX_POSITIONS                       = 6     # increase concurrent capacity on strong tape
-POSITION_SIZE_USD                   = 350   # larger default budget per trade
-RISK_PER_TRADE_PCT                  = 0.03
-MAX_POSITION_SIZE_USD               = 500.0  # hard cap for per-trade premium budget
+MAX_POSITIONS                       = 4     # sized for a $6k account
+POSITION_SIZE_USD                   = 125   # baseline premium budget per trade
+RISK_PER_TRADE_PCT                  = 0.017
+MAX_POSITION_SIZE_USD               = 150.0  # per-trade premium cap
 DRAWDOWN_REDUCE_AFTER_CONSEC_LOSSES = 2
 DRAWDOWN_SIZE_MULTIPLIER            = 0.75
-DAILY_LOSS_LIMIT_USD                = 350.0 # allow strategy room before day-stop
-WEEKLY_LOSS_LIMIT_USD               = 1200.0 # align with higher daily throughput
+DAILY_LOSS_LIMIT_USD                = 100.0 # hard stop for a $6k account day
+WEEKLY_LOSS_LIMIT_USD               = 300.0 # weekly risk cap for a $6k account
 CONSECUTIVE_LOSS_LIMIT              = 2     # stop after 2 consecutive losses, reassess
 # Net P&L circuit breaker (runtime telemetry-based):
 # Pause new entries once the day is sufficiently red in realized net P&L.
@@ -137,11 +137,11 @@ LOSS_THROTTLE_SIGNAL_SCORE_ADD      = 1.5   # require score 7.0+ after 2 losses
 LOSS_THROTTLE_MIN_VOLATILITY_SCORE  = 1.5  # after 2 losses require volatility_score >= 1.5 (low bar but not zero)
 
 # Capital doctrine: $150 max per trade, $450 max total open at once (3 positions × $150).
-MAX_PREMIUM_PER_TRADE_USD           = 500.0  # allow multi-contract exposure on quality setups
-MAX_TOTAL_OPEN_PREMIUM_USD          = 2500.0  # portfolio premium cap across open positions
-OPENING_MAX_FRESH_PREMIUM_USD       = 1000.0  # avoid over-throttling opening session entries
-MAX_CONTRACTS_PER_TRADE             = 8
-MAX_SAME_DIRECTION_POSITIONS        = 5      # one more notch to reduce same-direction entry starvation
+MAX_PREMIUM_PER_TRADE_USD           = 150.0  # keep single-name premium bounded
+MAX_TOTAL_OPEN_PREMIUM_USD          = 600.0  # total open premium budget
+OPENING_MAX_FRESH_PREMIUM_USD       = 250.0  # opening-session budget
+MAX_CONTRACTS_PER_TRADE             = 4
+MAX_SAME_DIRECTION_POSITIONS        = 3
 
 # Disable premium override — never allow expensive trades on a $6k account.
 ENABLE_PREMIUM_CAP_QUALITY_OVERRIDE = False
@@ -227,9 +227,9 @@ OPENING_STRICT_MIN_DIRECTION_SCORE           = 0.0
 OPENING_STRICT_MIN_RVOL                      = 0.0
 OPENING_STRICT_MIN_ROC_PCT                   = 0.0
 OPENING_STRICT_MIN_VWAP_DISTANCE_PCT         = 0.0
-OPENING_MAX_SIGNAL_CANDIDATES                = 3
-OPENING_MAX_FRESH_ENTRIES                    = 2    # max 2 fresh entries in the opening window
-OPENING_MAX_CONCURRENT_POSITIONS             = 2    # max 2 concurrent positions in opening window
+OPENING_MAX_SIGNAL_CANDIDATES                = 5
+OPENING_MAX_FRESH_ENTRIES                    = 4
+OPENING_MAX_CONCURRENT_POSITIONS             = 4
 OPENING_MAX_NEW_ENTRY_ATTEMPTS_PER_LOOP      = 6
 MAX_NEW_ENTRY_ATTEMPTS_PER_LOOP              = 6
 OPENING_MAX_EXPENSIVE_ENTRIES                = 0    # no expensive entries in opening window on $6k account
@@ -256,6 +256,7 @@ TRADE_STATE_PROTECTED_STOP_FLOOR_PCT        = 0.05   # +5% floor once protected 
 TRADE_STATE_BANK_OR_QUALIFY_TRIGGER_PCT     = 0.40   # +40%: bank-or-qualify decision
 TRADE_STATE_RUNNER_PROMOTION_STOP_FLOOR_PCT = 0.20   # +20% floor when promoted to runner
 RUNNER_DISABLE_AFTER_ET                     = "16:00"
+RUNNER_AUTO_PROMOTE_MIN_PCT                 = 0.18
 
 # Fixed profit target (disabled — trailing stop rides winners instead)
 ENABLE_FIXED_PROFIT_TARGET = False
@@ -319,8 +320,8 @@ ATR_PCT_MIN               = 0.3   # very low ATR floor — don't filter out ETFs
 VWAP_NEUTRAL_BAND_PCT     = 0.15  # wider neutral band: within 0.15% of VWAP = neutral, halve VWAP vote weight
 MOVEMENT_FORCE_MIN_PCT    = 0.014  # further relaxed for early-session/transition tape
 MOVEMENT_WEAK_VWAP_MULT   = 1.00  # was effectively 1.5 in scanner; only block when very close to VWAP
-DIRECTION_PRICE_MIN_PCT   = 0.006  # minimum recent price move to classify direction
-DIRECTION_CONFLICT_HARD_REJECT = True
+DIRECTION_PRICE_MIN_PCT   = 0.004  # slightly more permissive to avoid starving entries
+DIRECTION_CONFLICT_HARD_REJECT = False
 DIRECTION_CONFLICT_SCORE_MULT  = 0.55  # penalize (not veto) when price and ROC disagree
 DIRECTION_CONFLICT_ROC_MIN_PCT = 0.008
 ROC_ACTIVE_MOVE_MIN_PCT   = 0.006
@@ -328,7 +329,7 @@ ROC_ACTIVE_MOVE_MIN_PCT   = 0.006
 # Direction conviction: minimum weighted-vote score to commit to call/put.
 # 0.0 = any majority; 0.5 = strongly one-sided required.
 # Raised from 0.10: too low was allowing calls on bearish stocks (3 bull vs 2 bear votes = 0.20 score).
-DIRECTION_CONVICTION_MIN  = 0.30  # stricter directional agreement before entry
+DIRECTION_CONVICTION_MIN  = 0.22  # allow modest but clear directional bias
 DIRECTION_MIN_ALIGNED_VOTES = 3   # require 3 of 5 votes to agree
 DIRECTION_FAST_ROC_PERIOD  = 5    # short-horizon ROC used in directional voting
 
@@ -349,7 +350,7 @@ IV_RANK_MIN               = 0.0   # no minimum IV rank — trade any setup
 IV_RANK_MAX               = 99.0
 
 ENABLE_SIGNAL_SCORING     = True
-MIN_SIGNAL_SCORE          = 7.2   # reject weak setups; quality over quantity
+MIN_SIGNAL_SCORE          = 6.0   # raise throughput while preserving quality floor
 VOLATILITY_PRIORITY_WEIGHT = 3.0  # make volatility the top signal driver
 TREND_PRIORITY_WEIGHT      = 1.0
 FLOW_PRIORITY_WEIGHT       = 1.0
@@ -416,6 +417,7 @@ CATALYST_RELAXED_MIN_SIGNAL_SCORE = 2.5
 # ---------------------------------------------------------------------------
 
 ENABLE_HTF_CONFIRM         = True   # confirm with higher timeframe to reduce false entries
+HTF_MISMATCH_HARD_REJECT   = False  # downgrade mismatches instead of outright rejection
 HTF_TIMEFRAME              = "15m"
 HTF_LOOKBACK_BARS          = 30
 HTF_SLOPE_TOLERANCE_PCT    = 0.12   # allow near-flat HTF without hard reject
