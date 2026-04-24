@@ -160,16 +160,6 @@ def _parse_state_datetime(value: str | None) -> datetime | None:
         return None
 
 
-def _position_unrealized_usd(pos, plpc: float, entry_price: float, qty: int) -> float:
-    try:
-        raw = float(getattr(pos, "unrealized_pl", 0) or 0)
-        return raw
-    except (TypeError, ValueError):
-        if entry_price > 0 and qty > 0:
-            return float(plpc) * float(entry_price) * float(qty) * 100.0
-    return 0.0
-
-
 def _latest_5m_move_pct(data_client: AlpacaDataClient, symbol: str, now_et: datetime) -> float | None:
     try:
         bars = data_client.get_intraday_bars_since_open(symbol=symbol, now_et=now_et, limit=3)
@@ -283,7 +273,6 @@ def _hydrate_missing_position_meta(open_trade_meta: dict[str, dict], option_posi
             "entry_price": entry_price,
             "stop_floor_plpc": -float(config.STOP_LOSS_PCT),
             "max_plpc": 0.0,
-            "runner_mode": False,
             "inferred": True,
         }
         hydrated += 1
@@ -996,7 +985,6 @@ def main():
                     "entry_price": filled_avg_price or ask_price,
                     "stop_floor_plpc": -float(config.STOP_LOSS_PCT),
                     "max_plpc": 0.0,
-                    "runner_mode": False,
                 }
                 if prior_entries >= 1 and reentry_armed:
                     ticker_reentries_used[ticker] = reentries_used + 1
@@ -1019,38 +1007,6 @@ def main():
         if hydrated_count > 0:
             print(f"[{ts(now_et)}] Hydrated {hydrated_count} externally-opened position(s) before exit management.")
             _save_runtime_state()
-        basket_snapshot: dict[str, dict] = {}
-        total_open_unrealized_usd = 0.0
-        runner_count = 0
-        for p in option_positions:
-            symbol = str(getattr(p, "symbol", ""))
-            if not symbol:
-                continue
-            qty = position_qty_as_int(getattr(p, "qty", 0))
-            if qty <= 0:
-                continue
-            try:
-                plpc = float(getattr(p, "unrealized_plpc", 0) or 0)
-            except (TypeError, ValueError):
-                plpc = 0.0
-            meta = open_trade_meta.get(symbol, {})
-            entry_price = float(meta.get("entry_price", getattr(p, "avg_entry_price", 0) or 0) or 0)
-            unrealized_usd = _position_unrealized_usd(p, plpc, entry_price, qty)
-            if bool(meta.get("runner_mode", False)):
-                runner_count += 1
-            basket_snapshot[symbol] = {
-                "plpc": plpc,
-                "qty": qty,
-                "entry_price": entry_price,
-                "unrealized_usd": unrealized_usd,
-                "meta": meta,
-            }
-            total_open_unrealized_usd += float(unrealized_usd)
-
-        basket_harvest_active = bool(getattr(config, "ENABLE_BASKET_MANAGER", True)) and (
-            total_open_unrealized_usd >= float(getattr(config, "BASKET_HARVEST_UNREALIZED_USD", 40.0) or 40.0)
-        )
-
         for pos in option_positions:
             now_et = datetime.now(tz)
             symbol = str(getattr(pos, "symbol", ""))
@@ -1076,50 +1032,11 @@ def main():
                 meta["max_plpc"] = max_plpc
                 open_trade_meta[symbol] = meta
 
-            if bool(getattr(config, "ENABLE_RUNNER_MODE", True)) and not bool(meta.get("runner_mode", False)):
-                if (
-                    plpc >= float(getattr(config, "RUNNER_PROMOTE_PCT", 0.35) or 0.35)
-                    and runner_count < int(getattr(config, "RUNNER_MAX_CONCURRENT", 1) or 1)
-                    and not is_at_or_after(now_et, str(getattr(config, "RUNNER_DISABLE_AFTER_TIME", "15:00") or "15:00"))
-                ):
-                    meta["runner_mode"] = True
-                    runner_count += 1
-                    dynamic_stop_floor = max(
-                        dynamic_stop_floor,
-                        float(getattr(config, "RUNNER_PROTECT_FLOOR_PCT", 0.20) or 0.20),
-                    )
-                    meta["stop_floor_plpc"] = dynamic_stop_floor
-                    open_trade_meta[symbol] = meta
-                    print(
-                        f"[{ts(now_et)}] RUNNER PROMOTE {symbol} plpc={plpc:+.2%} "
-                        f"floor={dynamic_stop_floor:+.2%}"
-                    )
-
-            if basket_harvest_active and plpc > 0 and not bool(meta.get("runner_mode", False)):
-                lock_floor = float(getattr(config, "BASKET_WINNER_LOCK_FLOOR_PCT", 0.05) or 0.05)
-                dynamic_stop_floor = max(dynamic_stop_floor, lock_floor)
-                if meta:
-                    meta["stop_floor_plpc"] = dynamic_stop_floor
-                    open_trade_meta[symbol] = meta
-
             exit_reason = None
             if config.ENABLE_FIXED_PROFIT_TARGET and plpc >= config.PROFIT_TARGET_PCT:
                 exit_reason = "profit_target"
-            elif basket_harvest_active and plpc <= float(getattr(config, "BASKET_LAGGARD_CUT_PCT", -0.12) or -0.12):
-                exit_reason = "basket_laggard_cut"
-            elif (
-                basket_harvest_active
-                and plpc >= float(getattr(config, "BASKET_WINNER_HARVEST_MIN_PCT", 0.25) or 0.25)
-                and not bool(meta.get("runner_mode", False))
-            ):
-                exit_reason = "basket_harvest_win"
             elif plpc <= dynamic_stop_floor:
                 exit_reason = "stop_loss"
-            elif (not bool(meta.get("runner_mode", False))) and is_at_or_after(
-                now_et,
-                str(getattr(config, "NON_RUNNER_FLATTEN_TIME", "15:15") or "15:15"),
-            ):
-                exit_reason = "non_runner_flatten"
             elif is_at_or_after(now_et, config.HARD_CLOSE_TIME):
                 exit_reason = "eod_close"
             else:
