@@ -24,6 +24,8 @@ from feature_flags import is_enabled
 from logger import TradeLogger
 from options import select_atm_option_contract_with_reason
 from risk import (
+    calculate_entry_qty,
+    calculate_position_budget_usd,
     can_open_new_positions,
     is_at_or_after,
     position_matches_ticker,
@@ -345,6 +347,30 @@ def _current_open_premium_usd(option_positions: list, open_trade_meta: dict[str,
         if qty > 0 and entry_price > 0:
             total += entry_price * qty * 100.0
     return round(total, 4)
+
+
+def _compute_contract_qty(
+    *,
+    ask_price: float,
+    equity: float | None,
+    consecutive_losses: int,
+    max_trade_premium_usd: float,
+    max_contracts_per_trade: int,
+) -> tuple[int, float]:
+    budget_usd = calculate_position_budget_usd(
+        equity=equity,
+        base_position_size_usd=float(getattr(config, "POSITION_SIZE_USD", 100.0) or 100.0),
+        risk_per_trade_pct=float(getattr(config, "RISK_PER_TRADE_PCT", 0.0) or 0.0),
+        max_position_size_usd=float(getattr(config, "MAX_POSITION_SIZE_USD", max_trade_premium_usd) or max_trade_premium_usd),
+        consecutive_losses=consecutive_losses,
+        reduce_after_consecutive_losses=int(getattr(config, "DRAWDOWN_REDUCE_AFTER_CONSEC_LOSSES", 2) or 2),
+        drawdown_size_multiplier=float(getattr(config, "DRAWDOWN_SIZE_MULTIPLIER", 0.75) or 0.75),
+    )
+    effective_budget = max(0.0, min(float(max_trade_premium_usd), float(budget_usd)))
+    qty = calculate_entry_qty(effective_budget, ask_price)
+    if max_contracts_per_trade > 0:
+        qty = min(qty, max_contracts_per_trade)
+    return max(0, int(qty)), float(effective_budget)
 
 
 def _direction_exposure_counts(option_positions: list, open_trade_meta: dict[str, dict]) -> tuple[int, int]:
@@ -1916,7 +1942,22 @@ def main():
                 )
                 return False
 
-            qty = 1
+            max_trade_premium_base = float(getattr(config, "MAX_PREMIUM_PER_TRADE_USD", 150.0) or 150.0)
+            max_trade_premium = max(25.0, max_trade_premium_base)
+            max_contracts_per_trade = max(1, int(getattr(config, "MAX_CONTRACTS_PER_TRADE", 10) or 10))
+            qty, _effective_budget = _compute_contract_qty(
+                ask_price=ask_price,
+                equity=float(equity) if equity is not None else None,
+                consecutive_losses=consecutive_losses,
+                max_trade_premium_usd=max_trade_premium,
+                max_contracts_per_trade=max_contracts_per_trade,
+            )
+            if qty < 1:
+                print(
+                    f"[{ts(now_et)}] {ticker}: reversal skipped (budget too small for ask=${ask_price:.2f}, "
+                    f"cap=${max_trade_premium:.2f})."
+                )
+                return False
             entry_result = _execute_limit_entry(
                 broker=broker,
                 data_client=data_client,
@@ -1935,14 +1976,6 @@ def main():
 
             filled_avg_price = float(entry_result.get("filled_price") or 0.0)
             filled_qty = position_qty_as_int(entry_result.get("filled_qty", qty)) or qty
-            if filled_qty > 1:
-                extra_qty = filled_qty - 1
-                try:
-                    broker.close_option_market(option_symbol, extra_qty)
-                    print(f"[{ts(now_et)}] {ticker}: trimmed reversal fill to 1 contract (closed extra {extra_qty}).")
-                except Exception as exc:  # noqa: BLE001
-                    print(f"[{ts(now_et)}] {ticker}: failed to trim reversal extra qty {extra_qty}: {exc}")
-                filled_qty = 1
             fill_slippage = float(entry_result.get("fill_slippage_vs_ask_pct", 0.0) or 0.0)
             if fill_slippage > config.MAX_FILL_SLIPPAGE_PCT:
                 print(
@@ -3329,12 +3362,27 @@ def main():
                     continue
                 ask_price = float(entry_quote.get("ask") or 0.0)
 
-                qty = 1
-                trade_premium_usd = ask_price * qty * 100.0
+                max_contracts_per_trade = max(1, int(getattr(config, "MAX_CONTRACTS_PER_TRADE", 10) or 10))
                 volatility_premium_mult = max(0.1, float(volatility_profile["premium_cap_mult"]))
                 volatility_opening_premium_mult = max(0.1, float(volatility_profile["opening_premium_cap_mult"]))
                 max_trade_premium_base = float(getattr(config, "MAX_PREMIUM_PER_TRADE_USD", 150.0) or 150.0)
                 max_trade_premium = max(25.0, max_trade_premium_base * volatility_premium_mult)
+                qty, _effective_budget = _compute_contract_qty(
+                    ask_price=ask_price,
+                    equity=float(equity) if equity is not None else None,
+                    consecutive_losses=consecutive_losses,
+                    max_trade_premium_usd=max_trade_premium,
+                    max_contracts_per_trade=max_contracts_per_trade,
+                )
+                if qty < 1:
+                    _mark_skip("insufficient_premium_budget")
+                    _mark_stage4_reject(reason="insufficient_premium_budget", ticker=ticker)
+                    print(
+                        f"[{ts(now_et)}] {ticker}: skip (budget too small for ask ${ask_price:.2f}; "
+                        f"per-trade cap ${max_trade_premium:.2f})."
+                    )
+                    continue
+                trade_premium_usd = ask_price * qty * 100.0
                 premium_override_ok = False
                 premium_override_reason = ""
                 if trade_premium_usd > max_trade_premium:
@@ -3359,6 +3407,23 @@ def main():
                 total_open_premium = _current_open_premium_usd(option_positions, open_trade_meta)
                 max_total_open_premium_base = float(getattr(config, "MAX_TOTAL_OPEN_PREMIUM_USD", 600.0) or 600.0)
                 max_total_open_premium = max(75.0, max_total_open_premium_base * volatility_premium_mult)
+                if (total_open_premium + trade_premium_usd) > max_total_open_premium:
+                    remaining_open_budget = max(0.0, max_total_open_premium - total_open_premium)
+                    fit_qty = calculate_entry_qty(min(max_trade_premium, remaining_open_budget), ask_price)
+                    if max_contracts_per_trade > 0:
+                        fit_qty = min(fit_qty, max_contracts_per_trade)
+                    if fit_qty >= 1:
+                        qty = fit_qty
+                        trade_premium_usd = ask_price * qty * 100.0
+                    else:
+                        _mark_skip("total_open_premium_cap")
+                        _mark_stage4_reject(reason="total_open_premium_cap", ticker=ticker)
+                        print(
+                            f"[{ts(now_et)}] {ticker}: skip (open premium ${total_open_premium:.2f} + "
+                            f"new ${trade_premium_usd:.2f} > cap ${max_total_open_premium:.2f})."
+                        )
+                        continue
+
                 if (total_open_premium + trade_premium_usd) > max_total_open_premium:
                     _mark_skip("total_open_premium_cap")
                     _mark_stage4_reject(reason="total_open_premium_cap", ticker=ticker)
@@ -3499,14 +3564,6 @@ def main():
 
                 filled_avg_price = float(entry_result.get("filled_price") or 0.0)
                 filled_qty = position_qty_as_int(entry_result.get("filled_qty", qty)) or qty
-                if filled_qty > 1:
-                    extra_qty = filled_qty - 1
-                    try:
-                        trim_order = broker.close_option_market(option_symbol, extra_qty)
-                        print(f"[{ts(now_et)}] {ticker}: trimmed fill to 1 contract (closed extra {extra_qty}).")
-                    except Exception as exc:  # noqa: BLE001
-                        print(f"[{ts(now_et)}] {ticker}: WARNING — failed to trim extra qty {extra_qty}: {exc}. Recording qty=1 anyway.")
-                    filled_qty = 1
                 fill_slippage = float(entry_result.get("fill_slippage_vs_ask_pct", 0.0) or 0.0)
                 if fill_slippage > config.MAX_FILL_SLIPPAGE_PCT:
                     _mark_skip("fill_slippage_too_high")

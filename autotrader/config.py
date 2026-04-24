@@ -114,14 +114,14 @@ SCAN_DAILY_BARS     = 30
 
 # $6000 account: max 3 concurrent positions, 1.7% of account per trade = $100 max premium.
 # Single contract on a $1 option = $100 = 1.7% of account. Tight enough to survive 3 consecutive stops.
-MAX_POSITIONS                       = 4     # allow one additional slot so a bad hold does not choke rotation
-POSITION_SIZE_USD                   = 125   # first-pass doctrine bump for better contract quality
-RISK_PER_TRADE_PCT                  = 0.017
-MAX_POSITION_SIZE_USD               = 125.0  # aligned with MAX_PREMIUM_PER_TRADE_USD
+MAX_POSITIONS                       = 6     # increase concurrent capacity on strong tape
+POSITION_SIZE_USD                   = 350   # larger default budget per trade
+RISK_PER_TRADE_PCT                  = 0.03
+MAX_POSITION_SIZE_USD               = 500.0  # hard cap for per-trade premium budget
 DRAWDOWN_REDUCE_AFTER_CONSEC_LOSSES = 2
 DRAWDOWN_SIZE_MULTIPLIER            = 0.75
-DAILY_LOSS_LIMIT_USD                = 100.0 # 1.7% daily max drawdown — hard stop for the day
-WEEKLY_LOSS_LIMIT_USD               = 300.0 # 5% weekly max drawdown
+DAILY_LOSS_LIMIT_USD                = 350.0 # allow strategy room before day-stop
+WEEKLY_LOSS_LIMIT_USD               = 1200.0 # align with higher daily throughput
 CONSECUTIVE_LOSS_LIMIT              = 2     # stop after 2 consecutive losses, reassess
 # Net P&L circuit breaker (runtime telemetry-based):
 # Pause new entries once the day is sufficiently red in realized net P&L.
@@ -137,9 +137,10 @@ LOSS_THROTTLE_SIGNAL_SCORE_ADD      = 1.5   # require score 7.0+ after 2 losses
 LOSS_THROTTLE_MIN_VOLATILITY_SCORE  = 1.5  # after 2 losses require volatility_score >= 1.5 (low bar but not zero)
 
 # Capital doctrine: $150 max per trade, $450 max total open at once (3 positions × $150).
-MAX_PREMIUM_PER_TRADE_USD           = 125.0  # moderate bump for better fillable/liquid contracts
-MAX_TOTAL_OPEN_PREMIUM_USD          = 500.0  # 4 positions × $125
-OPENING_MAX_FRESH_PREMIUM_USD       = 200.0  # 2 positions in the opening window
+MAX_PREMIUM_PER_TRADE_USD           = 500.0  # allow multi-contract exposure on quality setups
+MAX_TOTAL_OPEN_PREMIUM_USD          = 2500.0  # portfolio premium cap across open positions
+OPENING_MAX_FRESH_PREMIUM_USD       = 1000.0  # avoid over-throttling opening session entries
+MAX_CONTRACTS_PER_TRADE             = 8
 MAX_SAME_DIRECTION_POSITIONS        = 5      # one more notch to reduce same-direction entry starvation
 
 # Disable premium override — never allow expensive trades on a $6k account.
