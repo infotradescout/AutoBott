@@ -18,6 +18,30 @@ load_runtime_env()
 
 def _force_writable_data_dir() -> None:
     current = (os.getenv("DATA_DIR") or "").strip()
+    windows_default = Path(__file__).resolve().parent
+
+    if os.name == "nt":
+        # Keep Windows runs deterministic in the repo data dir unless explicitly overridden.
+        if not current:
+            os.environ["DATA_DIR"] = str(windows_default)
+            return
+
+        target = Path(current)
+        try:
+            target.mkdir(parents=True, exist_ok=True)
+            probe = target / ".write_test"
+            with probe.open("w", encoding="utf-8") as f:
+                f.write("ok")
+            probe.unlink(missing_ok=True)
+            return
+        except Exception:
+            os.environ["DATA_DIR"] = str(windows_default)
+            print(
+                f"[render_service] DATA_DIR '{current}' not writable. "
+                f"Using '{windows_default}'."
+            )
+            return
+
     persistent_default = Path("/data")
 
     def _first_writable(paths: list[Path]) -> Path | None:
@@ -59,7 +83,8 @@ def _force_writable_data_dir() -> None:
 
 
 def _migrate_runtime_files_to_active_data_dir() -> None:
-    target_dir = Path((os.getenv("DATA_DIR") or "").strip() or "/tmp/autotrader-data")
+    target_fallback = Path(__file__).resolve().parent if os.name == "nt" else Path("/tmp/autotrader-data")
+    target_dir = Path((os.getenv("DATA_DIR") or "").strip() or str(target_fallback))
     try:
         target_dir.mkdir(parents=True, exist_ok=True)
     except Exception:

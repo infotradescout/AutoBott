@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import csv
+import os
+import time
 from pathlib import Path
 
 try:
@@ -105,9 +107,24 @@ class TradeLogger:
 
     def log_trade(self, row: dict):
         payload = {key: row.get(key, "") for key in self.columns}
-        with self.path.open("a", newline="", encoding="utf-8") as f:
-            writer = csv.DictWriter(f, fieldnames=self.columns)
-            writer.writerow(payload)
+        last_exc: Exception | None = None
+        for attempt in range(3):
+            try:
+                with self.path.open("a", newline="", encoding="utf-8") as f:
+                    writer = csv.DictWriter(f, fieldnames=self.columns)
+                    writer.writerow(payload)
+                    f.flush()
+                    os.fsync(f.fileno())
+                last_exc = None
+                break
+            except Exception as exc:  # noqa: BLE001
+                last_exc = exc
+                if attempt >= 2:
+                    break
+                time.sleep(0.1 * (attempt + 1))
+
+        if last_exc is not None:
+            raise last_exc
         self._trim_if_needed()
 
     def _trim_if_needed(self):

@@ -1532,6 +1532,9 @@ def main():
     data_client = AlpacaDataClient(api_key, secret_key, paper=config.PAPER)
     initialize_scanner(data_client)
     trade_logger = TradeLogger()
+    print(
+        f"[{ts()}] Runtime data_dir={config.DATA_DIR} trades_csv={trade_logger.path}"
+    )
     alerts = AlertManager()
     state = load_bot_state()
     open_trade_meta: dict[str, dict] = dict(state.get("open_trade_meta") or {})
