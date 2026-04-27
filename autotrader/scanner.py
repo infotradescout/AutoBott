@@ -884,21 +884,40 @@ def _scan_ticker_details(
             f"direction conflict (price {price_change_pct:+.2f}% vs ROC {direction_roc:+.2f}%)"
         )
 
-    direction = "call" if price_sign > 0 else "put"
-    # Normalize momentum into [-1, 1] so downstream quality gates keep working.
-    score_den = max(0.10, movement_force_min * 4.0)
-    score_mag = min(1.0, abs(direction_roc) / score_den)
-    direction_score = score_mag if direction == "call" else -score_mag
+    vwap_vote = 1.0 if above_vwap else -1.0
+    ema_trend_vote = 1.0 if float(ema9_pre.iloc[-1]) >= float(ema21_pre.iloc[-1]) else -1.0
+    roc_slow_vote = momentum_sign if math.isnan(roc_early) else (1.0 if roc_early >= 0 else -1.0)
+    direction_votes: list[tuple[str, float, float]] = [
+        ("price", 1.0, price_sign),
+        ("momentum_fast", 0.9, momentum_sign),
+        ("momentum_slow", 0.6, roc_slow_vote),
+        ("ema_trend", 0.6, ema_trend_vote),
+        ("vwap_side", 0.3, vwap_vote),
+    ]
+
+    weighted_vote = sum(weight * vote for _name, weight, vote in direction_votes)
+    total_weight = sum(abs(weight) for _name, weight, _vote in direction_votes)
+    direction = "call" if weighted_vote >= 0 else "put"
+
+    aligned_count = 0
+    for _name, _weight, vote in direction_votes:
+        if direction == "call" and vote > 0:
+            aligned_count += 1
+        elif direction == "put" and vote < 0:
+            aligned_count += 1
+
+    min_aligned_votes = int(getattr(config, "DIRECTION_MIN_ALIGNED_VOTES", 3) or 3)
+    min_aligned_votes = max(1, min(len(direction_votes), min_aligned_votes))
+    if aligned_count < min_aligned_votes:
+        return _scan_failure(
+            f"direction alignment {aligned_count}/{len(direction_votes)} below {min_aligned_votes}"
+        )
+
+    direction_score_abs = (abs(weighted_vote) / total_weight) if total_weight > 0 else 0.0
+    direction_score = direction_score_abs if direction == "call" else -direction_score_abs
     if direction_conflict:
         conflict_mult = float(getattr(config, "DIRECTION_CONFLICT_SCORE_MULT", 0.55) or 0.55)
         direction_score *= max(0.1, min(1.0, conflict_mult))
-
-    vwap_vote = 1.0 if above_vwap else -1.0
-    direction_votes: list[tuple[str, float, float]] = [
-        ("price", 1.0, price_sign),
-        ("momentum", 0.7, momentum_sign),
-        ("vwap_side", 0.2, vwap_vote),
-    ]
 
     conviction_min = float(getattr(config, "DIRECTION_CONVICTION_MIN", 0.25) or 0.25)
     if abs(direction_score) < conviction_min:
