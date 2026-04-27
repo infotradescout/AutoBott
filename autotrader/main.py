@@ -2068,6 +2068,10 @@ def main():
             max_wait_seconds = max(poll_seconds, int(config.EXIT_ORDER_MAX_WAIT_SECONDS))
         else:
             max_wait_seconds = max(poll_seconds, int(max_wait_seconds_override))
+        if retry_attempts_override is None:
+            retry_attempts = max(1, int(getattr(config, "EXIT_CLOSE_RETRY_ATTEMPTS", 2) or 2))
+        else:
+            retry_attempts = max(1, int(retry_attempts_override))
 
         critical_exit_reasons = {
             "stop_loss",
@@ -2077,6 +2081,7 @@ def main():
             "pre_expiry_exit_overdue",
         }
         is_critical = str(exit_reason or "").lower() in critical_exit_reasons
+        enable_exit_market_fallback = bool(getattr(config, "ENABLE_EXIT_MARKET_FALLBACK", True))
         wait_seconds = max_wait_seconds
         if poll_seconds_override is None and max_wait_seconds_override is None:
             if is_critical:
@@ -2112,28 +2117,37 @@ def main():
                         f"cancel existing close order {existing_order_id} failed: {exc}"
                     )
 
-            quote_snapshot = _option_quote_snapshot(data_client, symbol)
-            bid_price = float(quote_snapshot.get("bid") or 0.0)
-            ask_price = float(quote_snapshot.get("ask") or 0.0)
-            execution_meta["submit_bid"] = quote_snapshot.get("bid")
-            execution_meta["submit_ask"] = quote_snapshot.get("ask")
-            execution_meta["submit_midpoint"] = quote_snapshot.get("midpoint")
-            execution_meta["submit_spread_pct"] = quote_snapshot.get("spread_pct")
+            bid_price = 0.0
+            last_status = ""
+            for attempt in range(1, retry_attempts + 1):
+                quote_snapshot = _option_quote_snapshot(data_client, symbol)
+                bid_price = float(quote_snapshot.get("bid") or 0.0)
+                ask_price = float(quote_snapshot.get("ask") or 0.0)
+                execution_meta["submit_bid"] = quote_snapshot.get("bid")
+                execution_meta["submit_ask"] = quote_snapshot.get("ask")
+                execution_meta["submit_midpoint"] = quote_snapshot.get("midpoint")
+                execution_meta["submit_spread_pct"] = quote_snapshot.get("spread_pct")
 
-            if bid_price > 0:
+                if bid_price <= 0:
+                    last_status = "no_bid_quote"
+                    execution_meta["status"] = last_status
+                    if attempt < retry_attempts:
+                        time.sleep(max(0.2, float(getattr(config, "RATE_LIMIT_SLEEP_SECONDS", 0.1) or 0.1)))
+                    continue
+
                 spread = max(0.0, ask_price - bid_price) if ask_price > 0 else 0.0
                 reprice_pct = float(
                     getattr(
                         config,
                         "SMART_EXIT_CRITICAL_REPRICE_PCT" if is_critical else "SMART_EXIT_NORMAL_REPRICE_PCT",
-                        0.10 if is_critical else 0.35,
+                        0.10,
                     )
-                    or (0.10 if is_critical else 0.35)
+                    or 0.10
                 )
                 limit_price = round(bid_price + (spread * max(0.0, reprice_pct)), 2)
                 execution_meta["intended_limit"] = limit_price
                 execution_meta["submit_mode"] = "limit"
-                execution_meta["attempts"] = 1
+                execution_meta["attempts"] = attempt
                 submit_ts = time.time()
                 order = broker.place_option_limit_sell(symbol, request_qty, limit_price)
                 order_id = str(getattr(order, "id", "") or "")
@@ -2151,6 +2165,7 @@ def main():
                 )
                 execution_meta["fill_seconds"] = round(max(0.0, time.time() - submit_ts), 3)
                 execution_meta["status"] = status
+                last_status = str(status or "")
                 if filled_qty > 0:
                     execution_meta["fill_slippage_vs_bid_pct"] = round(
                         _sell_fill_slippage_vs_bid_pct(bid_price, filled_avg_price),
@@ -2162,8 +2177,10 @@ def main():
                         broker.cancel_order(order_id)
                     except Exception as exc:  # noqa: BLE001
                         print(f"[{ts(now_et)}] {label} {symbol}: cancel close order {order_id} failed: {exc}")
+                if attempt < retry_attempts:
+                    time.sleep(max(0.2, float(getattr(config, "RATE_LIMIT_SLEEP_SECONDS", 0.1) or 0.1)))
 
-            if not is_critical:
+            if not is_critical and not enable_exit_market_fallback:
                 print(f"[{ts(now_et)}] {label} {symbol} qty={request_qty}: executable limit exit not filled; will retry next loop.")
                 return 0, None, execution_meta
 
@@ -2183,7 +2200,10 @@ def main():
                 now_et=now_et,
                 label=f"{label} {symbol} market",
                 poll_seconds=poll_seconds,
-                max_wait_seconds=max_wait_seconds,
+                max_wait_seconds=max(
+                    poll_seconds,
+                    int(getattr(config, "EXIT_MARKET_FALLBACK_WAIT_SECONDS", max_wait_seconds) or max_wait_seconds),
+                ),
             )
             execution_meta["fill_seconds"] = round(max(0.0, time.time() - submit_ts), 3)
             execution_meta["status"] = status
@@ -2193,7 +2213,7 @@ def main():
                     4,
                 )
                 return filled_qty, filled_avg_price, execution_meta
-            print(f"[{ts(now_et)}] {label} {symbol} qty={request_qty}: critical exit not filled.")
+            print(f"[{ts(now_et)}] {label} {symbol} qty={request_qty}: market fallback exit not filled.")
             return 0, None, execution_meta
         except Exception as exc:  # noqa: BLE001
             print(f"[{ts(now_et)}] {label} {symbol} qty={request_qty}: close error: {exc}")

@@ -240,9 +240,8 @@ OPENING_EXPENSIVE_MAX_PREMIUM_USD            = 100.0  # same cap as regular trad
 # Stop loss & trailing exit ladder
 # ---------------------------------------------------------------------------
 
-# Stop loss: $35 per trade = 35% of $100 max premium.
-# Wide enough to survive bid/ask spread noise (~10%), tight enough to cut losers fast.
-STOP_LOSS_USD          = 35.0   # 35% of $100 max premium — cut losers before they become disasters
+# Stop loss baseline scaled up for larger-account operation while preserving fast exits.
+STOP_LOSS_USD          = 60.0
 STOP_LOSS_PCT          = 0.35   # 35% hard stop
 
 # Legacy immediate TP knob retained for backward compatibility only.
@@ -564,11 +563,13 @@ ENTRY_MARKET_FALLBACK_MAX_SPREAD_PCT = 12.0
 ENTRY_RETRY_LIMIT_PCT              = 0.02
 EXIT_ORDER_STATUS_POLL_SECONDS     = 2
 EXIT_ORDER_MAX_WAIT_SECONDS        = 20
-EXIT_CLOSE_RETRY_ATTEMPTS          = 2
+EXIT_CLOSE_RETRY_ATTEMPTS          = 5
 SMART_EXIT_NORMAL_WAIT_SECONDS     = 2
 SMART_EXIT_CRITICAL_WAIT_SECONDS   = 3
-SMART_EXIT_NORMAL_REPRICE_PCT      = 0.35
+SMART_EXIT_NORMAL_REPRICE_PCT      = 0.10
 SMART_EXIT_CRITICAL_REPRICE_PCT    = 0.10
+ENABLE_EXIT_MARKET_FALLBACK        = True
+EXIT_MARKET_FALLBACK_WAIT_SECONDS  = 6
 # Faster close profile for hard stop-loss exits.
 STOPLOSS_EXIT_ORDER_STATUS_POLL_SECONDS = 1
 STOPLOSS_EXIT_ORDER_MAX_WAIT_SECONDS    = 3
