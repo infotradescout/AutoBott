@@ -3572,13 +3572,13 @@ def api_scansummary():
 @app.get("/api/status")
 def api_status():
     now_et = _now_et()
-  runtime_commit = str(
-    os.getenv("RENDER_GIT_COMMIT")
-    or os.getenv("GIT_COMMIT")
-    or os.getenv("SOURCE_COMMIT")
-    or ""
-  ).strip()
-  runtime_image = str(os.getenv("RENDER_IMAGE_ID") or os.getenv("RENDER_SERVICE_ID") or "").strip()
+    runtime_commit = str(
+        os.getenv("RENDER_GIT_COMMIT")
+        or os.getenv("GIT_COMMIT")
+        or os.getenv("SOURCE_COMMIT")
+        or ""
+    ).strip()
+    runtime_image = str(os.getenv("RENDER_IMAGE_ID") or os.getenv("RENDER_SERVICE_ID") or "").strip()
     try:
         clock = requests.get(f"{BASE_URL}/v2/clock", headers=HEADERS, timeout=10)
         clock.raise_for_status()
