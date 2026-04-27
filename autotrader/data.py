@@ -94,6 +94,7 @@ class AlpacaDataClient:
         self._rate_limited_until: dict[str, float] = {}
         self._option_quote_cache: dict[str, tuple[float, dict[str, float | None]]] = {}
         self._intraday_bars_cache: dict[str, tuple[float, pd.DataFrame]] = {}
+        self._forbidden_stock_bar_feeds: set[str] = set()
 
     @staticmethod
     def _is_429_error(exc: Exception) -> bool:
@@ -123,6 +124,11 @@ class AlpacaDataClient:
                 self._rate_limited_until.get(bucket, 0.0),
                 time.monotonic() + max(0.1, backoff),
             )
+
+    @staticmethod
+    def _is_403_forbidden(exc: Exception) -> bool:
+        text = str(exc or "")
+        return "403" in text or "Forbidden" in text
 
     def get_stock_bars(
         self,
@@ -162,6 +168,8 @@ class AlpacaDataClient:
             start_utc = (now_utc - timedelta(days=lookback_days)).isoformat().replace("+00:00", "Z")
             end_utc = now_utc.isoformat().replace("+00:00", "Z")
             for feed in _stock_bar_feed_candidates():
+                if feed in self._forbidden_stock_bar_feeds:
+                    continue
                 try:
                     resp = self.data_session.get(
                         f"{self.data_base_url}/v2/stocks/bars",
@@ -197,6 +205,8 @@ class AlpacaDataClient:
                             df = df.tail(limit).reset_index(drop=True)
                             return df[["timestamp", "open", "high", "low", "close", "volume"]]
                 except Exception as exc:  # noqa: BLE001
+                    if self._is_403_forbidden(exc):
+                        self._forbidden_stock_bar_feeds.add(feed)
                     print(f"[data] get_stock_bars Alpaca failed for {symbol} tf={timeframe} feed={feed}: {exc}")
 
         # Fallback: yfinance
@@ -292,6 +302,8 @@ class AlpacaDataClient:
         start_utc = market_open.astimezone(pytz.UTC).isoformat().replace("+00:00", "Z")
         end_utc = now_et.astimezone(pytz.UTC).isoformat().replace("+00:00", "Z")
         for feed in _stock_bar_feed_candidates():
+            if feed in self._forbidden_stock_bar_feeds:
+                continue
             try:
                 self._throttle("stocks_bars")
                 resp = self.data_session.get(
@@ -334,6 +346,8 @@ class AlpacaDataClient:
             except Exception as exc:  # noqa: BLE001
                 if self._is_429_error(exc):
                     self._mark_rate_limited("stocks_bars")
+                if self._is_403_forbidden(exc):
+                    self._forbidden_stock_bar_feeds.add(feed)
                 print(f"[data] get_intraday_bars_since_open Alpaca failed for {symbol} feed={feed}: {exc}")
 
         # Fallback: yfinance
@@ -394,6 +408,8 @@ class AlpacaDataClient:
         start_utc = start_et.astimezone(pytz.UTC).isoformat().replace("+00:00", "Z")
         end_utc = end_et.astimezone(pytz.UTC).isoformat().replace("+00:00", "Z")
         for feed in _stock_bar_feed_candidates():
+            if feed in self._forbidden_stock_bar_feeds:
+                continue
             try:
                 resp = self.data_session.get(
                     f"{self.data_base_url}/v2/stocks/bars",
@@ -431,6 +447,8 @@ class AlpacaDataClient:
                         if not df.empty:
                             return df[["timestamp", "open", "high", "low", "close", "volume"]]
             except Exception as exc:  # noqa: BLE001
+                if self._is_403_forbidden(exc):
+                    self._forbidden_stock_bar_feeds.add(feed)
                 print(f"[data] get_intraday_bars_window Alpaca failed for {symbol} feed={feed}: {exc}")
 
         # Fallback: yfinance

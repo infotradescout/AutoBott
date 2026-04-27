@@ -3572,6 +3572,13 @@ def api_scansummary():
 @app.get("/api/status")
 def api_status():
     now_et = _now_et()
+  runtime_commit = str(
+    os.getenv("RENDER_GIT_COMMIT")
+    or os.getenv("GIT_COMMIT")
+    or os.getenv("SOURCE_COMMIT")
+    or ""
+  ).strip()
+  runtime_image = str(os.getenv("RENDER_IMAGE_ID") or os.getenv("RENDER_SERVICE_ID") or "").strip()
     try:
         clock = requests.get(f"{BASE_URL}/v2/clock", headers=HEADERS, timeout=10)
         clock.raise_for_status()
@@ -3662,6 +3669,8 @@ def api_status():
                 "trader_loop_stale_after_seconds": loop_stale_after,
                 "trader_heartbeat_et": _to_ct_label(heartbeat_dt) if heartbeat_dt else "",
                 "trader_heartbeat_age_seconds": heartbeat_age_seconds,
+                "runtime_commit": runtime_commit[:12] if runtime_commit else "",
+                "runtime_image": runtime_image,
                 "trader_thread_last_crash_et": _to_ct_label(trader_thread_last_crash_dt) if trader_thread_last_crash_dt else "",
                 "trader_thread_last_crash": trader_thread_last_crash_msg,
                 "independent_stoploss_last_trigger_et": (
@@ -3708,6 +3717,8 @@ def api_status():
                 "trader_loop_stale_after_seconds": max(60, int(config.LOOP_INTERVAL_SECONDS) * 4),
                 "trader_heartbeat_et": "",
                 "trader_heartbeat_age_seconds": None,
+                "runtime_commit": runtime_commit[:12] if runtime_commit else "",
+                "runtime_image": runtime_image,
                 "trader_thread_last_crash_et": "",
                 "trader_thread_last_crash": "",
                 "independent_stoploss_last_trigger_et": "",
