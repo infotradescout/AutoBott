@@ -340,20 +340,19 @@ DIRECTION_CONFLICT_ROC_MIN_PCT = 0.008
 ROC_ACTIVE_MOVE_MIN_PCT   = 0.006
 
 # Direction conviction: minimum weighted-vote score to commit to call/put.
-# 0.0 = any majority; 0.5 = strongly one-sided required.
-# Raised from 0.10: too low was allowing calls on bearish stocks (3 bull vs 2 bear votes = 0.20 score).
-DIRECTION_CONVICTION_MIN  = 0.22  # allow modest but clear directional bias
+# Data-collection mode: keep a light conviction floor so scanner can produce fills.
+DIRECTION_CONVICTION_MIN  = 0.10
 DIRECTION_MIN_ALIGNED_VOTES = 3   # require 3 of 5 votes to agree
 DIRECTION_FAST_ROC_PERIOD  = 5    # short-horizon ROC used in directional voting
 
 ROC_PERIOD                = 10
 ROC_BULL_MIN              = 0.05  # lowered from 0.12 — weak momentum is still momentum
 ROC_BEAR_MAX              = -0.05 # loosened from -0.12
-ENABLE_ROC_FILTER         = True
+ENABLE_ROC_FILTER         = False
 
 RSI_EARLY_MIN_PERIOD      = 5
 RSI_STRICT_AFTER_TIME     = "10:15"
-ENABLE_RSI_FILTER         = True
+ENABLE_RSI_FILTER         = False
 RSI_CALL_MIN              = 40.0  # allow continuation entries before RSI fully expands
 RSI_CALL_MAX              = 95.0  # avoid rejecting trend continuation in high momentum tape
 RSI_PUT_MIN               = 5.0   # allow deeper downside continuation setups
@@ -363,7 +362,7 @@ IV_RANK_MIN               = 0.0   # no minimum IV rank — trade any setup
 IV_RANK_MAX               = 99.0
 
 ENABLE_SIGNAL_SCORING     = True
-MIN_SIGNAL_SCORE          = 5.5   # slightly lower floor to admit more valid intraday setups
+MIN_SIGNAL_SCORE          = 3.0   # data-collection floor; raise later with real trade stats
 VOLATILITY_PRIORITY_WEIGHT = 3.0  # make volatility the top signal driver
 TREND_PRIORITY_WEIGHT      = 1.0
 FLOW_PRIORITY_WEIGHT       = 1.0
@@ -393,7 +392,7 @@ REJECT_COOLDOWN_MEDIUM_MINUTES = 15  # shorter tradability cooldown to avoid sta
 REJECT_COOLDOWN_EVENT_MINUTES  = 8   # shorter event cooldown for intraday rotation
 
 # Chop/no-trade regime guard (reduce force-trading in dead tape).
-ENABLE_CHOP_NO_TRADE_FILTER                   = True
+ENABLE_CHOP_NO_TRADE_FILTER                   = False
 CHOP_NO_TRADE_MIN_SIGNAL_SAMPLE               = 8
 CHOP_NO_TRADE_WEAK_SHARE_TRIGGER              = 0.65
 CHOP_NO_TRADE_MAX_RVOL                        = 0.35
@@ -429,14 +428,14 @@ CATALYST_RELAXED_MIN_SIGNAL_SCORE = 2.5
 # Optional filters (all off by default for simple call/put scalping)
 # ---------------------------------------------------------------------------
 
-ENABLE_HTF_CONFIRM         = True   # confirm with higher timeframe to reduce false entries
+ENABLE_HTF_CONFIRM         = False  # data-collection mode: disable HTF veto stacking
 HTF_MISMATCH_HARD_REJECT   = False  # downgrade mismatches instead of outright rejection
 HTF_TIMEFRAME              = "15m"
 HTF_LOOKBACK_BARS          = 30
 HTF_SLOPE_TOLERANCE_PCT    = 0.12   # allow near-flat HTF without hard reject
 HTF_EMA_GAP_TOLERANCE_PCT  = 0.05   # allow tiny EMA overlap noise
 
-ENABLE_ORDER_FLOW_FILTER   = True
+ENABLE_ORDER_FLOW_FILTER   = False
 MIN_FLOW_SCORE             = 0.20
 
 ENABLE_NEWS_EVENT_BLOCK    = False
@@ -447,17 +446,17 @@ NEWS_BLOCK_KEYWORDS        = (
 )
 NEWS_BLOCK_DATES_ET        = ()
 
-ENABLE_HISTORICAL_REGIME_SCORE = True
+ENABLE_HISTORICAL_REGIME_SCORE = False
 MIN_HISTORICAL_REGIME_SCORE    = 2.0
 
-ENABLE_INDEX_BIAS_FILTER   = True   # ENABLED: filter signals to match SPY/QQQ macro direction
+ENABLE_INDEX_BIAS_FILTER   = False  # data-collection mode: avoid index-bias hard filtering
 INDEX_BIAS_TIMEFRAME       = "5m"   # 5-minute bars for SPY/QQQ trend check
 INDEX_BIAS_LOOKBACK        = 30    # 30 bars = 150 minutes of 5m history
 INDEX_BIAS_ROC_PERIODS     = 6     # ROC over last 6 bars (30 min) for fast trend detection
 INDEX_BIAS_ROC_THRESHOLD   = 0.10  # SPY/QQQ must move >0.10% in 30 min to declare a bias direction
-INDEX_BIAS_REQUIRE_BOTH    = True  # both SPY AND QQQ must agree before filtering
+INDEX_BIAS_REQUIRE_BOTH    = False
 
-ENABLE_VIX_GUARD           = True  # ENABLED: block entries when VIX is outside tradeable range
+ENABLE_VIX_GUARD           = False  # data-collection mode: avoid extra global veto gate
 VIX_MIN                    = 12.0  # below 12 = complacency, spreads too tight for edge
 VIX_MAX                    = 60.0  # above 60 = panic, options too wide and unpredictable
 
