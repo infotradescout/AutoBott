@@ -1,4 +1,9 @@
 services:
+  - type: redis
+    name: autobott-redis
+    plan: starter
+    ipAllowList: []
+
   - type: web
     name: autobott
     env: python
@@ -23,3 +28,10 @@ services:
         sync: false
       - key: DATA_DIR
         value: /data
+      - key: REDIS_URL
+        fromService:
+          type: redis
+          name: autobott-redis
+          property: connectionString
+      - key: AUTOBOTT_REDIS_PREFIX
+        value: autobott

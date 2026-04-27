@@ -12,8 +12,9 @@ If the button does not open the blueprint flow, use:
 
 1. Render Dashboard -> New + -> Blueprint
 2. Public Git repository URL: `https://github.com/infotradescout/AutoBott`
-3. Confirm the single service from `render.yaml`:
+3. Confirm the services from `render.yaml`:
    - `autobott` (web; runs trader loop + dashboard via `autotrader/render_service.py`)
+   - `autobott-redis` (managed Redis for runtime state)
 4. Add env vars:
    - `ALPACA_API_KEY`
    - `ALPACA_SECRET_KEY`
@@ -22,6 +23,7 @@ If the button does not open the blueprint flow, use:
 
 Current deployment architecture:
 - One Render web service (`autobott`) hosts both components.
+- One managed Redis service (`autobott-redis`) stores runtime key/value state.
 - Trader loop and dashboard run in one process under `render_service.py`.
 - Persistent runtime files are stored on the mounted disk (`DATA_DIR=/data`).
 
