@@ -114,7 +114,7 @@ SCAN_DAILY_BARS     = 30
 
 # $6000 account: max 3 concurrent positions, 1.7% of account per trade = $100 max premium.
 # Single contract on a $1 option = $100 = 1.7% of account. Tight enough to survive 3 consecutive stops.
-MAX_POSITIONS                       = 4     # sized for a $6k account
+MAX_POSITIONS                       = 10   # let buying power be the real limit
 POSITION_SIZE_USD                   = 125   # baseline premium budget per trade
 RISK_PER_TRADE_PCT                  = 0.017
 MAX_POSITION_SIZE_USD               = 150.0  # per-trade premium cap
@@ -138,10 +138,10 @@ LOSS_THROTTLE_MIN_VOLATILITY_SCORE  = 1.5  # after 2 losses require volatility_s
 
 # Capital doctrine: $150 max per trade, $450 max total open at once (3 positions × $150).
 MAX_PREMIUM_PER_TRADE_USD           = 150.0  # keep single-name premium bounded
-MAX_TOTAL_OPEN_PREMIUM_USD          = 600.0  # total open premium budget
+MAX_TOTAL_OPEN_PREMIUM_USD          = 1500.0  # scaled for $6k account
 OPENING_MAX_FRESH_PREMIUM_USD       = 250.0  # opening-session budget
 MAX_CONTRACTS_PER_TRADE             = 4
-MAX_SAME_DIRECTION_POSITIONS        = 3
+MAX_SAME_DIRECTION_POSITIONS        = 8    # stop blocking when market has clear direction
 
 # Disable premium override — never allow expensive trades on a $6k account.
 ENABLE_PREMIUM_CAP_QUALITY_OVERRIDE = False
@@ -449,12 +449,12 @@ NEWS_BLOCK_DATES_ET        = ()
 ENABLE_HISTORICAL_REGIME_SCORE = False
 MIN_HISTORICAL_REGIME_SCORE    = 2.0
 
-ENABLE_INDEX_BIAS_FILTER   = False  # data-collection mode: avoid index-bias hard filtering
+ENABLE_INDEX_BIAS_FILTER   = True  # only trade WITH the market direction
 INDEX_BIAS_TIMEFRAME       = "5m"   # 5-minute bars for SPY/QQQ trend check
 INDEX_BIAS_LOOKBACK        = 30    # 30 bars = 150 minutes of 5m history
 INDEX_BIAS_ROC_PERIODS     = 6     # ROC over last 6 bars (30 min) for fast trend detection
 INDEX_BIAS_ROC_THRESHOLD   = 0.10  # SPY/QQQ must move >0.10% in 30 min to declare a bias direction
-INDEX_BIAS_REQUIRE_BOTH    = False
+INDEX_BIAS_REQUIRE_BOTH    = True  # SPY AND QQQ must agree
 
 ENABLE_VIX_GUARD           = False  # data-collection mode: avoid extra global veto gate
 VIX_MIN                    = 12.0  # below 12 = complacency, spreads too tight for edge
