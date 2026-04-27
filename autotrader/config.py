@@ -621,6 +621,7 @@ WATCHLIST_CONTROL_PATH   = _DATA_DIR / "watchlist_control.json"
 
 ALPACA_PAPER_BASE_URL = "https://paper-api.alpaca.markets"
 ALPACA_DATA_BASE_URL  = "https://data.alpaca.markets"
+ALPACA_STOCK_BAR_FEEDS = ("iex", "sip")  # try IEX first; fall back to SIP when available
 
 
 # ---------------------------------------------------------------------------
