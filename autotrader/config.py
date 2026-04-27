@@ -141,7 +141,7 @@ MAX_PREMIUM_PER_TRADE_USD           = 150.0  # keep single-name premium bounded
 MAX_TOTAL_OPEN_PREMIUM_USD          = 1500.0  # scaled for $6k account
 OPENING_MAX_FRESH_PREMIUM_USD       = 250.0  # opening-session budget
 MAX_CONTRACTS_PER_TRADE             = 4
-MAX_SAME_DIRECTION_POSITIONS        = 8    # stop blocking when market has clear direction
+MAX_SAME_DIRECTION_POSITIONS        = 10
 
 # Disable premium override — never allow expensive trades on a $6k account.
 ENABLE_PREMIUM_CAP_QUALITY_OVERRIDE = False
@@ -340,9 +340,8 @@ DIRECTION_CONFLICT_ROC_MIN_PCT = 0.008
 ROC_ACTIVE_MOVE_MIN_PCT   = 0.006
 
 # Direction conviction: minimum weighted-vote score to commit to call/put.
-# Data-collection mode: keep a light conviction floor so scanner can produce fills.
-DIRECTION_CONVICTION_MIN  = 0.10
-DIRECTION_MIN_ALIGNED_VOTES = 3   # require 3 of 5 votes to agree
+DIRECTION_CONVICTION_MIN  = 0.55  # was 0.10 — require real directional agreement
+DIRECTION_MIN_ALIGNED_VOTES = 4     # was 3 — 4 of 5 signals must agree on direction
 DIRECTION_FAST_ROC_PERIOD  = 5    # short-horizon ROC used in directional voting
 
 ROC_PERIOD                = 10
