@@ -340,8 +340,8 @@ DIRECTION_CONFLICT_ROC_MIN_PCT = 0.008
 ROC_ACTIVE_MOVE_MIN_PCT   = 0.006
 
 # Direction conviction: minimum weighted-vote score to commit to call/put.
-DIRECTION_CONVICTION_MIN  = 0.55  # was 0.10 — require real directional agreement
-DIRECTION_MIN_ALIGNED_VOTES = 4     # was 3 — 4 of 5 signals must agree on direction
+DIRECTION_CONVICTION_MIN  = 0.55  # require real directional agreement
+DIRECTION_MIN_ALIGNED_VOTES = 4     # 4 of 5 signals must agree on direction
 DIRECTION_FAST_ROC_PERIOD  = 5    # short-horizon ROC used in directional voting
 
 ROC_PERIOD                = 10
@@ -448,7 +448,7 @@ NEWS_BLOCK_DATES_ET        = ()
 ENABLE_HISTORICAL_REGIME_SCORE = False
 MIN_HISTORICAL_REGIME_SCORE    = 2.0
 
-ENABLE_INDEX_BIAS_FILTER   = True  # only trade WITH the market direction
+ENABLE_INDEX_BIAS_FILTER   = False  # disabled: individual ticker direction is the signal, not market-wide bias
 INDEX_BIAS_TIMEFRAME       = "5m"   # 5-minute bars for SPY/QQQ trend check
 INDEX_BIAS_LOOKBACK        = 30    # 30 bars = 150 minutes of 5m history
 INDEX_BIAS_ROC_PERIODS     = 6     # ROC over last 6 bars (30 min) for fast trend detection
@@ -499,7 +499,7 @@ MAX_OPTION_SPREAD_PCT             = 15.0  # tighter spread gate: reject wide-spr
 ENABLE_OPTION_LIQUIDITY_RELAX     = True
 OPTION_CONTRACTS_ALLOW_LIVE_FALLBACK = False
 MIN_DTE_TRADING_DAYS              = 0    # allow same-day (0DTE) entries (morning only — see NO_NEW_0DTE_AFTER)
-MAX_DTE_TRADING_DAYS              = 2    # intraday focus: 0, 1, or 2 DTE only
+MAX_DTE_TRADING_DAYS              = 5    # expanded: find contracts up to 5 trading days out
 NO_NEW_0DTE_AFTER                 = "11:30"  # CRITICAL: no new 0DTE entries after 11:30am — theta decay accelerates
 MIN_OPTION_OPEN_INTEREST_0DTE     = 50    # 0DTE needs decent liquidity
 ENABLE_DELTA_TARGETING            = True
