@@ -13,6 +13,7 @@ except ImportError:
 from kv_store import load_json, redis_key, save_json
 
 _STATE_KEY = redis_key("runtime_state")
+_REDIS_FALLBACK_NOTICE_EMITTED = False
 
 
 def _load_file_state(path: Path) -> dict:
@@ -68,12 +69,14 @@ def load_bot_state(path: Path | None = None) -> dict:
 
 
 def save_bot_state(state: dict, path: Path | None = None) -> None:
+    global _REDIS_FALLBACK_NOTICE_EMITTED
     payload = dict(state or {})
     payload["_state_updated_at_iso"] = datetime.now(timezone.utc).isoformat()
 
     redis_saved = save_json(_STATE_KEY, payload)
-    if not redis_saved:
-        print("[state] Redis save unavailable; writing file fallback only.")
+    if not redis_saved and not _REDIS_FALLBACK_NOTICE_EMITTED:
+        print("[state] Redis unavailable. Using persistent file-backed state only.")
+        _REDIS_FALLBACK_NOTICE_EMITTED = True
 
     state_path = path or config.STATE_JSON_PATH
     state_path.parent.mkdir(parents=True, exist_ok=True)
