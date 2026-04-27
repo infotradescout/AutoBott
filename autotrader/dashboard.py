@@ -3226,41 +3226,41 @@ def api_trades():
         return jsonify({"error": str(exc)}), 500
 
 
-  @app.get("/api/trades/export")
-  def api_trades_export():
+@app.get("/api/trades/export")
+def api_trades_export():
     try:
-      if not TRADES_CSV.exists():
-        return jsonify({"error": f"trades file not found at {TRADES_CSV}"}), 404
-      body = TRADES_CSV.read_text(encoding="utf-8")
-      return Response(
-        body,
-        mimetype="text/csv",
-        headers={
-          "Content-Disposition": "attachment; filename=trades.csv",
-          "X-Trades-Path": str(TRADES_CSV),
-        },
-      )
+        if not TRADES_CSV.exists():
+            return jsonify({"error": f"trades file not found at {TRADES_CSV}"}), 404
+        body = TRADES_CSV.read_text(encoding="utf-8")
+        return Response(
+            body,
+            mimetype="text/csv",
+            headers={
+                "Content-Disposition": "attachment; filename=trades.csv",
+                "X-Trades-Path": str(TRADES_CSV),
+            },
+        )
     except Exception as exc:  # noqa: BLE001
-      return jsonify({"error": str(exc)}), 500
+        return jsonify({"error": str(exc)}), 500
 
 
-  @app.get("/api/runtime-paths")
-  def api_runtime_paths():
+@app.get("/api/runtime-paths")
+def api_runtime_paths():
     try:
-      return jsonify(
-        {
-          "data_dir": str(config.DATA_DIR),
-          "trades_csv_path": str(TRADES_CSV),
-          "trades_csv_exists": bool(TRADES_CSV.exists()),
-          "trades_csv_size_bytes": int(TRADES_CSV.stat().st_size) if TRADES_CSV.exists() else 0,
-          "scan_log_csv_path": str(SCAN_LOG_CSV),
-          "scan_log_exists": bool(SCAN_LOG_CSV.exists()),
-          "state_json_path": str(config.STATE_JSON_PATH),
-          "state_json_exists": bool(config.STATE_JSON_PATH.exists()),
-        }
-      )
+        return jsonify(
+            {
+                "data_dir": str(config.DATA_DIR),
+                "trades_csv_path": str(TRADES_CSV),
+                "trades_csv_exists": bool(TRADES_CSV.exists()),
+                "trades_csv_size_bytes": int(TRADES_CSV.stat().st_size) if TRADES_CSV.exists() else 0,
+                "scan_log_csv_path": str(SCAN_LOG_CSV),
+                "scan_log_exists": bool(SCAN_LOG_CSV.exists()),
+                "state_json_path": str(config.STATE_JSON_PATH),
+                "state_json_exists": bool(config.STATE_JSON_PATH.exists()),
+            }
+        )
     except Exception as exc:  # noqa: BLE001
-      return jsonify({"error": str(exc)}), 500
+        return jsonify({"error": str(exc)}), 500
 
 
 @app.get("/api/scanlog")
