@@ -207,8 +207,8 @@ PREMARKET_APPLY_UNTIL              = "09:40"
 PREMARKET_SCAN_INTERVAL_SECONDS    = 120
 PREMARKET_SCAN_MAX_RUNS            = 0
 
-# Poll every 15 seconds for fast exit response on scalp trades
-LOOP_INTERVAL_SECONDS              = 45   # 45s: stale threshold = max(60, 45*4)=180s; HTF results cached 5min so loop stays well under threshold
+# Poll every 10 seconds for faster scalp exit response.
+LOOP_INTERVAL_SECONDS              = 10
 
 # Allow trades to run up to 90 min — trailing stop exits winners well before this
 MAX_HOLD_MINUTES                   = 45    # rotate capital sooner when trades fail to prove out
@@ -216,7 +216,7 @@ MAX_HOLD_MINUTES                   = 45    # rotate capital sooner when trades f
 # Anti-churn entry hold: prevent discretionary exits (reversal, immediate take-profit)
 # during first N minutes after entry. Stop loss still fires immediately.
 # Reduces round-trip losses from early noise; lets winners establish momentum.
-ANTI_CHURN_HOLD_MINUTES            = 2    # shorter hold window for fast intraday scalps
+ANTI_CHURN_HOLD_MINUTES            = 0
 
 # Opening strict mode (09:30+N minutes): trade fewer, stronger setups only.
 OPENING_STRICT_WINDOW_MINUTES                = 20
@@ -566,7 +566,7 @@ ENTRY_RETRY_LIMIT_PCT              = 0.02
 EXIT_ORDER_STATUS_POLL_SECONDS     = 2
 EXIT_ORDER_MAX_WAIT_SECONDS        = 20
 EXIT_CLOSE_RETRY_ATTEMPTS          = 2
-SMART_EXIT_NORMAL_WAIT_SECONDS     = 6
+SMART_EXIT_NORMAL_WAIT_SECONDS     = 2
 SMART_EXIT_CRITICAL_WAIT_SECONDS   = 3
 SMART_EXIT_NORMAL_REPRICE_PCT      = 0.35
 SMART_EXIT_CRITICAL_REPRICE_PCT    = 0.10
