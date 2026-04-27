@@ -122,18 +122,18 @@ DRAWDOWN_REDUCE_AFTER_CONSEC_LOSSES = 2
 DRAWDOWN_SIZE_MULTIPLIER            = 0.75
 DAILY_LOSS_LIMIT_USD                = 100.0 # hard stop for a $6k account day
 WEEKLY_LOSS_LIMIT_USD               = 300.0 # weekly risk cap for a $6k account
-CONSECUTIVE_LOSS_LIMIT              = 2     # stop after 2 consecutive losses, reassess
+CONSECUTIVE_LOSS_LIMIT              = 3     # stop after 3 consecutive losses, reassess
 # Net P&L circuit breaker (runtime telemetry-based):
 # Pause new entries once the day is sufficiently red in realized net P&L.
 INTRADAY_NET_LOSS_LIMIT_USD         = 100.0  # halt new entries if down $100 on the day
 # Early-red guard: stop new entries if still net red after first few trades.
 EARLY_RED_GUARD_ENABLED             = True
-EARLY_RED_GUARD_MIN_CLOSED_TRADES   = 3
-EARLY_RED_GUARD_MAX_NET_PNL_USD     = -50.0  # halt if down $50 after first 3 trades
+EARLY_RED_GUARD_MIN_CLOSED_TRADES   = 4
+EARLY_RED_GUARD_MAX_NET_PNL_USD     = -70.0  # halt if down $70 after first 4 trades
 
 # Loss throttle: after 2 consecutive losses, require stronger setups.
 LOSS_THROTTLE_AFTER_CONSEC_LOSSES   = 2
-LOSS_THROTTLE_SIGNAL_SCORE_ADD      = 1.5   # require stronger setups after 2 losses
+LOSS_THROTTLE_SIGNAL_SCORE_ADD      = 1.0   # require score 6.5+ after 2 losses
 LOSS_THROTTLE_MIN_VOLATILITY_SCORE  = 1.5  # after 2 losses require volatility_score >= 1.5 (low bar but not zero)
 
 # Capital doctrine: $150 max per trade, $450 max total open at once (3 positions × $150).
@@ -323,26 +323,26 @@ OPTION_BEHAVIOR_SPREAD_GRACE_MINUTES        = 5    # wait a bit before spread-ba
 # Scanner thresholds
 # ---------------------------------------------------------------------------
 
-RVOL_MIN                  = 0.45  # require meaningful participation before entries
-OPENING_RVOL_MIN          = 0.40  # still slightly relaxed at open, but not loose
+RVOL_MIN                  = 0.15  # permissive floor for quiet intraday tape without going blind
+OPENING_RVOL_MIN          = 0.15  # match base RVOL floor during opening rotation
 RVOL_STRICT_UNTIL         = "10:30"
 RVOL_RELAX_AFTER          = "10:00"
-RVOL_RELAXED_MIN          = 0.35  # keep a quality floor even after opening phase
+RVOL_RELAXED_MIN          = 0.15  # lower relaxed floor one more step for throughput
 RVOL_IGNORE_AFTER         = "16:00"  # CRITICAL FIX: was 10:30 — never fully disable RVOL gate
-ATR_PCT_MIN               = 0.5   # require enough movement to justify options risk
+ATR_PCT_MIN               = 0.3   # very low ATR floor — don't filter out ETFs
 VWAP_NEUTRAL_BAND_PCT     = 0.15  # wider neutral band: within 0.15% of VWAP = neutral, halve VWAP vote weight
-MOVEMENT_FORCE_MIN_PCT    = 0.05   # require clearer momentum before directional entries
+MOVEMENT_FORCE_MIN_PCT    = 0.014  # further relaxed for early-session/transition tape
 MOVEMENT_WEAK_VWAP_MULT   = 1.00  # was effectively 1.5 in scanner; only block when very close to VWAP
-DIRECTION_PRICE_MIN_PCT   = 0.03   # require actual short-horizon price displacement
-DIRECTION_CONFLICT_HARD_REJECT = True
+DIRECTION_PRICE_MIN_PCT   = 0.004  # slightly more permissive to avoid starving entries
+DIRECTION_CONFLICT_HARD_REJECT = False
 DIRECTION_CONFLICT_SCORE_MULT  = 0.55  # penalize (not veto) when price and ROC disagree
-DIRECTION_CONFLICT_ROC_MIN_PCT = 0.02
-ROC_ACTIVE_MOVE_MIN_PCT   = 0.03
+DIRECTION_CONFLICT_ROC_MIN_PCT = 0.008
+ROC_ACTIVE_MOVE_MIN_PCT   = 0.006
 
 # Direction conviction: minimum weighted-vote score to commit to call/put.
 # 0.0 = any majority; 0.5 = strongly one-sided required.
 # Raised from 0.10: too low was allowing calls on bearish stocks (3 bull vs 2 bear votes = 0.20 score).
-DIRECTION_CONVICTION_MIN  = 0.35  # require stronger directional agreement
+DIRECTION_CONVICTION_MIN  = 0.22  # allow modest but clear directional bias
 DIRECTION_MIN_ALIGNED_VOTES = 3   # require 3 of 5 votes to agree
 DIRECTION_FAST_ROC_PERIOD  = 5    # short-horizon ROC used in directional voting
 
@@ -363,9 +363,9 @@ IV_RANK_MIN               = 0.0   # no minimum IV rank — trade any setup
 IV_RANK_MAX               = 99.0
 
 ENABLE_SIGNAL_SCORING     = True
-MIN_SIGNAL_SCORE          = 6.5   # demand stronger aggregate quality before entries
-VOLATILITY_PRIORITY_WEIGHT = 2.0  # reduce chance of volatility-only signals passing
-TREND_PRIORITY_WEIGHT      = 2.0
+MIN_SIGNAL_SCORE          = 5.5   # slightly lower floor to admit more valid intraday setups
+VOLATILITY_PRIORITY_WEIGHT = 3.0  # make volatility the top signal driver
+TREND_PRIORITY_WEIGHT      = 1.0
 FLOW_PRIORITY_WEIGHT       = 1.0
 
 # Phase 3 enforcement knobs driven by review.py output.
@@ -430,14 +430,14 @@ CATALYST_RELAXED_MIN_SIGNAL_SCORE = 2.5
 # ---------------------------------------------------------------------------
 
 ENABLE_HTF_CONFIRM         = True   # confirm with higher timeframe to reduce false entries
-HTF_MISMATCH_HARD_REJECT   = True   # block entries that fight higher-timeframe direction
+HTF_MISMATCH_HARD_REJECT   = False  # downgrade mismatches instead of outright rejection
 HTF_TIMEFRAME              = "15m"
 HTF_LOOKBACK_BARS          = 30
 HTF_SLOPE_TOLERANCE_PCT    = 0.12   # allow near-flat HTF without hard reject
 HTF_EMA_GAP_TOLERANCE_PCT  = 0.05   # allow tiny EMA overlap noise
 
 ENABLE_ORDER_FLOW_FILTER   = True
-MIN_FLOW_SCORE             = 0.25
+MIN_FLOW_SCORE             = 0.20
 
 ENABLE_NEWS_EVENT_BLOCK    = False
 NEWS_LOOKBACK_MINUTES      = 90
@@ -473,17 +473,17 @@ ENTRY_CONFIRM_MOMENTUM_THRESHOLD_PCT   = 0.14
 
 # Fast-start doctrine: disabled — scanner already enforces direction conviction and RVOL.
 # Keeping thresholds at 0 so the gate is a no-op; the scanner's own gates are sufficient.
-ENABLE_FAST_START_QUALITY_GATE         = True
+ENABLE_FAST_START_QUALITY_GATE         = False
 FAST_START_MIN_SIGNAL_SCORE            = 7.2
-FAST_START_MIN_DIRECTION_SCORE         = 0.40
-FAST_START_MIN_RVOL                    = 0.60
-FAST_START_MIN_ABS_ROC_PCT             = 0.14
-FAST_START_MIN_VWAP_DISTANCE_PCT       = 0.07
+FAST_START_MIN_DIRECTION_SCORE         = 0.30
+FAST_START_MIN_RVOL                    = 0.45
+FAST_START_MIN_ABS_ROC_PCT             = 0.10
+FAST_START_MIN_VWAP_DISTANCE_PCT       = 0.05
 OPENING_FAST_START_MIN_SIGNAL_SCORE    = 7.5
-OPENING_FAST_START_MIN_DIRECTION_SCORE = 0.45
-OPENING_FAST_START_MIN_RVOL            = 0.70
-OPENING_FAST_START_MIN_ABS_ROC_PCT     = 0.16
-OPENING_FAST_START_MIN_VWAP_DISTANCE_PCT = 0.08
+OPENING_FAST_START_MIN_DIRECTION_SCORE = 0.35
+OPENING_FAST_START_MIN_RVOL            = 0.50
+OPENING_FAST_START_MIN_ABS_ROC_PCT     = 0.12
+OPENING_FAST_START_MIN_VWAP_DISTANCE_PCT = 0.06
 
 # Feed freshness guardrail for intraday bars (scanner).
 # If data timestamps are older than this, signals are rejected as stale.
