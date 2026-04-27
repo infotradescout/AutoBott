@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from decimal import Decimal
+from decimal import Decimal, ROUND_HALF_UP
 import re
 
 from alpaca.trading.client import TradingClient
@@ -15,6 +15,14 @@ except ImportError:
     import config
 
 _OPTION_SYMBOL_RE = re.compile(r"^[A-Z.]+\d{6}[CP]\d{8}$")
+
+
+def _normalize_limit_price(limit_price: float) -> Decimal:
+    """Alpaca option limits must be submitted with 2-decimal precision."""
+    price = Decimal(str(limit_price)).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+    if price <= Decimal("0"):
+        raise ValueError(f"invalid non-positive limit price: {limit_price!r}")
+    return price
 
 
 def _assert_option_symbol(symbol: str) -> None:
@@ -68,7 +76,7 @@ class AlpacaBroker:
             qty=qty,
             side=OrderSide.BUY,
             time_in_force=TimeInForce.DAY,
-            limit_price=Decimal(str(ask_price)),
+            limit_price=_normalize_limit_price(ask_price),
         )
         return self.trading_client.submit_order(order_data=req)
 
@@ -79,7 +87,7 @@ class AlpacaBroker:
             qty=qty,
             side=OrderSide.SELL,
             time_in_force=TimeInForce.DAY,
-            limit_price=Decimal(str(limit_price)),
+            limit_price=_normalize_limit_price(limit_price),
         )
         return self.trading_client.submit_order(order_data=req)
 

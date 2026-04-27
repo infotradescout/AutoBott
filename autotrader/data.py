@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 from datetime import date, datetime, timedelta
+import time
+import threading
 from typing import Any
 
 import pandas as pd
@@ -86,6 +88,40 @@ class AlpacaDataClient:
         else:
             self._option_contract_base_candidates = list(
                 dict.fromkeys([_LIVE_TRADE_BASE_URL, self.base_url])
+            )
+        self._throttle_lock = threading.Lock()
+        self._last_request_at: dict[str, float] = {}
+        self._rate_limited_until: dict[str, float] = {}
+        self._option_quote_cache: dict[str, tuple[float, dict[str, float | None]]] = {}
+        self._intraday_bars_cache: dict[str, tuple[float, pd.DataFrame]] = {}
+
+    @staticmethod
+    def _is_429_error(exc: Exception) -> bool:
+        text = str(exc or "")
+        return "429" in text or "Too Many Requests" in text
+
+    def _throttle(self, bucket: str, *, min_interval: float | None = None) -> None:
+        interval = float(min_interval if min_interval is not None else getattr(config, "RATE_LIMIT_SLEEP_SECONDS", 0.1) or 0.1)
+        wait_seconds = 0.0
+        with self._throttle_lock:
+            now = time.monotonic()
+            next_due = max(
+                self._last_request_at.get(bucket, 0.0) + max(0.0, interval),
+                self._rate_limited_until.get(bucket, 0.0),
+            )
+            if next_due > now:
+                wait_seconds = next_due - now
+        if wait_seconds > 0:
+            time.sleep(wait_seconds)
+        with self._throttle_lock:
+            self._last_request_at[bucket] = time.monotonic()
+
+    def _mark_rate_limited(self, bucket: str) -> None:
+        backoff = float(getattr(config, "RATE_LIMIT_429_BACKOFF_SECONDS", 0.75) or 0.75)
+        with self._throttle_lock:
+            self._rate_limited_until[bucket] = max(
+                self._rate_limited_until.get(bucket, 0.0),
+                time.monotonic() + max(0.1, backoff),
             )
 
     def get_stock_bars(
@@ -243,11 +279,21 @@ class AlpacaDataClient:
             use_one_minute = minutes_since_open < 5
             timeframe = "1Min" if use_one_minute else "5Min"
 
+        cache_ttl = float(getattr(config, "INTRADAY_BARS_CACHE_SECONDS", 2.0) or 2.0)
+        now_mono = time.monotonic()
+        cache_key = f"{symbol}:{timeframe}:{now_et.strftime('%Y-%m-%d %H:%M')}"
+        cached_payload = self._intraday_bars_cache.get(cache_key)
+        if cached_payload and cache_ttl > 0:
+            cached_at, cached_df = cached_payload
+            if (now_mono - cached_at) <= cache_ttl:
+                return cached_df.copy()
+
         # Primary source: Alpaca bars API (more stable intraday for live trading loops)
         start_utc = market_open.astimezone(pytz.UTC).isoformat().replace("+00:00", "Z")
         end_utc = now_et.astimezone(pytz.UTC).isoformat().replace("+00:00", "Z")
         for feed in _stock_bar_feed_candidates():
             try:
+                self._throttle("stocks_bars")
                 resp = self.data_session.get(
                     f"{self.data_base_url}/v2/stocks/bars",
                     params={
@@ -282,8 +328,12 @@ class AlpacaDataClient:
                         df = df[(df["timestamp"] >= market_open) & (df["timestamp"] <= now_et)]
                         df = df.tail(limit).reset_index(drop=True)
                         if not df.empty:
-                            return df[["timestamp", "open", "high", "low", "close", "volume"]]
+                            result = df[["timestamp", "open", "high", "low", "close", "volume"]]
+                            self._intraday_bars_cache[cache_key] = (time.monotonic(), result.copy())
+                            return result
             except Exception as exc:  # noqa: BLE001
+                if self._is_429_error(exc):
+                    self._mark_rate_limited("stocks_bars")
                 print(f"[data] get_intraday_bars_since_open Alpaca failed for {symbol} feed={feed}: {exc}")
 
         # Fallback: yfinance
@@ -310,8 +360,9 @@ class AlpacaDataClient:
 
             if df.empty:
                 return pd.DataFrame()
-
-            return df[["timestamp", "open", "high", "low", "close", "volume"]]
+            result = df[["timestamp", "open", "high", "low", "close", "volume"]]
+            self._intraday_bars_cache[cache_key] = (time.monotonic(), result.copy())
+            return result
 
         except Exception as exc:  # noqa: BLE001
             print(f"[data] get_intraday_bars_since_open yfinance failed for {symbol}: {exc}")
@@ -551,8 +602,17 @@ class AlpacaDataClient:
         return float(bid) if bid is not None else None
 
     def get_latest_option_quote(self, option_symbol: str) -> dict[str, float | None]:
+        cache_ttl = float(getattr(config, "OPTION_QUOTE_CACHE_SECONDS", 0.75) or 0.75)
+        now_mono = time.monotonic()
+        cached_payload = self._option_quote_cache.get(option_symbol)
+        if cached_payload and cache_ttl > 0:
+            cached_at, cached_quote = cached_payload
+            if (now_mono - cached_at) <= cache_ttl:
+                return dict(cached_quote)
+
         last_exc: Exception | None = None
         try:
+            self._throttle("option_quotes")
             resp = self.data_session.get(
                 f"{self.data_base_url}/v1beta1/options/quotes/latest",
                 params={"symbols": option_symbol, "feed": "indicative"},
@@ -565,15 +625,24 @@ class AlpacaDataClient:
             if quote:
                 bid = quote.get("bp")
                 ask = quote.get("ap")
-                return {
+                parsed = {
                     "bid": float(bid) if bid is not None else None,
                     "ask": float(ask) if ask is not None else None,
                 }
+                self._option_quote_cache[option_symbol] = (time.monotonic(), dict(parsed))
+                return parsed
         except Exception as exc:  # noqa: BLE001
             last_exc = exc
+            if self._is_429_error(exc):
+                self._mark_rate_limited("option_quotes")
         if last_exc is not None:
             print(f"[data] get_latest_option_quote failed for {option_symbol}: {last_exc}")
-        return {"bid": None, "ask": None}
+        fallback = {"bid": None, "ask": None}
+        if cached_payload:
+            _cached_at, cached_quote = cached_payload
+            fallback = dict(cached_quote)
+        self._option_quote_cache[option_symbol] = (time.monotonic(), dict(fallback))
+        return fallback
 
     def get_top_movers(self, top: int = 20) -> tuple[list[str], list[str]]:
         # Alpaca's movers endpoint takes market_type in the URL path, not query params.

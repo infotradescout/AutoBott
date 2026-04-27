@@ -784,11 +784,11 @@ def _execute_limit_entry(
         if submit_ask <= 0:
             continue
         if attempt_index == 1:
-            limit_price = round(submit_ask, 4)
+            limit_price = round(submit_ask, 2)
             wait_seconds = max(1, int(config.ENTRY_ORDER_STATUS_WAIT_SECONDS))
         else:
             retry_pct = max(0.0, float(getattr(config, "ENTRY_RETRY_LIMIT_PCT", 0.02) or 0.02))
-            limit_price = round(max(submit_ask, submit_ask * (1.0 + retry_pct)), 4)
+            limit_price = round(max(submit_ask, submit_ask * (1.0 + retry_pct)), 2)
             wait_seconds = max(1, int(config.ENTRY_RETRY_STATUS_WAIT_SECONDS))
 
         submit_ts = time.time()
@@ -2130,7 +2130,7 @@ def main():
                     )
                     or (0.10 if is_critical else 0.35)
                 )
-                limit_price = round(bid_price + (spread * max(0.0, reprice_pct)), 4)
+                limit_price = round(bid_price + (spread * max(0.0, reprice_pct)), 2)
                 execution_meta["intended_limit"] = limit_price
                 execution_meta["submit_mode"] = "limit"
                 execution_meta["attempts"] = 1
