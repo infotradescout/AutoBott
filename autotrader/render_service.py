@@ -125,8 +125,29 @@ def _migrate_runtime_files_to_active_data_dir() -> None:
         print(f"[render_service] Migrated {copied} runtime file(s) into DATA_DIR '{target_dir}'.")
 
 
+def _enforce_durable_state_baseline() -> None:
+    if os.name == "nt":
+        return
+    if str(os.getenv("AUTOBOTT_ALLOW_EPHEMERAL_STATE", "")).strip().lower() in {"1", "true", "yes"}:
+        return
+
+    redis_url = str(os.getenv("REDIS_URL", "") or "").strip()
+    data_dir = Path((os.getenv("DATA_DIR") or "").strip() or "/tmp/autotrader-data")
+    data_dir_str = str(data_dir)
+
+    if redis_url:
+        return
+    if data_dir_str.startswith("/tmp/") or data_dir_str == "/tmp":
+        raise RuntimeError(
+            "Redis is not configured and DATA_DIR points to ephemeral storage. "
+            "Attach a persistent disk and set DATA_DIR=/data, or set REDIS_URL. "
+            "Set AUTOBOTT_ALLOW_EPHEMERAL_STATE=true only for temporary test runs."
+        )
+
+
 _force_writable_data_dir()
 _migrate_runtime_files_to_active_data_dir()
+_enforce_durable_state_baseline()
 try:
     from autotrader import config
 except ImportError:

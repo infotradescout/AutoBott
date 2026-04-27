@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import json
+import os
+import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -14,6 +16,32 @@ from kv_store import load_json, redis_key, save_json
 
 _STATE_KEY = redis_key("runtime_state")
 _REDIS_FALLBACK_NOTICE_EMITTED = False
+
+
+def _atomic_write_json(path: Path, payload: dict) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd = None
+    tmp_path = None
+    try:
+        fd, tmp_name = tempfile.mkstemp(prefix=".runtime_state_", suffix=".tmp", dir=str(path.parent))
+        tmp_path = Path(tmp_name)
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            fd = None
+            json.dump(payload, f, indent=2, sort_keys=True)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(str(tmp_path), str(path))
+    finally:
+        if fd is not None:
+            try:
+                os.close(fd)
+            except Exception:
+                pass
+        if tmp_path is not None and tmp_path.exists():
+            try:
+                tmp_path.unlink(missing_ok=True)
+            except Exception:
+                pass
 
 
 def _load_file_state(path: Path) -> dict:
@@ -79,9 +107,7 @@ def save_bot_state(state: dict, path: Path | None = None) -> None:
         _REDIS_FALLBACK_NOTICE_EMITTED = True
 
     state_path = path or config.STATE_JSON_PATH
-    state_path.parent.mkdir(parents=True, exist_ok=True)
     try:
-        with state_path.open("w", encoding="utf-8") as f:
-            json.dump(payload, f, indent=2, sort_keys=True)
+        _atomic_write_json(state_path, payload)
     except Exception as exc:  # noqa: BLE001
         print(f"[state] save failed: {exc}")
