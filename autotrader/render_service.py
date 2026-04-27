@@ -16,6 +16,25 @@ from env_config import get_required_env, load_runtime_env
 load_runtime_env()
 
 
+def _persistent_data_dir_candidates() -> list[Path]:
+    """Return likely persistent disk mount paths on Render (preferred first)."""
+    raw_candidates = [
+        os.getenv("RENDER_DISK_MOUNT_PATH", ""),
+        os.getenv("RENDER_DISK_PATH", ""),
+        "/data",
+        "/var/data",
+    ]
+    seen: set[str] = set()
+    paths: list[Path] = []
+    for raw in raw_candidates:
+        value = str(raw or "").strip()
+        if not value or value in seen:
+            continue
+        seen.add(value)
+        paths.append(Path(value))
+    return paths
+
+
 def _force_writable_data_dir() -> None:
     current = (os.getenv("DATA_DIR") or "").strip()
     windows_default = Path(__file__).resolve().parent
@@ -42,7 +61,7 @@ def _force_writable_data_dir() -> None:
             )
             return
 
-    persistent_default = Path("/data")
+    persistent_candidates = _persistent_data_dir_candidates()
 
     def _first_writable(paths: list[Path]) -> Path | None:
         for path in paths:
@@ -58,7 +77,7 @@ def _force_writable_data_dir() -> None:
         return None
 
     if not current:
-        chosen = _first_writable([persistent_default, Path("/tmp/autotrader-data")])
+        chosen = _first_writable([*persistent_candidates, Path("/tmp/autotrader-data")])
         if chosen is None:
             chosen = Path("/tmp/autotrader-data")
             chosen.mkdir(parents=True, exist_ok=True)
@@ -73,7 +92,7 @@ def _force_writable_data_dir() -> None:
             f.write("ok")
         probe.unlink(missing_ok=True)
     except Exception:
-        fallback = _first_writable([persistent_default, Path("/tmp/autotrader-data")]) or Path("/tmp/autotrader-data")
+        fallback = _first_writable([*persistent_candidates, Path("/tmp/autotrader-data")]) or Path("/tmp/autotrader-data")
         fallback.mkdir(parents=True, exist_ok=True)
         os.environ["DATA_DIR"] = str(fallback)
         print(
