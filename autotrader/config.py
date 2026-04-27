@@ -122,18 +122,18 @@ DRAWDOWN_REDUCE_AFTER_CONSEC_LOSSES = 2
 DRAWDOWN_SIZE_MULTIPLIER            = 0.75
 DAILY_LOSS_LIMIT_USD                = 100.0 # hard stop for a $6k account day
 WEEKLY_LOSS_LIMIT_USD               = 300.0 # weekly risk cap for a $6k account
-CONSECUTIVE_LOSS_LIMIT              = 2     # stop after 2 consecutive losses, reassess
+CONSECUTIVE_LOSS_LIMIT              = 3     # stop after 3 consecutive losses, reassess
 # Net P&L circuit breaker (runtime telemetry-based):
 # Pause new entries once the day is sufficiently red in realized net P&L.
 INTRADAY_NET_LOSS_LIMIT_USD         = 100.0  # halt new entries if down $100 on the day
 # Early-red guard: stop new entries if still net red after first few trades.
 EARLY_RED_GUARD_ENABLED             = True
-EARLY_RED_GUARD_MIN_CLOSED_TRADES   = 3
-EARLY_RED_GUARD_MAX_NET_PNL_USD     = -50.0  # halt if down $50 after first 3 trades
+EARLY_RED_GUARD_MIN_CLOSED_TRADES   = 4
+EARLY_RED_GUARD_MAX_NET_PNL_USD     = -70.0  # halt if down $70 after first 4 trades
 
 # Loss throttle: after 2 consecutive losses, require stronger setups.
 LOSS_THROTTLE_AFTER_CONSEC_LOSSES   = 2
-LOSS_THROTTLE_SIGNAL_SCORE_ADD      = 1.5   # require score 7.0+ after 2 losses
+LOSS_THROTTLE_SIGNAL_SCORE_ADD      = 1.0   # require score 6.5+ after 2 losses
 LOSS_THROTTLE_MIN_VOLATILITY_SCORE  = 1.5  # after 2 losses require volatility_score >= 1.5 (low bar but not zero)
 
 # Capital doctrine: $150 max per trade, $450 max total open at once (3 positions × $150).
@@ -363,7 +363,7 @@ IV_RANK_MIN               = 0.0   # no minimum IV rank — trade any setup
 IV_RANK_MAX               = 99.0
 
 ENABLE_SIGNAL_SCORING     = True
-MIN_SIGNAL_SCORE          = 6.0   # raise throughput while preserving quality floor
+MIN_SIGNAL_SCORE          = 5.5   # slightly lower floor to admit more valid intraday setups
 VOLATILITY_PRIORITY_WEIGHT = 3.0  # make volatility the top signal driver
 TREND_PRIORITY_WEIGHT      = 1.0
 FLOW_PRIORITY_WEIGHT       = 1.0
@@ -473,7 +473,7 @@ ENTRY_CONFIRM_MOMENTUM_THRESHOLD_PCT   = 0.14
 
 # Fast-start doctrine: disabled — scanner already enforces direction conviction and RVOL.
 # Keeping thresholds at 0 so the gate is a no-op; the scanner's own gates are sufficient.
-ENABLE_FAST_START_QUALITY_GATE         = True
+ENABLE_FAST_START_QUALITY_GATE         = False
 FAST_START_MIN_SIGNAL_SCORE            = 7.2
 FAST_START_MIN_DIRECTION_SCORE         = 0.30
 FAST_START_MIN_RVOL                    = 0.45
