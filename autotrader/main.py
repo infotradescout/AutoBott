@@ -38,7 +38,7 @@ from session_rules import (
 )
 from strategy_profiles import get_profile_overrides, normalize_profile_name
 from state_store import load_bot_state, save_bot_state
-from trading_control import load_trading_control
+from trading_control import load_trading_control, set_manual_stop
 from watchlist_control import load_watchlist_control
 
 
@@ -2355,6 +2355,14 @@ def main():
     except Exception as exc:  # noqa: BLE001
         print(f"[{ts()} | {ts_ct()}] Account diagnostics unavailable: {exc}")
     initial_control = load_trading_control()
+    if bool(initial_control.get("manual_stop", False)) and bool(getattr(config, "AUTO_RESUME_TRADING_ON_BOOT", False)):
+        reason = str(initial_control.get("reason", "") or "manual_stop")
+        resumed = set_manual_stop(False, reason="auto_resume_boot")
+        print(
+            f"[{ts()} | {ts_ct()}] Startup auto-resume cleared kill-switch "
+            f"(previous reason={reason})."
+        )
+        initial_control = resumed if isinstance(resumed, dict) else load_trading_control()
     if bool(initial_control.get("manual_stop", False)):
         reason = str(initial_control.get("reason", "") or "manual_stop")
         print(f"[{ts()} | {ts_ct()}] Startup state: KILLSWITCH ACTIVE ({reason}). Trading will remain paused.")
