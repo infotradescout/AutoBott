@@ -508,8 +508,13 @@ def _profile_signals_for_candidate(
             generic_reason = ""
             if signal_score >= float(generic.min_signal_score):
                 has_direction = direction in ("call", "put")
-                has_roc = abs(roc) >= 0.05
-                has_vwap_side = distance_from_vwap_pct >= 0.03
+                roc_min = 0.05
+                vwap_side_min = 0.03
+                if relaxed_rvol_mode or flat_regime:
+                    roc_min = min(roc_min, 0.01)
+                    vwap_side_min = min(vwap_side_min, 0.005)
+                has_roc = abs(roc) >= roc_min
+                has_vwap_side = distance_from_vwap_pct >= vwap_side_min
                 generic_ok = has_direction and has_roc and has_vwap_side
                 if generic_ok:
                     generic_reason = (
@@ -928,12 +933,15 @@ def _scan_ticker_details(
             )
         if force_relaxed_rvol:
             effective_rvol_min = min(effective_rvol_min, 0.05)
-        # Apply learning multiplier but preserve relaxed-mode intent.
-        # Fail-open / flat-regime should be able to go down to 0.05x.
-        floor = 0.05 if (force_relaxed_rvol or flat_regime_active) else 0.50
-        effective_rvol_min = max(floor, effective_rvol_min * float(learning.get("rvol_min_mult", 1.0) or 1.0))
-        if rvol < effective_rvol_min:
-            return _scan_failure(f"RVOL {rvol:.1f}x (too low)")
+        # In RVOL fail-open mode, do not hard-reject on RVOL at all.
+        # Other gates (movement, direction, score, ATR, risk controls) still apply.
+        if not force_relaxed_rvol:
+            # Apply learning multiplier but preserve relaxed-mode intent.
+            # Flat-regime should be able to go down to 0.05x.
+            floor = 0.05 if flat_regime_active else 0.50
+            effective_rvol_min = max(floor, effective_rvol_min * float(learning.get("rvol_min_mult", 1.0) or 1.0))
+            if rvol < effective_rvol_min:
+                return _scan_failure(f"RVOL {rvol:.1f}x (too low)")
 
     atr = calculate_atr(symbol=symbol, daily_bars_df=daily_bars_df, period=14)
     if math.isnan(atr) or price <= 0:
