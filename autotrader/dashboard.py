@@ -107,7 +107,8 @@ def _safe_float(value: Any, default: float = 0.0) -> float:
 def _verify_control_token() -> tuple[bool, str, int]:
   expected = str(CONTROL_TOKEN or "").strip()
   if not expected:
-    return False, "Dashboard control token is not configured.", 503
+    # Tokenless mode: if no token is configured, allow local/dashboard control actions.
+    return True, "", 200
 
   provided = ""
   auth_header = str(request.headers.get("Authorization", "") or "").strip()
