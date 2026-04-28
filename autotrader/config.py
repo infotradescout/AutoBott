@@ -472,9 +472,10 @@ FLAT_REGIME_RANGE_MAX_PCT       = 0.45   # (high-low)/close*100 over lookback be
 FLAT_REGIME_REQUIRE_BOTH        = True   # SPY AND QQQ must both be flat
 FLAT_REGIME_CACHE_TTL_SECONDS   = 60     # re-evaluate at most once per minute
 FLAT_REGIME_MIN_SIGNAL_SCORE    = 1.5    # override of MIN_SIGNAL_SCORE while flat
-FLAT_REGIME_CONVICTION_MIN      = 0.18   # override of DIRECTION_CONVICTION_MIN
+FLAT_REGIME_CONVICTION_MIN      = 0.10   # override of DIRECTION_CONVICTION_MIN (extra permissive for dead tape)
 FLAT_REGIME_MIN_ALIGNED_VOTES   = 2      # override of DIRECTION_MIN_ALIGNED_VOTES
 FLAT_REGIME_RVOL_MIN            = 0.05   # override of RVOL minimum while flat
+FLAT_REGIME_MOVEMENT_MULT       = 0.35   # scales MOVEMENT_FORCE_MIN_PCT during flat regime
 FLAT_REGIME_TAKE_PROFIT_PCT     = 0.025  # tighter scalp TP (used by flat_market_scalp profile)
 FLAT_REGIME_MAX_HOLD_MINUTES    = 25     # short hold (used by flat_market_scalp profile)
 

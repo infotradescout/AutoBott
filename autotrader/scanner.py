@@ -982,7 +982,7 @@ def _scan_ticker_details(
     movement_force_min = float(getattr(config, "MOVEMENT_FORCE_MIN_PCT", 0.03) or 0.03)
     movement_force_min *= float(learning.get("move_threshold_mult", 1.0) or 1.0)
     if flat_regime_active:
-        movement_force_min *= 0.6  # accept smaller pushes when the tape is dead
+        movement_force_min *= float(getattr(config, "FLAT_REGIME_MOVEMENT_MULT", 0.35) or 0.35)
     weak_vwap_mult = float(getattr(config, "MOVEMENT_WEAK_VWAP_MULT", 1.5) or 1.5)
     direction_roc = roc_fast if not math.isnan(roc_fast) else roc_early
     if math.isnan(direction_roc):
