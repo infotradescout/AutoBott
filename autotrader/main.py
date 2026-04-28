@@ -1381,6 +1381,22 @@ def _detect_catalyst_event(
 
 
 def _build_scan_universe(data_client: AlpacaDataClient) -> list[str]:
+    if bool(getattr(config, "STRICT_TOP_VOLUME_UNIVERSE", False)):
+        top_n = max(1, int(getattr(config, "TOP_VOLUME_UNIVERSE_SIZE", 10) or 10))
+        try:
+            actives = data_client.get_most_actives(top=top_n)
+        except Exception as exc:  # noqa: BLE001
+            print(f"[{ts()}] Strict top-volume universe fetch failed: {exc}")
+            return []
+        candidates = [str(sym).upper() for sym in actives if str(sym).strip()]
+        candidates = list(dict.fromkeys(candidates))
+        filtered = _filter_mover_candidates(
+            data_client,
+            candidates,
+            protected=set(),
+        )
+        return filtered[:top_n]
+
     base = [str(sym).upper() for sym in config.TICKERS if str(sym).strip()]
     core = [str(sym).upper() for sym in config.CORE_TICKERS if str(sym).strip()]
     protected = set(base + core)

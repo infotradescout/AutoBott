@@ -824,7 +824,7 @@ def _scan_ticker_details(
             effective_rvol_min = min(effective_rvol_min, float(config.RVOL_RELAXED_MIN))
         if force_relaxed_rvol:
             effective_rvol_min = min(effective_rvol_min, 0.05)
-        effective_rvol_min = max(0.05, effective_rvol_min * float(learning.get("rvol_min_mult", 1.0) or 1.0))
+        effective_rvol_min = max(1.0, effective_rvol_min * float(learning.get("rvol_min_mult", 1.0) or 1.0))
         if rvol < effective_rvol_min:
             return _scan_failure(f"RVOL {rvol:.1f}x (too low)")
 

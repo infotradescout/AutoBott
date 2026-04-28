@@ -90,6 +90,8 @@ CORE_TICKERS = [
 AUTO_EXPAND_UNIVERSE_WITH_MOVERS = True
 UNIVERSE_MOVER_TOP                = 300
 UNIVERSE_MAX_TICKERS              = 500  # broad exchange-wide mover sweep
+STRICT_TOP_VOLUME_UNIVERSE        = False
+TOP_VOLUME_UNIVERSE_SIZE          = 10
 SCREENER_TOP_N                    = 300
 MOVER_SYMBOLS_PER_SIDE            = 150
 MIN_MOVER_CANDIDATES_BEFORE_BASE_FALLBACK = 40
@@ -321,24 +323,26 @@ OPTION_BEHAVIOR_SPREAD_GRACE_MINUTES        = 5    # wait a bit before spread-ba
 # Scanner thresholds
 # ---------------------------------------------------------------------------
 
-RVOL_MIN                  = 0.15  # permissive floor for quiet intraday tape without going blind
-OPENING_RVOL_MIN          = 0.15  # match base RVOL floor during opening rotation
+RVOL_MIN                  = 1.0
+OPENING_RVOL_MIN          = 1.0
 RVOL_STRICT_UNTIL         = "10:30"
 RVOL_RELAX_AFTER          = "10:00"
-RVOL_RELAXED_MIN          = 0.15  # lower relaxed floor one more step for throughput
+RVOL_RELAXED_MIN          = 1.0
 RVOL_IGNORE_AFTER         = "16:00"  # CRITICAL FIX: was 10:30 — never fully disable RVOL gate
 ATR_PCT_MIN               = 0.3   # very low ATR floor — don't filter out ETFs
 VWAP_NEUTRAL_BAND_PCT     = 0.15  # wider neutral band: within 0.15% of VWAP = neutral, halve VWAP vote weight
 MOVEMENT_FORCE_MIN_PCT    = 0.014  # further relaxed for early-session/transition tape
 MOVEMENT_WEAK_VWAP_MULT   = 1.00  # was effectively 1.5 in scanner; only block when very close to VWAP
 DIRECTION_PRICE_MIN_PCT   = 0.004  # slightly more permissive to avoid starving entries
-DIRECTION_CONFLICT_HARD_REJECT = False
-DIRECTION_CONFLICT_SCORE_MULT  = 0.55  # penalize (not veto) when price and ROC disagree
+DIRECTION_CONFLICT_HARD_REJECT = True
+DIRECTION_CONFLICT_SCORE_MULT  = 0.55  # kept for telemetry; hard reject now blocks conflicts
 DIRECTION_CONFLICT_ROC_MIN_PCT = 0.008
 ROC_ACTIVE_MOVE_MIN_PCT   = 0.006
+DIRECTION_CONFIRM_LOOKBACK_BARS = 2
+DIRECTION_MIN_CONFIRM_ALIGNED_BARS = 2
 
 # Direction conviction: minimum weighted-vote score to commit to call/put.
-DIRECTION_CONVICTION_MIN  = 0.55
+DIRECTION_CONVICTION_MIN  = 0.65
 DIRECTION_MIN_ALIGNED_VOTES = 4
 DIRECTION_FAST_ROC_PERIOD  = 5    # short-horizon ROC used in directional voting
 
@@ -414,7 +418,7 @@ CATALYST_WINDOW_MINUTES           = 90
 CATALYST_INDEX_5M_MOVE_PCT        = 1.2
 CATALYST_BREADTH_MOVE_PCT         = 1.0
 CATALYST_BREADTH_MIN_COUNT        = 6
-CATALYST_RELAXED_RVOL_MIN         = 0.6
+CATALYST_RELAXED_RVOL_MIN         = 1.0
 CATALYST_DISABLE_RSI              = True
 CATALYST_ALLOW_IV_FALLBACK        = True
 CATALYST_RELAXED_IV_RANK_MAX      = 90.0
