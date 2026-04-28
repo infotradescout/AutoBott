@@ -25,7 +25,7 @@ PROFILES: dict[str, IntradayProfile] = {
     "open_drive_momentum": IntradayProfile(
         name="open_drive_momentum",
         window_start="09:30",
-        window_end="11:30",
+        window_end="16:00",
         symbols=(),          # universal — any ticker with an opening drive qualifies
         entry_max_quote_spread_pct=20.0,
         stop_loss_usd=10.0,
@@ -37,7 +37,7 @@ PROFILES: dict[str, IntradayProfile] = {
     "vwap_continuation": IntradayProfile(
         name="vwap_continuation",
         window_start="09:30",
-        window_end="15:30",
+        window_end="16:00",
         symbols=(),          # universal
         entry_max_quote_spread_pct=20.0,
         stop_loss_usd=12.0,
@@ -49,7 +49,7 @@ PROFILES: dict[str, IntradayProfile] = {
     "reversal_snapback": IntradayProfile(
         name="reversal_snapback",
         window_start="09:30",
-        window_end="15:30",
+        window_end="16:00",
         symbols=(),          # universal
         entry_max_quote_spread_pct=20.0,
         stop_loss_usd=13.0,
@@ -61,7 +61,7 @@ PROFILES: dict[str, IntradayProfile] = {
     "catalyst_impulse": IntradayProfile(
         name="catalyst_impulse",
         window_start="09:30",
-        window_end="15:30",
+        window_end="16:00",
         symbols=(),          # universal
         entry_max_quote_spread_pct=22.0,
         stop_loss_usd=14.0,

@@ -63,14 +63,17 @@ class WindowOpenTests(unittest.TestCase):
         self.assertTrue(is_profile_window_open(_et(9, 30), PROFILES["open_drive_momentum"]))
 
     def test_open_drive_window_closed_after_1130(self):
-        self.assertFalse(is_profile_window_open(_et(11, 30), PROFILES["open_drive_momentum"]))
-        self.assertFalse(is_profile_window_open(_et(13, 0), PROFILES["open_drive_momentum"]))
+        # Window widened to full session (09:30–16:00); 11:30/13:00 are now open.
+        self.assertTrue(is_profile_window_open(_et(11, 30), PROFILES["open_drive_momentum"]))
+        self.assertTrue(is_profile_window_open(_et(13, 0), PROFILES["open_drive_momentum"]))
+        self.assertFalse(is_profile_window_open(_et(16, 0), PROFILES["open_drive_momentum"]))
 
     def test_vwap_continuation_window_spans_session(self):
         profile = PROFILES["vwap_continuation"]
         self.assertTrue(is_profile_window_open(_et(10, 0), profile))
         self.assertTrue(is_profile_window_open(_et(15, 29), profile))
-        self.assertFalse(is_profile_window_open(_et(15, 30), profile))
+        self.assertTrue(is_profile_window_open(_et(15, 59), profile))
+        self.assertFalse(is_profile_window_open(_et(16, 0), profile))
 
     def test_generic_fallback_window_spans_full_session(self):
         profile = PROFILES["generic_intraday_continuation"]
