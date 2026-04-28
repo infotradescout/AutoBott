@@ -116,7 +116,7 @@ SCAN_DAILY_BARS     = 30
 
 # Risk limits scaled for larger paper balances to avoid premature day/week lockouts.
 MAX_POSITIONS                       = 3
-POSITION_SIZE_USD                   = 125   # baseline premium budget per trade
+POSITION_SIZE_USD                   = 175   # baseline premium budget per trade
 RISK_PER_TRADE_PCT                  = 0.017
 MAX_POSITION_SIZE_USD               = 150.0  # per-trade premium cap
 DRAWDOWN_REDUCE_AFTER_CONSEC_LOSSES = 2
@@ -138,7 +138,7 @@ LOSS_THROTTLE_SIGNAL_SCORE_ADD      = 1.0   # require score 6.5+ after 2 losses
 LOSS_THROTTLE_MIN_VOLATILITY_SCORE  = 1.5  # after 2 losses require volatility_score >= 1.5 (low bar but not zero)
 
 # Capital doctrine: $150 max per trade, $450 max total open at once (3 positions × $150).
-MAX_PREMIUM_PER_TRADE_USD           = 150.0  # keep single-name premium bounded
+MAX_PREMIUM_PER_TRADE_USD           = 275.0  # raised: live funnel showed premium_per_trade_cap as top blocker
 MAX_TOTAL_OPEN_PREMIUM_USD          = 1500.0  # scaled for $6k account
 OPENING_MAX_FRESH_PREMIUM_USD       = 250.0  # opening-session budget
 MAX_CONTRACTS_PER_TRADE             = 4
@@ -229,7 +229,7 @@ OPENING_MAX_CONCURRENT_POSITIONS             = 2
 OPENING_MAX_NEW_ENTRY_ATTEMPTS_PER_LOOP      = 1
 MAX_NEW_ENTRY_ATTEMPTS_PER_LOOP              = 1
 OPENING_MAX_EXPENSIVE_ENTRIES                = 0    # no expensive entries in opening window on $6k account
-OPENING_EXPENSIVE_MAX_PREMIUM_USD            = 100.0  # same cap as regular trades
+OPENING_EXPENSIVE_MAX_PREMIUM_USD            = 200.0  # allow controlled entries in pricier large-cap names
 
 
 # ---------------------------------------------------------------------------
