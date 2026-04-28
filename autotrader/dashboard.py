@@ -68,6 +68,16 @@ _REVIEW_CACHE: dict[str, Any] = {"ts": None, "payload": None}
 CONTROL_TOKEN = str(config.DASHBOARD_CONTROL_TOKEN or "").strip()
 
 app = Flask(__name__)
+@app.after_request
+def _set_api_no_cache_headers(response):
+  try:
+    if str(request.path or "").startswith("/api/"):
+      response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
+      response.headers["Pragma"] = "no-cache"
+      response.headers["Expires"] = "0"
+  except Exception:
+    pass
+  return response
 
 @app.get("/healthz")
 def healthz():
@@ -4077,15 +4087,12 @@ def api_daily_review():
                 return jsonify(cache_payload)
 
         payload = _build_daily_review_payload()
-        _REVIEW_CACHE["ts"] = now
-        _REVIEW_CACHE["payload"] = payload
-        return jsonify(payload)
-    except Exception as exc:  # noqa: BLE001
+    cache_window_seconds = max(5, int(getattr(config, "DASHBOARD_DAILY_REVIEW_CACHE_SECONDS", 30) or 30))
         return jsonify({"error": str(exc)}), 500
 
 
 def _pnl_usd_from_trade_row(row: dict[str, str]) -> float:
-    entry_price = _safe_float(row.get("entry_price"), 0.0)
+      if age_seconds < cache_window_seconds:
     exit_price = _safe_float(row.get("exit_price"), 0.0)
     qty = int(_safe_float(row.get("qty"), 0))
     if qty <= 0 or entry_price <= 0 or exit_price <= 0:
@@ -5450,6 +5457,7 @@ def home():
       <div>
         <div class="title">Alpaca Options Autotrader Dashboard</div>
         <div class="muted">Last updated: <span id="last-updated">--</span> | Auto-refresh: 30s</div>
+        <div class="muted">Last updated: <span id="last-updated">--</span> | Auto-refresh: 10s</div>
       </div>
       <div class="head-actions">
         <a href="/roadmap" class="ctrl-btn" style="text-decoration:none;">ROADMAP</a>
@@ -5970,7 +5978,9 @@ def home():
 
     async function fetchJson(url) {
       try {
-        const res = await fetch(url);
+        const sep = url.includes("?") ? "&" : "?";
+        const reqUrl = `${url}${sep}_=${Date.now()}`;
+        const res = await fetch(reqUrl, { cache: "no-store" });
         const data = await res.json();
         if (!res.ok) return { error: data.error || "request failed" };
         return data;
@@ -5982,12 +5992,15 @@ def home():
     async function setTradingControl(action) {
       const endpoint = action === "stop" ? "/api/trading-control/stop" : "/api/trading-control/start";
       try {
-        const res = await fetch(endpoint, {
+        const sep = url.includes("?") ? "&" : "?";
+        const reqUrl = `${url}${sep}_=${Date.now()}`;
+        const res = await fetch(reqUrl, { cache: "no-store" });
           method: "POST",
           headers: {
             "Content-Type": "application/json",
           },
           body: JSON.stringify({reason: `dashboard_${action}`}),
+          setInterval(refresh, 10000);
         });
         const body = await res.json();
         if (!res.ok || body.error) {
