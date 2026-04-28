@@ -488,6 +488,18 @@ def _profile_signals_for_candidate(
         elif profile.name == "catalyst_impulse":
             profile_ok = rvol >= profile_rvol_min and abs(roc) >= 0.01
             profile_reason = "catalyst impulse"
+        elif profile.name == "flat_market_scalp":
+            # Flat-tape scalp: only activate in detected flat regime and accept
+            # smaller directional pushes near VWAP.
+            scalp_roc_min = 0.01
+            scalp_vwap_dist_min = 0.003
+            profile_ok = (
+                flat_regime
+                and direction in ("call", "put")
+                and abs(roc) >= scalp_roc_min
+                and distance_from_vwap_pct >= scalp_vwap_dist_min
+            )
+            profile_reason = "flat-market scalp"
 
         if not profile_ok:
             rejected.append(f"{profile.name}:logic")
