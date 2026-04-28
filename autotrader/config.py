@@ -358,7 +358,7 @@ IV_RANK_MIN               = 0.0   # no minimum IV rank — trade any setup
 IV_RANK_MAX               = 99.0
 
 ENABLE_SIGNAL_SCORING     = True
-MIN_SIGNAL_SCORE          = 6.5
+MIN_SIGNAL_SCORE          = 3.0
 VOLATILITY_PRIORITY_WEIGHT = 3.0  # make volatility the top signal driver
 TREND_PRIORITY_WEIGHT      = 1.0
 FLOW_PRIORITY_WEIGHT       = 1.0
@@ -417,7 +417,7 @@ CATALYST_RELAXED_RVOL_MIN         = 1.0
 CATALYST_DISABLE_RSI              = True
 CATALYST_ALLOW_IV_FALLBACK        = True
 CATALYST_RELAXED_IV_RANK_MAX      = 90.0
-CATALYST_RELAXED_MIN_SIGNAL_SCORE = 6.5
+CATALYST_RELAXED_MIN_SIGNAL_SCORE = 2.5
 
 
 # ---------------------------------------------------------------------------

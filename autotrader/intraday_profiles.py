@@ -31,7 +31,7 @@ PROFILES: dict[str, IntradayProfile] = {
         stop_loss_usd=10.0,
         immediate_take_profit_pct=0.05,
         max_hold_minutes=60,
-        min_signal_score=4.0,
+        min_signal_score=2.5,
         priority=1,
     ),
     "vwap_continuation": IntradayProfile(
@@ -43,7 +43,7 @@ PROFILES: dict[str, IntradayProfile] = {
         stop_loss_usd=12.0,
         immediate_take_profit_pct=0.05,
         max_hold_minutes=60,
-        min_signal_score=4.0,
+        min_signal_score=2.5,
         priority=2,
     ),
     "reversal_snapback": IntradayProfile(
@@ -55,7 +55,7 @@ PROFILES: dict[str, IntradayProfile] = {
         stop_loss_usd=13.0,
         immediate_take_profit_pct=0.04,
         max_hold_minutes=45,
-        min_signal_score=4.0,
+        min_signal_score=2.5,
         priority=3,
     ),
     "catalyst_impulse": IntradayProfile(
@@ -67,7 +67,7 @@ PROFILES: dict[str, IntradayProfile] = {
         stop_loss_usd=14.0,
         immediate_take_profit_pct=0.06,
         max_hold_minutes=60,
-        min_signal_score=4.0,
+        min_signal_score=2.5,
         priority=4,
     ),
     # ── Fallback profile ────────────────────────────────────────────────────
@@ -83,7 +83,7 @@ PROFILES: dict[str, IntradayProfile] = {
         stop_loss_usd=12.0,
         immediate_take_profit_pct=0.05,
         max_hold_minutes=60,
-        min_signal_score=3.0,   # intentionally lower — this is the safety net
+        min_signal_score=1.5,   # intentionally lower — this is the safety net
         priority=5,             # lowest priority — only fires when named profiles miss
     ),
 }
