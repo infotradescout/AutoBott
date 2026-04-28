@@ -4509,11 +4509,20 @@ def api_diagnostics():
       "runtime_state_json": _file_health(state_path),
     }
     state = load_bot_state() or {}
-    heartbeat_iso = str(state.get("heartbeat_iso", "") or state.get("last_loop_iso", "") or "")
+    heartbeat_iso = str(
+      state.get("last_trader_heartbeat_et", "")
+      or state.get("heartbeat_iso", "")
+      or state.get("last_loop_iso", "")
+      or ""
+    )
     heartbeat_dt = _parse_state_iso(heartbeat_iso) if heartbeat_iso else None
     heartbeat_age_seconds: int | None = None
     if heartbeat_dt is not None:
       heartbeat_age_seconds = max(0, int((_now_et() - heartbeat_dt).total_seconds()))
+    last_auth_error = str(state.get("last_alpaca_auth_error", "") or "")
+    last_auth_error_et = str(state.get("last_alpaca_auth_error_et", "") or "")
+    trader_last_crash = str(state.get("trader_thread_last_crash", "") or "")
+    trader_last_crash_et = str(state.get("trader_thread_last_crash_et", "") or "")
     return jsonify({
       "data_dir": data_dir,
       "data_dir_env": str(os.getenv("DATA_DIR", "") or ""),
@@ -4525,6 +4534,10 @@ def api_diagnostics():
       "files": files,
       "heartbeat_iso": heartbeat_iso,
       "heartbeat_age_seconds": heartbeat_age_seconds,
+      "last_alpaca_auth_error": last_auth_error,
+      "last_alpaca_auth_error_et": last_auth_error_et,
+      "trader_thread_last_crash": trader_last_crash,
+      "trader_thread_last_crash_et": trader_last_crash_et,
       "runtime_state_keys": sorted(list(state.keys()))[:50],
       "control_token_required": bool(CONTROL_TOKEN),
     })
