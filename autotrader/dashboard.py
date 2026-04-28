@@ -4079,7 +4079,7 @@ def api_watch_history():
 def api_daily_review():
   try:
     now = _now_et()
-    cache_window_seconds = max(5, int(getattr(config, "DASHBOARD_DAILY_REVIEW_CACHE_SECONDS", 30) or 30))
+    cache_window_seconds = max(5, int(getattr(config, "DASHBOARD_DAILY_REVIEW_CACHE_SECONDS", 10) or 10))
     cache_ts = _REVIEW_CACHE.get("ts")
     cache_payload = _REVIEW_CACHE.get("payload")
     if cache_ts and cache_payload is not None:
@@ -5461,7 +5461,7 @@ def home():
       <div>
         <div class="title">Alpaca Options Autotrader Dashboard</div>
         <div class="muted">Last updated: <span id="last-updated">--</span> | Auto-refresh: 30s</div>
-        <div class="muted">Last updated: <span id="last-updated">--</span> | Auto-refresh: 10s</div>
+        <div class="muted">Last updated: <span id="last-updated">--</span> | Auto-refresh: 10s (instant on tab focus)</div>
       </div>
       <div class="head-actions">
         <a href="/roadmap" class="ctrl-btn" style="text-decoration:none;">ROADMAP</a>
@@ -6512,6 +6512,10 @@ def home():
 
     refresh();
     setInterval(refresh, 30000);
+    window.addEventListener("focus", () => { refresh(); });
+    document.addEventListener("visibilitychange", () => {
+      if (!document.hidden) refresh();
+    });
     let resizeTimer = null;
     window.addEventListener("resize", () => {
       if (resizeTimer) clearTimeout(resizeTimer);
