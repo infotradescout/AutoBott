@@ -456,6 +456,27 @@ ENABLE_VIX_GUARD           = False  # data-collection mode: avoid extra global v
 VIX_MIN                    = 12.0  # below 12 = complacency, spreads too tight for edge
 VIX_MAX                    = 60.0  # above 60 = panic, options too wide and unpredictable
 
+# ---------------------------------------------------------------------------
+# Flat-market (chop / range-bound) regime detection
+# ---------------------------------------------------------------------------
+# When SPY and QQQ are both barely moving, normal trend-follow thresholds
+# starve entries. When this regime is detected, the scanner relaxes signal
+# score / direction conviction / vote alignment so small directional pushes
+# can still trade, and downstream code uses tighter take-profit / shorter
+# hold (the new "flat_market_scalp" profile).
+ENABLE_FLAT_REGIME_DETECT       = True
+FLAT_REGIME_INDEX_TIMEFRAME     = "5m"
+FLAT_REGIME_INDEX_LOOKBACK_BARS = 6      # last ~30 min of SPY/QQQ
+FLAT_REGIME_ABS_ROC_MAX_PCT     = 0.30   # |ROC| over lookback below this = flat
+FLAT_REGIME_RANGE_MAX_PCT       = 0.45   # (high-low)/close*100 over lookback below this = flat
+FLAT_REGIME_REQUIRE_BOTH        = True   # SPY AND QQQ must both be flat
+FLAT_REGIME_CACHE_TTL_SECONDS   = 60     # re-evaluate at most once per minute
+FLAT_REGIME_MIN_SIGNAL_SCORE    = 1.5    # override of MIN_SIGNAL_SCORE while flat
+FLAT_REGIME_CONVICTION_MIN      = 0.18   # override of DIRECTION_CONVICTION_MIN
+FLAT_REGIME_MIN_ALIGNED_VOTES   = 2      # override of DIRECTION_MIN_ALIGNED_VOTES
+FLAT_REGIME_TAKE_PROFIT_PCT     = 0.025  # tighter scalp TP (used by flat_market_scalp profile)
+FLAT_REGIME_MAX_HOLD_MINUTES    = 25     # short hold (used by flat_market_scalp profile)
+
 
 # ---------------------------------------------------------------------------
 # Entry confirmation

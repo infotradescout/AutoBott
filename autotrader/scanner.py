@@ -771,6 +771,67 @@ def scan_ticker(
     return details
 
 
+# ── Flat-market regime detector ────────────────────────────────────────────
+# When SPY and QQQ are both flat, normal trend thresholds starve entries.
+# We cache the result for FLAT_REGIME_CACHE_TTL_SECONDS to avoid hammering
+# the data API once per ticker.
+_FLAT_REGIME_CACHE: dict[str, tuple[float, bool, str]] = {}  # key="state" -> (expiry_ts, active, reason)
+
+
+def _index_is_flat(symbol: str, data_client: AlpacaDataClient) -> tuple[bool, str]:
+    try:
+        bars = data_client.get_stock_bars(
+            symbol=symbol,
+            timeframe=str(getattr(config, "FLAT_REGIME_INDEX_TIMEFRAME", "5m") or "5m"),
+            limit=max(8, int(getattr(config, "FLAT_REGIME_INDEX_LOOKBACK_BARS", 6) or 6) + 2),
+        )
+    except Exception as exc:  # noqa: BLE001
+        return False, f"{symbol} fetch error: {exc}"
+    if bars is None or bars.empty:
+        return False, f"{symbol} no bars"
+    lookback = max(2, int(getattr(config, "FLAT_REGIME_INDEX_LOOKBACK_BARS", 6) or 6))
+    if len(bars) < lookback + 1:
+        return False, f"{symbol} insufficient bars"
+    closes = bars["close"].astype(float)
+    highs = bars["high"].astype(float)
+    lows = bars["low"].astype(float)
+    last_close = float(closes.iloc[-1])
+    if last_close <= 0:
+        return False, f"{symbol} bad close"
+    start_close = float(closes.iloc[-lookback - 1])
+    if start_close <= 0:
+        return False, f"{symbol} bad start"
+    abs_roc_pct = abs((last_close - start_close) / start_close) * 100.0
+    window_high = float(highs.iloc[-lookback:].max())
+    window_low = float(lows.iloc[-lookback:].min())
+    range_pct = (window_high - window_low) / last_close * 100.0
+    roc_max = float(getattr(config, "FLAT_REGIME_ABS_ROC_MAX_PCT", 0.30) or 0.30)
+    range_max = float(getattr(config, "FLAT_REGIME_RANGE_MAX_PCT", 0.45) or 0.45)
+    flat = abs_roc_pct <= roc_max and range_pct <= range_max
+    note = f"{symbol} roc={abs_roc_pct:.2f}% range={range_pct:.2f}%"
+    return flat, note
+
+
+def _flat_market_active(data_client: AlpacaDataClient) -> tuple[bool, str]:
+    if not bool(getattr(config, "ENABLE_FLAT_REGIME_DETECT", False)):
+        return False, "disabled"
+    import time as _time
+    cached = _FLAT_REGIME_CACHE.get("state")
+    if cached is not None and _time.monotonic() < cached[0]:
+        return cached[1], cached[2]
+    require_both = bool(getattr(config, "FLAT_REGIME_REQUIRE_BOTH", True))
+    spy_flat, spy_note = _index_is_flat("SPY", data_client)
+    qqq_flat, qqq_note = _index_is_flat("QQQ", data_client)
+    if require_both:
+        active = spy_flat and qqq_flat
+    else:
+        active = spy_flat or qqq_flat
+    reason = f"SPY[{spy_note}] QQQ[{qqq_note}] -> {'FLAT' if active else 'trending'}"
+    ttl = max(15, int(getattr(config, "FLAT_REGIME_CACHE_TTL_SECONDS", 60) or 60))
+    _FLAT_REGIME_CACHE["state"] = (_time.monotonic() + ttl, active, reason)
+    return active, reason
+
+
 def _scan_ticker_details(
     symbol: str,
     bars_df: pd.DataFrame,
@@ -783,6 +844,7 @@ def _scan_ticker_details(
         return _scan_failure("insufficient intraday bars")
     if daily_bars_df is None or daily_bars_df.empty or len(daily_bars_df) < 20:
         return _scan_failure("insufficient daily bars")
+    flat_regime_active, flat_regime_reason = _flat_market_active(data_client)
 
     bars = bars_df.copy()
     closes = bars["close"].astype(float)
@@ -885,6 +947,8 @@ def _scan_ticker_details(
 
     movement_force_min = float(getattr(config, "MOVEMENT_FORCE_MIN_PCT", 0.03) or 0.03)
     movement_force_min *= float(learning.get("move_threshold_mult", 1.0) or 1.0)
+    if flat_regime_active:
+        movement_force_min *= 0.6  # accept smaller pushes when the tape is dead
     weak_vwap_mult = float(getattr(config, "MOVEMENT_WEAK_VWAP_MULT", 1.5) or 1.5)
     direction_roc = roc_fast if not math.isnan(roc_fast) else roc_early
     if math.isnan(direction_roc):
@@ -931,6 +995,11 @@ def _scan_ticker_details(
     )
 
     min_aligned_votes = int(getattr(config, "DIRECTION_MIN_ALIGNED_VOTES", 3) or 3)
+    if flat_regime_active:
+        min_aligned_votes = min(
+            min_aligned_votes,
+            int(getattr(config, "FLAT_REGIME_MIN_ALIGNED_VOTES", 2) or 2),
+        )
     min_aligned_votes = max(1, min(len(direction_votes), min_aligned_votes))
     if aligned_count < min_aligned_votes:
         return _scan_failure(
@@ -942,6 +1011,11 @@ def _scan_ticker_details(
         direction_score *= max(0.1, min(1.0, conflict_mult))
 
     conviction_min = float(getattr(config, "DIRECTION_CONVICTION_MIN", 0.25) or 0.25)
+    if flat_regime_active:
+        conviction_min = min(
+            conviction_min,
+            float(getattr(config, "FLAT_REGIME_CONVICTION_MIN", 0.18) or 0.18),
+        )
     if abs(direction_score) < conviction_min:
         return _scan_failure(
             f"direction conviction {abs(direction_score):.2f} below {conviction_min:.2f}"
@@ -1081,6 +1155,11 @@ def _scan_ticker_details(
     effective_min_signal_score = (
         float(config.CATALYST_RELAXED_MIN_SIGNAL_SCORE) if _CATALYST_MODE_ACTIVE else float(config.MIN_SIGNAL_SCORE)
     )
+    if flat_regime_active:
+        effective_min_signal_score = min(
+            effective_min_signal_score,
+            float(getattr(config, "FLAT_REGIME_MIN_SIGNAL_SCORE", 1.5) or 1.5),
+        )
     if config.ENABLE_SIGNAL_SCORING and signal_score < effective_min_signal_score:
         return _scan_failure(f"signal score {signal_score:.2f} below {effective_min_signal_score:.2f}")
 
@@ -1116,6 +1195,8 @@ def _scan_ticker_details(
         "signal_score": round(signal_score, 2),
         "flow_score": round(flow_score, 4) if flow_score is not None else None,
         "htf_reason": htf_reason,
+        "flat_regime": bool(flat_regime_active),
+        "flat_regime_reason": flat_regime_reason if flat_regime_active else "",
         "reason": (
             f"RVOL {rvol:.1f}x | {above_below} | Dir {direction_score:+.2f} [{vote_log}] | {ema_note} | "
             f"ROC {roc:+.2f}% | {ivr_reason_text} | Vol {volatility_score:.2f} | Regime {regime_score:.2f} | "

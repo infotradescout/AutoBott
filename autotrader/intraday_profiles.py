@@ -70,6 +70,21 @@ PROFILES: dict[str, IntradayProfile] = {
         min_signal_score=2.5,
         priority=4,
     ),
+    # ── Flat-market scalp ──────────────────────────────────────────────────
+    # Activated when scanner detects a flat regime (SPY+QQQ both range-bound).
+    # Uses tighter take-profit and shorter hold so we exit before chop reverses.
+    "flat_market_scalp": IntradayProfile(
+        name="flat_market_scalp",
+        window_start="09:30",
+        window_end="16:00",
+        symbols=(),          # universal
+        entry_max_quote_spread_pct=22.0,
+        stop_loss_usd=10.0,
+        immediate_take_profit_pct=0.025,  # quick scalp — overridden by FLAT_REGIME_TAKE_PROFIT_PCT consumer
+        max_hold_minutes=25,
+        min_signal_score=1.5,
+        priority=5,
+    ),
     # ── Fallback profile ────────────────────────────────────────────────────
     # Catches core liquid names that don't match a named profile.
     # symbols=() means universal — any symbol in permissive_core is eligible.
@@ -84,7 +99,7 @@ PROFILES: dict[str, IntradayProfile] = {
         immediate_take_profit_pct=0.05,
         max_hold_minutes=60,
         min_signal_score=1.5,   # intentionally lower — this is the safety net
-        priority=5,             # lowest priority — only fires when named profiles miss
+        priority=6,             # lowest priority — only fires when named profiles miss
     ),
 }
 
