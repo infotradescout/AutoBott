@@ -5460,7 +5460,6 @@ def home():
     <div class="header">
       <div>
         <div class="title">Alpaca Options Autotrader Dashboard</div>
-        <div class="muted">Last updated: <span id="last-updated">--</span> | Auto-refresh: 30s</div>
         <div class="muted">Last updated: <span id="last-updated">--</span> | Auto-refresh: 10s (instant on tab focus)</div>
       </div>
       <div class="head-actions">
@@ -5996,15 +5995,12 @@ def home():
     async function setTradingControl(action) {
       const endpoint = action === "stop" ? "/api/trading-control/stop" : "/api/trading-control/start";
       try {
-        const sep = url.includes("?") ? "&" : "?";
-        const reqUrl = `${url}${sep}_=${Date.now()}`;
-        const res = await fetch(reqUrl, { cache: "no-store" });
+        const res = await fetch(endpoint, {
           method: "POST",
           headers: {
             "Content-Type": "application/json",
           },
           body: JSON.stringify({reason: `dashboard_${action}`}),
-          setInterval(refresh, 10000);
         });
         const body = await res.json();
         if (!res.ok || body.error) {
