@@ -338,8 +338,8 @@ DIRECTION_CONFLICT_ROC_MIN_PCT = 0.008
 ROC_ACTIVE_MOVE_MIN_PCT   = 0.006
 
 # Direction conviction: minimum weighted-vote score to commit to call/put.
-DIRECTION_CONVICTION_MIN  = 0.55  # require real directional agreement
-DIRECTION_MIN_ALIGNED_VOTES = 4     # 4 of 5 signals must agree on direction
+DIRECTION_CONVICTION_MIN  = 0.45  # allow earlier open momentum participation with moderate agreement
+DIRECTION_MIN_ALIGNED_VOTES = 3     # 3 of 5 signals must agree on direction
 DIRECTION_FAST_ROC_PERIOD  = 5    # short-horizon ROC used in directional voting
 
 ROC_PERIOD                = 10
