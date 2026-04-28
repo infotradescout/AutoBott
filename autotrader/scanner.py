@@ -65,6 +65,35 @@ _LEARNING_PROFILE_CACHE: dict[str, Any] = {
 }
 
 
+def compute_direction_from_votes(
+    votes: list[tuple[str, float, float]],
+) -> tuple[str, float, float, int]:
+    """Aggregate weighted direction votes into (direction, score, abs_score, aligned_count).
+
+    `votes` is a list of (name, weight, vote) where vote is +1/-1 (or any signed
+    float). Returns:
+      direction      : "call" if weighted_vote >= 0 else "put"
+      score          : signed normalized score in [-1, 1]
+      abs_score      : abs(score)
+      aligned_count  : count of votes whose sign matches the chosen direction
+    Pure function; no config dependencies, safe for unit tests.
+    """
+    if not votes:
+        return "call", 0.0, 0.0, 0
+    weighted = sum(float(weight) * float(vote) for _name, weight, vote in votes)
+    total_weight = sum(abs(float(weight)) for _name, weight, _vote in votes)
+    direction = "call" if weighted >= 0 else "put"
+    abs_score = (abs(weighted) / total_weight) if total_weight > 0 else 0.0
+    score = abs_score if direction == "call" else -abs_score
+    aligned = 0
+    for _name, _weight, vote in votes:
+        if direction == "call" and float(vote) > 0:
+            aligned += 1
+        elif direction == "put" and float(vote) < 0:
+            aligned += 1
+    return direction, score, abs_score, aligned
+
+
 def _default_learning_profile() -> dict[str, Any]:
     return {
         "move_threshold_mult": 1.0,
@@ -895,16 +924,9 @@ def _scan_ticker_details(
         ("vwap_side", 0.3, vwap_vote),
     ]
 
-    weighted_vote = sum(weight * vote for _name, weight, vote in direction_votes)
-    total_weight = sum(abs(weight) for _name, weight, _vote in direction_votes)
-    direction = "call" if weighted_vote >= 0 else "put"
-
-    aligned_count = 0
-    for _name, _weight, vote in direction_votes:
-        if direction == "call" and vote > 0:
-            aligned_count += 1
-        elif direction == "put" and vote < 0:
-            aligned_count += 1
+    direction, direction_score, _direction_score_abs, aligned_count = compute_direction_from_votes(
+        direction_votes
+    )
 
     min_aligned_votes = int(getattr(config, "DIRECTION_MIN_ALIGNED_VOTES", 3) or 3)
     min_aligned_votes = max(1, min(len(direction_votes), min_aligned_votes))
@@ -913,8 +935,6 @@ def _scan_ticker_details(
             f"direction alignment {aligned_count}/{len(direction_votes)} below {min_aligned_votes}"
         )
 
-    direction_score_abs = (abs(weighted_vote) / total_weight) if total_weight > 0 else 0.0
-    direction_score = direction_score_abs if direction == "call" else -direction_score_abs
     if direction_conflict:
         conflict_mult = float(getattr(config, "DIRECTION_CONFLICT_SCORE_MULT", 0.55) or 0.55)
         direction_score *= max(0.1, min(1.0, conflict_mult))

@@ -443,86 +443,6 @@ def _opening_entry_quality_ok(signal: dict[str, Any], now_et: datetime) -> tuple
     return True, ""
 
 
-def _fast_start_entry_quality_ok(signal: dict[str, Any], now_et: datetime) -> tuple[bool, str]:
-    """Require setups that should work quickly, not slow drifts."""
-    try:
-        signal_score = float(signal.get("signal_score", 0.0) or 0.0)
-        direction_score = abs(float(signal.get("direction_score", 0.0) or 0.0))
-        rvol = float(signal.get("rvol", 0.0) or 0.0)
-        roc_pct = abs(float(signal.get("roc", 0.0) or 0.0))
-        price = float(signal.get("price", 0.0) or 0.0)
-        vwap = float(signal.get("vwap", 0.0) or 0.0)
-    except (TypeError, ValueError):
-        return False, "fast-start parse failure"
-
-    min_signal = float(getattr(config, "FAST_START_MIN_SIGNAL_SCORE", 7.0) or 7.0)
-    min_direction = float(getattr(config, "FAST_START_MIN_DIRECTION_SCORE", 0.68) or 0.68)
-    min_rvol = float(getattr(config, "FAST_START_MIN_RVOL", 1.25) or 1.25)
-    min_abs_roc = float(getattr(config, "FAST_START_MIN_ABS_ROC_PCT", 0.16) or 0.16)
-    min_vwap_dist = float(getattr(config, "FAST_START_MIN_VWAP_DISTANCE_PCT", 0.10) or 0.10)
-
-    if _is_in_opening_strict_window(now_et):
-        min_signal = max(min_signal, float(getattr(config, "OPENING_FAST_START_MIN_SIGNAL_SCORE", min_signal) or min_signal))
-        min_direction = max(min_direction, float(getattr(config, "OPENING_FAST_START_MIN_DIRECTION_SCORE", min_direction) or min_direction))
-        min_rvol = max(min_rvol, float(getattr(config, "OPENING_FAST_START_MIN_RVOL", min_rvol) or min_rvol))
-        min_abs_roc = max(min_abs_roc, float(getattr(config, "OPENING_FAST_START_MIN_ABS_ROC_PCT", min_abs_roc) or min_abs_roc))
-        min_vwap_dist = max(min_vwap_dist, float(getattr(config, "OPENING_FAST_START_MIN_VWAP_DISTANCE_PCT", min_vwap_dist) or min_vwap_dist))
-
-    vwap_dist = 0.0
-    if vwap > 0 and price > 0:
-        vwap_dist = abs(price - vwap) / vwap * 100.0
-
-    if signal_score < min_signal:
-        return False, f"signal score too weak ({signal_score:.2f}<{min_signal:.2f})"
-    if direction_score < min_direction:
-        return False, f"direction conviction too weak ({direction_score:.2f}<{min_direction:.2f})"
-    if rvol < min_rvol:
-        return False, f"RVOL too weak ({rvol:.2f}<{min_rvol:.2f})"
-    if roc_pct < min_abs_roc:
-        return False, f"ROC too weak ({roc_pct:.2f}%<{min_abs_roc:.2f}%)"
-    if vwap_dist < min_vwap_dist:
-        return False, f"VWAP distance too shallow ({vwap_dist:.2f}%<{min_vwap_dist:.2f}%)"
-    return True, ""
-
-
-def _premium_cap_quality_override_ok(
-    *,
-    signal: dict[str, Any],
-    entry_quote: dict[str, float | None],
-    now_et: datetime,
-) -> tuple[bool, str]:
-    """Allow expensive entries only when conviction and execution quality are exceptional."""
-    if not bool(getattr(config, "ENABLE_PREMIUM_CAP_QUALITY_OVERRIDE", True)):
-        return False, "premium quality override disabled"
-
-    try:
-        signal_score = float(signal.get("signal_score", 0.0) or 0.0)
-        direction_score = abs(float(signal.get("direction_score", 0.0) or 0.0))
-        rvol = float(signal.get("rvol", 0.0) or 0.0)
-        spread_pct = float(entry_quote.get("spread_pct") or 0.0)
-    except (TypeError, ValueError):
-        return False, "premium override parse failure"
-
-    min_signal_score = float(getattr(config, "EXPENSIVE_TRADE_MIN_SIGNAL_SCORE", 8.0) or 8.0)
-    min_direction_score = float(getattr(config, "EXPENSIVE_TRADE_MIN_DIRECTION_SCORE", 0.75) or 0.75)
-    min_rvol = float(getattr(config, "EXPENSIVE_TRADE_MIN_RVOL", 1.8) or 1.8)
-    max_spread_pct = float(getattr(config, "EXPENSIVE_TRADE_MAX_SPREAD_PCT", 8.0) or 8.0)
-
-    if _is_in_opening_strict_window(now_et):
-        opening_min_signal = float(getattr(config, "OPENING_EXPENSIVE_TRADE_MIN_SIGNAL_SCORE", min_signal_score) or min_signal_score)
-        min_signal_score = max(min_signal_score, opening_min_signal)
-
-    if signal_score < min_signal_score:
-        return False, f"signal score {signal_score:.2f}<{min_signal_score:.2f}"
-    if direction_score < min_direction_score:
-        return False, f"direction score {direction_score:.2f}<{min_direction_score:.2f}"
-    if rvol < min_rvol:
-        return False, f"RVOL {rvol:.2f}<{min_rvol:.2f}"
-    if spread_pct > max_spread_pct:
-        return False, f"spread {spread_pct:.2f}%>{max_spread_pct:.2f}%"
-    return True, "high-conviction override"
-
-
 def _entry_quote_spread_gate(
     *,
     option_symbol: str,
@@ -3183,14 +3103,6 @@ def main():
                 print(f"[{ts(now_et)}] {ticker}: skip ({opening_quality_reason}).")
                 continue
 
-            if bool(getattr(config, "ENABLE_FAST_START_QUALITY_GATE", True)):
-                fast_start_ok, fast_start_reason = _fast_start_entry_quality_ok(signal, now_et)
-                if not fast_start_ok:
-                    _mark_skip("fast_start_quality_gate")
-                    _mark_stage4_reject(reason="fast_start_quality_gate", ticker=ticker)
-                    print(f"[{ts(now_et)}] {ticker}: skip ({fast_start_reason}).")
-                    continue
-
             if not _is_valid_long_direction(direction):
                 _mark_skip("invalid_strategy_direction")
                 _mark_stage4_reject(reason="invalid_strategy_direction", ticker=ticker)
@@ -3487,26 +3399,14 @@ def main():
                     )
                     continue
                 trade_premium_usd = ask_price * qty * 100.0
-                premium_override_ok = False
-                premium_override_reason = ""
                 if trade_premium_usd > max_trade_premium:
-                    premium_override_ok, premium_override_reason = _premium_cap_quality_override_ok(
-                        signal=signal,
-                        entry_quote=entry_quote,
-                        now_et=now_et,
-                    )
-                    if not premium_override_ok:
-                        _mark_skip("premium_per_trade_cap")
-                        _mark_stage4_reject(reason="premium_per_trade_cap", ticker=ticker)
-                        print(
-                            f"[{ts(now_et)}] {ticker}: skip (premium ${trade_premium_usd:.2f} > "
-                            f"per-trade cap ${max_trade_premium:.2f}; {premium_override_reason})."
-                        )
-                        continue
+                    _mark_skip("premium_per_trade_cap")
+                    _mark_stage4_reject(reason="premium_per_trade_cap", ticker=ticker)
                     print(
-                        f"[{ts(now_et)}] {ticker}: premium override accepted "
-                        f"(${trade_premium_usd:.2f} > ${max_trade_premium:.2f}; {premium_override_reason})."
+                        f"[{ts(now_et)}] {ticker}: skip (premium ${trade_premium_usd:.2f} > "
+                        f"per-trade cap ${max_trade_premium:.2f})."
                     )
+                    continue
 
                 total_open_premium = _current_open_premium_usd(option_positions, open_trade_meta)
                 max_total_open_premium_base = float(getattr(config, "MAX_TOTAL_OPEN_PREMIUM_USD", 600.0) or 600.0)
@@ -3764,6 +3664,26 @@ def main():
                 time.sleep(config.RATE_LIMIT_SLEEP_SECONDS)
 
         last_entry_debug = entry_debug
+
+        # --- Entry funnel telemetry (single condensed line per loop) ---
+        try:
+            _funnel_skips = entry_debug.get("skips") or {}
+            _funnel_top_skip = ""
+            if isinstance(_funnel_skips, dict) and _funnel_skips:
+                _funnel_top = sorted(_funnel_skips.items(), key=lambda kv: -int(kv[1] or 0))[:2]
+                _funnel_top_skip = ", ".join(f"{k}={v}" for k, v in _funnel_top)
+            print(
+                f"[{ts(now_et)}] FUNNEL universe={len(watchlist)} "
+                f"scan_pass={int(entry_debug.get('scan_pass_count', 0))} "
+                f"considered={int(entry_debug.get('signals_considered', 0))} "
+                f"reject={int(entry_debug.get('entry_stage4_reject_count', 0))} "
+                f"eligible={int(entry_debug.get('entry_stage4_eligible_count', 0))} "
+                f"submitted={int(entry_debug.get('entry_orders_submitted', 0))} "
+                f"filled={int(entry_debug.get('entries_filled', 0))} "
+                f"top_skip=[{_funnel_top_skip}]"
+            )
+        except Exception as _funnel_exc:  # noqa: BLE001
+            print(f"[{ts(now_et)}] FUNNEL telemetry error: {_funnel_exc!r}")
 
         # --- Exit management ---
         option_positions = broker.get_open_option_positions()

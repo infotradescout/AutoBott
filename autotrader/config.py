@@ -144,13 +144,8 @@ OPENING_MAX_FRESH_PREMIUM_USD       = 250.0  # opening-session budget
 MAX_CONTRACTS_PER_TRADE             = 4
 MAX_SAME_DIRECTION_POSITIONS        = 10
 
-# Disable premium override — never allow expensive trades on a $6k account.
-ENABLE_PREMIUM_CAP_QUALITY_OVERRIDE = False
-EXPENSIVE_TRADE_MIN_SIGNAL_SCORE    = 9.9
-EXPENSIVE_TRADE_MIN_DIRECTION_SCORE = 0.90
-EXPENSIVE_TRADE_MIN_RVOL            = 2.5
-EXPENSIVE_TRADE_MAX_SPREAD_PCT      = 5.0
-OPENING_EXPENSIVE_TRADE_MIN_SIGNAL_SCORE = 9.9
+# Premium-cap quality override (legacy) is permanently removed; trades that
+# exceed MAX_PREMIUM_PER_TRADE_USD are always rejected.
 
 # Expensive names are allowed only when premium stays inside per-trade budget;
 # opening window allows at most one expensive-name fresh entry.
@@ -471,21 +466,14 @@ ENTRY_CONFIRM_BARS                     = 3
 ENTRY_CONFIRM_BYPASS_MIN_SIGNAL_SCORE  = 0.0   # always bypass if confirmation somehow re-enabled
 ENTRY_CONFIRM_MOMENTUM_THRESHOLD_PCT   = 0.14
 
-# Fast-start doctrine: disabled — scanner already enforces direction conviction and RVOL.
-# Keeping thresholds at 0 so the gate is a no-op; the scanner's own gates are sufficient.
-ENABLE_FAST_START_QUALITY_GATE         = False
-FAST_START_MIN_SIGNAL_SCORE            = 7.2
-FAST_START_MIN_DIRECTION_SCORE         = 0.30
-FAST_START_MIN_RVOL                    = 0.45
-FAST_START_MIN_ABS_ROC_PCT             = 0.10
-FAST_START_MIN_VWAP_DISTANCE_PCT       = 0.05
-OPENING_FAST_START_MIN_SIGNAL_SCORE    = 7.5
-OPENING_FAST_START_MIN_DIRECTION_SCORE = 0.35
-OPENING_FAST_START_MIN_RVOL            = 0.50
-OPENING_FAST_START_MIN_ABS_ROC_PCT     = 0.12
-OPENING_FAST_START_MIN_VWAP_DISTANCE_PCT = 0.06
+# Fast-start gate (legacy) is permanently removed; the scanner's own direction
+# conviction and RVOL thresholds are the single source of truth for entry quality.
 
 # Feed freshness guardrail for intraday bars (scanner).
+# Stock-bar feed (iex/sip) cooldown after a 403 forbidden response.
+# After this many seconds the feed is retried automatically; before this it is
+# skipped without retry. Prevents permanent disablement from a transient 403.
+STOCK_BAR_FEED_FORBIDDEN_TTL_SECONDS   = 600
 # If data timestamps are older than this, signals are rejected as stale.
 STALE_BAR_MAX_AGE_SECONDS              = 900
 
@@ -583,7 +571,13 @@ INDEPENDENT_STOPLOSS_REQUIRE_STALE_LOOP  = False
 PAPER_EXECUTION_FRICTION_PER_CONTRACT    = 1.0
 TRADES_MAX_ROWS                    = 5000
 
-PAPER = True   # paper trading — set to False only when ready for live
+# PAPER may be overridden via the ALPACA_PAPER env var ("0"/"false"/"no" → live).
+# Default is paper trading. Switching to live requires confirmed live API keys.
+_PAPER_ENV = str(os.getenv("ALPACA_PAPER", "")).strip().lower()
+if _PAPER_ENV in {"0", "false", "no", "off", "live"}:
+    PAPER = False
+else:
+    PAPER = True
 
 
 # ---------------------------------------------------------------------------

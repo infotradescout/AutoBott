@@ -94,7 +94,24 @@ class AlpacaDataClient:
         self._rate_limited_until: dict[str, float] = {}
         self._option_quote_cache: dict[str, tuple[float, dict[str, float | None]]] = {}
         self._intraday_bars_cache: dict[str, tuple[float, pd.DataFrame]] = {}
-        self._forbidden_stock_bar_feeds: set[str] = set()
+        # Per-feed cooldown after a 403 forbidden response: feed -> monotonic
+        # timestamp until which the feed should be skipped. After that point
+        # we re-attempt so a transient 403 does not permanently disable a feed.
+        self._forbidden_stock_bar_feeds: dict[str, float] = {}
+
+    def _is_feed_forbidden(self, feed: str) -> bool:
+        until = self._forbidden_stock_bar_feeds.get(feed)
+        if not until:
+            return False
+        if time.monotonic() >= until:
+            self._forbidden_stock_bar_feeds.pop(feed, None)
+            return False
+        return True
+
+    def _block_feed(self, feed: str) -> None:
+        ttl = float(getattr(config, "STOCK_BAR_FEED_FORBIDDEN_TTL_SECONDS", 600.0) or 600.0)
+        ttl = max(30.0, ttl)
+        self._forbidden_stock_bar_feeds[feed] = time.monotonic() + ttl
 
     @staticmethod
     def _is_429_error(exc: Exception) -> bool:
@@ -168,7 +185,7 @@ class AlpacaDataClient:
             start_utc = (now_utc - timedelta(days=lookback_days)).isoformat().replace("+00:00", "Z")
             end_utc = now_utc.isoformat().replace("+00:00", "Z")
             for feed in _stock_bar_feed_candidates():
-                if feed in self._forbidden_stock_bar_feeds:
+                if self._is_feed_forbidden(feed):
                     continue
                 try:
                     resp = self.data_session.get(
@@ -206,7 +223,7 @@ class AlpacaDataClient:
                             return df[["timestamp", "open", "high", "low", "close", "volume"]]
                 except Exception as exc:  # noqa: BLE001
                     if self._is_403_forbidden(exc):
-                        self._forbidden_stock_bar_feeds.add(feed)
+                        self._block_feed(feed)
                     print(f"[data] get_stock_bars Alpaca failed for {symbol} tf={timeframe} feed={feed}: {exc}")
 
         # Fallback: yfinance
@@ -302,7 +319,7 @@ class AlpacaDataClient:
         start_utc = market_open.astimezone(pytz.UTC).isoformat().replace("+00:00", "Z")
         end_utc = now_et.astimezone(pytz.UTC).isoformat().replace("+00:00", "Z")
         for feed in _stock_bar_feed_candidates():
-            if feed in self._forbidden_stock_bar_feeds:
+            if self._is_feed_forbidden(feed):
                 continue
             try:
                 self._throttle("stocks_bars")
@@ -347,7 +364,7 @@ class AlpacaDataClient:
                 if self._is_429_error(exc):
                     self._mark_rate_limited("stocks_bars")
                 if self._is_403_forbidden(exc):
-                    self._forbidden_stock_bar_feeds.add(feed)
+                    self._block_feed(feed)
                 print(f"[data] get_intraday_bars_since_open Alpaca failed for {symbol} feed={feed}: {exc}")
 
         # Fallback: yfinance
@@ -408,7 +425,7 @@ class AlpacaDataClient:
         start_utc = start_et.astimezone(pytz.UTC).isoformat().replace("+00:00", "Z")
         end_utc = end_et.astimezone(pytz.UTC).isoformat().replace("+00:00", "Z")
         for feed in _stock_bar_feed_candidates():
-            if feed in self._forbidden_stock_bar_feeds:
+            if self._is_feed_forbidden(feed):
                 continue
             try:
                 resp = self.data_session.get(
@@ -448,7 +465,7 @@ class AlpacaDataClient:
                             return df[["timestamp", "open", "high", "low", "close", "volume"]]
             except Exception as exc:  # noqa: BLE001
                 if self._is_403_forbidden(exc):
-                    self._forbidden_stock_bar_feeds.add(feed)
+                    self._block_feed(feed)
                 print(f"[data] get_intraday_bars_window Alpaca failed for {symbol} feed={feed}: {exc}")
 
         # Fallback: yfinance
