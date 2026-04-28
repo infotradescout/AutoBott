@@ -4816,9 +4816,13 @@ def watch_page():
     }
     * { box-sizing:border-box; }
     body {
-      margin:0; color:var(--text);
-      font-family:"Avenir Next","Nunito Sans","Segoe UI",Tahoma,sans-serif;
-      background:
+        const controller = new AbortController();
+        const timeoutMs = 6000;
+        const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
+        const sep = url.includes("?") ? "&" : "?";
+        const reqUrl = `${url}${sep}_=${Date.now()}`;
+        const res = await fetch(reqUrl, { cache: "no-store", signal: controller.signal });
+        clearTimeout(timeoutId);
         radial-gradient(1200px 500px at 100% -20%, rgba(49,203,255,.14), transparent 45%),
         radial-gradient(900px 420px at 0% -10%, rgba(37,211,102,.1), transparent 40%),
         linear-gradient(150deg, #060b12 0%, #0d1726 50%, #0a111b 100%);
@@ -5983,7 +5987,11 @@ def home():
       try {
         const sep = url.includes("?") ? "&" : "?";
         const reqUrl = `${url}${sep}_=${Date.now()}`;
-        const res = await fetch(reqUrl, { cache: "no-store" });
+        const controller = new AbortController();
+        const timeoutMs = 6000;
+        const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
+        const res = await fetch(reqUrl, { cache: "no-store", signal: controller.signal });
+        clearTimeout(timeoutId);
         const data = await res.json();
         if (!res.ok) return { error: data.error || "request failed" };
         return data;
