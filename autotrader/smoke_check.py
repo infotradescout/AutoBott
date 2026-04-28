@@ -61,6 +61,9 @@ def _smoke_dashboard_routes() -> list[str]:
         ("GET", "/api/exit-reliability", {200}),
         ("GET", "/api/ticker-scorecards", {200}),
         ("GET", "/api/weekly-review", {200}),
+        ("GET", "/api/funnel", {200}),
+        ("GET", "/api/diagnostics", {200}),
+        ("GET", "/api/scan-summary-today", {200}),
     ]
 
     for method, route, ok_statuses in checks:

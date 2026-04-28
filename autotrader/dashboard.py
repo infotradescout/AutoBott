@@ -8,6 +8,7 @@ import hmac
 import json
 import os
 import re
+import time
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -4375,6 +4376,206 @@ def api_signals():
         ],
       }
     )
+  except Exception as exc:  # noqa: BLE001
+    return jsonify({"error": str(exc)}), 500
+
+
+# ---------------------------------------------------------------------------
+# Real-data observability endpoints
+# ---------------------------------------------------------------------------
+
+
+def _scan_log_today_count() -> int:
+    rows = _read_csv_rows(SCAN_LOG_CSV, limit=20000, reverse=False)
+    today = _now_et().date()
+    count = 0
+    for row in rows:
+        dt = _parse_ts(row.get("timestamp", ""))
+        if dt and dt.date() == today:
+            count += 1
+    return count
+
+
+def _trades_today_count() -> int:
+    rows = _read_csv_rows(TRADES_CSV, limit=10000, reverse=False)
+    today = _now_et().date()
+    count = 0
+    for row in rows:
+        dt = _parse_ts(row.get("timestamp", ""))
+        if dt and dt.date() == today:
+            count += 1
+    return count
+
+
+def _csv_row_count(path: Path) -> int:
+    if not path.exists():
+        return 0
+    try:
+        with path.open("r", newline="", encoding="utf-8") as f:
+            return max(0, sum(1 for _ in f) - 1)
+    except Exception:
+        return 0
+
+
+@app.get("/api/funnel")
+def api_funnel():
+  """Per-loop entry funnel telemetry (universe → scan → reject → filled).
+
+  Sourced from runtime_state.last_entry_debug, which the trader populates each
+  loop tick. Returns {} when the trader hasn't published a debug snapshot yet.
+  """
+  try:
+    state = load_bot_state() or {}
+    debug = dict(state.get("last_entry_debug") or {})
+    skips = debug.get("skips") or {}
+    if isinstance(skips, dict):
+      top_skips = sorted(
+        ({"reason": str(k), "count": int(v or 0)} for k, v in skips.items()),
+        key=lambda x: -x["count"],
+      )[:10]
+    else:
+      top_skips = []
+    reject_reasons = debug.get("entry_stage4_reject_reasons") or {}
+    if isinstance(reject_reasons, dict):
+      top_rejects = sorted(
+        ({"reason": str(k), "count": int(v or 0)} for k, v in reject_reasons.items()),
+        key=lambda x: -x["count"],
+      )[:10]
+    else:
+      top_rejects = []
+    funnel = {
+      "universe": int(debug.get("watchlist_count", 0) or 0),
+      "scan_pass": int(debug.get("scan_pass_count", 0) or 0),
+      "considered": int(debug.get("signals_considered", 0) or 0),
+      "stage4_reject": int(debug.get("entry_stage4_reject_count", 0) or 0),
+      "stage4_eligible": int(debug.get("entry_stage4_eligible_count", 0) or 0),
+      "orders_submitted": int(debug.get("entry_orders_submitted", 0) or 0),
+      "entries_filled": int(debug.get("entries_filled", 0) or 0),
+    }
+    return jsonify({
+      "loop_ts_et": str(debug.get("loop_ts_et", "") or ""),
+      "chop_filter_active": bool(debug.get("chop_filter_active", False)),
+      "chop_filter_reason": str(debug.get("chop_filter_reason", "") or ""),
+      "index_bias": str(debug.get("index_bias", "") or ""),
+      "watchlist_mode": str(debug.get("watchlist_mode", "") or ""),
+      "funnel": funnel,
+      "top_skips": top_skips,
+      "top_stage4_rejects": top_rejects,
+      "eligible_symbols": list(debug.get("entry_stage4_eligible_symbols") or [])[:25],
+      "rejected_symbols": list(debug.get("entry_stage4_rejected_symbols") or [])[:25],
+      "signal_outcomes": dict(debug.get("signal_outcomes") or {}),
+      "exceptions": list(debug.get("exceptions") or [])[:5],
+    })
+  except Exception as exc:  # noqa: BLE001
+    return jsonify({"error": str(exc)}), 500
+
+
+@app.get("/api/diagnostics")
+def api_diagnostics():
+  """Storage, path, and freshness diagnostics so the operator can verify the
+  dashboard is reading the same files the trader is writing to."""
+  try:
+    data_dir = str(getattr(config, "DATA_DIR", "") or "")
+    obs_path = Path(getattr(config, "OBSERVATION_LOG_CSV_PATH", ""))
+    state_path = Path(getattr(config, "STATE_JSON_PATH", ""))
+    files = {
+      "trades_csv": {
+        **_file_health(TRADES_CSV),
+        "row_count": _csv_row_count(TRADES_CSV),
+        "today_count": _trades_today_count(),
+      },
+      "scan_log_csv": {
+        **_file_health(SCAN_LOG_CSV),
+        "row_count": _csv_row_count(SCAN_LOG_CSV),
+        "today_count": _scan_log_today_count(),
+      },
+      "observation_log_csv": {
+        **_file_health(obs_path),
+        "row_count": _csv_row_count(obs_path),
+      },
+      "runtime_state_json": _file_health(state_path),
+    }
+    state = load_bot_state() or {}
+    heartbeat_iso = str(state.get("heartbeat_iso", "") or state.get("last_loop_iso", "") or "")
+    heartbeat_dt = _parse_state_iso(heartbeat_iso) if heartbeat_iso else None
+    heartbeat_age_seconds: int | None = None
+    if heartbeat_dt is not None:
+      heartbeat_age_seconds = max(0, int((_now_et() - heartbeat_dt).total_seconds()))
+    return jsonify({
+      "data_dir": data_dir,
+      "data_dir_env": str(os.getenv("DATA_DIR", "") or ""),
+      "paper_mode": bool(PAPER),
+      "display_tz": str(DISPLAY_TZ),
+      "now_et": _now_et().strftime("%Y-%m-%d %H:%M:%S ET"),
+      "files": files,
+      "heartbeat_iso": heartbeat_iso,
+      "heartbeat_age_seconds": heartbeat_age_seconds,
+      "runtime_state_keys": sorted(list(state.keys()))[:50],
+      "control_token_required": bool(CONTROL_TOKEN),
+    })
+  except Exception as exc:  # noqa: BLE001
+    return jsonify({"error": str(exc)}), 500
+
+
+@app.get("/api/scan-summary-today")
+def api_scan_summary_today():
+  """Aggregate today's scan_log.csv rows by result and top reject reasons."""
+  try:
+    rows = _today_scan_rows()
+    pass_count = 0
+    fail_count = 0
+    reasons: dict[str, int] = {}
+    stages: dict[str, int] = {}
+    by_symbol: dict[str, dict[str, int]] = {}
+    for row in rows:
+      result = str(row.get("result", "") or "").lower()
+      symbol = str(row.get("symbol", "") or "").upper()
+      if result == "pass":
+        pass_count += 1
+      else:
+        fail_count += 1
+        reason = str(row.get("reason", "") or "").strip() or "unknown"
+        reasons[reason] = reasons.get(reason, 0) + 1
+        stage = _scan_fail_stage(reason)
+        stages[stage] = stages.get(stage, 0) + 1
+      if symbol:
+        bucket = by_symbol.setdefault(symbol, {"pass": 0, "fail": 0})
+        bucket["pass" if result == "pass" else "fail"] += 1
+    top_reasons = sorted(
+      ({"reason": k, "count": v} for k, v in reasons.items()),
+      key=lambda x: -x["count"],
+    )[:15]
+    top_stages = sorted(
+      ({"stage": k, "count": v} for k, v in stages.items()),
+      key=lambda x: -x["count"],
+    )
+    top_symbols = sorted(
+      ({"symbol": s, **counts} for s, counts in by_symbol.items()),
+      key=lambda x: -(int(x.get("pass", 0)) + int(x.get("fail", 0))),
+    )[:25]
+    last_loop_ts, last_loop_rows = _latest_scan_loop_rows(limit=500)
+    last_loop_passes = [
+      {
+        "symbol": str(r.get("symbol", "") or "").upper(),
+        "profile": str(r.get("strategy_profile", "") or ""),
+        "direction": str(r.get("direction", "") or ""),
+        "signal_score": _safe_float(r.get("signal_score"), 0.0),
+        "rvol": _safe_float(r.get("rvol"), 0.0),
+      }
+      for r in last_loop_rows
+      if str(r.get("result", "") or "").lower() == "pass"
+    ]
+    return jsonify({
+      "today": _now_et().date().isoformat(),
+      "total_rows": len(rows),
+      "pass_count": pass_count,
+      "fail_count": fail_count,
+      "top_reject_reasons": top_reasons,
+      "by_stage": top_stages,
+      "top_symbols": top_symbols,
+      "last_loop_ts": last_loop_ts,
+      "last_loop_passes": last_loop_passes,
+    })
   except Exception as exc:  # noqa: BLE001
     return jsonify({"error": str(exc)}), 500
 
