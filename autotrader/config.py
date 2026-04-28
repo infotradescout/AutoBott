@@ -329,16 +329,16 @@ VWAP_NEUTRAL_BAND_PCT     = 0.15  # wider neutral band: within 0.15% of VWAP = n
 MOVEMENT_FORCE_MIN_PCT    = 0.014  # further relaxed for early-session/transition tape
 MOVEMENT_WEAK_VWAP_MULT   = 1.00  # was effectively 1.5 in scanner; only block when very close to VWAP
 DIRECTION_PRICE_MIN_PCT   = 0.004  # slightly more permissive to avoid starving entries
-DIRECTION_CONFLICT_HARD_REJECT = True
-DIRECTION_CONFLICT_SCORE_MULT  = 0.55  # kept for telemetry; hard reject now blocks conflicts
+DIRECTION_CONFLICT_HARD_REJECT = False
+DIRECTION_CONFLICT_SCORE_MULT  = 0.55  # soft penalty when price/momentum disagree
 DIRECTION_CONFLICT_ROC_MIN_PCT = 0.008
 ROC_ACTIVE_MOVE_MIN_PCT   = 0.006
 DIRECTION_CONFIRM_LOOKBACK_BARS = 2
 DIRECTION_MIN_CONFIRM_ALIGNED_BARS = 2
 
 # Direction conviction: minimum weighted-vote score to commit to call/put.
-DIRECTION_CONVICTION_MIN  = 0.65
-DIRECTION_MIN_ALIGNED_VOTES = 4
+DIRECTION_CONVICTION_MIN  = 0.30
+DIRECTION_MIN_ALIGNED_VOTES = 3
 DIRECTION_FAST_ROC_PERIOD  = 5    # short-horizon ROC used in directional voting
 
 ROC_PERIOD                = 10
