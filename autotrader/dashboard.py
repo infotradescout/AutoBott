@@ -36,8 +36,21 @@ from trading_control import (
 )
 from watchlist_control import load_watchlist_control, update_watchlist_control
 
-API_KEY = get_required_env("ALPACA_API_KEY")
-SECRET_KEY = get_required_env("ALPACA_SECRET_KEY")
+def _safe_required_env(name: str) -> tuple[str, str | None]:
+  try:
+    return get_required_env(name), None
+  except Exception as exc:  # noqa: BLE001
+    # Keep dashboard/process alive even when credentials are misconfigured;
+    # diagnostics endpoints can then report the exact issue.
+    return "", str(exc)
+
+
+API_KEY, _api_key_error = _safe_required_env("ALPACA_API_KEY")
+SECRET_KEY, _secret_key_error = _safe_required_env("ALPACA_SECRET_KEY")
+ALPACA_CREDENTIALS_OK = bool(API_KEY and SECRET_KEY)
+ALPACA_CREDENTIALS_ERROR = "; ".join(
+  part for part in (_api_key_error, _secret_key_error) if part
+)
 PAPER = bool(config.PAPER)
 BASE_URL = "https://paper-api.alpaca.markets" if PAPER else "https://api.alpaca.markets"
 DATA_BASE_URL = config.ALPACA_DATA_BASE_URL
@@ -4505,6 +4518,8 @@ def api_diagnostics():
       "data_dir": data_dir,
       "data_dir_env": str(os.getenv("DATA_DIR", "") or ""),
       "paper_mode": bool(PAPER),
+      "alpaca_credentials_ok": bool(ALPACA_CREDENTIALS_OK),
+      "alpaca_credentials_error": str(ALPACA_CREDENTIALS_ERROR or ""),
       "display_tz": str(DISPLAY_TZ),
       "now_et": _now_et().strftime("%Y-%m-%d %H:%M:%S ET"),
       "files": files,
