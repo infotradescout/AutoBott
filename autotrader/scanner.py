@@ -397,6 +397,7 @@ def _profile_signals_for_candidate(
     bars_df: pd.DataFrame,
     now_et: datetime,
     catalyst_mode_active: bool,
+    relaxed_rvol_mode: bool = False,
 ) -> tuple[list[dict[str, Any]], list[str]]:
     """Evaluate all named profiles then fall back to generic continuation.
 
@@ -420,6 +421,7 @@ def _profile_signals_for_candidate(
     direction = str(base_signal.get("direction", "") or "").lower()
     price = float(base_signal.get("price", 0.0) or 0.0)
     vwap = float(base_signal.get("vwap", 0.0) or 0.0)
+    flat_regime = bool(base_signal.get("flat_regime", False))
 
     closes = bars_df["close"].astype(float)
     last2_roc = 0.0
@@ -437,6 +439,12 @@ def _profile_signals_for_candidate(
 
     passed: list[dict[str, Any]] = []
     rejected: list[str] = []
+    profile_rvol_min = 0.20
+    if relaxed_rvol_mode or flat_regime:
+        profile_rvol_min = min(
+            profile_rvol_min,
+            float(getattr(config, "FLAT_REGIME_RVOL_MIN", 0.05) or 0.05),
+        )
 
     # ── Named profiles (priority 1-4) ─────────────────────────────────────
     named_profiles = sorted(
@@ -462,10 +470,10 @@ def _profile_signals_for_candidate(
         profile_ok = False
         profile_reason = ""
         if profile.name == "open_drive_momentum":
-            profile_ok = rvol >= 0.20 and abs(roc) >= 0.01 and distance_from_vwap_pct >= 0.005
+            profile_ok = rvol >= profile_rvol_min and abs(roc) >= 0.01 and distance_from_vwap_pct >= 0.005
             profile_reason = "open-drive momentum"
         elif profile.name == "vwap_continuation":
-            profile_ok = distance_from_vwap_pct <= 3.0 and rvol >= 0.20 and abs(roc) >= 0.01
+            profile_ok = distance_from_vwap_pct <= 3.0 and rvol >= profile_rvol_min and abs(roc) >= 0.01
             profile_reason = "vwap continuation"
         elif profile.name == "reversal_snapback":
             if distance_from_vwap_pct >= 0.20 and abs(last2_roc) >= 0.10:
@@ -478,7 +486,7 @@ def _profile_signals_for_candidate(
                 profile_ok = base_signal.get("direction") in ("call", "put")
             profile_reason = "reversal snapback"
         elif profile.name == "catalyst_impulse":
-            profile_ok = rvol >= 0.20 and abs(roc) >= 0.01
+            profile_ok = rvol >= profile_rvol_min and abs(roc) >= 0.01
             profile_reason = "catalyst impulse"
 
         if not profile_ok:
@@ -1456,6 +1464,7 @@ class IntradayScanner:
                         bars_df=bars_df,
                         now_et=now_et,
                         catalyst_mode_active=_CATALYST_MODE_ACTIVE,
+                        relaxed_rvol_mode=False,
                     )
                     if not profile_signals:
                         _permissive_core = (
@@ -1505,6 +1514,7 @@ class IntradayScanner:
                             bars_df=bars_df,
                             now_et=now_et,
                             catalyst_mode_active=_CATALYST_MODE_ACTIVE,
+                            relaxed_rvol_mode=True,
                         )
                         if not profile_signals:
                             _permissive_core = (
