@@ -2060,6 +2060,34 @@ def main():
         if request_qty <= 0:
             return 0, None, {}
 
+        def _live_position_qty(symbol_value: str) -> int:
+            try:
+                for live_pos in broker.get_open_option_positions():
+                    live_symbol = str(getattr(live_pos, "symbol", "") or "")
+                    if live_symbol == symbol_value:
+                        return max(0, position_qty_as_int(getattr(live_pos, "qty", 0)))
+            except Exception as exc:  # noqa: BLE001
+                print(f"[{ts(now_et)}] {label} {symbol_value}: live position check failed: {exc}")
+            return 0
+
+        def _open_sell_remaining_qty(symbol_value: str) -> int:
+            remaining = 0
+            try:
+                for open_order in broker.get_open_orders_for_symbol(symbol=symbol_value, side="sell"):
+                    order_qty = position_qty_as_int(getattr(open_order, "qty", 0))
+                    filled_qty = position_qty_as_int(getattr(open_order, "filled_qty", 0))
+                    remaining += max(0, order_qty - filled_qty)
+            except Exception as exc:  # noqa: BLE001
+                print(f"[{ts(now_et)}] {label} {symbol_value}: open sell check failed: {exc}")
+            return max(0, remaining)
+
+        live_qty = _live_position_qty(symbol)
+        if live_qty <= 0:
+            return 0, None, {}
+        request_qty = min(request_qty, live_qty)
+        if request_qty <= 0:
+            return 0, None, {}
+
         if poll_seconds_override is None:
             poll_seconds = max(1, int(config.EXIT_ORDER_STATUS_POLL_SECONDS))
         else:
@@ -2104,22 +2132,30 @@ def main():
         }
 
         try:
-            existing_sells = broker.get_open_orders_for_symbol(symbol=symbol, side="sell")
-            for existing in existing_sells:
-                existing_order_id = str(getattr(existing, "id", "") or "")
-                if not existing_order_id:
-                    continue
-                try:
-                    broker.cancel_order(existing_order_id)
-                except Exception as exc:  # noqa: BLE001
-                    print(
-                        f"[{ts(now_et)}] {label} {symbol} qty={request_qty}: "
-                        f"cancel existing close order {existing_order_id} failed: {exc}"
-                    )
+            open_sell_qty = _open_sell_remaining_qty(symbol)
+            if open_sell_qty > 0:
+                if open_sell_qty >= request_qty:
+                    execution_meta["status"] = "existing_exit_open"
+                    return 0, None, execution_meta
+                request_qty = max(0, request_qty - open_sell_qty)
+                if request_qty <= 0:
+                    execution_meta["status"] = "existing_exit_open"
+                    return 0, None, execution_meta
 
             bid_price = 0.0
             last_status = ""
             for attempt in range(1, retry_attempts + 1):
+                live_qty = _live_position_qty(symbol)
+                if live_qty <= 0:
+                    execution_meta["status"] = "position_flattened"
+                    return 0, None, execution_meta
+
+                open_sell_qty = _open_sell_remaining_qty(symbol)
+                safe_qty = max(0, min(request_qty, live_qty) - open_sell_qty)
+                if safe_qty <= 0:
+                    execution_meta["status"] = "existing_exit_open"
+                    return 0, None, execution_meta
+
                 quote_snapshot = _option_quote_snapshot(data_client, symbol)
                 bid_price = float(quote_snapshot.get("bid") or 0.0)
                 ask_price = float(quote_snapshot.get("ask") or 0.0)
@@ -2149,15 +2185,15 @@ def main():
                 execution_meta["submit_mode"] = "limit"
                 execution_meta["attempts"] = attempt
                 submit_ts = time.time()
-                order = broker.place_option_limit_sell(symbol, request_qty, limit_price)
+                order = broker.place_option_limit_sell(symbol, safe_qty, limit_price)
                 order_id = str(getattr(order, "id", "") or "")
                 if not order_id:
-                    print(f"[{ts(now_et)}] {label} {symbol} qty={request_qty}: limit close submitted without order id.")
+                    print(f"[{ts(now_et)}] {label} {symbol} qty={safe_qty}: limit close submitted without order id.")
                     return 0, None, execution_meta
                 filled_qty, filled_avg_price, status, still_open = _await_order_fill(
                     broker,
                     order_id=order_id,
-                    requested_qty=request_qty,
+                    requested_qty=safe_qty,
                     now_et=now_et,
                     label=f"{label} {symbol}",
                     poll_seconds=poll_seconds,
@@ -2187,16 +2223,27 @@ def main():
             execution_meta["submit_mode"] = "market"
             execution_meta["attempts"] = int(execution_meta.get("attempts", 0) or 0) + 1
             execution_meta["used_market_fallback"] = True
+
+            live_qty = _live_position_qty(symbol)
+            if live_qty <= 0:
+                execution_meta["status"] = "position_flattened"
+                return 0, None, execution_meta
+            open_sell_qty = _open_sell_remaining_qty(symbol)
+            safe_qty = max(0, min(request_qty, live_qty) - open_sell_qty)
+            if safe_qty <= 0:
+                execution_meta["status"] = "existing_exit_open"
+                return 0, None, execution_meta
+
             submit_ts = time.time()
-            order = broker.close_option_market(symbol, request_qty)
+            order = broker.close_option_market(symbol, safe_qty)
             order_id = str(getattr(order, "id", "") or "")
             if not order_id:
-                print(f"[{ts(now_et)}] {label} {symbol} qty={request_qty}: market close submitted without order id.")
+                print(f"[{ts(now_et)}] {label} {symbol} qty={safe_qty}: market close submitted without order id.")
                 return 0, None, execution_meta
             filled_qty, filled_avg_price, status, _still_open = _await_order_fill(
                 broker,
                 order_id=order_id,
-                requested_qty=request_qty,
+                requested_qty=safe_qty,
                 now_et=now_et,
                 label=f"{label} {symbol} market",
                 poll_seconds=poll_seconds,
@@ -2213,7 +2260,7 @@ def main():
                     4,
                 )
                 return filled_qty, filled_avg_price, execution_meta
-            print(f"[{ts(now_et)}] {label} {symbol} qty={request_qty}: market fallback exit not filled.")
+            print(f"[{ts(now_et)}] {label} {symbol} qty={safe_qty}: market fallback exit not filled.")
             return 0, None, execution_meta
         except Exception as exc:  # noqa: BLE001
             print(f"[{ts(now_et)}] {label} {symbol} qty={request_qty}: close error: {exc}")

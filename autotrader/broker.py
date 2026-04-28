@@ -43,6 +43,18 @@ def _normalize_asset_class(raw_asset_class) -> str:
     return text
 
 
+def _normalize_order_side(raw_side) -> str:
+    """Normalize SDK/rest order side values into a lowercase label."""
+    try:
+        value = getattr(raw_side, "value", raw_side)
+    except Exception:  # noqa: BLE001
+        value = raw_side
+    text = str(value or "").strip().lower()
+    if "." in text:
+        text = text.split(".")[-1]
+    return text
+
+
 class AlpacaBroker:
     def __init__(self, api_key: str, secret_key: str, paper: bool = True):
         self.trading_client = TradingClient(api_key, secret_key, paper=paper)
@@ -139,7 +151,7 @@ class AlpacaBroker:
             orders = self.trading_client.get_orders(filter=req) or []
             if side is not None:
                 side_lc = str(side).lower()
-                orders = [o for o in orders if str(getattr(o, "side", "")).lower() == side_lc]
+                orders = [o for o in orders if _normalize_order_side(getattr(o, "side", "")) == side_lc]
             # Prefer most recently submitted first when available.
             orders.sort(key=lambda o: str(getattr(o, "submitted_at", "") or ""), reverse=True)
             return orders
