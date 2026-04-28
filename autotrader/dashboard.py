@@ -4079,20 +4079,24 @@ def api_watch_history():
 def api_daily_review():
     try:
         now = _now_et()
+    cache_window_seconds = max(5, int(getattr(config, "DASHBOARD_DAILY_REVIEW_CACHE_SECONDS", 30) or 30))
         cache_ts = _REVIEW_CACHE.get("ts")
         cache_payload = _REVIEW_CACHE.get("payload")
         if cache_ts and cache_payload is not None:
             age_seconds = (now - cache_ts).total_seconds()
-            if age_seconds < 300:
+      if age_seconds < cache_window_seconds:
                 return jsonify(cache_payload)
 
         payload = _build_daily_review_payload()
-    cache_window_seconds = max(5, int(getattr(config, "DASHBOARD_DAILY_REVIEW_CACHE_SECONDS", 30) or 30))
+    _REVIEW_CACHE["ts"] = now
+    _REVIEW_CACHE["payload"] = payload
+    return jsonify(payload)
+  except Exception as exc:  # noqa: BLE001
         return jsonify({"error": str(exc)}), 500
 
 
 def _pnl_usd_from_trade_row(row: dict[str, str]) -> float:
-      if age_seconds < cache_window_seconds:
+  entry_price = _safe_float(row.get("entry_price"), 0.0)
     exit_price = _safe_float(row.get("exit_price"), 0.0)
     qty = int(_safe_float(row.get("qty"), 0))
     if qty <= 0 or entry_price <= 0 or exit_price <= 0:
