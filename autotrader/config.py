@@ -113,22 +113,22 @@ SCAN_DAILY_BARS     = 30
 # ---------------------------------------------------------------------------
 
 # Risk limits scaled for larger paper balances to avoid premature day/week lockouts.
-MAX_POSITIONS                       = 10   # let buying power be the real limit
+MAX_POSITIONS                       = 3
 POSITION_SIZE_USD                   = 125   # baseline premium budget per trade
 RISK_PER_TRADE_PCT                  = 0.017
 MAX_POSITION_SIZE_USD               = 150.0  # per-trade premium cap
 DRAWDOWN_REDUCE_AFTER_CONSEC_LOSSES = 2
 DRAWDOWN_SIZE_MULTIPLIER            = 0.75
-DAILY_LOSS_LIMIT_USD                = 1500.0
-WEEKLY_LOSS_LIMIT_USD               = 5000.0
-CONSECUTIVE_LOSS_LIMIT              = 6
+DAILY_LOSS_LIMIT_USD                = 450.0
+WEEKLY_LOSS_LIMIT_USD               = 1500.0
+CONSECUTIVE_LOSS_LIMIT              = 3
 # Net P&L circuit breaker (runtime telemetry-based):
 # Pause new entries once the day is sufficiently red in realized net P&L.
-INTRADAY_NET_LOSS_LIMIT_USD         = 1200.0
+INTRADAY_NET_LOSS_LIMIT_USD         = 350.0
 # Early-red guard: stop new entries if still net red after first few trades.
-EARLY_RED_GUARD_ENABLED             = False
-EARLY_RED_GUARD_MIN_CLOSED_TRADES   = 6
-EARLY_RED_GUARD_MAX_NET_PNL_USD     = -500.0
+EARLY_RED_GUARD_ENABLED             = True
+EARLY_RED_GUARD_MIN_CLOSED_TRADES   = 3
+EARLY_RED_GUARD_MAX_NET_PNL_USD     = -150.0
 
 # Loss throttle: after 2 consecutive losses, require stronger setups.
 LOSS_THROTTLE_AFTER_CONSEC_LOSSES   = 2
@@ -228,9 +228,9 @@ OPENING_STRICT_MIN_ROC_PCT                   = 0.0
 OPENING_STRICT_MIN_VWAP_DISTANCE_PCT         = 0.0
 OPENING_MAX_SIGNAL_CANDIDATES                = 5
 OPENING_MAX_FRESH_ENTRIES                    = 4
-OPENING_MAX_CONCURRENT_POSITIONS             = 4
-OPENING_MAX_NEW_ENTRY_ATTEMPTS_PER_LOOP      = 6
-MAX_NEW_ENTRY_ATTEMPTS_PER_LOOP              = 6
+OPENING_MAX_CONCURRENT_POSITIONS             = 2
+OPENING_MAX_NEW_ENTRY_ATTEMPTS_PER_LOOP      = 2
+MAX_NEW_ENTRY_ATTEMPTS_PER_LOOP              = 2
 OPENING_MAX_EXPENSIVE_ENTRIES                = 0    # no expensive entries in opening window on $6k account
 OPENING_EXPENSIVE_MAX_PREMIUM_USD            = 100.0  # same cap as regular trades
 
@@ -240,7 +240,7 @@ OPENING_EXPENSIVE_MAX_PREMIUM_USD            = 100.0  # same cap as regular trad
 # ---------------------------------------------------------------------------
 
 # Stop loss baseline scaled up for larger-account operation while preserving fast exits.
-STOP_LOSS_USD          = 60.0
+STOP_LOSS_USD          = 45.0
 STOP_LOSS_PCT          = 0.35   # 35% hard stop
 
 # Legacy immediate TP knob retained for backward compatibility only.
@@ -338,8 +338,8 @@ DIRECTION_CONFLICT_ROC_MIN_PCT = 0.008
 ROC_ACTIVE_MOVE_MIN_PCT   = 0.006
 
 # Direction conviction: minimum weighted-vote score to commit to call/put.
-DIRECTION_CONVICTION_MIN  = 0.45  # allow earlier open momentum participation with moderate agreement
-DIRECTION_MIN_ALIGNED_VOTES = 3     # 3 of 5 signals must agree on direction
+DIRECTION_CONVICTION_MIN  = 0.55
+DIRECTION_MIN_ALIGNED_VOTES = 4
 DIRECTION_FAST_ROC_PERIOD  = 5    # short-horizon ROC used in directional voting
 
 ROC_PERIOD                = 10
