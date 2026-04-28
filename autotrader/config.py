@@ -221,18 +221,18 @@ ANTI_CHURN_HOLD_MINUTES            = 0
 
 # Opening strict mode (09:30+N minutes): trade fewer, stronger setups only.
 OPENING_STRICT_WINDOW_MINUTES                = 20
-OPENING_STRICT_MIN_SIGNAL_SCORE              = 4.0
+OPENING_STRICT_MIN_SIGNAL_SCORE              = 6.5
 OPENING_STRICT_CONFIRM_BARS                  = 3
 OPENING_STRICT_CONFIRM_MOMENTUM_THRESHOLD_PCT = 0.22
-OPENING_STRICT_MIN_DIRECTION_SCORE           = 0.0
-OPENING_STRICT_MIN_RVOL                      = 0.0
-OPENING_STRICT_MIN_ROC_PCT                   = 0.0
-OPENING_STRICT_MIN_VWAP_DISTANCE_PCT         = 0.0
+OPENING_STRICT_MIN_DIRECTION_SCORE           = 0.65
+OPENING_STRICT_MIN_RVOL                      = 1.0
+OPENING_STRICT_MIN_ROC_PCT                   = 0.05
+OPENING_STRICT_MIN_VWAP_DISTANCE_PCT         = 0.03
 OPENING_MAX_SIGNAL_CANDIDATES                = 5
 OPENING_MAX_FRESH_ENTRIES                    = 4
 OPENING_MAX_CONCURRENT_POSITIONS             = 2
-OPENING_MAX_NEW_ENTRY_ATTEMPTS_PER_LOOP      = 2
-MAX_NEW_ENTRY_ATTEMPTS_PER_LOOP              = 2
+OPENING_MAX_NEW_ENTRY_ATTEMPTS_PER_LOOP      = 1
+MAX_NEW_ENTRY_ATTEMPTS_PER_LOOP              = 1
 OPENING_MAX_EXPENSIVE_ENTRIES                = 0    # no expensive entries in opening window on $6k account
 OPENING_EXPENSIVE_MAX_PREMIUM_USD            = 100.0  # same cap as regular trades
 
@@ -363,7 +363,7 @@ IV_RANK_MIN               = 0.0   # no minimum IV rank — trade any setup
 IV_RANK_MAX               = 99.0
 
 ENABLE_SIGNAL_SCORING     = True
-MIN_SIGNAL_SCORE          = 3.0   # data-collection floor; raise later with real trade stats
+MIN_SIGNAL_SCORE          = 6.5
 VOLATILITY_PRIORITY_WEIGHT = 3.0  # make volatility the top signal driver
 TREND_PRIORITY_WEIGHT      = 1.0
 FLOW_PRIORITY_WEIGHT       = 1.0
@@ -422,7 +422,7 @@ CATALYST_RELAXED_RVOL_MIN         = 1.0
 CATALYST_DISABLE_RSI              = True
 CATALYST_ALLOW_IV_FALLBACK        = True
 CATALYST_RELAXED_IV_RANK_MAX      = 90.0
-CATALYST_RELAXED_MIN_SIGNAL_SCORE = 2.5
+CATALYST_RELAXED_MIN_SIGNAL_SCORE = 6.5
 
 
 # ---------------------------------------------------------------------------

@@ -2866,6 +2866,16 @@ def main():
                     f"{before_opening}->{len(signals)} (cap={opening_signal_cap})."
                 )
 
+        if signals:
+            signals.sort(
+                key=lambda s: (
+                    float(s.get("signal_score", 0.0) or 0.0),
+                    float(s.get("direction_score", 0.0) or 0.0),
+                    float(s.get("rvol", 0.0) or 0.0),
+                ),
+                reverse=True,
+            )
+
         if not pdt_allowed:
             print(
                 f"[{ts(now_et)}] PDT broker flag: no new entries reported. "

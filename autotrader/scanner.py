@@ -471,9 +471,9 @@ def _profile_signals_for_candidate(
             generic_reason = ""
             if signal_score >= float(generic.min_signal_score):
                 has_direction = direction in ("call", "put")
-                has_roc = abs(roc) >= 0.015  # any measurable momentum
-                has_vwap_side = distance_from_vwap_pct >= 0.01  # not pinned to VWAP
-                generic_ok = has_direction and (has_roc or has_vwap_side)
+                has_roc = abs(roc) >= 0.05
+                has_vwap_side = distance_from_vwap_pct >= 0.03
+                generic_ok = has_direction and has_roc and has_vwap_side
                 if generic_ok:
                     generic_reason = (
                         f"generic continuation | {direction.upper()} | "
