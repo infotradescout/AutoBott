@@ -913,11 +913,17 @@ def _scan_ticker_details(
             effective_rvol_min = min(effective_rvol_min, float(config.OPENING_RVOL_MIN))
         if is_at_or_after(now_et, config.RVOL_RELAX_AFTER):
             effective_rvol_min = min(effective_rvol_min, float(config.RVOL_RELAXED_MIN))
+        if flat_regime_active:
+            effective_rvol_min = min(
+                effective_rvol_min,
+                float(getattr(config, "FLAT_REGIME_RVOL_MIN", 0.05) or 0.05),
+            )
         if force_relaxed_rvol:
             effective_rvol_min = min(effective_rvol_min, 0.05)
-        # Apply learning multiplier without re-imposing a 1.0x hard floor; let
-        # CATALYST/OPENING/RELAX/force_relaxed_rvol pathways actually relax.
-        effective_rvol_min = max(0.50, effective_rvol_min * float(learning.get("rvol_min_mult", 1.0) or 1.0))
+        # Apply learning multiplier but preserve relaxed-mode intent.
+        # Fail-open / flat-regime should be able to go down to 0.05x.
+        floor = 0.05 if (force_relaxed_rvol or flat_regime_active) else 0.50
+        effective_rvol_min = max(floor, effective_rvol_min * float(learning.get("rvol_min_mult", 1.0) or 1.0))
         if rvol < effective_rvol_min:
             return _scan_failure(f"RVOL {rvol:.1f}x (too low)")
 
