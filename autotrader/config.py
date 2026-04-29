@@ -115,7 +115,7 @@ SCAN_DAILY_BARS     = 30
 # ---------------------------------------------------------------------------
 
 # Risk limits scaled for larger paper balances to avoid premature day/week lockouts.
-MAX_POSITIONS                       = 3
+MAX_POSITIONS                       = 2
 POSITION_SIZE_USD                   = 175   # baseline premium budget per trade
 RISK_PER_TRADE_PCT                  = 0.017
 MAX_POSITION_SIZE_USD               = 150.0  # per-trade premium cap
@@ -139,9 +139,9 @@ LOSS_THROTTLE_MIN_VOLATILITY_SCORE  = 1.5  # after 2 losses require volatility_s
 
 # Capital doctrine: $150 max per trade, $450 max total open at once (3 positions × $150).
 MAX_PREMIUM_PER_TRADE_USD           = 275.0  # raised: live funnel showed premium_per_trade_cap as top blocker
-MAX_TOTAL_OPEN_PREMIUM_USD          = 1500.0  # scaled for $6k account
+MAX_TOTAL_OPEN_PREMIUM_USD          = 450.0
 OPENING_MAX_FRESH_PREMIUM_USD       = 250.0  # opening-session budget
-MAX_CONTRACTS_PER_TRADE             = 4
+MAX_CONTRACTS_PER_TRADE             = 1
 MAX_SAME_DIRECTION_POSITIONS        = 10
 
 # Premium-cap quality override (legacy) is permanently removed; trades that
@@ -188,18 +188,18 @@ PREOPEN_READY_MINUTES              = 10
 HARD_CLOSE_TIME                    = "16:00"   # force-close all positions at market close
 OPTION_EXPIRY_EXIT_TIME            = "15:45"   # exit expiring 0-2DTE contracts 15 min before close
 OPTION_FORCE_EXIT_DAYS_BEFORE_EXPIRY = 0    # exit on expiry day itself (intraday)
-NO_NEW_TRADES_BEFORE               = "00:00"   # disabled gate: allow all-day candidate evaluation
-NO_NEW_TRADES_AFTER                = "23:59"   # disabled gate: avoid false after/before window blocks
+NO_NEW_TRADES_BEFORE               = "09:30"
+NO_NEW_TRADES_AFTER                = "15:30"   # avoid late-day theta/liquidity decay for new entries
 SCAN_MORNING_TIME                  = "09:30"
 OBSERVATION_END_TIME               = "10:00"
 OBSERVATION_ENABLED                = False  # disabled: skip observation window, trade from 09:30
-ENABLE_PREMARKET_OPENING_SIGNALS   = True
+ENABLE_PREMARKET_OPENING_SIGNALS   = False
 PREMARKET_SIGNAL_WINDOW_START      = "08:00"
 PREMARKET_SIGNAL_WINDOW_END        = "09:30"
 PREMARKET_REPORT_READY_TIME        = "08:20"
 PREMARKET_LOOKBACK_MINUTES         = 75
 PREMARKET_MAX_SIGNALS              = 6
-PREMARKET_APPLY_UNTIL              = "09:40"
+PREMARKET_APPLY_UNTIL              = "10:35"
 PREMARKET_SCAN_INTERVAL_SECONDS    = 120
 PREMARKET_SCAN_MAX_RUNS            = 0
 
@@ -215,8 +215,8 @@ MAX_HOLD_MINUTES                   = 45    # rotate capital sooner when trades f
 ANTI_CHURN_HOLD_MINUTES            = 0
 
 # Opening strict mode (09:30+N minutes): trade fewer, stronger setups only.
-OPENING_STRICT_WINDOW_MINUTES                = 20
-OPENING_STRICT_MIN_SIGNAL_SCORE              = 6.5
+OPENING_STRICT_WINDOW_MINUTES                = 60
+OPENING_STRICT_MIN_SIGNAL_SCORE              = 8.0
 OPENING_STRICT_CONFIRM_BARS                  = 3
 OPENING_STRICT_CONFIRM_MOMENTUM_THRESHOLD_PCT = 0.22
 OPENING_STRICT_MIN_DIRECTION_SCORE           = 0.65
@@ -224,7 +224,7 @@ OPENING_STRICT_MIN_RVOL                      = 1.0
 OPENING_STRICT_MIN_ROC_PCT                   = 0.05
 OPENING_STRICT_MIN_VWAP_DISTANCE_PCT         = 0.03
 OPENING_MAX_SIGNAL_CANDIDATES                = 5
-OPENING_MAX_FRESH_ENTRIES                    = 4
+OPENING_MAX_FRESH_ENTRIES                    = 2
 OPENING_MAX_CONCURRENT_POSITIONS             = 2
 OPENING_MAX_NEW_ENTRY_ATTEMPTS_PER_LOOP      = 1
 MAX_NEW_ENTRY_ATTEMPTS_PER_LOOP              = 1
@@ -326,13 +326,13 @@ RVOL_RELAXED_MIN          = 1.0
 RVOL_IGNORE_AFTER         = "16:00"  # CRITICAL FIX: was 10:30 — never fully disable RVOL gate
 ATR_PCT_MIN               = 0.3   # very low ATR floor — don't filter out ETFs
 VWAP_NEUTRAL_BAND_PCT     = 0.15  # wider neutral band: within 0.15% of VWAP = neutral, halve VWAP vote weight
-MOVEMENT_FORCE_MIN_PCT    = 0.014  # further relaxed for early-session/transition tape
+MOVEMENT_FORCE_MIN_PCT    = 0.05
 MOVEMENT_WEAK_VWAP_MULT   = 1.00  # was effectively 1.5 in scanner; only block when very close to VWAP
-DIRECTION_PRICE_MIN_PCT   = 0.004  # slightly more permissive to avoid starving entries
-DIRECTION_CONFLICT_HARD_REJECT = False
+DIRECTION_PRICE_MIN_PCT   = 0.03
+DIRECTION_CONFLICT_HARD_REJECT = True
 DIRECTION_CONFLICT_SCORE_MULT  = 0.55  # soft penalty when price/momentum disagree
 DIRECTION_CONFLICT_ROC_MIN_PCT = 0.008
-ROC_ACTIVE_MOVE_MIN_PCT   = 0.006
+ROC_ACTIVE_MOVE_MIN_PCT   = 0.04
 DIRECTION_CONFIRM_LOOKBACK_BARS = 2
 DIRECTION_MIN_CONFIRM_ALIGNED_BARS = 2
 
@@ -344,21 +344,21 @@ DIRECTION_FAST_ROC_PERIOD  = 5    # short-horizon ROC used in directional voting
 ROC_PERIOD                = 10
 ROC_BULL_MIN              = 0.05  # lowered from 0.12 — weak momentum is still momentum
 ROC_BEAR_MAX              = -0.05 # loosened from -0.12
-ENABLE_ROC_FILTER         = False
+ENABLE_ROC_FILTER         = True
 
 RSI_EARLY_MIN_PERIOD      = 5
 RSI_STRICT_AFTER_TIME     = "10:15"
-ENABLE_RSI_FILTER         = False
-RSI_CALL_MIN              = 40.0  # allow continuation entries before RSI fully expands
-RSI_CALL_MAX              = 95.0  # avoid rejecting trend continuation in high momentum tape
-RSI_PUT_MIN               = 5.0   # allow deeper downside continuation setups
-RSI_PUT_MAX               = 60.0  # widen bearish acceptance around transition zones
+ENABLE_RSI_FILTER         = True
+RSI_CALL_MIN              = 48.0
+RSI_CALL_MAX              = 78.0
+RSI_PUT_MIN               = 22.0
+RSI_PUT_MAX               = 52.0
 
 IV_RANK_MIN               = 0.0   # no minimum IV rank — trade any setup
 IV_RANK_MAX               = 99.0
 
 ENABLE_SIGNAL_SCORING     = True
-MIN_SIGNAL_SCORE          = 3.0
+MIN_SIGNAL_SCORE          = 6.5
 VOLATILITY_PRIORITY_WEIGHT = 3.0  # make volatility the top signal driver
 TREND_PRIORITY_WEIGHT      = 1.0
 FLOW_PRIORITY_WEIGHT       = 1.0
@@ -369,8 +369,8 @@ ENTRY_BLOCKED_HOURS_ET    = ()
 
 # Execution-time spread gate using the live quote right before order submission.
 # Keep this tighter than MAX_OPTION_SPREAD_PCT, which is only used during chain selection.
-ENTRY_MAX_QUOTE_SPREAD_PCT         = 8.0   # stricter fill-quality gate
-OPENING_ENTRY_MAX_QUOTE_SPREAD_PCT = 9.0
+ENTRY_MAX_QUOTE_SPREAD_PCT         = 5.0   # hard fill-quality gate
+OPENING_ENTRY_MAX_QUOTE_SPREAD_PCT = 5.0
 
 MAX_ENTRY_SLIPPAGE_PCT    = 3.0
 MAX_FILL_SLIPPAGE_PCT     = 3.0
@@ -386,6 +386,11 @@ OPENING_ENTRY_RELAX_MINUTES   = 7
 REJECT_COOLDOWN_SHORT_MINUTES  = 2   # transient data issues: keep scanner responsive
 REJECT_COOLDOWN_MEDIUM_MINUTES = 15  # shorter tradability cooldown to avoid starving symbols
 REJECT_COOLDOWN_EVENT_MINUTES  = 8   # shorter event cooldown for intraday rotation
+
+# Direction execution mode:
+# - "scanner": trade the scanner direction.
+# - "contrarian": use scanner direction as the setup detector, then take the opposite option side.
+ENTRY_DIRECTION_MODE = "contrarian"
 
 # Chop/no-trade regime guard (reduce force-trading in dead tape).
 ENABLE_CHOP_NO_TRADE_FILTER                   = False
@@ -484,10 +489,10 @@ FLAT_REGIME_MAX_HOLD_MINUTES    = 25     # short hold (used by flat_market_scalp
 # Entry confirmation
 # ---------------------------------------------------------------------------
 
-ENABLE_ENTRY_CONFIRMATION              = False  # disabled: no bar-confirmation wait, enter immediately
-ENTRY_CONFIRM_BARS                     = 3
-ENTRY_CONFIRM_BYPASS_MIN_SIGNAL_SCORE  = 0.0   # always bypass if confirmation somehow re-enabled
-ENTRY_CONFIRM_MOMENTUM_THRESHOLD_PCT   = 0.14
+ENABLE_ENTRY_CONFIRMATION              = True
+ENTRY_CONFIRM_BARS                     = 2
+ENTRY_CONFIRM_BYPASS_MIN_SIGNAL_SCORE  = 9.0
+ENTRY_CONFIRM_MOMENTUM_THRESHOLD_PCT   = 0.18
 
 # Fast-start gate (legacy) is permanently removed; the scanner's own direction
 # conviction and RVOL thresholds are the single source of truth for entry quality.

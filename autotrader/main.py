@@ -272,22 +272,28 @@ def _runtime_entry_max_quote_spread_pct(
     except ValueError:
         minutes_since_open = 10**6
 
-    if bool(getattr(config, "ENABLE_OPENING_ENTRY_RELAX", False)) and minutes_since_open <= int(getattr(config, "OPENING_ENTRY_RELAX_MINUTES", 0) or 0):
+    opening_strict_minutes = max(0, int(getattr(config, "OPENING_STRICT_WINDOW_MINUTES", 0) or 0))
+    if 0 <= minutes_since_open < opening_strict_minutes:
+        base = min(base, opening_base)
+    elif bool(getattr(config, "ENABLE_OPENING_ENTRY_RELAX", False)) and minutes_since_open <= int(getattr(config, "OPENING_ENTRY_RELAX_MINUTES", 0) or 0):
         base = max(base, opening_base)
 
+    if not is_enabled("FEATURE_STRATEGY_PROFILES", False):
+        profile_cap = base
+    else:
+        overrides = get_profile_overrides(strategy_profile)
+        override = overrides.get("entry_max_quote_spread_pct")
+        profile_cap = base if override is None else float(override)
+
+    effective_cap = min(base, profile_cap)
     if spread_override_pct is not None:
         try:
-            return max(1.0, float(spread_override_pct))
+            # Signal/profile-level spread values may tighten execution, but must
+            # never loosen the runtime/session fill-quality cap.
+            effective_cap = min(effective_cap, max(1.0, float(spread_override_pct)))
         except (TypeError, ValueError):
             pass
-
-    if not is_enabled("FEATURE_STRATEGY_PROFILES", False):
-        return base
-    overrides = get_profile_overrides(strategy_profile)
-    override = overrides.get("entry_max_quote_spread_pct")
-    if override is None:
-        return base
-    return float(override)
+    return max(1.0, effective_cap)
 
 
 def _runtime_entry_blocked_hours_et(*, strategy_profile: str | None = None) -> set[int]:
@@ -692,24 +698,13 @@ def _execute_limit_entry(
         return {"filled": False, "status": "no_ask", "attempts": 0}
 
     attempt_quotes = [quote_snapshot]
-    retry_quote = _option_quote_snapshot(data_client, option_symbol)
-    retry_ask = float(retry_quote.get("ask") or 0.0)
-    if retry_ask > 0:
-        attempt_quotes.append(retry_quote)
-    else:
-        attempt_quotes.append(quote_snapshot)
 
     for attempt_index, submit_quote in enumerate(attempt_quotes, start=1):
         submit_ask = float(submit_quote.get("ask") or 0.0)
         if submit_ask <= 0:
             continue
-        if attempt_index == 1:
-            limit_price = round(submit_ask, 2)
-            wait_seconds = max(1, int(config.ENTRY_ORDER_STATUS_WAIT_SECONDS))
-        else:
-            retry_pct = max(0.0, float(getattr(config, "ENTRY_RETRY_LIMIT_PCT", 0.02) or 0.02))
-            limit_price = round(max(submit_ask, submit_ask * (1.0 + retry_pct)), 2)
-            wait_seconds = max(1, int(config.ENTRY_RETRY_STATUS_WAIT_SECONDS))
+        limit_price = round(submit_ask, 2)
+        wait_seconds = max(1, int(config.ENTRY_ORDER_STATUS_WAIT_SECONDS))
 
         submit_ts = time.time()
         order = broker.place_option_limit_buy(option_symbol, qty, limit_price)
@@ -1032,6 +1027,23 @@ def _filter_mover_candidates(
 
 def _is_valid_long_direction(direction: str) -> bool:
     return str(direction or "").lower() in ("call", "put")
+
+
+def _opposite_direction(direction: str) -> str:
+    direction_lc = str(direction or "").lower()
+    if direction_lc == "call":
+        return "put"
+    if direction_lc == "put":
+        return "call"
+    return direction_lc
+
+
+def _entry_direction_from_signal(direction: str) -> str:
+    direction_lc = str(direction or "").lower()
+    mode = str(getattr(config, "ENTRY_DIRECTION_MODE", "scanner") or "scanner").strip().lower()
+    if mode in ("contrarian", "inverse", "opposite", "flip"):
+        return _opposite_direction(direction_lc)
+    return direction_lc
 
 
 def _option_symbol_matches_direction(option_symbol: str, direction: str) -> bool:
@@ -2755,7 +2767,8 @@ def main():
             before = len(signals)
             filtered_signals: list[dict] = []
             for s in signals:
-                floor = float(s.get("profile_min_signal_score", entry_min_signal_score) or entry_min_signal_score)
+                profile_floor = float(s.get("profile_min_signal_score", entry_min_signal_score) or entry_min_signal_score)
+                floor = max(float(entry_min_signal_score), profile_floor)
                 if _is_in_opening_strict_window(now_et):
                     floor = max(
                         floor,
@@ -3046,7 +3059,8 @@ def main():
                 break
 
             ticker = signal["symbol"]
-            direction = signal["direction"]
+            scanner_direction = str(signal["direction"]).lower()
+            direction = _entry_direction_from_signal(scanner_direction)
             _set_signal_outcome(ticker=ticker, disposition="setup_pass")
 
             # --- Loss throttle (keep trading, but demand stronger setups after losses) ---
@@ -3103,10 +3117,15 @@ def main():
                 print(f"[{ts(now_et)}] {ticker}: skip ({opening_quality_reason}).")
                 continue
 
-            if not _is_valid_long_direction(direction):
+            if not _is_valid_long_direction(scanner_direction):
                 _mark_skip("invalid_strategy_direction")
                 _mark_stage4_reject(reason="invalid_strategy_direction", ticker=ticker)
-                print(f"[{ts(now_et)}] {ticker}: skip (invalid direction={direction!r}; only CALL/PUT allowed).")
+                print(f"[{ts(now_et)}] {ticker}: skip (invalid scanner direction={scanner_direction!r}; only CALL/PUT allowed).")
+                continue
+            if not _is_valid_long_direction(direction):
+                _mark_skip("invalid_entry_direction")
+                _mark_stage4_reject(reason="invalid_entry_direction", ticker=ticker)
+                print(f"[{ts(now_et)}] {ticker}: skip (invalid entry direction={direction!r}; only CALL/PUT allowed).")
                 continue
 
             preferred_core = set(str(s).upper() for s in getattr(config, "PREFERRED_CORE_TICKERS", ()))
@@ -3187,7 +3206,8 @@ def main():
                 _mark_skip("dry_run_mode")
                 _mark_stage4_reject(reason="dry_run_mode", ticker=ticker)
                 print(
-                    f"[{ts(now_et)}] DRY-RUN entry candidate: {ticker} {str(direction).upper()} "
+                    f"[{ts(now_et)}] DRY-RUN entry candidate: {ticker} entry={str(direction).upper()} "
+                    f"scanner={str(scanner_direction).upper()} "
                     f"score={float(signal.get('signal_score', 0) or 0):.2f} (no order submitted)."
                 )
                 continue
@@ -3309,7 +3329,7 @@ def main():
 
             try:
                 print(
-                    f"[{ts(now_et)}] {ticker}: scanner signal={direction} "
+                    f"[{ts(now_et)}] {ticker}: scanner signal={scanner_direction} entry={direction} "
                     f"profile={str(signal.get('strategy_profile', 'generic') or 'generic')}. "
                     f"{signal.get('reason', '')}"
                 )
@@ -3598,6 +3618,8 @@ def main():
                     "strategy_profile": signal_strategy_profile,
                     "ticker": ticker,
                     "index_bias_at_entry": str(index_bias or "both"),
+                    "entry_direction_mode": str(getattr(config, "ENTRY_DIRECTION_MODE", "scanner") or "scanner"),
+                    "scanner_direction": scanner_direction,
                     "direction": direction,
                     "option_symbol": option_symbol,
                     "strike": contract.get("strike_price", ""),
