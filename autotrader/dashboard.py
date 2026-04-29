@@ -26,7 +26,7 @@ except ImportError:
     import config
 from feature_flags import get_feature_flags_snapshot
 from feature_flags import is_enabled as feature_enabled
-from state_store import load_bot_state
+from state_store import load_bot_state, save_bot_state
 from strategy_profiles import PROFILE_PRESETS, normalize_profile_name
 from trading_control import (
     load_trading_control,
@@ -3769,12 +3769,18 @@ def api_status():
 def api_trading_control():
     try:
         state = load_trading_control()
+    runtime_state = load_bot_state()
+    consecutive_losses = int(runtime_state.get("consecutive_losses", 0) or 0)
+    consecutive_loss_limit = int(config.CONSECUTIVE_LOSS_LIMIT)
         return jsonify(
             {
                 "manual_stop": bool(state.get("manual_stop", False)),
                 "dry_run": bool(state.get("dry_run", False)),
                 "strategy_profile": normalize_profile_name(str(state.get("strategy_profile", "balanced") or "balanced")),
                 "available_profiles": sorted(PROFILE_PRESETS.keys()),
+        "consecutive_losses": consecutive_losses,
+        "consecutive_loss_limit": consecutive_loss_limit,
+        "consecutive_loss_guard_active": consecutive_losses >= consecutive_loss_limit,
                 "updated_at_et": str(state.get("updated_at_et", "")),
                 "reason": str(state.get("reason", "")),
             }
@@ -3853,6 +3859,39 @@ def api_runtime_control_update():
         )
     except Exception as exc:  # noqa: BLE001
         return jsonify({"error": str(exc)}), 500
+
+
+  @app.post("/api/runtime-control/reset-consecutive-loss-guard")
+  def api_runtime_control_reset_consecutive_loss_guard():
+    try:
+      ok, err, status = _verify_control_token()
+      if not ok:
+        return jsonify({"error": err}), status
+
+      payload = request.get_json(silent=True) or {}
+      reason = str(payload.get("reason", "") or "dashboard_reset_consecutive_loss_guard")
+      now_et = _now_et()
+      runtime_state = load_bot_state()
+      previous_losses = int(runtime_state.get("consecutive_losses", 0) or 0)
+
+      runtime_state["consecutive_losses"] = 0
+      runtime_state["loss_counters_day"] = now_et.date().isoformat()
+      runtime_state["last_loss_guard_reset_et"] = now_et.isoformat()
+      runtime_state["last_loss_guard_reset_reason"] = reason[:120]
+      save_bot_state(runtime_state)
+
+      return jsonify(
+        {
+          "ok": True,
+          "previous_consecutive_losses": previous_losses,
+          "consecutive_losses": 0,
+          "consecutive_loss_limit": int(config.CONSECUTIVE_LOSS_LIMIT),
+          "updated_at_et": now_et.strftime("%Y-%m-%d %H:%M:%S ET"),
+          "reason": reason,
+        }
+      )
+    except Exception as exc:  # noqa: BLE001
+      return jsonify({"error": str(exc)}), 500
 
 
 @app.post("/api/control/close-all-positions")
@@ -5718,6 +5757,7 @@ def home():
       <h3>RUNTIME CONTROLS</h3>
       <div class="ctrl">
         <button id="dry-run-btn" class="ctrl-btn" onclick="toggleDryRun()">Toggle Dry Run</button>
+        <button id="reset-loss-guard-btn" class="ctrl-btn" style="background-color:#ef6c00;" onclick="resetConsecutiveLossGuard()">Reset Loss Guard</button>
         <select id="strategy-profile-select" class="ctrl-btn" onchange="setStrategyProfile()">
           <option value="balanced">balanced</option>
           <option value="conservative">conservative</option>
@@ -6464,6 +6504,31 @@ def home():
       await updateRuntimeControl({ strategy_profile: String(el.value || "balanced") });
     }
 
+    async function resetConsecutiveLossGuard() {
+      const confirmed = window.confirm(
+        "Reset consecutive-loss guard and allow new entries again today? Use only after manual review of recent losses."
+      );
+      if (!confirmed) {
+        return;
+      }
+      const res = await fetch("/api/runtime-control/reset-consecutive-loss-guard", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({ reason: "dashboard_manual_reset" }),
+      });
+      const body = await res.json();
+      if (!res.ok || body.error) {
+        alert(`Reset loss guard failed: ${body.error || "request failed"}`);
+        return;
+      }
+      const prev = Number(body.previous_consecutive_losses || 0);
+      const limit = Number(body.consecutive_loss_limit || CONSEC_LOSS_LIMIT);
+      alert(`Consecutive-loss guard reset (${prev}/${limit} -> 0/${limit}).`);
+      await refresh();
+    }
+
     async function refresh() {
       const [
         account, positions, trades, scanlog, status, scansummary, scanfails, review, control,
@@ -6600,7 +6665,9 @@ def home():
       if (runtimeStatusEl) {
         const dryRunLabel = control && !control.error && control.dry_run ? "DRY RUN ON" : "DRY RUN OFF";
         const profile = control && !control.error ? String(control.strategy_profile || "balanced") : "balanced";
-        runtimeStatusEl.textContent = `${dryRunLabel} | profile=${profile}`;
+        const losses = Number(control && !control.error ? control.consecutive_losses : 0);
+        const limit = Number(control && !control.error ? control.consecutive_loss_limit : CONSEC_LOSS_LIMIT);
+        runtimeStatusEl.textContent = `${dryRunLabel} | profile=${profile} | loss_streak=${losses}/${limit}`;
       }
       const profileSelect = document.getElementById("strategy-profile-select");
       if (profileSelect && control && !control.error) {
