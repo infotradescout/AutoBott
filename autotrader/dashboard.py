@@ -3382,10 +3382,10 @@ def api_scanlog():
 def api_scanfails():
     """Return latest-loop final scan failures with stage labels."""
     try:
-    cache_ttl = max(1, int(getattr(config, "DASHBOARD_HEAVY_API_CACHE_SECONDS", 5) or 5))
-    cached = _get_cached_heavy_payload("scanfails", cache_ttl)
-    if cached is not None:
-      return jsonify(cached)
+        cache_ttl = max(1, int(getattr(config, "DASHBOARD_HEAVY_API_CACHE_SECONDS", 5) or 5))
+        cached = _get_cached_heavy_payload("scanfails", cache_ttl)
+        if cached is not None:
+            return jsonify(cached)
         _last_ts, rows = _latest_scan_loop_rows(limit=1000)
         fails = [r for r in rows if str(r.get("result", "")).lower() == "fail"]
         out: list[dict[str, Any]] = []
@@ -3446,10 +3446,10 @@ def api_scanfails():
 def api_scansummary():
     """Return stage-aware counts and reasons from the latest scan loop."""
     try:
-    cache_ttl = max(1, int(getattr(config, "DASHBOARD_HEAVY_API_CACHE_SECONDS", 5) or 5))
-    cached = _get_cached_heavy_payload("scansummary", cache_ttl)
-    if cached is not None:
-      return jsonify(cached)
+        cache_ttl = max(1, int(getattr(config, "DASHBOARD_HEAVY_API_CACHE_SECONDS", 5) or 5))
+        cached = _get_cached_heavy_payload("scansummary", cache_ttl)
+        if cached is not None:
+            return jsonify(cached)
         last_ts, same_loop = _latest_scan_loop_rows(limit=1000)
         if not same_loop:
           runtime_state = load_bot_state()
