@@ -3511,8 +3511,8 @@ def api_scansummary():
                 "top_reason": "Scan log unavailable",
                 "last_scan": str(last_entry_debug.get("loop_ts_et", "") or ""),
             }
-            _set_cached_heavy_payload("scansummary", payload)
-            return jsonify(payload)
+          _set_cached_heavy_payload("scansummary", payload)
+          return jsonify(payload)
             return jsonify(
                 {
                     "universe_candidates": 0,
