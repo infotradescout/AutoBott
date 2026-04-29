@@ -6334,7 +6334,7 @@ def home():
       const replayCard = document.getElementById("trade-replay-card");
       const tickerCard = document.getElementById("ticker-scorecards-card");
       const weeklyCard = document.getElementById("weekly-review-card");
-      if (runtimeCard) runtimeCard.style.display = (f.FEATURE_DRY_RUN_MODE || f.FEATURE_STRATEGY_PROFILES) ? "" : "none";
+      if (runtimeCard) runtimeCard.style.display = "";
       if (guardrailCard) guardrailCard.style.display = f.FEATURE_SESSION_GUARDRAIL_PANEL ? "" : "none";
       if (premarketCard) premarketCard.style.display = f.FEATURE_PREMARKET_OPENING_PLAN_CARD ? "" : "none";
       if (exitReliabilityCard) exitReliabilityCard.style.display = f.FEATURE_EXIT_RELIABILITY_METRICS ? "" : "none";
