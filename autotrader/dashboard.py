@@ -597,7 +597,8 @@ def _build_logic_checks(scan_rows: list[dict[str, str]], trade_rows: list[dict[s
             }
         )
 
-    if streak >= int(config.CONSECUTIVE_LOSS_LIMIT):
+    consecutive_guard_enabled = bool(getattr(config, "CONSECUTIVE_LOSS_GUARD_ENABLED", True))
+    if consecutive_guard_enabled and streak >= int(config.CONSECUTIVE_LOSS_LIMIT):
         checks.append(
             {
                 "status": "warn",
@@ -605,6 +606,14 @@ def _build_logic_checks(scan_rows: list[dict[str, str]], trade_rows: list[dict[s
                 "detail": f"Loss streak {streak} reached limit {int(config.CONSECUTIVE_LOSS_LIMIT)}.",
             }
         )
+    elif not consecutive_guard_enabled:
+      checks.append(
+        {
+          "status": "ok",
+          "name": "Consecutive Loss Guard",
+          "detail": "Disabled.",
+        }
+      )
     else:
         checks.append(
             {
@@ -3661,10 +3670,11 @@ def api_status():
         strategy_profile = normalize_profile_name(str(control.get("strategy_profile", "balanced") or "balanced"))
         consecutive_losses = int(runtime_state.get("consecutive_losses", 0) or 0)
         consecutive_loss_limit = int(config.CONSECUTIVE_LOSS_LIMIT)
+        consecutive_guard_enabled = bool(getattr(config, "CONSECUTIVE_LOSS_GUARD_ENABLED", True))
         blockers: list[str] = []
         if trading_paused:
             blockers.append("manual_stop")
-        if consecutive_losses >= consecutive_loss_limit:
+        if consecutive_guard_enabled and consecutive_losses >= consecutive_loss_limit:
           blockers.append("consecutive_loss_limit")
         if not bool(clock_body.get("is_open", False)):
             blockers.append("market_closed")
@@ -3776,6 +3786,7 @@ def api_trading_control():
         runtime_state = load_bot_state()
         consecutive_losses = int(runtime_state.get("consecutive_losses", 0) or 0)
         consecutive_loss_limit = int(config.CONSECUTIVE_LOSS_LIMIT)
+        consecutive_guard_enabled = bool(getattr(config, "CONSECUTIVE_LOSS_GUARD_ENABLED", True))
         return jsonify(
             {
                 "manual_stop": bool(state.get("manual_stop", False)),
@@ -3784,7 +3795,7 @@ def api_trading_control():
                 "available_profiles": sorted(PROFILE_PRESETS.keys()),
                 "consecutive_losses": consecutive_losses,
                 "consecutive_loss_limit": consecutive_loss_limit,
-                "consecutive_loss_guard_active": consecutive_losses >= consecutive_loss_limit,
+                "consecutive_loss_guard_active": bool(consecutive_guard_enabled and consecutive_losses >= consecutive_loss_limit),
                 "updated_at_et": str(state.get("updated_at_et", "")),
                 "reason": str(state.get("reason", "")),
             }

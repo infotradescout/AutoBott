@@ -124,6 +124,7 @@ DRAWDOWN_SIZE_MULTIPLIER            = 0.75
 DAILY_LOSS_LIMIT_USD                = 450.0
 WEEKLY_LOSS_LIMIT_USD               = 1500.0
 CONSECUTIVE_LOSS_LIMIT              = 3
+CONSECUTIVE_LOSS_GUARD_ENABLED      = False
 # Net P&L circuit breaker (runtime telemetry-based):
 # Pause new entries once the day is sufficiently red in realized net P&L.
 INTRADAY_NET_LOSS_LIMIT_USD         = 350.0

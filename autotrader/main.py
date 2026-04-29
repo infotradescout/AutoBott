@@ -3010,7 +3010,7 @@ def main():
                 break
 
             # --- Consecutive loss circuit breaker ---
-            if consecutive_losses >= config.CONSECUTIVE_LOSS_LIMIT:
+            if bool(getattr(config, "CONSECUTIVE_LOSS_GUARD_ENABLED", True)) and consecutive_losses >= config.CONSECUTIVE_LOSS_LIMIT:
                 _mark_skip("consecutive_loss_limit")
                 print(
                     f"[{ts(now_et)}] {consecutive_losses} consecutive losses. "
