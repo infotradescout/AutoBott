@@ -2381,7 +2381,7 @@ def main():
         if live_reset_et and live_reset_et != last_applied_loss_guard_reset_et:
             prev_losses = int(consecutive_losses)
             consecutive_losses = int(live_state.get("consecutive_losses", 0) or 0)
-                        last_applied_loss_guard_reset_reason = str(live_state.get("last_loss_guard_reset_reason", "") or "")
+            last_applied_loss_guard_reset_reason = str(live_state.get("last_loss_guard_reset_reason", "") or "")
             live_loss_day = live_state.get("loss_counters_day")
             if live_loss_day:
                 try:
