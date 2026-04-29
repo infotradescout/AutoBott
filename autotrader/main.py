@@ -1488,6 +1488,7 @@ def main():
     weekly_realized_loss_usd = float(state.get("weekly_realized_loss_usd", 0.0) or 0.0)
     consecutive_losses = int(state.get("consecutive_losses", 0) or 0)
     last_applied_loss_guard_reset_et = str(state.get("last_loss_guard_reset_et", "") or "")
+    last_applied_loss_guard_reset_reason = str(state.get("last_loss_guard_reset_reason", "") or "")
     loss_counters_day_raw = state.get("loss_counters_day")
     loss_counters_day = None
     if loss_counters_day_raw:
@@ -1639,6 +1640,8 @@ def main():
                 "daily_realized_loss_usd": round(daily_realized_loss_usd, 6),
                 "weekly_realized_loss_usd": round(weekly_realized_loss_usd, 6),
                 "consecutive_losses": consecutive_losses,
+                "last_loss_guard_reset_et": last_applied_loss_guard_reset_et,
+                "last_loss_guard_reset_reason": last_applied_loss_guard_reset_reason,
                 "loss_counters_day": loss_counters_day.isoformat() if loss_counters_day else None,
                 "weekly_loss_key": weekly_loss_key,
                 "blocked_day_notice": blocked_day_notice,
@@ -2370,7 +2373,6 @@ def main():
       try:
         now_et = datetime.now(tz)
         now_ct = datetime.now(pytz.timezone(config.CENTRAL_TZ))
-        _touch_heartbeat(force=True)
 
         # Honor manual loss-guard resets applied via dashboard/runtime state
         # without requiring a process restart.
@@ -2379,6 +2381,7 @@ def main():
         if live_reset_et and live_reset_et != last_applied_loss_guard_reset_et:
             prev_losses = int(consecutive_losses)
             consecutive_losses = int(live_state.get("consecutive_losses", 0) or 0)
+                        last_applied_loss_guard_reset_reason = str(live_state.get("last_loss_guard_reset_reason", "") or "")
             live_loss_day = live_state.get("loss_counters_day")
             if live_loss_day:
                 try:
@@ -2391,6 +2394,8 @@ def main():
                 f"consecutive_losses {prev_losses} -> {consecutive_losses}."
             )
             _save_runtime_state()
+
+        _touch_heartbeat(force=True)
 
         control_state = load_trading_control()
         strategy_profile = normalize_profile_name(str(control_state.get("strategy_profile", "balanced") or "balanced"))
