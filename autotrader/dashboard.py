@@ -3769,18 +3769,18 @@ def api_status():
 def api_trading_control():
     try:
         state = load_trading_control()
-    runtime_state = load_bot_state()
-    consecutive_losses = int(runtime_state.get("consecutive_losses", 0) or 0)
-    consecutive_loss_limit = int(config.CONSECUTIVE_LOSS_LIMIT)
+        runtime_state = load_bot_state()
+        consecutive_losses = int(runtime_state.get("consecutive_losses", 0) or 0)
+        consecutive_loss_limit = int(config.CONSECUTIVE_LOSS_LIMIT)
         return jsonify(
             {
                 "manual_stop": bool(state.get("manual_stop", False)),
                 "dry_run": bool(state.get("dry_run", False)),
                 "strategy_profile": normalize_profile_name(str(state.get("strategy_profile", "balanced") or "balanced")),
                 "available_profiles": sorted(PROFILE_PRESETS.keys()),
-        "consecutive_losses": consecutive_losses,
-        "consecutive_loss_limit": consecutive_loss_limit,
-        "consecutive_loss_guard_active": consecutive_losses >= consecutive_loss_limit,
+                "consecutive_losses": consecutive_losses,
+                "consecutive_loss_limit": consecutive_loss_limit,
+                "consecutive_loss_guard_active": consecutive_losses >= consecutive_loss_limit,
                 "updated_at_et": str(state.get("updated_at_et", "")),
                 "reason": str(state.get("reason", "")),
             }
@@ -3861,37 +3861,37 @@ def api_runtime_control_update():
         return jsonify({"error": str(exc)}), 500
 
 
-  @app.post("/api/runtime-control/reset-consecutive-loss-guard")
-  def api_runtime_control_reset_consecutive_loss_guard():
+@app.post("/api/runtime-control/reset-consecutive-loss-guard")
+def api_runtime_control_reset_consecutive_loss_guard():
     try:
-      ok, err, status = _verify_control_token()
-      if not ok:
-        return jsonify({"error": err}), status
+        ok, err, status = _verify_control_token()
+        if not ok:
+            return jsonify({"error": err}), status
 
-      payload = request.get_json(silent=True) or {}
-      reason = str(payload.get("reason", "") or "dashboard_reset_consecutive_loss_guard")
-      now_et = _now_et()
-      runtime_state = load_bot_state()
-      previous_losses = int(runtime_state.get("consecutive_losses", 0) or 0)
+        payload = request.get_json(silent=True) or {}
+        reason = str(payload.get("reason", "") or "dashboard_reset_consecutive_loss_guard")
+        now_et = _now_et()
+        runtime_state = load_bot_state()
+        previous_losses = int(runtime_state.get("consecutive_losses", 0) or 0)
 
-      runtime_state["consecutive_losses"] = 0
-      runtime_state["loss_counters_day"] = now_et.date().isoformat()
-      runtime_state["last_loss_guard_reset_et"] = now_et.isoformat()
-      runtime_state["last_loss_guard_reset_reason"] = reason[:120]
-      save_bot_state(runtime_state)
+        runtime_state["consecutive_losses"] = 0
+        runtime_state["loss_counters_day"] = now_et.date().isoformat()
+        runtime_state["last_loss_guard_reset_et"] = now_et.isoformat()
+        runtime_state["last_loss_guard_reset_reason"] = reason[:120]
+        save_bot_state(runtime_state)
 
-      return jsonify(
-        {
-          "ok": True,
-          "previous_consecutive_losses": previous_losses,
-          "consecutive_losses": 0,
-          "consecutive_loss_limit": int(config.CONSECUTIVE_LOSS_LIMIT),
-          "updated_at_et": now_et.strftime("%Y-%m-%d %H:%M:%S ET"),
-          "reason": reason,
-        }
-      )
+        return jsonify(
+            {
+                "ok": True,
+                "previous_consecutive_losses": previous_losses,
+                "consecutive_losses": 0,
+                "consecutive_loss_limit": int(config.CONSECUTIVE_LOSS_LIMIT),
+                "updated_at_et": now_et.strftime("%Y-%m-%d %H:%M:%S ET"),
+                "reason": reason,
+            }
+        )
     except Exception as exc:  # noqa: BLE001
-      return jsonify({"error": str(exc)}), 500
+        return jsonify({"error": str(exc)}), 500
 
 
 @app.post("/api/control/close-all-positions")
@@ -6836,3 +6836,4 @@ if __name__ == "__main__":
     port = int(os.getenv("PORT", "5000"))
     print(f"Dashboard running at http://localhost:{port}")
     app.run(host="0.0.0.0", port=port, debug=False)
+
