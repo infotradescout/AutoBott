@@ -9,6 +9,7 @@ import json
 import os
 import re
 import time
+from collections import deque
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -153,11 +154,13 @@ def _verify_control_token() -> tuple[bool, str, int]:
 def _read_csv_rows(path: Path, limit: int, reverse: bool = True) -> list[dict[str, str]]:
     if not path.exists():
         return []
-    with path.open("r", newline="", encoding="utf-8") as f:
-        rows = list(csv.DictReader(f))
-    if reverse:
-        rows = list(reversed(rows))
-    return rows[:limit]
+  max_rows = max(1, int(limit or 1))
+  with path.open("r", newline="", encoding="utf-8") as f:
+    rolling = deque(csv.DictReader(f), maxlen=max_rows)
+  rows = list(rolling)
+  if reverse:
+    rows.reverse()
+  return rows
 
 
 def _parse_ts(value: str) -> datetime | None:
