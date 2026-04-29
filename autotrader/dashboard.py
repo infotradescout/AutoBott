@@ -3659,9 +3659,13 @@ def api_status():
         trading_paused = bool(control.get("manual_stop", False))
         dry_run = bool(control.get("dry_run", False))
         strategy_profile = normalize_profile_name(str(control.get("strategy_profile", "balanced") or "balanced"))
+        consecutive_losses = int(runtime_state.get("consecutive_losses", 0) or 0)
+        consecutive_loss_limit = int(config.CONSECUTIVE_LOSS_LIMIT)
         blockers: list[str] = []
         if trading_paused:
             blockers.append("manual_stop")
+        if consecutive_losses >= consecutive_loss_limit:
+          blockers.append("consecutive_loss_limit")
         if not bool(clock_body.get("is_open", False)):
             blockers.append("market_closed")
         if not entry_window_open:
