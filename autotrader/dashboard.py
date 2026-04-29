@@ -81,6 +81,25 @@ DISPLAY_TZ = _resolve_display_tz()
 DISPLAY_TZ_LABEL = str(os.getenv("DASHBOARD_DISPLAY_TZ_LABEL", "CST") or "CST").strip() or "CST"
 _REVIEW_CACHE: dict[str, Any] = {"ts": None, "payload": None}
 _CSV_READ_HARD_LIMIT = max(200, int(getattr(config, "DASHBOARD_CSV_READ_HARD_LIMIT", 2500) or 2500))
+_HEAVY_API_CACHE: dict[str, dict[str, Any]] = {}
+
+
+def _get_cached_heavy_payload(cache_key: str, ttl_seconds: int) -> Any | None:
+  cached = _HEAVY_API_CACHE.get(cache_key)
+  if not isinstance(cached, dict):
+    return None
+  ts_cached = cached.get("ts")
+  payload = cached.get("payload")
+  if not isinstance(ts_cached, datetime) or payload is None:
+    return None
+  age = (_now_et() - ts_cached).total_seconds()
+  if age < max(1, int(ttl_seconds)):
+    return payload
+  return None
+
+
+def _set_cached_heavy_payload(cache_key: str, payload: Any) -> None:
+  _HEAVY_API_CACHE[cache_key] = {"ts": _now_et(), "payload": payload}
 CONTROL_TOKEN = str(config.DASHBOARD_CONTROL_TOKEN or "").strip()
 
 app = Flask(__name__)
@@ -3305,6 +3324,10 @@ def api_runtime_paths():
 @app.get("/api/scanlog")
 def api_scanlog():
   try:
+    cache_ttl = max(1, int(getattr(config, "DASHBOARD_HEAVY_API_CACHE_SECONDS", 5) or 5))
+    cached = _get_cached_heavy_payload("scanlog", cache_ttl)
+    if cached is not None:
+      return jsonify(cached)
     _last_ts, rows = _latest_scan_loop_rows(limit=1000)
     today_rows = _today_scan_rows()
     runtime_state = load_bot_state()
@@ -3348,7 +3371,9 @@ def api_scanlog():
         str(row.get("symbol", "") or ""),
         max_items=5,
       )
-    return jsonify(deduped[:30])
+    payload = deduped[:30]
+    _set_cached_heavy_payload("scanlog", payload)
+    return jsonify(payload)
   except Exception as exc:  # noqa: BLE001
     return jsonify({"error": str(exc)}), 500
 
@@ -3357,6 +3382,10 @@ def api_scanlog():
 def api_scanfails():
     """Return latest-loop final scan failures with stage labels."""
     try:
+    cache_ttl = max(1, int(getattr(config, "DASHBOARD_HEAVY_API_CACHE_SECONDS", 5) or 5))
+    cached = _get_cached_heavy_payload("scanfails", cache_ttl)
+    if cached is not None:
+      return jsonify(cached)
         _last_ts, rows = _latest_scan_loop_rows(limit=1000)
         fails = [r for r in rows if str(r.get("result", "")).lower() == "fail"]
         out: list[dict[str, Any]] = []
@@ -3407,6 +3436,7 @@ def api_scanfails():
             if ts_raw:
                 patched["timestamp"] = _to_ct_label(ts_dt) or ts_raw
             out.append(patched)
+        _set_cached_heavy_payload("scanfails", out)
         return jsonify(out)
     except Exception as exc:  # noqa: BLE001
         return jsonify({"error": str(exc)}), 500
@@ -3416,6 +3446,10 @@ def api_scanfails():
 def api_scansummary():
     """Return stage-aware counts and reasons from the latest scan loop."""
     try:
+    cache_ttl = max(1, int(getattr(config, "DASHBOARD_HEAVY_API_CACHE_SECONDS", 5) or 5))
+    cached = _get_cached_heavy_payload("scansummary", cache_ttl)
+    if cached is not None:
+      return jsonify(cached)
         last_ts, same_loop = _latest_scan_loop_rows(limit=1000)
         if not same_loop:
           runtime_state = load_bot_state()
@@ -3430,8 +3464,7 @@ def api_scansummary():
             trade_summary = _build_trade_report_summary(today_trades)
             raw_reasons = last_entry_debug.get("entry_stage4_reject_reasons")
             reject_reasons = raw_reasons if isinstance(raw_reasons, dict) else {}
-            return jsonify(
-              {
+            payload = {
                 "universe_candidates": signal_detected,
                 "signal_detected_count": signal_detected,
                 "setup_passed_count": signal_detected,
@@ -3477,8 +3510,9 @@ def api_scansummary():
                 "fail_count": 0,
                 "top_reason": "Scan log unavailable",
                 "last_scan": str(last_entry_debug.get("loop_ts_et", "") or ""),
-              }
-            )
+            }
+            _set_cached_heavy_payload("scansummary", payload)
+            return jsonify(payload)
             return jsonify(
                 {
                     "universe_candidates": 0,
@@ -3559,8 +3593,7 @@ def api_scansummary():
         stage_pipeline["order_submitted"] = orders_submitted_count
         stage_pipeline["order_filled"] = orders_total_filled_count
 
-        return jsonify(
-            {
+        payload = {
                 "universe_candidates": len(same_loop),
           "signal_detected_count": len(same_loop),
                 "setup_passed_count": pass_count,
@@ -3603,7 +3636,8 @@ def api_scansummary():
                 "top_reason": top_reason,
                 "last_scan": _to_ct_label(_parse_ts(str(last_ts))) or str(last_ts),
             }
-        )
+            _set_cached_heavy_payload("scansummary", payload)
+            return jsonify(payload)
     except Exception as exc:  # noqa: BLE001
         return jsonify({"error": str(exc)}), 500
 
