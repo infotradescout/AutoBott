@@ -80,6 +80,7 @@ def _resolve_display_tz() -> Any:
 DISPLAY_TZ = _resolve_display_tz()
 DISPLAY_TZ_LABEL = str(os.getenv("DASHBOARD_DISPLAY_TZ_LABEL", "CST") or "CST").strip() or "CST"
 _REVIEW_CACHE: dict[str, Any] = {"ts": None, "payload": None}
+_CSV_READ_HARD_LIMIT = max(200, int(getattr(config, "DASHBOARD_CSV_READ_HARD_LIMIT", 2500) or 2500))
 CONTROL_TOKEN = str(config.DASHBOARD_CONTROL_TOKEN or "").strip()
 
 app = Flask(__name__)
@@ -154,7 +155,7 @@ def _verify_control_token() -> tuple[bool, str, int]:
 def _read_csv_rows(path: Path, limit: int, reverse: bool = True) -> list[dict[str, str]]:
     if not path.exists():
         return []
-  max_rows = max(1, int(limit or 1))
+  max_rows = min(_CSV_READ_HARD_LIMIT, max(1, int(limit or 1)))
   with path.open("r", newline="", encoding="utf-8") as f:
     rolling = deque(csv.DictReader(f), maxlen=max_rows)
   rows = list(rolling)
@@ -1156,8 +1157,9 @@ def _load_report_csv(filename: str) -> list[dict[str, str]]:
     if found is None:
         return []
     try:
-        with found.open("r", newline="", encoding="utf-8") as handle:
-            return list(csv.DictReader(handle))
+      with found.open("r", newline="", encoding="utf-8") as handle:
+        rolling = deque(csv.DictReader(handle), maxlen=min(1500, _CSV_READ_HARD_LIMIT))
+      return list(rolling)
     except Exception:
         return []
 
