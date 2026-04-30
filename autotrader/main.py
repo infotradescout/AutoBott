@@ -2915,7 +2915,7 @@ def main():
             skips[reason] = int(skips.get(reason, 0)) + 1
             entry_debug["skips"] = skips
 
-        def _mark_stage4_reject(*, reason: str, ticker: str) -> None:
+        def _mark_stage4_reject(*, reason: str, ticker: str, detail: str | None = None) -> None:
             reject_reasons = entry_debug.get("entry_stage4_reject_reasons", {})
             if not isinstance(reject_reasons, dict):
                 reject_reasons = {}
@@ -2933,7 +2933,7 @@ def main():
             _set_signal_outcome(
                 ticker=ticker,
                 disposition=f"blocked_{_normalize_disposition_reason(reason)}",
-                detail=reason,
+                detail=str(detail or reason),
             )
 
         def _mark_stage4_eligible(*, ticker: str) -> None:
@@ -3202,17 +3202,25 @@ def main():
             )
             if has_ticker_position:
                 _mark_skip("existing_option_position")
-                _mark_stage4_reject(reason="existing_option_position", ticker=ticker)
+                _mark_stage4_reject(
+                    reason="existing_option_position",
+                    ticker=ticker,
+                    detail=f"{ticker} already has an open option position",
+                )
                 print(f"[{ts(now_et)}] {ticker}: skip (existing option position).")
                 continue
             if _has_ticker_open_meta(ticker):
                 _mark_skip("existing_ticker_runtime_state")
-                _mark_stage4_reject(reason="existing_ticker_runtime_state", ticker=ticker)
+                _mark_stage4_reject(
+                    reason="existing_ticker_runtime_state",
+                    ticker=ticker,
+                    detail=f"{ticker} already exists in runtime open-trade state",
+                )
                 print(f"[{ts(now_et)}] {ticker}: skip (already open in runtime state).")
                 continue
             if dry_run_enabled:
                 _mark_skip("dry_run_mode")
-                _mark_stage4_reject(reason="dry_run_mode", ticker=ticker)
+                _mark_stage4_reject(reason="dry_run_mode", ticker=ticker, detail="dry-run mode is on")
                 print(
                     f"[{ts(now_et)}] DRY-RUN entry candidate: {ticker} {str(direction).upper()} "
                     f"score={float(signal.get('signal_score', 0) or 0):.2f} (no order submitted)."
@@ -3374,7 +3382,11 @@ def main():
                 )
                 if not contract:
                     _mark_skip("no_eligible_option_contract")
-                    _mark_stage4_reject(reason="no_eligible_option_contract", ticker=ticker)
+                    _mark_stage4_reject(
+                        reason="no_eligible_option_contract",
+                        ticker=ticker,
+                        detail=contract_reason,
+                    )
                     print(f"[{ts(now_et)}] {ticker}: skip (no eligible option contract: {contract_reason}).")
                     time.sleep(config.RATE_LIMIT_SLEEP_SECONDS)
                     continue
@@ -3399,7 +3411,7 @@ def main():
                 if not spread_ok:
                     reject_reason = "quote_spread_too_wide" if "spread" in spread_reason else "no_option_ask"
                     _mark_skip(reject_reason)
-                    _mark_stage4_reject(reason=reject_reason, ticker=ticker)
+                    _mark_stage4_reject(reason=reject_reason, ticker=ticker, detail=spread_reason)
                     print(f"[{ts(now_et)}] {ticker}: skip ({spread_reason}).")
                     time.sleep(config.RATE_LIMIT_SLEEP_SECONDS)
                     continue
@@ -3419,7 +3431,14 @@ def main():
                 )
                 if qty < 1:
                     _mark_skip("insufficient_premium_budget")
-                    _mark_stage4_reject(reason="insufficient_premium_budget", ticker=ticker)
+                    _mark_stage4_reject(
+                        reason="insufficient_premium_budget",
+                        ticker=ticker,
+                        detail=(
+                            f"ask ${ask_price:.2f} exceeds effective budget ${_effective_budget:.2f}; "
+                            f"per-trade cap ${max_trade_premium:.2f}"
+                        ),
+                    )
                     print(
                         f"[{ts(now_et)}] {ticker}: skip (budget too small for ask ${ask_price:.2f}; "
                         f"per-trade cap ${max_trade_premium:.2f})."
@@ -3428,7 +3447,14 @@ def main():
                 trade_premium_usd = ask_price * qty * 100.0
                 if trade_premium_usd > max_trade_premium:
                     _mark_skip("premium_per_trade_cap")
-                    _mark_stage4_reject(reason="premium_per_trade_cap", ticker=ticker)
+                    _mark_stage4_reject(
+                        reason="premium_per_trade_cap",
+                        ticker=ticker,
+                        detail=(
+                            f"premium ${trade_premium_usd:.2f} > cap ${max_trade_premium:.2f} "
+                            f"(ask ${ask_price:.2f} x {qty})"
+                        ),
+                    )
                     print(
                         f"[{ts(now_et)}] {ticker}: skip (premium ${trade_premium_usd:.2f} > "
                         f"per-trade cap ${max_trade_premium:.2f})."
@@ -3448,7 +3474,14 @@ def main():
                         trade_premium_usd = ask_price * qty * 100.0
                     else:
                         _mark_skip("total_open_premium_cap")
-                        _mark_stage4_reject(reason="total_open_premium_cap", ticker=ticker)
+                        _mark_stage4_reject(
+                            reason="total_open_premium_cap",
+                            ticker=ticker,
+                            detail=(
+                                f"open ${total_open_premium:.2f} + new ${trade_premium_usd:.2f} "
+                                f"> cap ${max_total_open_premium:.2f}"
+                            ),
+                        )
                         print(
                             f"[{ts(now_et)}] {ticker}: skip (open premium ${total_open_premium:.2f} + "
                             f"new ${trade_premium_usd:.2f} > cap ${max_total_open_premium:.2f})."
@@ -3457,7 +3490,14 @@ def main():
 
                 if (total_open_premium + trade_premium_usd) > max_total_open_premium:
                     _mark_skip("total_open_premium_cap")
-                    _mark_stage4_reject(reason="total_open_premium_cap", ticker=ticker)
+                    _mark_stage4_reject(
+                        reason="total_open_premium_cap",
+                        ticker=ticker,
+                        detail=(
+                            f"open ${total_open_premium:.2f} + new ${trade_premium_usd:.2f} "
+                            f"> cap ${max_total_open_premium:.2f}"
+                        ),
+                    )
                     print(
                         f"[{ts(now_et)}] {ticker}: skip (open premium ${total_open_premium:.2f} + "
                         f"new ${trade_premium_usd:.2f} > cap ${max_total_open_premium:.2f})."
@@ -3480,7 +3520,14 @@ def main():
                         is_core_name = ticker in core_set
                         if core_set and (not is_core_name) and trade_premium_usd > tight_opening_expensive_premium:
                             _mark_skip("opening_expensive_name_gate")
-                            _mark_stage4_reject(reason="opening_expensive_name_gate", ticker=ticker)
+                            _mark_stage4_reject(
+                                reason="opening_expensive_name_gate",
+                                ticker=ticker,
+                                detail=(
+                                    f"premium ${trade_premium_usd:.2f} > opening expensive cap "
+                                    f"${tight_opening_expensive_premium:.2f} and {ticker} is not core"
+                                ),
+                            )
                             print(
                                 f"[{ts(now_et)}] {ticker}: skip (opening expensive-name gate; premium ${trade_premium_usd:.2f} "
                                 f"> ${tight_opening_expensive_premium:.2f} and not core)."
@@ -3490,7 +3537,14 @@ def main():
                     if (opening_fresh_premium_deployed_usd + trade_premium_usd) > opening_premium_cap:
                         if not premium_override_ok:
                             _mark_skip("opening_fresh_premium_cap")
-                            _mark_stage4_reject(reason="opening_fresh_premium_cap", ticker=ticker)
+                            _mark_stage4_reject(
+                                reason="opening_fresh_premium_cap",
+                                ticker=ticker,
+                                detail=(
+                                    f"opening deployed ${opening_fresh_premium_deployed_usd:.2f} + "
+                                    f"new ${trade_premium_usd:.2f} > cap ${opening_premium_cap:.2f}"
+                                ),
+                            )
                             print(
                                 f"[{ts(now_et)}] {ticker}: skip (opening premium ${opening_fresh_premium_deployed_usd:.2f} + "
                                 f"${trade_premium_usd:.2f} > cap ${opening_premium_cap:.2f})."
@@ -3504,7 +3558,14 @@ def main():
                     if is_expensive_symbol and opening_expensive_entries_today_count >= opening_expensive_cap:
                         if not premium_override_ok:
                             _mark_skip("opening_expensive_symbol_cap")
-                            _mark_stage4_reject(reason="opening_expensive_symbol_cap", ticker=ticker)
+                            _mark_stage4_reject(
+                                reason="opening_expensive_symbol_cap",
+                                ticker=ticker,
+                                detail=(
+                                    f"opening expensive entries {opening_expensive_entries_today_count}/"
+                                    f"{opening_expensive_cap}"
+                                ),
+                            )
                             print(
                                 f"[{ts(now_et)}] {ticker}: skip (opening expensive-name cap "
                                 f"{opening_expensive_entries_today_count}/{opening_expensive_cap})."
@@ -3546,13 +3607,20 @@ def main():
                     elif not retry_ok:
                         reject_reason = "quote_spread_too_wide" if "spread" in retry_reason else "no_option_ask"
                         _mark_skip(reject_reason)
-                        _mark_stage4_reject(reason=reject_reason, ticker=ticker)
+                        _mark_stage4_reject(reason=reject_reason, ticker=ticker, detail=retry_reason)
                         print(f"[{ts(now_et)}] {ticker}: skip ({retry_reason}).")
                         time.sleep(config.RATE_LIMIT_SLEEP_SECONDS)
                         continue
                 if pre_submit_slippage > (config.MAX_ENTRY_SLIPPAGE_PCT * 3):
                     _mark_skip("entry_slippage_too_high")
-                    _mark_stage4_reject(reason="entry_slippage_too_high", ticker=ticker)
+                    _mark_stage4_reject(
+                        reason="entry_slippage_too_high",
+                        ticker=ticker,
+                        detail=(
+                            f"entry slippage {pre_submit_slippage:.2f}% > hard cap "
+                            f"{(config.MAX_ENTRY_SLIPPAGE_PCT * 3):.2f}%"
+                        ),
+                    )
                     print(
                         f"[{ts(now_et)}] {ticker}: skip (entry slippage {pre_submit_slippage:.2f}% > "
                         f"hard cap {(config.MAX_ENTRY_SLIPPAGE_PCT * 3):.2f}%)."

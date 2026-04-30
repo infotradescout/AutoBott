@@ -78,7 +78,8 @@ def _resolve_display_tz() -> Any:
 
 
 DISPLAY_TZ = _resolve_display_tz()
-DISPLAY_TZ_LABEL = str(os.getenv("DASHBOARD_DISPLAY_TZ_LABEL", "CST") or "CST").strip() or "CST"
+DISPLAY_TZ_LABEL_OVERRIDE = str(os.getenv("DASHBOARD_DISPLAY_TZ_LABEL", "") or "").strip()
+DISPLAY_TZ_LABEL = DISPLAY_TZ_LABEL_OVERRIDE
 _REVIEW_CACHE: dict[str, Any] = {"ts": None, "payload": None}
 _CSV_READ_HARD_LIMIT = max(200, int(getattr(config, "DASHBOARD_CSV_READ_HARD_LIMIT", 2500) or 2500))
 _HEAVY_API_CACHE: dict[str, dict[str, Any]] = {}
@@ -123,11 +124,22 @@ def _now_et() -> datetime:
     return datetime.now(EASTERN)
 
 
+def _display_tz_label(local_dt: datetime | None = None) -> str:
+  if DISPLAY_TZ_LABEL_OVERRIDE:
+    return DISPLAY_TZ_LABEL_OVERRIDE
+  probe = local_dt or datetime.now(DISPLAY_TZ)
+  try:
+    return str(probe.astimezone(DISPLAY_TZ).tzname() or DISPLAY_TZ.zone)
+  except Exception:
+    return str(DISPLAY_TZ)
+
+
 def _to_ct_label(dt: datetime | None) -> str:
   if dt is None:
     return ""
-  value = dt.astimezone(DISPLAY_TZ).strftime("%Y-%m-%d %H:%M:%S")
-  return f"{value} {DISPLAY_TZ_LABEL}"
+  local_dt = dt.astimezone(DISPLAY_TZ)
+  value = local_dt.strftime("%Y-%m-%d %H:%M:%S")
+  return f"{value} {_display_tz_label(local_dt)}"
 
 
 def _extract_underlying(symbol: str) -> str:
@@ -313,9 +325,11 @@ def _entry_window_label_for_display() -> str:
         now_et = _now_et()
         start_et = EASTERN.localize(datetime(now_et.year, now_et.month, now_et.day, start_hour, start_min, 0))
         end_et = EASTERN.localize(datetime(now_et.year, now_et.month, now_et.day, end_hour, end_min, 0))
-        start_local = start_et.astimezone(DISPLAY_TZ).strftime("%H:%M")
-        end_local = end_et.astimezone(DISPLAY_TZ).strftime("%H:%M")
-        return f"{start_local}-{end_local} {DISPLAY_TZ_LABEL}"
+        start_local_dt = start_et.astimezone(DISPLAY_TZ)
+        end_local_dt = end_et.astimezone(DISPLAY_TZ)
+        start_local = start_local_dt.strftime("%H:%M")
+        end_local = end_local_dt.strftime("%H:%M")
+        return f"{start_local}-{end_local} {_display_tz_label(end_local_dt)}"
     except Exception:
         return f"{config.NO_NEW_TRADES_BEFORE}-{config.NO_NEW_TRADES_AFTER} ET"
 
@@ -363,7 +377,11 @@ def _timeline_for_symbol(scan_rows: list[dict[str, Any]], symbol: str, *, max_it
   out: list[str] = []
   for row in rows[: max(1, int(max_items))]:
     ts_dt = _parse_ts(str(row.get("timestamp", "") or ""))
-    ts_label = ts_dt.strftime("%H:%M") if ts_dt is not None else str(row.get("timestamp", "") or "")[:5]
+    ts_label = (
+      ts_dt.astimezone(DISPLAY_TZ).strftime("%H:%M")
+      if ts_dt is not None
+      else str(row.get("timestamp", "") or "")[:5]
+    )
     stage = _scan_row_stage(row)
     reason = str(row.get("reason", "") or "")
     if len(reason) > 70:
@@ -3357,21 +3375,28 @@ def api_scanlog():
       ),
       reverse=True,
     )
+    out: list[dict[str, Any]] = []
     for row in deduped:
       symbol_upper = str(row.get("symbol", "") or "").upper()
       outcome = signal_outcomes.get(symbol_upper, {}) if symbol_upper else {}
       disposition = str(outcome.get("disposition", "") or "").strip() or "setup_pass"
       disposition_detail = str(outcome.get("detail", "") or "").strip()
-      row["stage"] = "setup_pass"
-      row["post_setup_disposition"] = disposition
-      row["post_setup_detail"] = disposition_detail
-      row["final_state"] = disposition
-      row["state_timeline"] = _timeline_for_symbol(
+      ts_raw = str(row.get("timestamp", "") or "")
+      ts_dt = _parse_ts(ts_raw)
+      patched = dict(row)
+      if ts_raw:
+        patched["timestamp"] = _to_ct_label(ts_dt) or ts_raw
+      patched["stage"] = "setup_pass"
+      patched["post_setup_disposition"] = disposition
+      patched["post_setup_detail"] = disposition_detail
+      patched["final_state"] = disposition
+      patched["state_timeline"] = _timeline_for_symbol(
         today_rows,
         str(row.get("symbol", "") or ""),
         max_items=5,
       )
-    payload = deduped[:30]
+      out.append(patched)
+    payload = out[:30]
     _set_cached_heavy_payload("scanlog", payload)
     return jsonify(payload)
   except Exception as exc:  # noqa: BLE001
@@ -3452,82 +3477,92 @@ def api_scansummary():
             return jsonify(cached)
         last_ts, same_loop = _latest_scan_loop_rows(limit=1000)
         if not same_loop:
-          runtime_state = load_bot_state()
-          last_entry_debug = runtime_state.get("last_entry_debug") if isinstance(runtime_state, dict) else {}
-          if isinstance(last_entry_debug, dict) and last_entry_debug:
-            signal_detected = int(_safe_float(last_entry_debug.get("signal_detected_count"), 0))
-            eligible_count = int(_safe_float(last_entry_debug.get("entry_stage4_eligible_count"), 0))
-            rejected_count = int(_safe_float(last_entry_debug.get("entry_stage4_reject_count"), 0))
-            orders_submitted = int(_safe_float(last_entry_debug.get("entry_orders_submitted"), 0))
-            orders_filled = int(_safe_float(last_entry_debug.get("entries_filled"), 0))
-            today_trades = _today_trade_rows()
-            trade_summary = _build_trade_report_summary(today_trades)
-            raw_reasons = last_entry_debug.get("entry_stage4_reject_reasons")
-            reject_reasons = raw_reasons if isinstance(raw_reasons, dict) else {}
-            payload = {
-                "universe_candidates": signal_detected,
-                "signal_detected_count": signal_detected,
-                "setup_passed_count": signal_detected,
-                "scanner_pass_count": signal_detected,
-                "rejected_count": 0,
-                "entry_eligible_count": eligible_count,
-                "entry_rejected_count": rejected_count,
-                "order_submitted_count": orders_submitted,
-                "order_filled_count": orders_filled,
-                "orders_submitted_count": orders_submitted,
-                "orders_filled_count": orders_filled,
-                "orders_buy_filled_count": orders_filled,
-                "orders_sell_filled_count": 0,
-                "orders_total_filled_count": orders_filled,
-                "orders_rejected_or_canceled_count": 0,
-                "trades_filled_count": orders_filled,
-                "real_pass_count": orders_filled,
-                "realized_pnl_usd": 0.0,
-                "stage_pipeline": {
-                  "signal_detected": signal_detected,
-                  "entry_eligible": eligible_count,
-                  "order_submitted": orders_submitted,
-                  "order_filled": orders_filled,
-                },
-                "stage_fail_counts": {},
-                "stage4_entry_reject_reasons": reject_reasons,
-                "entry_stage4_source": "runtime_entry_debug_no_scanlog",
-                "entry_stage4_fresh": True,
-                "entry_stage4_loop_ts": str(last_entry_debug.get("loop_ts_et", "") or ""),
-                "index_bias": str(last_entry_debug.get("index_bias", "both") or "both"),
-                "chop_filter_active": bool(last_entry_debug.get("chop_filter_active", False)),
-                "chop_filter_reason": str(last_entry_debug.get("chop_filter_reason", "") or ""),
-                "chop_weak_signal_share": float(last_entry_debug.get("chop_weak_signal_share", 0.0) or 0.0),
-                "chop_recent_option_exits": int(last_entry_debug.get("chop_recent_option_exits", 0) or 0),
-                "chop_pause_until": str(last_entry_debug.get("chop_pause_until", "") or ""),
-                "avg_time_to_first_green_seconds": trade_summary.get("avg_time_to_first_green_seconds"),
-                "option_no_progress_exit_count": int(trade_summary.get("option_no_progress_exit_count", 0) or 0),
-                "option_momentum_stall_exit_count": int(trade_summary.get("option_momentum_stall_exit_count", 0) or 0),
-                "weak_index_bias_trade_count": int(trade_summary.get("weak_index_bias_trade_count", 0) or 0),
-                "top_fail_reason": "Scan log unavailable; using runtime entry telemetry",
-                "setup_valid_count": signal_detected,
-                "pass_count": signal_detected,
-                "fail_count": 0,
-                "top_reason": "Scan log unavailable",
-                "last_scan": str(last_entry_debug.get("loop_ts_et", "") or ""),
-            }
-          _set_cached_heavy_payload("scansummary", payload)
-          return jsonify(payload)
-            return jsonify(
-                {
-                    "universe_candidates": 0,
-              "signal_detected_count": 0,
-                    "setup_passed_count": 0,
+            runtime_state = load_bot_state()
+            last_entry_debug = runtime_state.get("last_entry_debug") if isinstance(runtime_state, dict) else {}
+            if isinstance(last_entry_debug, dict) and last_entry_debug:
+                signal_detected = int(_safe_float(last_entry_debug.get("signal_detected_count"), 0))
+                eligible_count = int(_safe_float(last_entry_debug.get("entry_stage4_eligible_count"), 0))
+                rejected_count = int(_safe_float(last_entry_debug.get("entry_stage4_reject_count"), 0))
+                orders_submitted = int(_safe_float(last_entry_debug.get("entry_orders_submitted"), 0))
+                orders_filled = int(_safe_float(last_entry_debug.get("entries_filled"), 0))
+                today_trades = _today_trade_rows()
+                trade_summary = _build_trade_report_summary(today_trades)
+                raw_reasons = last_entry_debug.get("entry_stage4_reject_reasons")
+                reject_reasons = raw_reasons if isinstance(raw_reasons, dict) else {}
+                payload = {
+                    "universe_candidates": signal_detected,
+                    "signal_detected_count": signal_detected,
+                    "setup_passed_count": signal_detected,
+                    "scanner_pass_count": signal_detected,
                     "rejected_count": 0,
-                    "entry_eligible_count": 0,
-              "order_submitted_count": 0,
-              "order_filled_count": 0,
-              "real_pass_count": 0,
+                    "entry_eligible_count": eligible_count,
+                    "entry_rejected_count": rejected_count,
+                    "order_submitted_count": orders_submitted,
+                    "order_filled_count": orders_filled,
+                    "orders_submitted_count": orders_submitted,
+                    "orders_filled_count": orders_filled,
+                    "orders_buy_filled_count": orders_filled,
+                    "orders_sell_filled_count": 0,
+                    "orders_total_filled_count": orders_filled,
+                    "orders_rejected_or_canceled_count": 0,
+                    "trades_filled_count": orders_filled,
+                    "real_pass_count": orders_filled,
+                    "realized_pnl_usd": 0.0,
+                    "stage_pipeline": {
+                        "signal_detected": signal_detected,
+                        "entry_eligible": eligible_count,
+                        "order_submitted": orders_submitted,
+                        "order_filled": orders_filled,
+                    },
                     "stage_fail_counts": {},
-                    "top_fail_reason": "No scan data yet",
-                    "last_scan": "",
+                    "stage4_entry_reject_reasons": reject_reasons,
+                    "entry_stage4_source": "runtime_entry_debug_no_scanlog",
+                    "entry_stage4_fresh": True,
+                    "entry_stage4_loop_ts": str(last_entry_debug.get("loop_ts_et", "") or ""),
+                    "index_bias": str(last_entry_debug.get("index_bias", "both") or "both"),
+                    "chop_filter_active": bool(last_entry_debug.get("chop_filter_active", False)),
+                    "chop_filter_reason": str(last_entry_debug.get("chop_filter_reason", "") or ""),
+                    "chop_weak_signal_share": float(last_entry_debug.get("chop_weak_signal_share", 0.0) or 0.0),
+                    "chop_recent_option_exits": int(last_entry_debug.get("chop_recent_option_exits", 0) or 0),
+                    "chop_pause_until": str(last_entry_debug.get("chop_pause_until", "") or ""),
+                    "avg_time_to_first_green_seconds": trade_summary.get("avg_time_to_first_green_seconds"),
+                    "option_no_progress_exit_count": int(trade_summary.get("option_no_progress_exit_count", 0) or 0),
+                    "option_momentum_stall_exit_count": int(trade_summary.get("option_momentum_stall_exit_count", 0) or 0),
+                    "weak_index_bias_trade_count": int(trade_summary.get("weak_index_bias_trade_count", 0) or 0),
+                    "top_fail_reason": "Scan log unavailable; using runtime entry telemetry",
+                    "setup_valid_count": signal_detected,
+                    "pass_count": signal_detected,
+                    "fail_count": 0,
+                    "top_reason": "Scan log unavailable",
+                    "last_scan": str(last_entry_debug.get("loop_ts_et", "") or ""),
                 }
-            )
+                _set_cached_heavy_payload("scansummary", payload)
+                return jsonify(payload)
+
+            payload = {
+                "universe_candidates": 0,
+                "signal_detected_count": 0,
+                "setup_passed_count": 0,
+                "scanner_pass_count": 0,
+                "rejected_count": 0,
+                "entry_eligible_count": 0,
+                "entry_rejected_count": 0,
+                "order_submitted_count": 0,
+                "order_filled_count": 0,
+                "orders_submitted_count": 0,
+                "orders_filled_count": 0,
+                "orders_buy_filled_count": 0,
+                "orders_sell_filled_count": 0,
+                "orders_total_filled_count": 0,
+                "orders_rejected_or_canceled_count": 0,
+                "real_pass_count": 0,
+                "stage_fail_counts": {},
+                "stage4_entry_reject_reasons": {},
+                "top_fail_reason": "No scan data yet",
+                "last_scan": "",
+            }
+        _set_cached_heavy_payload("scansummary", payload)
+        return jsonify(payload)
 
         pass_rows = [r for r in same_loop if str(r.get("result", "") or "").lower() == "pass"]
         fail_rows = [r for r in same_loop if str(r.get("result", "") or "").lower() == "fail"]
@@ -3636,8 +3671,8 @@ def api_scansummary():
                 "top_reason": top_reason,
                 "last_scan": _to_ct_label(_parse_ts(str(last_ts))) or str(last_ts),
             }
-            _set_cached_heavy_payload("scansummary", payload)
-            return jsonify(payload)
+        _set_cached_heavy_payload("scansummary", payload)
+        return jsonify(payload)
     except Exception as exc:  # noqa: BLE001
         return jsonify({"error": str(exc)}), 500
 
@@ -5709,6 +5744,50 @@ def home():
     #scan-fails-table table {
       min-width: 720px;
     }
+    #scan-wrap { overflow-x: hidden; }
+    #scan-wrap .scan-table {
+      min-width: 0;
+      table-layout: fixed;
+    }
+    .scan-table th,
+    .scan-table td {
+      white-space: normal;
+      overflow-wrap: anywhere;
+      line-height: 1.35;
+    }
+    .scan-table .scan-nowrap {
+      white-space: nowrap;
+      overflow-wrap: normal;
+    }
+    .scan-table .scan-num {
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      font-size: 12px;
+    }
+    .scan-state-pill {
+      display: inline-flex;
+      max-width: 100%;
+      border: 1px solid rgba(141, 172, 206, 0.32);
+      border-radius: 999px;
+      padding: 2px 7px;
+      color: var(--muted);
+      font-size: 11px;
+      line-height: 1.25;
+      overflow-wrap: anywhere;
+    }
+    .scan-state-pill.ok { color: var(--green); border-color: rgba(37, 211, 102, 0.42); }
+    .scan-state-pill.warn { color: var(--yellow); border-color: rgba(255, 191, 74, 0.48); }
+    .scan-state-pill.bad { color: var(--red); border-color: rgba(255, 93, 102, 0.45); }
+    .scan-reason-cell { color: #9ab0c9; font-size: 12px; }
+    .scan-timeline {
+      margin-top: 5px;
+      color: #7f94ad;
+      font-size: 11px;
+    }
+    .scan-timeline summary {
+      color: #8fa1b8;
+      cursor: pointer;
+      outline: none;
+    }
     .badge { font-size: 11px; padding: 2px 7px; border-radius: 999px; border: 1px solid var(--border); }
     .b-green { color: var(--green); border-color: rgba(0,200,83,0.4); }
     .b-red { color: var(--red); border-color: rgba(255,23,68,0.4); }
@@ -5754,7 +5833,7 @@ def home():
       font-size: 12px;
     }
     .mobile-k { color: var(--muted); }
-    .mobile-v { color: var(--text); font-weight: 600; }
+    .mobile-v { color: var(--text); font-weight: 600; overflow-wrap: anywhere; }
     @media (max-width: 1120px) {
       .grid4 { grid-template-columns: repeat(2, minmax(0, 1fr)); }
     }
@@ -5786,7 +5865,7 @@ def home():
     <div class="header">
       <div>
         <div class="title">Alpaca Options Autotrader Dashboard</div>
-        <div class="muted">Last updated: <span id="last-updated">--</span> | Auto-refresh: 10s (instant on tab focus)</div>
+        <div class="muted">Last updated: <span id="last-updated">--</span> | Auto-refresh: 30s (instant on tab focus)</div>
       </div>
       <div class="head-actions">
         <a href="/roadmap" class="ctrl-btn" style="text-decoration:none;">ROADMAP</a>
@@ -5914,7 +5993,7 @@ def home():
     </div>
 
     <div class="card section">
-      <h3>SCANNER - Current Loop Final Setup Passes</h3>
+      <h3>SCANNER - Current Loop Setup Passes + Entry Result</h3>
       <div id="scan-wrap" class="muted">Loading...</div>
     </div>
 
@@ -5961,10 +6040,25 @@ def home():
       if (Number.isNaN(n)) return "--";
       return `${n >= 0 ? "+" : ""}${n.toFixed(digits)}%`;
     }
+    function escapeHtml(value) {
+      return String(value ?? "")
+        .replace(/&/g, "&amp;")
+        .replace(/</g, "&lt;")
+        .replace(/>/g, "&gt;")
+        .replace(/"/g, "&quot;")
+        .replace(/'/g, "&#039;");
+    }
+    function shortTimestamp(value) {
+      const text = String(value || "-");
+      const match = text.match(/^\d{4}-\d{2}-\d{2}\s+(\d{2}:\d{2}:\d{2})(?:\s+([A-Z]{2,5}))?$/);
+      if (!match) return text;
+      return `${match[1]}${match[2] ? ` ${match[2]}` : ""}`;
+    }
     function reasonBadge(reason) {
-      if (reason === "profit_target") return `<span class="badge b-green">${reason}</span>`;
-      if (reason === "stop_loss") return `<span class="badge b-red">${reason}</span>`;
-      return `<span class="badge b-gray">${reason || "manual"}</span>`;
+      const safeReason = escapeHtml(reason || "manual");
+      if (reason === "profit_target") return `<span class="badge b-green">${safeReason}</span>`;
+      if (reason === "stop_loss") return `<span class="badge b-red">${safeReason}</span>`;
+      return `<span class="badge b-gray">${safeReason}</span>`;
     }
     function barColor(p) {
       if (p < 50) return "#00c853";
@@ -6136,20 +6230,29 @@ def home():
       const el = document.getElementById("scan-wrap");
       if (!Array.isArray(data)) { el.textContent = "—"; return; }
       const slice = data.slice(0, 10);
-      if (slice.length === 0) { el.textContent = "No final setup passes in latest scan loop"; return; }
-      const timelineText = (arr) => {
-        if (!Array.isArray(arr) || !arr.length) return "-";
-        return arr.join(" > ");
+      if (slice.length === 0) { el.textContent = "No setup-passed candidates in latest scan loop"; return; }
+      const scanStateBadge = (value) => {
+        const text = String(value || "setup_pass");
+        const lowered = text.toLowerCase();
+        let tone = "";
+        if (lowered === "setup_pass" || lowered.includes("filled")) {
+          tone = "ok";
+        } else if (lowered.startsWith("blocked")) {
+          tone = "warn";
+        } else if (lowered.includes("reject") || lowered.includes("fail")) {
+          tone = "bad";
+        }
+        return `<span class="scan-state-pill ${tone}">${escapeHtml(text)}</span>`;
       };
       const timelineDetails = (arr) => {
         if (!Array.isArray(arr) || !arr.length) return "-";
-        const latest = String(arr[0] || "-");
+        const latest = escapeHtml(arr[0] || "-");
         if (arr.length === 1) return latest;
-        const extra = arr.slice(1).map(item => `<div style="margin-top:4px">${item}</div>`).join("");
+        const extra = arr.slice(1).map(item => `<div style="margin-top:4px">${escapeHtml(item)}</div>`).join("");
         return `
-          <details style="cursor:pointer;">
-            <summary style="color:#9ab0c9">${latest} <span style="color:#6f849c">(+${arr.length - 1} more)</span></summary>
-            <div style="margin-top:6px; color:#9ab0c9">${extra}</div>
+          <details class="scan-timeline">
+            <summary>${latest} <span style="color:#6f849c">(+${arr.length - 1} more)</span></summary>
+            <div style="margin-top:6px;">${extra}</div>
           </details>
         `;
       };
@@ -6157,17 +6260,17 @@ def home():
         const cards = slice.map(s => `
           <div class="mobile-item">
             <div class="mobile-title">
-              <span>${s.symbol || "-"}</span>
-              <span class="badge ${String(s.direction || "").toLowerCase() === "call" ? "b-green" : "b-red"}">${String(s.direction || "-").toUpperCase()}</span>
+              <span>${escapeHtml(s.symbol || "-")}</span>
+              <span class="badge ${String(s.direction || "").toLowerCase() === "call" ? "b-green" : "b-red"}">${escapeHtml(String(s.direction || "-").toUpperCase())}</span>
             </div>
             <div class="mobile-grid">
-              <div><span class="mobile-k">Time</span> <span class="mobile-v">${s.timestamp || "-"}</span></div>
-              <div><span class="mobile-k">RVOL</span> <span class="mobile-v">${s.rvol || "-"}</span></div>
-              <div><span class="mobile-k">RSI</span> <span class="mobile-v">${s.rsi || "-"}</span></div>
-              <div><span class="mobile-k">IVR</span> <span class="mobile-v">${s.iv_rank || "-"}</span></div>
-              <div><span class="mobile-k">State</span> <span class="mobile-v">${s.final_state || "setup_pass"}</span></div>
-              <div><span class="mobile-k">Disposition</span> <span class="mobile-v">${s.post_setup_detail || "-"}</span></div>
-              <div><span class="mobile-k">Reason</span> <span class="mobile-v">${s.reason || "-"}</span></div>
+              <div><span class="mobile-k">Time</span> <span class="mobile-v">${escapeHtml(s.timestamp || "-")}</span></div>
+              <div><span class="mobile-k">RVOL</span> <span class="mobile-v">${escapeHtml(s.rvol || "-")}</span></div>
+              <div><span class="mobile-k">RSI</span> <span class="mobile-v">${escapeHtml(s.rsi || "-")}</span></div>
+              <div><span class="mobile-k">IVR</span> <span class="mobile-v">${escapeHtml(s.iv_rank || "-")}</span></div>
+              <div><span class="mobile-k">State</span> <span class="mobile-v">${scanStateBadge(s.final_state)}</span></div>
+              <div><span class="mobile-k">Disposition</span> <span class="mobile-v">${escapeHtml(s.post_setup_detail || "-")}</span></div>
+              <div><span class="mobile-k">Reason</span> <span class="mobile-v">${escapeHtml(s.reason || "-")}</span></div>
               <div><span class="mobile-k">Timeline</span> <span class="mobile-v">${timelineDetails(s.state_timeline)}</span></div>
             </div>
           </div>
@@ -6177,18 +6280,35 @@ def home():
       }
       const rows = slice.map(s => `
         <tr>
-          <td>${s.timestamp || "-"}</td>
-          <td>${s.symbol || "-"}</td>
-          <td><span class="badge ${String(s.direction || "").toLowerCase() === "call" ? "b-green" : "b-red"}">${String(s.direction || "-").toUpperCase()}</span></td>
-          <td>${s.rvol || "-"}</td>
-          <td>${s.rsi || "-"}</td>
-          <td>${s.iv_rank || "-"}</td>
-          <td>${s.final_state || "setup_pass"}</td>
-          <td>${s.post_setup_detail || "-"}</td>
-          <td>${s.reason || "-"}</td>
-          <td style="max-width:360px; white-space:normal; color:#9ab0c9; font-size:11px">${timelineDetails(s.state_timeline)}</td>
+          <td class="scan-nowrap" title="${escapeHtml(s.timestamp || "-")}">${escapeHtml(shortTimestamp(s.timestamp || "-"))}</td>
+          <td class="scan-nowrap">${escapeHtml(s.symbol || "-")}</td>
+          <td class="scan-nowrap"><span class="badge ${String(s.direction || "").toLowerCase() === "call" ? "b-green" : "b-red"}">${escapeHtml(String(s.direction || "-").toUpperCase())}</span></td>
+          <td class="scan-num">${escapeHtml(s.rvol || "-")}</td>
+          <td class="scan-num">${escapeHtml(s.rsi || "-")}</td>
+          <td class="scan-num">${escapeHtml(s.iv_rank || "-")}</td>
+          <td>${scanStateBadge(s.final_state)}</td>
+          <td>${escapeHtml(s.post_setup_detail || "-")}</td>
+          <td class="scan-reason-cell">
+            <div>${escapeHtml(s.reason || "-")}</div>
+            <div>${timelineDetails(s.state_timeline)}</div>
+          </td>
         </tr>`).join("");
-      el.innerHTML = `<table><thead><tr><th>Time</th><th>Symbol</th><th>Dir</th><th>RVOL</th><th>RSI</th><th>IVR %</th><th>Final State</th><th>Disposition Detail</th><th>Reason</th><th>Recent Timeline</th></tr></thead><tbody>${rows}</tbody></table>`;
+      el.innerHTML = `
+        <table class="scan-table">
+          <colgroup>
+            <col style="width:11%">
+            <col style="width:6%">
+            <col style="width:6%">
+            <col style="width:5%">
+            <col style="width:5%">
+            <col style="width:5%">
+            <col style="width:14%">
+            <col style="width:15%">
+            <col style="width:33%">
+          </colgroup>
+          <thead><tr><th>Time</th><th>Symbol</th><th>Dir</th><th>RVOL</th><th>RSI</th><th>IVR %</th><th>Entry Result</th><th>Blocker</th><th>Reason / Timeline</th></tr></thead>
+          <tbody>${rows}</tbody>
+        </table>`;
     }
 
     function reviewBadge(status) {
