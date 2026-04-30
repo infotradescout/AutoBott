@@ -210,10 +210,9 @@ LOOP_INTERVAL_SECONDS              = 10
 # Allow trades to run up to 90 min — trailing stop exits winners well before this
 MAX_HOLD_MINUTES                   = 45    # rotate capital sooner when trades fail to prove out
 
-# Anti-churn entry hold: prevent discretionary exits (reversal, immediate take-profit)
-# during first N minutes after entry. Stop loss still fires immediately.
-# Reduces round-trip losses from early noise; lets winners establish momentum.
-ANTI_CHURN_HOLD_MINUTES            = 0
+# Anti-churn entry hold: prevent discretionary exits during the first few minutes
+# after entry so option spread noise does not create immediate round-trip losses.
+ANTI_CHURN_HOLD_MINUTES            = 5
 
 # Opening strict mode (09:30+N minutes): trade fewer, stronger setups only.
 OPENING_STRICT_WINDOW_MINUTES                = 20
@@ -240,6 +239,9 @@ OPENING_EXPENSIVE_MAX_PREMIUM_USD            = 200.0  # allow controlled entries
 # Stop loss baseline scaled up for larger-account operation while preserving fast exits.
 STOP_LOSS_USD          = 45.0
 STOP_LOSS_PCT          = 0.35   # 35% hard stop
+MIN_EFFECTIVE_STOP_LOSS_USD = 45.0
+STOP_LOSS_GRACE_MINUTES = 2.0
+STOP_LOSS_GRACE_SEVERE_MULT = 1.75
 
 # Legacy immediate TP knob retained for backward compatibility only.
 # Stateful manager (protect -> bank/qualify -> runner) is now primary.

@@ -927,6 +927,29 @@ def _is_in_anti_churn_window(entry_time: datetime | None, now_et: datetime) -> b
         return False
 
 
+def _effective_stop_loss_usd(value: float | int | str | None) -> float:
+    try:
+        parsed = abs(float(value or 0.0))
+    except (TypeError, ValueError):
+        parsed = 0.0
+    floor = abs(float(getattr(config, "MIN_EFFECTIVE_STOP_LOSS_USD", getattr(config, "STOP_LOSS_USD", 10.0)) or 0.0))
+    base = abs(float(getattr(config, "STOP_LOSS_USD", 10.0) or 10.0))
+    return max(parsed, floor, base)
+
+
+def _stop_loss_grace_active(entry_time: datetime | None, now_et: datetime) -> bool:
+    if entry_time is None:
+        return False
+    try:
+        grace_minutes = float(getattr(config, "STOP_LOSS_GRACE_MINUTES", 0.0) or 0.0)
+        if grace_minutes <= 0:
+            return False
+        elapsed = (now_et - entry_time).total_seconds() / 60.0
+        return elapsed < grace_minutes
+    except Exception:
+        return False
+
+
 def _parse_state_datetime(value: str | None) -> datetime | None:
     if not value:
         return None
@@ -1601,12 +1624,12 @@ def main():
     def _runtime_stop_loss_usd() -> float:
         base = float(getattr(config, "STOP_LOSS_USD", 10.0))
         if not is_enabled("FEATURE_STRATEGY_PROFILES", False):
-            return base
+            return _effective_stop_loss_usd(base)
         overrides = get_profile_overrides(strategy_profile)
         override = overrides.get("stop_loss_usd")
         if override is None:
-            return base
-        return float(override)
+            return _effective_stop_loss_usd(base)
+        return _effective_stop_loss_usd(override)
 
     def _runtime_entry_min_signal_score() -> float:
         base = float(getattr(config, "MIN_SIGNAL_SCORE", 5.0))
@@ -3382,7 +3405,8 @@ def main():
                 volatility_profile = _signal_volatility_profile(signal)
                 base_signal_stop_loss_usd = float(signal.get("stop_loss_usd", _runtime_stop_loss_usd()) or _runtime_stop_loss_usd())
                 signal_stop_loss_usd = round(
-                    max(1.0, base_signal_stop_loss_usd * float(volatility_profile["stop_loss_mult"])),
+                    _effective_stop_loss_usd(base_signal_stop_loss_usd)
+                    * float(volatility_profile["stop_loss_mult"]),
                     2,
                 )
                 signal_take_profit_pct = float(
@@ -3963,9 +3987,17 @@ def main():
             # This ensures that when config is tightened, existing positions get the tighter stop immediately.
             _meta_sl = float(meta.get("stop_loss_usd") or 0)
             _runtime_sl = _runtime_stop_loss_usd()
-            stop_loss_usd_cap = min(_meta_sl, _runtime_sl) if _meta_sl > 0 else _runtime_sl
+            raw_stop_loss_usd_cap = min(_meta_sl, _runtime_sl) if _meta_sl > 0 else _runtime_sl
+            stop_loss_usd_cap = _effective_stop_loss_usd(raw_stop_loss_usd_cap)
             if exit_reason is None and should_trigger_stop_loss(unrealized_usd, stop_loss_usd_cap):
-                exit_reason = "stop_loss"
+                severe_mult = max(1.0, float(getattr(config, "STOP_LOSS_GRACE_SEVERE_MULT", 1.0) or 1.0))
+                severe_stop_cap = stop_loss_usd_cap * severe_mult
+                if _stop_loss_grace_active(entry_time, now_et) and not should_trigger_stop_loss(unrealized_usd, severe_stop_cap):
+                    meta["last_stop_loss_grace_et"] = ts(now_et)
+                    meta["last_stop_loss_grace_unrealized_usd"] = round(float(unrealized_usd or 0.0), 4)
+                    open_trade_meta[symbol] = meta
+                else:
+                    exit_reason = "stop_loss"
 
             # --- Option-behavior exits (contract premium is primary after entry) ---
             if exit_reason is None and bool(getattr(config, "ENABLE_OPTION_BEHAVIOR_EXIT", True)):

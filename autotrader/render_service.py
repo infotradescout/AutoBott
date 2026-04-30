@@ -215,6 +215,42 @@ def _is_trader_loop_stale(runtime_state: dict) -> bool:
     return heartbeat_age_seconds > stale_after
 
 
+def _parse_state_datetime(value: str | None) -> datetime | None:
+    if not value:
+        return None
+    try:
+        parsed = datetime.fromisoformat(str(value))
+        if parsed.tzinfo is None and pytz is not None:
+            return pytz.timezone(config.EASTERN_TZ).localize(parsed)
+        if parsed.tzinfo is not None and pytz is not None:
+            return parsed.astimezone(pytz.timezone(config.EASTERN_TZ))
+        return parsed
+    except Exception:
+        return None
+
+
+def _effective_stop_loss_usd(value) -> float:
+    try:
+        parsed = abs(float(value or 0.0))
+    except (TypeError, ValueError):
+        parsed = 0.0
+    floor = abs(float(getattr(config, "MIN_EFFECTIVE_STOP_LOSS_USD", getattr(config, "STOP_LOSS_USD", 10.0)) or 0.0))
+    base = abs(float(getattr(config, "STOP_LOSS_USD", 10.0) or 10.0))
+    return max(parsed, floor, base)
+
+
+def _stop_loss_grace_active(entry_time: datetime | None, now_et: datetime) -> bool:
+    if entry_time is None:
+        return False
+    try:
+        grace_minutes = float(getattr(config, "STOP_LOSS_GRACE_MINUTES", 0.0) or 0.0)
+        if grace_minutes <= 0:
+            return False
+        return ((now_et - entry_time).total_seconds() / 60.0) < grace_minutes
+    except Exception:
+        return False
+
+
 def _position_unrealized_usd(pos) -> float | None:
     try:
         pl_raw = float(getattr(pos, "unrealized_pl", 0) or 0)
@@ -347,7 +383,10 @@ def _run_independent_stoploss_guard() -> None:
 
             broker = _broker()
             positions = broker.get_open_option_positions()
-            stop_cap = abs(float(getattr(config, "STOP_LOSS_USD", 10.0) or 10.0))
+            open_meta = runtime_state.get("open_trade_meta") if isinstance(runtime_state, dict) else {}
+            if not isinstance(open_meta, dict):
+                open_meta = {}
+            stop_cap = _effective_stop_loss_usd(getattr(config, "STOP_LOSS_USD", 10.0))
             if stop_cap <= 0:
                 time.sleep(guard_sleep_seconds)
                 continue
@@ -358,7 +397,16 @@ def _run_independent_stoploss_guard() -> None:
                 if not symbol or qty <= 0:
                     continue
                 unrealized_usd = _position_unrealized_usd(pos)
-                if unrealized_usd is None or unrealized_usd > -stop_cap:
+                meta = open_meta.get(symbol, {}) if isinstance(open_meta, dict) else {}
+                if not isinstance(meta, dict):
+                    meta = {}
+                symbol_stop_cap = _effective_stop_loss_usd(meta.get("stop_loss_usd", stop_cap))
+                if unrealized_usd is None or unrealized_usd > -symbol_stop_cap:
+                    continue
+                now_et = datetime.now(pytz.timezone(config.EASTERN_TZ)) if pytz is not None else datetime.now()
+                entry_time = _parse_state_datetime(str(meta.get("entry_time_iso", "") or ""))
+                severe_mult = max(1.0, float(getattr(config, "STOP_LOSS_GRACE_SEVERE_MULT", 1.0) or 1.0))
+                if _stop_loss_grace_active(entry_time, now_et) and unrealized_usd > -(symbol_stop_cap * severe_mult):
                     continue
                 if broker.has_open_order_for_symbol(symbol=symbol, side="sell"):
                     continue
@@ -371,17 +419,18 @@ def _run_independent_stoploss_guard() -> None:
                             "independent_stoploss_last_symbol": symbol,
                             "independent_stoploss_last_unrealized_usd": round(float(unrealized_usd), 4),
                             "independent_stoploss_last_qty": qty,
+                            "independent_stoploss_last_cap_usd": round(float(symbol_stop_cap), 4),
                         }
                     )
                     print(
                         f"[render_service] INDEPENDENT_STOPLOSS closed {symbol} qty={qty} "
-                        f"unrealized_usd={unrealized_usd:.2f} cap=-{stop_cap:.2f}"
+                        f"unrealized_usd={unrealized_usd:.2f} cap=-{symbol_stop_cap:.2f}"
                     )
                     ALERTS.send(
                         "independent_stoploss",
                         (
                             f"Independent stop-loss closed {symbol} qty={qty} "
-                            f"unrealized=${unrealized_usd:.2f} (cap -${stop_cap:.2f})."
+                            f"unrealized=${unrealized_usd:.2f} (cap -${symbol_stop_cap:.2f})."
                         ),
                         level="warning",
                         dedupe_key=f"independent-stoploss-{symbol}-{int(time.time() // 30)}",
