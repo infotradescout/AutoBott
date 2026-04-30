@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import csv
 import time
+from collections import deque
 from datetime import date, datetime, timedelta
 import re
 import math
@@ -962,6 +964,163 @@ def _parse_state_datetime(value: str | None) -> datetime | None:
         return None
 
 
+_TRADE_PERFORMANCE_GUARD_CACHE: dict[str, object] = {
+    "loaded_at": 0.0,
+    "source_mtime": None,
+    "rows": [],
+}
+
+
+def _safe_trade_float(value, default: float = 0.0) -> float:
+    try:
+        if value in (None, ""):
+            return default
+        return float(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _parse_trade_entry_time(row: dict[str, str]) -> datetime | None:
+    entry_time = _parse_state_datetime(str(row.get("entry_time", "") or ""))
+    if entry_time is not None:
+        return entry_time
+    date_raw = str(row.get("date", "") or "").strip()
+    if date_raw:
+        try:
+            parsed_date = date.fromisoformat(date_raw)
+            return pytz.timezone(config.EASTERN_TZ).localize(datetime.combine(parsed_date, datetime.min.time()))
+        except Exception:
+            return None
+    return None
+
+
+def _trade_row_pnl_pct(row: dict[str, str]) -> float:
+    for key in ("conservative_executable_pnl_pct", "pnl_pct", "paper_reported_pnl_pct"):
+        raw = row.get(key)
+        if raw not in (None, ""):
+            return _safe_trade_float(raw)
+    return 0.0
+
+
+def _load_recent_trade_rows(now_et: datetime) -> list[dict[str, str]]:
+    if not bool(getattr(config, "ENABLE_TRADE_PERFORMANCE_GUARD", False)):
+        return []
+
+    path = config.TRADES_CSV_PATH
+    if not path.exists():
+        return []
+
+    refresh_seconds = max(15, int(getattr(config, "TRADE_PERFORMANCE_GUARD_REFRESH_SECONDS", 120) or 120))
+    max_rows = max(100, int(getattr(config, "TRADE_PERFORMANCE_GUARD_MAX_ROWS", 3000) or 3000))
+    now_mono = time.monotonic()
+    try:
+        source_mtime = path.stat().st_mtime
+    except Exception:
+        return []
+
+    cached_rows = _TRADE_PERFORMANCE_GUARD_CACHE.get("rows")
+    if (
+        isinstance(cached_rows, list)
+        and _TRADE_PERFORMANCE_GUARD_CACHE.get("source_mtime") == source_mtime
+        and (now_mono - float(_TRADE_PERFORMANCE_GUARD_CACHE.get("loaded_at", 0.0) or 0.0)) < refresh_seconds
+    ):
+        return cached_rows
+
+    try:
+        with path.open("r", newline="", encoding="utf-8") as f:
+            rows = list(deque(csv.DictReader(f), maxlen=max_rows))
+    except Exception as exc:  # noqa: BLE001
+        print(f"[{ts(now_et)}] trade performance guard read failed: {exc}")
+        return []
+
+    lookback_days = max(1, int(getattr(config, "TRADE_PERFORMANCE_GUARD_LOOKBACK_DAYS", 21) or 21))
+    cutoff = now_et - timedelta(days=lookback_days)
+    recent: list[dict[str, str]] = []
+    for row in rows:
+        entry_time = _parse_trade_entry_time(row)
+        if entry_time is None or entry_time < cutoff:
+            continue
+        recent.append(row)
+
+    _TRADE_PERFORMANCE_GUARD_CACHE["loaded_at"] = now_mono
+    _TRADE_PERFORMANCE_GUARD_CACHE["source_mtime"] = source_mtime
+    _TRADE_PERFORMANCE_GUARD_CACHE["rows"] = recent
+    return recent
+
+
+def _performance_bucket_is_blocked(
+    rows: list[dict[str, str]],
+    *,
+    min_trades: int,
+) -> tuple[bool, str]:
+    if len(rows) < min_trades:
+        return False, ""
+    pnl_values = [_trade_row_pnl_pct(row) for row in rows]
+    wins = sum(1 for pnl in pnl_values if pnl > 0)
+    win_rate = wins / len(rows)
+    avg_pnl = sum(pnl_values) / len(pnl_values)
+    stop_loss_count = sum(1 for row in rows if str(row.get("exit_reason", "") or "").lower() == "stop_loss")
+    stop_loss_rate = stop_loss_count / len(rows)
+
+    max_win_rate = float(getattr(config, "TRADE_GUARD_MAX_WIN_RATE", 0.25) or 0.25)
+    max_avg_pnl = float(getattr(config, "TRADE_GUARD_MAX_AVG_PNL_PCT", -0.04) or -0.04)
+    stop_loss_threshold = float(getattr(config, "TRADE_GUARD_STOP_LOSS_RATE", 0.67) or 0.67)
+
+    poor_expectancy = win_rate <= max_win_rate and avg_pnl <= max_avg_pnl
+    stop_loss_cluster = stop_loss_rate >= stop_loss_threshold and avg_pnl < 0
+    if not (poor_expectancy or stop_loss_cluster):
+        return False, ""
+    return (
+        True,
+        f"{len(rows)} trades, win_rate={win_rate:.0%}, avg_pnl={avg_pnl:.1%}, stop_loss_rate={stop_loss_rate:.0%}",
+    )
+
+
+def _trade_performance_block_reason(ticker: str, direction: str, now_et: datetime) -> str:
+    symbol = str(ticker or "").upper()
+    dir_lc = str(direction or "").lower()
+    if not symbol or dir_lc not in ("call", "put"):
+        return ""
+
+    rows = _load_recent_trade_rows(now_et)
+    if not rows:
+        return ""
+
+    def _matches(row: dict[str, str], *, ticker_ok: bool, direction_ok: bool, hour_ok: bool) -> bool:
+        if ticker_ok and str(row.get("ticker", "") or "").upper() != symbol:
+            return False
+        if direction_ok and str(row.get("direction", "") or "").lower() != dir_lc:
+            return False
+        if hour_ok:
+            entry_time = _parse_trade_entry_time(row)
+            if entry_time is None or entry_time.hour != now_et.hour:
+                return False
+        return True
+
+    buckets = [
+        (
+            "ticker_direction_hour",
+            int(getattr(config, "TRADE_GUARD_MIN_EXACT_TRADES", 2) or 2),
+            [row for row in rows if _matches(row, ticker_ok=True, direction_ok=True, hour_ok=True)],
+        ),
+        (
+            "ticker_direction",
+            int(getattr(config, "TRADE_GUARD_MIN_TICKER_DIR_TRADES", 3) or 3),
+            [row for row in rows if _matches(row, ticker_ok=True, direction_ok=True, hour_ok=False)],
+        ),
+        (
+            "hour_direction",
+            int(getattr(config, "TRADE_GUARD_MIN_HOUR_DIR_TRADES", 4) or 4),
+            [row for row in rows if _matches(row, ticker_ok=False, direction_ok=True, hour_ok=True)],
+        ),
+    ]
+    for bucket_name, min_trades, bucket_rows in buckets:
+        blocked, summary = _performance_bucket_is_blocked(bucket_rows, min_trades=min_trades)
+        if blocked:
+            return f"{bucket_name} underperforming ({summary})"
+    return ""
+
+
 def _looks_like_auth_error(exc: Exception) -> bool:
     text = str(exc).lower()
     return "401" in text or "unauthorized" in text or "authorization required" in text
@@ -1842,6 +2001,10 @@ def main():
             print(f"[{ts(now_et)}] DRY-RUN reversal candidate: {ticker} {direction.upper()} (no order submitted).")
             return False
         if not _is_valid_long_direction(direction):
+            return False
+        performance_block_reason = _trade_performance_block_reason(ticker, direction, now_et)
+        if performance_block_reason:
+            print(f"[{ts(now_et)}] {ticker}: reversal skipped ({performance_block_reason}).")
             return False
         if not is_at_or_after(now_et, config.NO_NEW_TRADES_BEFORE):
             print(f"[{ts(now_et)}] {ticker}: reversal skipped (before entry window).")
@@ -3186,6 +3349,17 @@ def main():
                 _mark_skip("invalid_strategy_direction")
                 _mark_stage4_reject(reason="invalid_strategy_direction", ticker=ticker)
                 print(f"[{ts(now_et)}] {ticker}: skip (invalid direction={direction!r}; only CALL/PUT allowed).")
+                continue
+
+            performance_block_reason = _trade_performance_block_reason(ticker, direction, now_et)
+            if performance_block_reason:
+                _mark_skip("trade_performance_guard")
+                _mark_stage4_reject(
+                    reason="trade_performance_guard",
+                    ticker=ticker,
+                    detail=performance_block_reason,
+                )
+                print(f"[{ts(now_et)}] {ticker}: skip ({performance_block_reason}).")
                 continue
 
             preferred_core = set(str(s).upper() for s in getattr(config, "PREFERRED_CORE_TICKERS", ()))

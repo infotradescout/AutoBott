@@ -370,6 +370,20 @@ FLOW_PRIORITY_WEIGHT       = 1.0
 # Use blocked hours after you identify weak entry windows from analytics.
 ENTRY_BLOCKED_HOURS_ET    = ()
 
+# Live performance guard from closed trades. This is deliberately evidence-based:
+# sparse history does not block entries, but repeated losing ticker/direction/hour
+# combinations are stopped before another order is submitted.
+ENABLE_TRADE_PERFORMANCE_GUARD = True
+TRADE_PERFORMANCE_GUARD_LOOKBACK_DAYS = 21
+TRADE_PERFORMANCE_GUARD_MAX_ROWS = 3000
+TRADE_PERFORMANCE_GUARD_REFRESH_SECONDS = 120
+TRADE_GUARD_MIN_EXACT_TRADES = 2
+TRADE_GUARD_MIN_TICKER_DIR_TRADES = 3
+TRADE_GUARD_MIN_HOUR_DIR_TRADES = 4
+TRADE_GUARD_MAX_WIN_RATE = 0.25
+TRADE_GUARD_MAX_AVG_PNL_PCT = -0.04
+TRADE_GUARD_STOP_LOSS_RATE = 0.67
+
 # Execution-time spread gate using the live quote right before order submission.
 # Keep this tighter than MAX_OPTION_SPREAD_PCT, which is only used during chain selection.
 ENTRY_MAX_QUOTE_SPREAD_PCT         = 8.0   # stricter fill-quality gate
