@@ -25,7 +25,7 @@ PROFILES: dict[str, IntradayProfile] = {
     "open_drive_momentum": IntradayProfile(
         name="open_drive_momentum",
         window_start="09:30",
-        window_end="16:00",
+        window_end="10:30",
         symbols=(),          # universal — any ticker with an opening drive qualifies
         entry_max_quote_spread_pct=20.0,
         stop_loss_usd=10.0,

@@ -124,7 +124,7 @@ DRAWDOWN_SIZE_MULTIPLIER            = 0.75
 DAILY_LOSS_LIMIT_USD                = 450.0
 WEEKLY_LOSS_LIMIT_USD               = 1500.0
 CONSECUTIVE_LOSS_LIMIT              = 3
-CONSECUTIVE_LOSS_GUARD_ENABLED      = False
+CONSECUTIVE_LOSS_GUARD_ENABLED      = True
 # Net P&L circuit breaker (runtime telemetry-based):
 # Pause new entries once the day is sufficiently red in realized net P&L.
 INTRADAY_NET_LOSS_LIMIT_USD         = 350.0
@@ -327,6 +327,7 @@ RVOL_STRICT_UNTIL         = "10:30"
 RVOL_RELAX_AFTER          = "10:00"
 RVOL_RELAXED_MIN          = 1.0
 RVOL_IGNORE_AFTER         = "16:00"  # CRITICAL FIX: was 10:30 — never fully disable RVOL gate
+ENABLE_RVOL_FAIL_OPEN     = False  # never turn low-RVOL afternoons into tradeable momentum
 ATR_PCT_MIN               = 0.3   # very low ATR floor — don't filter out ETFs
 VWAP_NEUTRAL_BAND_PCT     = 0.15  # wider neutral band: within 0.15% of VWAP = neutral, halve VWAP vote weight
 MOVEMENT_FORCE_MIN_PCT    = 0.014  # further relaxed for early-session/transition tape
@@ -405,7 +406,7 @@ REJECT_COOLDOWN_MEDIUM_MINUTES = 15  # shorter tradability cooldown to avoid sta
 REJECT_COOLDOWN_EVENT_MINUTES  = 8   # shorter event cooldown for intraday rotation
 
 # Chop/no-trade regime guard (reduce force-trading in dead tape).
-ENABLE_CHOP_NO_TRADE_FILTER                   = False
+ENABLE_CHOP_NO_TRADE_FILTER                   = True
 CHOP_NO_TRADE_MIN_SIGNAL_SAMPLE               = 8
 CHOP_NO_TRADE_WEAK_SHARE_TRIGGER              = 0.65
 CHOP_NO_TRADE_MAX_RVOL                        = 0.35

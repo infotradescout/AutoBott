@@ -63,9 +63,9 @@ class WindowOpenTests(unittest.TestCase):
         self.assertTrue(is_profile_window_open(_et(9, 30), PROFILES["open_drive_momentum"]))
 
     def test_open_drive_window_closed_after_1130(self):
-        # Window widened to full session (09:30–16:00); 11:30/13:00 are now open.
-        self.assertTrue(is_profile_window_open(_et(11, 30), PROFILES["open_drive_momentum"]))
-        self.assertTrue(is_profile_window_open(_et(13, 0), PROFILES["open_drive_momentum"]))
+        # Opening drive is only an opening setup; afternoon drift must use other profiles.
+        self.assertFalse(is_profile_window_open(_et(11, 30), PROFILES["open_drive_momentum"]))
+        self.assertFalse(is_profile_window_open(_et(13, 0), PROFILES["open_drive_momentum"]))
         self.assertFalse(is_profile_window_open(_et(16, 0), PROFILES["open_drive_momentum"]))
 
     def test_vwap_continuation_window_spans_session(self):

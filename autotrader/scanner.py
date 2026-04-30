@@ -1512,7 +1512,12 @@ class IntradayScanner:
 
         rvol_fail_count = sum(1 for item in failed if "rvol" in str(item.get("reason", "")).lower())
         failopen_triggered = False
-        if not passed and failed and (rvol_fail_count / max(1, len(failed))) >= 0.70:
+        if (
+            bool(getattr(config, "ENABLE_RVOL_FAIL_OPEN", False))
+            and not passed
+            and failed
+            and (rvol_fail_count / max(1, len(failed))) >= 0.70
+        ):
             failopen_triggered = True
             retry_passed: list[dict] = []
             retry_failed: list[dict[str, str]] = []
