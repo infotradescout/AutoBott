@@ -4441,7 +4441,16 @@ def main():
                         and bool(getattr(config, "ENABLE_STOPLOSS_REVERSAL_REENTRY", False))
                     ):
                         cd_until = _active_ticker_loss_cooldown_until(ticker, now_et)
-                        if cd_until is None:
+                        bypass_reversal_cooldown = bool(
+                            getattr(config, "STOPLOSS_REVERSAL_BYPASS_LOSS_COOLDOWN", True)
+                        )
+                        if cd_until is None or bypass_reversal_cooldown:
+                            if cd_until is not None:
+                                print(
+                                    f"[{ts(now_et)}] {ticker}: attempting immediate "
+                                    f"{reversal_direction.upper()} reversal despite loss cooldown "
+                                    f"(until {ts(cd_until)})."
+                                )
                             _attempt_reversal_entry(
                                 ticker=ticker,
                                 direction=reversal_direction,

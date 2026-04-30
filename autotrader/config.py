@@ -556,8 +556,11 @@ MAX_REENTRIES_PER_TICKER = 1         # max 1 re-entry per ticker per day — pre
 QUICK_LOSER_MAX_HOLD_MINUTES         = 4
 QUICK_LOSER_REENTRY_COOLDOWN_MINUTES = 10
 
-# Optional reversal entry after stop-loss. Disable by default to reduce churn.
-ENABLE_STOPLOSS_REVERSAL_REENTRY = False
+# Reverse direction once after a stop-loss. This lets a stopped CALL try a PUT,
+# and a stopped PUT try a CALL, instead of waiting for the scanner to repeat the
+# same losing thesis.
+ENABLE_STOPLOSS_REVERSAL_REENTRY = True
+STOPLOSS_REVERSAL_BYPASS_LOSS_COOLDOWN = True
 
 
 # ---------------------------------------------------------------------------
