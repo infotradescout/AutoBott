@@ -5953,6 +5953,11 @@ def home():
     </div>
 
     <div class="card section">
+      <h3>NO-TRADE DIAGNOSIS</h3>
+      <div id="no-trade-diagnosis" class="muted">Loading...</div>
+    </div>
+
+    <div class="card section">
       <h3>CIRCUIT BREAKERS</h3>
       <div class="bar-wrap">
         <div class="bar-line"><span id="daily-loss-text">Daily Loss: --</span><span id="daily-loss-pct">--</span></div>
@@ -6684,6 +6689,95 @@ def home():
       `;
     }
 
+    function renderNoTradeDiagnosis(status, scansummary, control) {
+      const el = document.getElementById("no-trade-diagnosis");
+      if (!el) return;
+      const blockers = Array.isArray(status && status.blockers) ? status.blockers : [];
+      const setupValid = Number(scansummary && !scansummary.error
+        ? (scansummary.setup_valid_count ?? scansummary.setup_passed_count ?? scansummary.scanner_pass_count ?? scansummary.pass_count ?? 0)
+        : 0);
+      const entryEligible = Number(scansummary && !scansummary.error
+        ? (scansummary.entry_eligible_count ?? 0)
+        : 0);
+      const entryRejected = Number(scansummary && !scansummary.error
+        ? (scansummary.entry_rejected_count ?? 0)
+        : 0);
+      const ordersSubmitted = Number(scansummary && !scansummary.error
+        ? (scansummary.orders_submitted_count ?? scansummary.order_submitted_count ?? 0)
+        : 0);
+      const ordersFilled = Number(scansummary && !scansummary.error
+        ? (scansummary.orders_buy_filled_count ?? scansummary.orders_filled_count ?? scansummary.order_filled_count ?? 0)
+        : 0);
+      const topRejects = scansummary && scansummary.stage4_entry_reject_reasons && typeof scansummary.stage4_entry_reject_reasons === "object"
+        ? Object.entries(scansummary.stage4_entry_reject_reasons)
+            .sort((a, b) => Number(b[1]) - Number(a[1]))
+            .slice(0, 3)
+            .map(([k, v]) => `${escapeHtml(k)} (${Number(v)})`)
+        : [];
+      const source = scansummary && !scansummary.error ? String(scansummary.entry_stage4_source || "scan_log") : "unavailable";
+      const lastScan = scansummary && !scansummary.error ? String(scansummary.last_scan || "") : "";
+      let tone = "var(--muted)";
+      let headline = "Waiting for live telemetry";
+      let detail = "The dashboard has not received enough runtime data yet.";
+
+      if (status && status.error) {
+        tone = "var(--red)";
+        headline = "Status endpoint is unavailable";
+        detail = String(status.error || "The dashboard could not read live broker/runtime status.");
+      } else if (control && !control.error && control.manual_stop) {
+        tone = "var(--red)";
+        headline = "Trading is manually stopped";
+        detail = `Manual stop is active${control.reason ? `: ${escapeHtml(control.reason)}` : ""}.`;
+      } else if (status && !status.trader_loop_alive) {
+        tone = "var(--red)";
+        headline = "Trader loop is not running";
+        const crash = String(status.trader_thread_last_crash || "").trim();
+        detail = crash ? `Last crash: ${escapeHtml(crash.slice(0, 220))}` : "No recent trader heartbeat was recorded.";
+      } else if (blockers.length) {
+        tone = "var(--yellow)";
+        headline = "Entries are currently blocked";
+        detail = blockers.map(escapeHtml).join(", ");
+      } else if (ordersFilled > 0) {
+        tone = "var(--green)";
+        headline = "Trades have filled today";
+        detail = `${ordersFilled} buy fill(s) recorded by the current summary.`;
+      } else if (ordersSubmitted > 0) {
+        tone = "var(--yellow)";
+        headline = "Orders submitted but not filled";
+        detail = `${ordersSubmitted} order attempt(s), 0 fills. Check limit price/spread behavior.`;
+      } else if (entryEligible > 0) {
+        tone = "var(--yellow)";
+        headline = "Entries became eligible but no orders were submitted";
+        detail = `${entryEligible} eligible candidate(s), 0 submitted. Check entry execution exceptions and order path.`;
+      } else if (entryRejected > 0) {
+        tone = "var(--yellow)";
+        headline = "Scanner found setups, entry gates rejected them";
+        detail = topRejects.length ? `Top entry blockers: ${topRejects.join(", ")}.` : `${entryRejected} entry rejection(s).`;
+      } else if (setupValid > 0) {
+        tone = "var(--yellow)";
+        headline = "Scanner found setups but none reached entry";
+        detail = `Setup-valid signals: ${setupValid}. Review current scanner table and stage4 source.`;
+      } else {
+        tone = "var(--muted)";
+        headline = "No setup-valid signals in the latest loop";
+        detail = "The trader appears unblocked, but the scanner has not produced an entry candidate.";
+      }
+
+      el.innerHTML = `
+        <div style="color:${tone}; font-weight:700; margin-bottom:6px;">${headline}</div>
+        <div>${detail}</div>
+        <div class="mobile-grid" style="margin-top:10px;">
+          <div><span class="mobile-k">Setup Valid</span> <span class="mobile-v">${setupValid}</span></div>
+          <div><span class="mobile-k">Entry Rejected</span> <span class="mobile-v">${entryRejected}</span></div>
+          <div><span class="mobile-k">Eligible</span> <span class="mobile-v">${entryEligible}</span></div>
+          <div><span class="mobile-k">Orders Submitted</span> <span class="mobile-v">${ordersSubmitted}</span></div>
+          <div><span class="mobile-k">Buy Fills</span> <span class="mobile-v">${ordersFilled}</span></div>
+          <div><span class="mobile-k">Source</span> <span class="mobile-v">${escapeHtml(source)}</span></div>
+        </div>
+        <div style="margin-top:8px; font-size:12px; color:#8fa1b8;">Last scan: ${escapeHtml(lastScan || "n/a")}</div>
+      `;
+    }
+
     async function updateRuntimeControl(payload) {
       const res = await fetch("/api/runtime-control", {
         method: "POST",
@@ -6883,6 +6977,7 @@ def home():
       }
       applyFeatureVisibility((status && status.feature_flags) ? status.feature_flags : {});
       renderGuardrails(status);
+      renderNoTradeDiagnosis(status, scansummary, control);
       renderPremarketPlan(premarketPlan);
       renderExitReliability(exitReliability);
       renderTradeReplay(replay);
