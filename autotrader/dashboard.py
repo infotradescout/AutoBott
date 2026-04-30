@@ -3680,6 +3680,16 @@ def api_scansummary():
 @app.get("/api/status")
 def api_status():
     now_et = _now_et()
+    runtime_state = load_bot_state()
+    if not isinstance(runtime_state, dict):
+        runtime_state = {}
+    env_readiness = {
+        "alpaca_key_present": bool(str(os.getenv("ALPACA_API_KEY", "") or "").strip()),
+        "alpaca_secret_present": bool(str(os.getenv("ALPACA_SECRET_KEY", "") or "").strip()),
+        "live_options_key_present": bool(str(getattr(config, "ALPACA_LIVE_API_KEY", "") or "").strip()),
+        "live_options_secret_present": bool(str(getattr(config, "ALPACA_LIVE_SECRET_KEY", "") or "").strip()),
+        "redis_url_present": bool(str(os.getenv("REDIS_URL", "") or "").strip()),
+    }
     runtime_commit = str(
         os.getenv("RENDER_GIT_COMMIT")
         or os.getenv("GIT_COMMIT")
@@ -3697,7 +3707,6 @@ def api_status():
         entry_open = _clock_hhmm_to_minutes(config.NO_NEW_TRADES_BEFORE)
         entry_close = _clock_hhmm_to_minutes(config.NO_NEW_TRADES_AFTER)
         entry_window_open = bool(clock_body.get("is_open", False)) and (entry_open <= now_minutes < entry_close)
-        runtime_state = load_bot_state()
         catalyst_mode_active = bool(runtime_state.get("catalyst_mode_active", False))
         catalyst_mode_reason = str(runtime_state.get("catalyst_mode_reason", "") or "")
         catalyst_mode_until = str(runtime_state.get("catalyst_mode_until_iso", "") or "")
@@ -3764,6 +3773,14 @@ def api_status():
             blockers.append("alpaca_auth_error_recent")
         if not trader_loop_alive:
             blockers.append("trader_loop_stale")
+        if not env_readiness["alpaca_key_present"]:
+            blockers.append("missing_alpaca_api_key")
+        if not env_readiness["alpaca_secret_present"]:
+            blockers.append("missing_alpaca_secret_key")
+        if bool(getattr(config, "PAPER", True)) and not env_readiness["live_options_key_present"]:
+            blockers.append("missing_live_options_api_key")
+        if bool(getattr(config, "PAPER", True)) and not env_readiness["live_options_secret_present"]:
+            blockers.append("missing_live_options_secret_key")
 
         return jsonify(
             {
@@ -3784,6 +3801,7 @@ def api_status():
                 "trader_heartbeat_age_seconds": heartbeat_age_seconds,
                 "runtime_commit": runtime_commit[:12] if runtime_commit else "",
                 "runtime_image": runtime_image,
+                "env_readiness": env_readiness,
                 "trader_thread_last_crash_et": _to_ct_label(trader_thread_last_crash_dt) if trader_thread_last_crash_dt else "",
                 "trader_thread_last_crash": trader_thread_last_crash_msg,
                 "independent_stoploss_last_trigger_et": (
@@ -3825,15 +3843,31 @@ def api_status():
                 "catalyst_mode_reason": "",
                 "catalyst_mode_until": "",
                 "can_enter_now": False,
-                "blockers": ["status_unavailable"],
+                "blockers": [
+                    item
+                    for item in [
+                        "status_unavailable",
+                        "missing_alpaca_api_key" if not env_readiness["alpaca_key_present"] else "",
+                        "missing_alpaca_secret_key" if not env_readiness["alpaca_secret_present"] else "",
+                        "missing_live_options_api_key"
+                        if bool(getattr(config, "PAPER", True)) and not env_readiness["live_options_key_present"]
+                        else "",
+                        "missing_live_options_secret_key"
+                        if bool(getattr(config, "PAPER", True)) and not env_readiness["live_options_secret_present"]
+                        else "",
+                        "trader_loop_stale",
+                    ]
+                    if item
+                ],
                 "trader_loop_alive": False,
                 "trader_loop_stale_after_seconds": max(60, int(config.LOOP_INTERVAL_SECONDS) * 4),
                 "trader_heartbeat_et": "",
                 "trader_heartbeat_age_seconds": None,
                 "runtime_commit": runtime_commit[:12] if runtime_commit else "",
                 "runtime_image": runtime_image,
-                "trader_thread_last_crash_et": "",
-                "trader_thread_last_crash": "",
+                "env_readiness": env_readiness,
+                "trader_thread_last_crash_et": str(runtime_state.get("trader_thread_last_crash_et", "") or ""),
+                "trader_thread_last_crash": str(runtime_state.get("trader_thread_last_crash", "") or ""),
                 "independent_stoploss_last_trigger_et": "",
                 "independent_stoploss_last_symbol": "",
                 "independent_stoploss_last_unrealized_usd": 0.0,
