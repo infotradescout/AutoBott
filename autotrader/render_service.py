@@ -305,6 +305,8 @@ def _run_trader_forever() -> None:
         _patch_runtime_state(
             {
                 "trader_thread_last_start_et": _now_et_iso(),
+                "last_trader_heartbeat_et": _now_et_iso(),
+                "trader_thread_source": "render_service",
                 "trader_thread_restart_count": restart_count,
             }
         )

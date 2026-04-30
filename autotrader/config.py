@@ -220,9 +220,9 @@ OPENING_STRICT_WINDOW_MINUTES                = 20
 OPENING_STRICT_MIN_SIGNAL_SCORE              = 6.5
 OPENING_STRICT_CONFIRM_BARS                  = 3
 OPENING_STRICT_CONFIRM_MOMENTUM_THRESHOLD_PCT = 0.22
-OPENING_STRICT_MIN_DIRECTION_SCORE           = 0.20
-OPENING_STRICT_MIN_RVOL                      = 0.8
-OPENING_STRICT_MIN_ROC_PCT                   = 0.03
+OPENING_STRICT_MIN_DIRECTION_SCORE           = 0.65
+OPENING_STRICT_MIN_RVOL                      = 1.0
+OPENING_STRICT_MIN_ROC_PCT                   = 0.05
 OPENING_STRICT_MIN_VWAP_DISTANCE_PCT         = 0.03
 OPENING_MAX_SIGNAL_CANDIDATES                = 5
 OPENING_MAX_FRESH_ENTRIES                    = 4
@@ -338,8 +338,8 @@ DIRECTION_CONFIRM_LOOKBACK_BARS = 2
 DIRECTION_MIN_CONFIRM_ALIGNED_BARS = 2
 
 # Direction conviction: minimum weighted-vote score to commit to call/put.
-DIRECTION_CONVICTION_MIN  = 0.10
-DIRECTION_MIN_ALIGNED_VOTES = 2
+DIRECTION_CONVICTION_MIN  = 0.30
+DIRECTION_MIN_ALIGNED_VOTES = 3
 DIRECTION_FAST_ROC_PERIOD  = 5    # short-horizon ROC used in directional voting
 
 ROC_PERIOD                = 10
@@ -473,7 +473,7 @@ FLAT_REGIME_RANGE_MAX_PCT       = 0.45   # (high-low)/close*100 over lookback be
 FLAT_REGIME_REQUIRE_BOTH        = True   # SPY AND QQQ must both be flat
 FLAT_REGIME_CACHE_TTL_SECONDS   = 60     # re-evaluate at most once per minute
 FLAT_REGIME_MIN_SIGNAL_SCORE    = 1.5    # override of MIN_SIGNAL_SCORE while flat
-FLAT_REGIME_CONVICTION_MIN      = 0.03   # override of DIRECTION_CONVICTION_MIN (extra permissive for dead tape)
+FLAT_REGIME_CONVICTION_MIN      = 0.10   # override of DIRECTION_CONVICTION_MIN (extra permissive for dead tape)
 FLAT_REGIME_MIN_ALIGNED_VOTES   = 2      # override of DIRECTION_MIN_ALIGNED_VOTES
 FLAT_REGIME_RVOL_MIN            = 0.05   # override of RVOL minimum while flat
 FLAT_REGIME_MOVEMENT_MULT       = 0.35   # scales MOVEMENT_FORCE_MIN_PCT during flat regime

@@ -8,6 +8,7 @@ import hmac
 import json
 import os
 import re
+import threading
 import time
 from collections import deque
 from datetime import datetime, timedelta
@@ -118,6 +119,55 @@ def _set_api_no_cache_headers(response):
 @app.get("/healthz")
 def healthz():
     return jsonify({"ok": True, "service": "autobott"})
+
+
+def _run_embedded_trader_forever() -> None:
+  """Fallback only: keep trading alive if the dashboard is launched directly."""
+  from main import main as trader_main
+
+  while True:
+    try:
+      state = load_bot_state()
+      if not isinstance(state, dict):
+        state = {}
+      state.update(
+        {
+          "trader_thread_last_start_et": _now_et().isoformat(),
+          "last_trader_heartbeat_et": _now_et().isoformat(),
+          "trader_thread_source": "dashboard_embedded",
+        }
+      )
+      save_bot_state(state)
+    except Exception as exc:  # noqa: BLE001
+      print(f"[dashboard] embedded trader state patch failed: {exc}")
+    try:
+      trader_main()
+    except Exception as exc:  # noqa: BLE001
+      print(f"[dashboard] Embedded trader crashed: {exc}")
+      try:
+        state = load_bot_state()
+        if not isinstance(state, dict):
+          state = {}
+        state.update(
+          {
+            "trader_thread_last_crash_et": _now_et().isoformat(),
+            "trader_thread_last_crash": str(exc)[:500],
+            "trader_thread_last_stop_et": _now_et().isoformat(),
+          }
+        )
+        save_bot_state(state)
+      except Exception as state_exc:  # noqa: BLE001
+        print(f"[dashboard] embedded trader crash state patch failed: {state_exc}")
+    time.sleep(30)
+
+
+def _start_embedded_trader_if_direct_dashboard() -> None:
+  disabled = str(os.getenv("AUTOBOTT_DISABLE_DASHBOARD_EMBEDDED_TRADER", "") or "").strip().lower()
+  if disabled in {"1", "true", "yes", "on"}:
+    return
+  thread = threading.Thread(target=_run_embedded_trader_forever, daemon=True, name="dashboard-embedded-trader")
+  thread.start()
+  print("[dashboard] Embedded trader thread started because dashboard.py was launched directly.")
 
 
 def _now_et() -> datetime:
@@ -7136,6 +7186,7 @@ def home():
 
 
 if __name__ == "__main__":
+    _start_embedded_trader_if_direct_dashboard()
     port = int(os.getenv("PORT", "5000"))
     print(f"Dashboard running at http://localhost:{port}")
     app.run(host="0.0.0.0", port=port, debug=False)

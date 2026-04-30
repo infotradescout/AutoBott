@@ -439,14 +439,12 @@ def _profile_signals_for_candidate(
 
     passed: list[dict[str, Any]] = []
     rejected: list[str] = []
-    profile_rvol_min = 0.05
-    profile_roc_min = 0.006
+    profile_rvol_min = 0.20
     if relaxed_rvol_mode or flat_regime:
         profile_rvol_min = min(
             profile_rvol_min,
             float(getattr(config, "FLAT_REGIME_RVOL_MIN", 0.05) or 0.05),
         )
-        profile_roc_min = min(profile_roc_min, 0.003)
 
     # ── Named profiles (priority 1-4) ─────────────────────────────────────
     named_profiles = sorted(
@@ -472,10 +470,10 @@ def _profile_signals_for_candidate(
         profile_ok = False
         profile_reason = ""
         if profile.name == "open_drive_momentum":
-            profile_ok = rvol >= profile_rvol_min and abs(roc) >= profile_roc_min and distance_from_vwap_pct >= 0.003
+            profile_ok = rvol >= profile_rvol_min and abs(roc) >= 0.01 and distance_from_vwap_pct >= 0.005
             profile_reason = "open-drive momentum"
         elif profile.name == "vwap_continuation":
-            profile_ok = distance_from_vwap_pct <= 3.0 and rvol >= profile_rvol_min and abs(roc) >= profile_roc_min
+            profile_ok = distance_from_vwap_pct <= 3.0 and rvol >= profile_rvol_min and abs(roc) >= 0.01
             profile_reason = "vwap continuation"
         elif profile.name == "reversal_snapback":
             if distance_from_vwap_pct >= 0.20 and abs(last2_roc) >= 0.10:
@@ -488,7 +486,7 @@ def _profile_signals_for_candidate(
                 profile_ok = base_signal.get("direction") in ("call", "put")
             profile_reason = "reversal snapback"
         elif profile.name == "catalyst_impulse":
-            profile_ok = rvol >= profile_rvol_min and abs(roc) >= profile_roc_min
+            profile_ok = rvol >= profile_rvol_min and abs(roc) >= 0.01
             profile_reason = "catalyst impulse"
         elif profile.name == "flat_market_scalp":
             # Flat-tape scalp: only activate in detected flat regime and accept
@@ -522,19 +520,14 @@ def _profile_signals_for_candidate(
             generic_reason = ""
             if signal_score >= float(generic.min_signal_score):
                 has_direction = direction in ("call", "put")
-                roc_min = 0.006
-                vwap_side_min = 0.005
+                roc_min = 0.05
+                vwap_side_min = 0.03
                 if relaxed_rvol_mode or flat_regime:
-                    roc_min = min(roc_min, 0.003)
-                    vwap_side_min = min(vwap_side_min, 0.003)
+                    roc_min = min(roc_min, 0.01)
+                    vwap_side_min = min(vwap_side_min, 0.005)
                 has_roc = abs(roc) >= roc_min
                 has_vwap_side = distance_from_vwap_pct >= vwap_side_min
-                strong_volatility = (
-                    float(base_signal.get("volatility_score", 0.0) or 0.0) >= 1.0
-                    or float(base_signal.get("rvol", 0.0) or 0.0) >= 1.0
-                    or float(base_signal.get("atr_pct", 0.0) or 0.0) >= float(getattr(config, "ATR_PCT_MIN", 0.3) or 0.3)
-                )
-                generic_ok = has_direction and (has_roc or strong_volatility) and (has_vwap_side or strong_volatility)
+                generic_ok = has_direction and has_roc and has_vwap_side
                 if generic_ok:
                     generic_reason = (
                         f"generic continuation | {direction.upper()} | "
