@@ -16,7 +16,7 @@ import pytz
 import requests
 from flask import Flask, Response, jsonify, render_template_string, request
 
-from env_config import get_required_env, load_runtime_env
+from env_config import load_runtime_env
 
 load_runtime_env()
 import config
@@ -32,8 +32,8 @@ from trading_control import (
 )
 from watchlist_control import load_watchlist_control, update_watchlist_control
 
-API_KEY = get_required_env("ALPACA_API_KEY")
-SECRET_KEY = get_required_env("ALPACA_SECRET_KEY")
+API_KEY = str(os.getenv("ALPACA_API_KEY") or "").strip()
+SECRET_KEY = str(os.getenv("ALPACA_SECRET_KEY") or "").strip()
 PAPER = bool(config.PAPER)
 BASE_URL = "https://paper-api.alpaca.markets" if PAPER else "https://api.alpaca.markets"
 DATA_BASE_URL = config.ALPACA_DATA_BASE_URL
@@ -68,7 +68,14 @@ app = Flask(__name__)
 
 @app.get("/healthz")
 def healthz():
-    return jsonify({"ok": True, "service": "autobott"})
+  return jsonify(
+    {
+      "ok": True,
+      "service": "autobott",
+      "alpaca_key_present": bool(API_KEY),
+      "alpaca_secret_present": bool(SECRET_KEY),
+    }
+  )
 
 
 def _now_et() -> datetime:
