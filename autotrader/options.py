@@ -195,6 +195,9 @@ def select_atm_option_contract_with_reason(
         )
 
     liquidity_candidates: list[dict[str, Any]] = []
+    enrich_enabled = bool(getattr(config, "ENABLE_OPTION_CONTRACT_DETAIL_ENRICHMENT", False))
+    enrich_limit = max(0, int(getattr(config, "OPTION_CONTRACT_DETAIL_ENRICH_LIMIT", 6) or 6))
+    enriched_count = 0
     fail_counts = {
         "inactive_or_untradable": 0,
         "missing_fields": 0,
@@ -210,13 +213,14 @@ def select_atm_option_contract_with_reason(
         # from the chain response. This avoids 429 rate-limit errors from making
         # one API call per strike across a full chain (30+ calls for NVDA, etc.).
         # Most chain responses already include open_interest; skip enrichment if so.
-        needs_enrichment = (open_interest is None) and symbol
+        needs_enrichment = enrich_enabled and (open_interest is None) and symbol and enriched_count < enrich_limit
         if needs_enrichment:
             try:
                 time.sleep(config.RATE_LIMIT_SLEEP_SECONDS)
                 enriched = data_client.get_option_contract(symbol)
                 if isinstance(enriched, dict):
                     details.update(enriched)
+                    enriched_count += 1
             except Exception as exc:  # noqa: BLE001
                 print(f"[options] enrichment failed for {symbol}: {exc}")
             open_interest = _safe_float(details.get("open_interest"))
@@ -297,8 +301,14 @@ def select_atm_option_contract_with_reason(
     scored: list[dict[str, Any]] = []
     for contract in filtered:
         exp_date = _safe_date(contract.get("expiration_date"))
-        open_interest = _safe_float(contract.get("open_interest")) or 0.0
-        if (not config.EMERGENCY_EXECUTION_MODE) and exp_date == today and open_interest < float(config.MIN_OPTION_OPEN_INTEREST_0DTE):
+        open_interest_raw = _safe_float(contract.get("open_interest"))
+        open_interest = open_interest_raw or 0.0
+        if (
+            (not config.EMERGENCY_EXECUTION_MODE)
+            and exp_date == today
+            and open_interest_raw is not None
+            and open_interest_raw < float(config.MIN_OPTION_OPEN_INTEREST_0DTE)
+        ):
             fail_counts["low_open_interest"] += 1
             continue
         strike_val = _contract_strike(contract)
@@ -351,7 +361,8 @@ def select_atm_option_contract_with_reason(
         "nonpositive_mid": 0,
         "spread_too_wide": 0,
     }
-    for contract in scored[:40]:
+    quote_selection_limit = max(4, int(getattr(config, "OPTION_QUOTE_SELECTION_LIMIT", 16) or 16))
+    for contract in scored[:quote_selection_limit]:
         symbol = _contract_symbol(contract)
         if not symbol:
             quote_fail_counts["bad_quote"] += 1

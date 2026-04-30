@@ -93,6 +93,7 @@ class AlpacaDataClient:
         self._last_request_at: dict[str, float] = {}
         self._rate_limited_until: dict[str, float] = {}
         self._option_quote_cache: dict[str, tuple[float, dict[str, float | None]]] = {}
+        self._option_contract_cache: dict[str, tuple[float, dict[str, Any]]] = {}
         self._intraday_bars_cache: dict[str, tuple[float, pd.DataFrame]] = {}
         # Per-feed cooldown after a 403 forbidden response: feed -> monotonic
         # timestamp until which the feed should be skipped. After that point
@@ -586,6 +587,10 @@ class AlpacaDataClient:
         errors_by_base: list[str] = []
         for base in self._option_contract_base_candidates:
             try:
+                self._throttle(
+                    "option_contracts",
+                    min_interval=float(getattr(config, "OPTION_CONTRACT_REQUEST_INTERVAL_SECONDS", 0.25) or 0.25),
+                )
                 resp = self.options_session.get(
                     f"{base}/v2/options/contracts",
                     params=params,
@@ -597,6 +602,8 @@ class AlpacaDataClient:
                 if contracts:
                     return contracts
             except Exception as exc:  # noqa: BLE001
+                if self._is_429_error(exc):
+                    self._mark_rate_limited("option_contracts")
                 errors_by_base.append(f"{base}: {exc}")
                 continue
         if errors_by_base:
@@ -607,9 +614,21 @@ class AlpacaDataClient:
         return []
 
     def get_option_contract(self, option_symbol: str) -> dict[str, Any]:
+        cache_ttl = float(getattr(config, "OPTION_CONTRACT_CACHE_SECONDS", 300.0) or 300.0)
+        now_mono = time.monotonic()
+        cached_payload = self._option_contract_cache.get(option_symbol)
+        if cached_payload and cache_ttl > 0:
+            cached_at, cached_contract = cached_payload
+            if (now_mono - cached_at) <= cache_ttl:
+                return dict(cached_contract)
+
         errors_by_base: list[str] = []
         for base in self._option_contract_base_candidates:
             try:
+                self._throttle(
+                    "option_contract_details",
+                    min_interval=float(getattr(config, "OPTION_CONTRACT_REQUEST_INTERVAL_SECONDS", 0.25) or 0.25),
+                )
                 resp = self.options_session.get(
                     f"{base}/v2/options/contracts/{option_symbol}",
                     timeout=15,
@@ -618,8 +637,11 @@ class AlpacaDataClient:
                 body = resp.json()
                 payload = body.get("option_contract", body)
                 if isinstance(payload, dict) and payload:
+                    self._option_contract_cache[option_symbol] = (time.monotonic(), dict(payload))
                     return payload
             except Exception as exc:  # noqa: BLE001
+                if self._is_429_error(exc):
+                    self._mark_rate_limited("option_contract_details")
                 errors_by_base.append(f"{base}: {exc}")
                 continue
         if errors_by_base:
@@ -647,7 +669,10 @@ class AlpacaDataClient:
 
         last_exc: Exception | None = None
         try:
-            self._throttle("option_quotes")
+            self._throttle(
+                "option_quotes",
+                min_interval=float(getattr(config, "OPTION_QUOTE_REQUEST_INTERVAL_SECONDS", 0.18) or 0.18),
+            )
             resp = self.data_session.get(
                 f"{self.data_base_url}/v1beta1/options/quotes/latest",
                 params={"symbols": option_symbol, "feed": "indicative"},

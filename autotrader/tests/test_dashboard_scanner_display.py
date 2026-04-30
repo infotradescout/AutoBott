@@ -93,6 +93,81 @@ class DashboardScannerDisplayTests(unittest.TestCase):
         self.assertEqual(payload[0]["timestamp"], "2026-04-30 08:33:12 CDT")
         self.assertEqual(payload[0]["final_state"], "setup_pass")
 
+    def test_scansummary_api_handles_scan_rows(self):
+        old_scan_log = dashboard.SCAN_LOG_CSV
+        old_load_state = dashboard.load_bot_state
+        old_broker_telemetry = dashboard._fetch_broker_order_telemetry
+        old_today_trade_rows = dashboard._today_trade_rows
+        dashboard._HEAVY_API_CACHE.clear()
+
+        with tempfile.TemporaryDirectory() as tmp:
+            scan_log = Path(tmp) / "scan_log.csv"
+            columns = [
+                "timestamp",
+                "symbol",
+                "strategy_profile",
+                "result",
+                "direction",
+                "rvol",
+                "rsi",
+                "roc",
+                "iv_rank",
+                "volatility_score",
+                "regime_score",
+                "signal_score",
+                "flow_score",
+                "htf_reason",
+                "reason",
+            ]
+            with scan_log.open("w", newline="", encoding="utf-8") as f:
+                writer = csv.DictWriter(f, fieldnames=columns)
+                writer.writeheader()
+                writer.writerow(
+                    {
+                        "timestamp": "2026-04-30 11:15:21 EDT",
+                        "symbol": "SLB",
+                        "strategy_profile": "balanced",
+                        "result": "pass",
+                        "direction": "put",
+                        "rvol": "1.1",
+                        "rsi": "45.0",
+                        "roc": "-0.07",
+                        "iv_rank": "",
+                        "volatility_score": "3.72",
+                        "regime_score": "4.0",
+                        "signal_score": "15.21",
+                        "flow_score": "0",
+                        "htf_reason": "",
+                        "reason": "open-drive momentum",
+                    }
+                )
+
+            try:
+                dashboard.SCAN_LOG_CSV = scan_log
+                dashboard.load_bot_state = lambda: {
+                    "last_entry_debug": {
+                        "loop_ts_et": "2026-04-30 11:15:21 EDT",
+                        "entry_stage4_eligible_count": 0,
+                        "entry_stage4_reject_count": 1,
+                        "entry_stage4_reject_reasons": {"no_eligible_option_contract": 1},
+                    }
+                }
+                dashboard._fetch_broker_order_telemetry = lambda: {"ok": True}
+                dashboard._today_trade_rows = lambda: []
+                response = dashboard.app.test_client().get("/api/scansummary")
+                self.assertEqual(response.status_code, 200)
+                payload = response.get_json()
+            finally:
+                dashboard.SCAN_LOG_CSV = old_scan_log
+                dashboard.load_bot_state = old_load_state
+                dashboard._fetch_broker_order_telemetry = old_broker_telemetry
+                dashboard._today_trade_rows = old_today_trade_rows
+                dashboard._HEAVY_API_CACHE.clear()
+
+        self.assertEqual(payload["scanner_pass_count"], 1)
+        self.assertEqual(payload["entry_rejected_count"], 1)
+        self.assertEqual(payload["stage4_entry_reject_reasons"], {"no_eligible_option_contract": 1})
+
 
 if __name__ == "__main__":  # pragma: no cover
     unittest.main()

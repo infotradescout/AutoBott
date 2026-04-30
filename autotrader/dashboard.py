@@ -3611,8 +3611,8 @@ def api_scansummary():
                 "top_fail_reason": "No scan data yet",
                 "last_scan": "",
             }
-        _set_cached_heavy_payload("scansummary", payload)
-        return jsonify(payload)
+            _set_cached_heavy_payload("scansummary", payload)
+            return jsonify(payload)
 
         pass_rows = [r for r in same_loop if str(r.get("result", "") or "").lower() == "pass"]
         fail_rows = [r for r in same_loop if str(r.get("result", "") or "").lower() == "fail"]

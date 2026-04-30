@@ -58,6 +58,8 @@ def _normalize_order_side(raw_side) -> str:
 class AlpacaBroker:
     def __init__(self, api_key: str, secret_key: str, paper: bool = True):
         self.trading_client = TradingClient(api_key, secret_key, paper=paper)
+        self.last_positions_fetch_ok = True
+        self.last_positions_fetch_error = ""
 
     def get_clock(self):
         return self.trading_client.get_clock()
@@ -71,7 +73,11 @@ class AlpacaBroker:
     def get_open_option_positions(self):
         try:
             positions = self.get_all_positions()
+            self.last_positions_fetch_ok = True
+            self.last_positions_fetch_error = ""
         except Exception as exc:  # noqa: BLE001
+            self.last_positions_fetch_ok = False
+            self.last_positions_fetch_error = str(exc)
             print(f"[broker] get_all_positions failed: {exc}")
             return []
         option_asset_classes = {"us_option", "option", "options"}

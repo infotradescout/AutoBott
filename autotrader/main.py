@@ -1266,6 +1266,30 @@ def _hydrate_missing_position_meta(open_trade_meta: dict[str, dict], option_posi
     return hydrated
 
 
+def _prune_stale_open_trade_meta(open_trade_meta: dict[str, dict], option_positions: list, now_et: datetime) -> int:
+    live_symbols = {
+        str(getattr(pos, "symbol", "") or "")
+        for pos in option_positions
+        if position_qty_as_int(getattr(pos, "qty", 0)) > 0
+    }
+    if not open_trade_meta:
+        return 0
+
+    grace_seconds = max(0, int(getattr(config, "STALE_OPEN_META_PRUNE_GRACE_SECONDS", 180) or 180))
+    pruned = 0
+    for symbol, meta in list(open_trade_meta.items()):
+        if symbol in live_symbols:
+            continue
+        entry_dt = _parse_iso_datetime(str(meta.get("entry_time_iso", "") or "")) if isinstance(meta, dict) else None
+        if entry_dt is not None:
+            age_seconds = (now_et - entry_dt.astimezone(pytz.timezone(config.EASTERN_TZ))).total_seconds()
+            if age_seconds < grace_seconds:
+                continue
+        open_trade_meta.pop(symbol, None)
+        pruned += 1
+    return pruned
+
+
 def _detect_catalyst_event(
     data_client: AlpacaDataClient,
     now_et: datetime,
@@ -2539,6 +2563,11 @@ def main():
             set_catalyst_mode(False, "")
 
         option_positions = broker.get_open_option_positions()
+        if getattr(broker, "last_positions_fetch_ok", True):
+            pruned_count = _prune_stale_open_trade_meta(open_trade_meta, option_positions, now_et)
+            if pruned_count > 0:
+                print(f"[{ts(now_et)}] Pruned {pruned_count} stale runtime open position(s) not present at broker.")
+                _save_runtime_state()
         hydrated_count = _hydrate_missing_position_meta(open_trade_meta, option_positions, now_et)
         if hydrated_count > 0:
             for meta in open_trade_meta.values():
@@ -3782,6 +3811,11 @@ def main():
 
         # --- Exit management ---
         option_positions = broker.get_open_option_positions()
+        if getattr(broker, "last_positions_fetch_ok", True):
+            pruned_count = _prune_stale_open_trade_meta(open_trade_meta, option_positions, now_et)
+            if pruned_count > 0:
+                print(f"[{ts(now_et)}] Pruned {pruned_count} stale runtime open position(s) before exit management.")
+                _save_runtime_state()
         hydrated_count = _hydrate_missing_position_meta(open_trade_meta, option_positions, now_et)
         if hydrated_count > 0:
             print(f"[{ts(now_et)}] Hydrated {hydrated_count} externally-opened position(s) before exit management.")
