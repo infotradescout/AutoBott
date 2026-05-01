@@ -27,6 +27,38 @@ from broker import AlpacaBroker
 from data import AlpacaDataClient
 
 EASTERN = pytz.timezone(str(getattr(config, "EASTERN_TZ", "US/Eastern") or "US/Eastern"))
+VIX_PROXY_LOG_COLUMNS = [
+    "timestamp",
+    "vix_level",
+    "average_level",
+    "proxy_underlying",
+    "proxy_underlying_price",
+    "direction",
+    "decision",
+    "reason",
+    "option_symbol",
+    "strike",
+    "expiration",
+    "ask",
+    "bid",
+    "spread_pct",
+    "qty",
+]
+LEGACY_VIX_PROXY_LOG_COLUMNS = [
+    "timestamp",
+    "vix_level",
+    "average_level",
+    "direction",
+    "decision",
+    "reason",
+    "option_symbol",
+    "strike",
+    "expiration",
+    "ask",
+    "bid",
+    "spread_pct",
+    "qty",
+]
 
 
 def _now_et() -> datetime:
@@ -193,31 +225,71 @@ def _select_proxy_contract(
     return None, f"no proxy contract passed quote/spread gate max_spread={max_spread:.2f}%"
 
 
+def _coerce_legacy_row(row: dict[str, Any]) -> dict[str, Any]:
+    payload = {key: row.get(key, "") for key in VIX_PROXY_LOG_COLUMNS}
+    if not payload.get("proxy_underlying"):
+        payload["proxy_underlying"] = str(_cfg("VIXW_OPTION_UNDERLYING_SYMBOL", "VIXY") or "VIXY").upper()
+    return payload
+
+
+def _ensure_log_header(path: Path) -> None:
+    if not path.exists():
+        return
+    try:
+        with path.open("r", newline="", encoding="utf-8") as handle:
+            reader = csv.DictReader(handle)
+            existing_columns = list(reader.fieldnames or [])
+            rows = list(reader)
+        if existing_columns == VIX_PROXY_LOG_COLUMNS:
+            return
+
+        migrated: list[dict[str, Any]] = []
+        if existing_columns == LEGACY_VIX_PROXY_LOG_COLUMNS:
+            for row in rows:
+                payload = _coerce_legacy_row(row)
+                payload["proxy_underlying_price"] = ""
+                migrated.append(payload)
+        else:
+            for row in rows:
+                # Handles malformed rows created after the schema changed while
+                # the old CSV header still existed. Those rows often show
+                # decision=unknown and reason=call/put in the journal.
+                values = [row.get(key, "") for key in existing_columns]
+                extra = row.get(None, [])
+                if isinstance(extra, list):
+                    values.extend(extra)
+                payload = {key: (values[idx] if idx < len(values) else "") for idx, key in enumerate(VIX_PROXY_LOG_COLUMNS)}
+                if not payload.get("proxy_underlying"):
+                    payload["proxy_underlying"] = str(_cfg("VIXW_OPTION_UNDERLYING_SYMBOL", "VIXY") or "VIXY").upper()
+                migrated.append(payload)
+
+        backup = path.with_suffix(path.suffix + ".bak")
+        try:
+            if not backup.exists():
+                backup.write_text(path.read_text(encoding="utf-8"), encoding="utf-8")
+        except Exception:
+            pass
+        with path.open("w", newline="", encoding="utf-8") as handle:
+            writer = csv.DictWriter(handle, fieldnames=VIX_PROXY_LOG_COLUMNS)
+            writer.writeheader()
+            for row in migrated:
+                writer.writerow({key: row.get(key, "") for key in VIX_PROXY_LOG_COLUMNS})
+        print(f"[vix_proxy] migrated decision log header at {path}")
+    except Exception as exc:  # noqa: BLE001
+        print(f"[vix_proxy] log header migration failed: {exc}")
+
+
 def _log_decision(row: dict[str, Any]) -> None:
     path = Path(_cfg("VIXW_REGIME_LOG_CSV_PATH", Path(config.DATA_DIR) / "vixw_regime_log.csv"))
     path.parent.mkdir(parents=True, exist_ok=True)
-    columns = [
-        "timestamp",
-        "vix_level",
-        "average_level",
-        "proxy_underlying",
-        "proxy_underlying_price",
-        "direction",
-        "decision",
-        "reason",
-        "option_symbol",
-        "strike",
-        "expiration",
-        "ask",
-        "bid",
-        "spread_pct",
-        "qty",
-    ]
+    _ensure_log_header(path)
     write_header = not path.exists()
-    payload = {key: row.get(key, "") for key in columns}
+    payload = {key: row.get(key, "") for key in VIX_PROXY_LOG_COLUMNS}
+    if not payload.get("proxy_underlying"):
+        payload["proxy_underlying"] = str(_cfg("VIXW_OPTION_UNDERLYING_SYMBOL", "VIXY") or "VIXY").upper()
     try:
         with path.open("a", newline="", encoding="utf-8") as handle:
-            writer = csv.DictWriter(handle, fieldnames=columns)
+            writer = csv.DictWriter(handle, fieldnames=VIX_PROXY_LOG_COLUMNS)
             if write_header:
                 writer.writeheader()
             writer.writerow(payload)
