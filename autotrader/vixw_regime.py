@@ -1,14 +1,13 @@
-"""VIXW-heavy volatility regime sidecar for AutoBott.
+"""VIX-derived volatility proxy sidecar for AutoBott.
 
 Paper-mode doctrine:
 - Read the VIX level.
 - If VIX is below the configured average level, prefer CALL exposure.
 - If VIX is above the configured average level, prefer PUT exposure.
+- Execute through an Alpaca-supported equity/ETF/ETN options proxy by default.
 - Use contracts a few trading days out.
-- Fail safely if Alpaca does not expose/trade the requested VIX/VIXW option chain.
 
-This sidecar is intentionally isolated from the normal scanner so it can be
-turned off without changing the core bot.
+Default execution proxy: VIXY options. The signal remains ^VIX.
 """
 
 from __future__ import annotations
@@ -51,6 +50,10 @@ def _safe_int(value: Any, default: int = 0) -> int:
         return int(default)
 
 
+def _cfg(name: str, default: Any) -> Any:
+    return getattr(config, name, default)
+
+
 def _add_trading_days(start: date, days: int) -> date:
     cursor = start
     count = 0
@@ -74,7 +77,7 @@ def _contract_strike(contract: dict[str, Any]) -> float:
 
 
 def _latest_vix_level() -> float | None:
-    symbol = str(getattr(config, "VIXW_SIGNAL_SOURCE_SYMBOL", "^VIX") or "^VIX").strip()
+    symbol = str(_cfg("VIXW_SIGNAL_SOURCE_SYMBOL", "^VIX") or "^VIX").strip()
     try:
         ticker = yf.Ticker(symbol)
         fast_info = getattr(ticker, "fast_info", None)
@@ -83,7 +86,7 @@ def _latest_vix_level() -> float | None:
             if price > 0:
                 return price
     except Exception as exc:  # noqa: BLE001
-        print(f"[vixw] fast_info failed for {symbol}: {exc}")
+        print(f"[vix_proxy] fast_info failed for {symbol}: {exc}")
 
     try:
         history = yf.Ticker(symbol).history(period="5d", interval="1m", auto_adjust=False)
@@ -92,26 +95,27 @@ def _latest_vix_level() -> float | None:
             if close > 0:
                 return close
     except Exception as exc:  # noqa: BLE001
-        print(f"[vixw] history failed for {symbol}: {exc}")
+        print(f"[vix_proxy] history failed for {symbol}: {exc}")
     return None
 
 
 def _regime_direction(vix_level: float) -> tuple[str | None, str]:
-    average = float(getattr(config, "VIXW_REGIME_AVERAGE_LEVEL", 19.0) or 19.0)
-    neutral_band = float(getattr(config, "VIXW_NEUTRAL_BAND", 0.0) or 0.0)
+    average = float(_cfg("VIXW_REGIME_AVERAGE_LEVEL", 19.0) or 19.0)
+    neutral_band = float(_cfg("VIXW_NEUTRAL_BAND", 0.0) or 0.0)
     if vix_level < (average - neutral_band):
-        return "call", f"VIX {vix_level:.2f} below average {average:.2f}; mean-reversion CALL bias"
+        return "call", f"VIX {vix_level:.2f} below average {average:.2f}; proxy CALL bias"
     if vix_level > (average + neutral_band):
-        return "put", f"VIX {vix_level:.2f} above average {average:.2f}; mean-reversion PUT bias"
+        return "put", f"VIX {vix_level:.2f} above average {average:.2f}; proxy PUT bias"
     return None, f"VIX {vix_level:.2f} inside neutral band around {average:.2f}"
 
 
-def _has_vixw_exposure(broker: AlpacaBroker) -> bool:
-    prefixes = tuple(str(x).upper() for x in getattr(config, "VIXW_POSITION_SYMBOL_PREFIXES", ("VIX", "VIXW")))
+def _has_proxy_exposure(broker: AlpacaBroker) -> bool:
+    default_underlying = str(_cfg("VIXW_OPTION_UNDERLYING_SYMBOL", "VIXY") or "VIXY").upper()
+    prefixes = tuple(str(x).upper() for x in _cfg("VIXW_POSITION_SYMBOL_PREFIXES", (default_underlying, "VXX", "UVXY")))
     try:
         positions = broker.get_open_option_positions()
     except Exception as exc:  # noqa: BLE001
-        print(f"[vixw] position lookup failed: {exc}")
+        print(f"[vix_proxy] position lookup failed: {exc}")
         return True
     count = 0
     for pos in positions:
@@ -119,21 +123,24 @@ def _has_vixw_exposure(broker: AlpacaBroker) -> bool:
         qty = _safe_int(getattr(pos, "qty", 0), 0)
         if qty > 0 and symbol.startswith(prefixes):
             count += 1
-    return count >= int(getattr(config, "VIXW_MAX_OPEN_POSITIONS", 1) or 1)
+    return count >= int(_cfg("VIXW_MAX_OPEN_POSITIONS", 1) or 1)
 
 
-def _select_vixw_contract(
+def _select_proxy_contract(
     data_client: AlpacaDataClient,
     *,
     direction: str,
-    vix_level: float,
     now_et: datetime,
 ) -> tuple[dict[str, Any] | None, str]:
-    underlying = str(getattr(config, "VIXW_OPTION_UNDERLYING_SYMBOL", "VIX") or "VIX").strip().upper()
-    min_dte = int(getattr(config, "VIXW_MIN_DTE_TRADING_DAYS", 2) or 2)
-    max_dte = int(getattr(config, "VIXW_MAX_DTE_TRADING_DAYS", 7) or 7)
+    underlying = str(_cfg("VIXW_OPTION_UNDERLYING_SYMBOL", "VIXY") or "VIXY").strip().upper()
+    min_dte = int(_cfg("VIXW_MIN_DTE_TRADING_DAYS", 2) or 2)
+    max_dte = int(_cfg("VIXW_MAX_DTE_TRADING_DAYS", 7) or 7)
     expiry_floor = _add_trading_days(now_et.date(), min_dte)
     expiry_ceiling = _add_trading_days(now_et.date(), max_dte)
+
+    underlying_price = data_client.get_latest_stock_price(underlying)
+    if underlying_price is None or underlying_price <= 0:
+        return None, f"proxy underlying price unavailable for {underlying}"
 
     contracts = data_client.get_option_contracts(
         underlying_symbol=underlying,
@@ -157,14 +164,14 @@ def _select_vixw_contract(
         contract["symbol"] = symbol
         contract["strike_price"] = strike
         contract["expiration_date"] = expiration
-        contract["_select_score"] = abs(strike - vix_level)
+        contract["_select_score"] = abs(strike - float(underlying_price))
         scored.append(contract)
 
     if not scored:
-        return None, "VIXW chain returned no active/tradable contracts with usable strikes"
+        return None, f"{underlying} chain returned no active/tradable contracts with usable strikes"
 
     scored.sort(key=lambda item: (float(item.get("_select_score", 999.0)), str(item.get("expiration_date", ""))))
-    max_spread = float(getattr(config, "VIXW_MAX_OPTION_SPREAD_PCT", getattr(config, "MAX_OPTION_SPREAD_PCT", 30.0)) or 30.0)
+    max_spread = float(_cfg("VIXW_MAX_OPTION_SPREAD_PCT", getattr(config, "MAX_OPTION_SPREAD_PCT", 30.0)) or 30.0)
     for contract in scored[:50]:
         symbol = str(contract.get("symbol", "") or "")
         quote = data_client.get_latest_option_quote(symbol)
@@ -179,18 +186,22 @@ def _select_vixw_contract(
         contract["bid_price"] = bid
         contract["ask_price"] = ask
         contract["spread_pct"] = round(spread_pct, 2)
+        contract["underlying_price"] = round(float(underlying_price), 4)
+        contract["proxy_underlying"] = underlying
         return contract, "ok"
 
-    return None, f"no VIXW contract passed quote/spread gate max_spread={max_spread:.2f}%"
+    return None, f"no proxy contract passed quote/spread gate max_spread={max_spread:.2f}%"
 
 
 def _log_decision(row: dict[str, Any]) -> None:
-    path = Path(getattr(config, "VIXW_REGIME_LOG_CSV_PATH", Path(config.DATA_DIR) / "vixw_regime_log.csv"))
+    path = Path(_cfg("VIXW_REGIME_LOG_CSV_PATH", Path(config.DATA_DIR) / "vixw_regime_log.csv"))
     path.parent.mkdir(parents=True, exist_ok=True)
     columns = [
         "timestamp",
         "vix_level",
         "average_level",
+        "proxy_underlying",
+        "proxy_underlying_price",
         "direction",
         "decision",
         "reason",
@@ -211,24 +222,24 @@ def _log_decision(row: dict[str, Any]) -> None:
                 writer.writeheader()
             writer.writerow(payload)
     except Exception as exc:  # noqa: BLE001
-        print(f"[vixw] decision log failed: {exc}")
+        print(f"[vix_proxy] decision log failed: {exc}")
 
 
 def run_vixw_regime_forever(api_key: str, secret_key: str) -> None:
-    if not bool(getattr(config, "VIXW_HEAVY_MODE", True)):
-        print("[vixw] VIXW_HEAVY_MODE disabled.")
+    if not bool(_cfg("VIXW_HEAVY_MODE", True)):
+        print("[vix_proxy] VIXW_HEAVY_MODE disabled.")
         return
-    if bool(getattr(config, "VIXW_ONLY_PAPER_MODE", True)) and not bool(getattr(config, "PAPER", True)):
-        print("[vixw] disabled because VIXW_ONLY_PAPER_MODE=True and PAPER=False.")
+    if bool(_cfg("VIXW_ONLY_PAPER_MODE", True)) and not bool(getattr(config, "PAPER", True)):
+        print("[vix_proxy] disabled because VIXW_ONLY_PAPER_MODE=True and PAPER=False.")
         return
 
     broker = AlpacaBroker(api_key, secret_key, paper=bool(getattr(config, "PAPER", True)))
     data_client = AlpacaDataClient(api_key, secret_key, paper=bool(getattr(config, "PAPER", True)))
     last_entry_at: datetime | None = None
-    sleep_seconds = max(15, int(getattr(config, "VIXW_POLL_SECONDS", 60) or 60))
-    cooldown_seconds = max(60, int(getattr(config, "VIXW_MIN_SECONDS_BETWEEN_ENTRIES", 1800) or 1800))
+    sleep_seconds = max(15, int(_cfg("VIXW_POLL_SECONDS", 60) or 60))
+    cooldown_seconds = max(60, int(_cfg("VIXW_MIN_SECONDS_BETWEEN_ENTRIES", 1800) or 1800))
 
-    print("[vixw] VIXW regime sidecar started.")
+    print("[vix_proxy] VIX-derived proxy sidecar started.")
     while True:
         now_et = _now_et()
         try:
@@ -249,19 +260,19 @@ def run_vixw_regime_forever(api_key: str, secret_key: str) -> None:
 
             direction, regime_reason = _regime_direction(vix_level)
             if direction is None:
-                _log_decision({"timestamp": now_et.isoformat(), "vix_level": round(vix_level, 4), "average_level": getattr(config, "VIXW_REGIME_AVERAGE_LEVEL", 19.0), "decision": "skip", "reason": regime_reason})
+                _log_decision({"timestamp": now_et.isoformat(), "vix_level": round(vix_level, 4), "average_level": _cfg("VIXW_REGIME_AVERAGE_LEVEL", 19.0), "decision": "skip", "reason": regime_reason})
                 time.sleep(sleep_seconds)
                 continue
 
-            if _has_vixw_exposure(broker):
-                _log_decision({"timestamp": now_et.isoformat(), "vix_level": round(vix_level, 4), "average_level": getattr(config, "VIXW_REGIME_AVERAGE_LEVEL", 19.0), "direction": direction, "decision": "skip", "reason": "existing VIX/VIXW exposure or position lookup conservative block"})
+            if _has_proxy_exposure(broker):
+                _log_decision({"timestamp": now_et.isoformat(), "vix_level": round(vix_level, 4), "average_level": _cfg("VIXW_REGIME_AVERAGE_LEVEL", 19.0), "direction": direction, "decision": "skip", "reason": "existing volatility proxy exposure or position lookup conservative block"})
                 time.sleep(sleep_seconds)
                 continue
 
-            contract, contract_reason = _select_vixw_contract(data_client, direction=direction, vix_level=vix_level, now_et=now_et)
+            contract, contract_reason = _select_proxy_contract(data_client, direction=direction, now_et=now_et)
             if not contract:
-                print(f"[vixw] skip: {contract_reason}")
-                _log_decision({"timestamp": now_et.isoformat(), "vix_level": round(vix_level, 4), "average_level": getattr(config, "VIXW_REGIME_AVERAGE_LEVEL", 19.0), "direction": direction, "decision": "skip", "reason": contract_reason})
+                print(f"[vix_proxy] skip: {contract_reason}")
+                _log_decision({"timestamp": now_et.isoformat(), "vix_level": round(vix_level, 4), "average_level": _cfg("VIXW_REGIME_AVERAGE_LEVEL", 19.0), "direction": direction, "decision": "skip", "reason": contract_reason})
                 time.sleep(sleep_seconds)
                 continue
 
@@ -269,20 +280,24 @@ def run_vixw_regime_forever(api_key: str, secret_key: str) -> None:
             if ask <= 0:
                 time.sleep(sleep_seconds)
                 continue
-            budget = float(getattr(config, "VIXW_POSITION_SIZE_USD", 600.0) or 600.0)
+            budget = float(_cfg("VIXW_POSITION_SIZE_USD", 600.0) or 600.0)
             qty = max(1, int(budget // (ask * 100.0)))
-            limit_multiplier = float(getattr(config, "VIXW_ENTRY_LIMIT_PRICE_MULTIPLIER", 1.0) or 1.0)
+            max_qty = int(_cfg("VIXW_MAX_CONTRACTS_PER_ENTRY", 3) or 3)
+            qty = max(1, min(qty, max_qty))
+            limit_multiplier = float(_cfg("VIXW_ENTRY_LIMIT_PRICE_MULTIPLIER", 1.0) or 1.0)
             limit_price = round(ask * limit_multiplier, 2)
             symbol = str(contract.get("symbol", "") or "")
 
             order = broker.place_option_limit_buy(symbol, qty, limit_price)
             order_id = str(getattr(order, "id", "") or "")
             last_entry_at = now_et
-            print(f"[vixw] submitted {direction.upper()} buy {symbol} qty={qty} limit={limit_price:.2f} vix={vix_level:.2f} order={order_id}")
+            print(f"[vix_proxy] submitted {direction.upper()} buy {symbol} qty={qty} limit={limit_price:.2f} vix={vix_level:.2f} order={order_id}")
             _log_decision({
                 "timestamp": now_et.isoformat(),
                 "vix_level": round(vix_level, 4),
-                "average_level": getattr(config, "VIXW_REGIME_AVERAGE_LEVEL", 19.0),
+                "average_level": _cfg("VIXW_REGIME_AVERAGE_LEVEL", 19.0),
+                "proxy_underlying": contract.get("proxy_underlying", ""),
+                "proxy_underlying_price": contract.get("underlying_price", ""),
                 "direction": direction,
                 "decision": "submitted_buy",
                 "reason": regime_reason,
@@ -295,6 +310,6 @@ def run_vixw_regime_forever(api_key: str, secret_key: str) -> None:
                 "qty": qty,
             })
         except Exception as exc:  # noqa: BLE001
-            print(f"[vixw] sidecar error: {exc}")
+            print(f"[vix_proxy] sidecar error: {exc}")
             _log_decision({"timestamp": now_et.isoformat(), "decision": "error", "reason": str(exc)[:250]})
         time.sleep(sleep_seconds)
