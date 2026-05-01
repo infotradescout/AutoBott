@@ -3,24 +3,39 @@
 The existing render_service.py owns the trader loop, boot auto-resume,
 runtime file migration, and independent stop-loss guard. This launcher swaps
 only the dashboard module import so `from dashboard import app` resolves to
-`dashboard_v2.app`, boots the isolated volatility proxy sidecar, and exposes
-read-only operator explanation APIs.
+`dashboard_v2.app`, boots the isolated volatility proxy sidecar, starts the
+persistent learning-memory worker, and exposes read-only operator explanation
+APIs.
 """
 
 from __future__ import annotations
 
 import runpy
 import sys
+import threading
 
 from flask import jsonify, request
 
 import dashboard_v2
 import volatility_proxy_boot
 from decision_journal import build_decision_journal
+from decision_memory import build_learning_summary, run_learning_memory_forever, update_decision_memory
 from decision_outcomes import build_decision_outcomes
 
 sys.modules["dashboard"] = dashboard_v2
 volatility_proxy_boot.start()
+
+
+def _start_learning_memory_worker() -> None:
+    try:
+        worker = threading.Thread(target=run_learning_memory_forever, daemon=True)
+        worker.start()
+        print("[decision_memory] background worker thread started")
+    except Exception as exc:  # noqa: BLE001
+        print(f"[decision_memory] background worker failed to start: {exc}")
+
+
+_start_learning_memory_worker()
 
 
 @dashboard_v2.app.get("/api/decision-journal")
@@ -48,6 +63,18 @@ def api_decision_outcomes():
     limit = max(50, min(500, limit))
     horizon = max(3, min(120, horizon))
     return jsonify(build_decision_outcomes(journal_limit=limit, horizon_minutes=horizon))
+
+
+@dashboard_v2.app.get("/api/decision-learning")
+def api_decision_learning():
+    """Persistent learning summary built from decision memory across restarts."""
+    return jsonify(build_learning_summary())
+
+
+@dashboard_v2.app.post("/api/decision-learning/update")
+def api_decision_learning_update():
+    """Force a read-only learning memory refresh."""
+    return jsonify(update_decision_memory())
 
 
 runpy.run_module("render_service", run_name="__main__")
