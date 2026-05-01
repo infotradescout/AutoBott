@@ -4,8 +4,8 @@ The existing render_service.py owns the trader loop, boot auto-resume,
 runtime file migration, and independent stop-loss guard. This launcher swaps
 only the dashboard module import so `from dashboard import app` resolves to
 `dashboard_v2.app`, boots the isolated volatility proxy sidecar, starts the
-persistent learning-memory worker, and exposes read-only operator explanation
-APIs.
+persistent learning-memory worker, exposes read-only operator explanation APIs,
+and registers always-available quick-link buttons.
 """
 
 from __future__ import annotations
@@ -21,9 +21,11 @@ import volatility_proxy_boot
 from decision_journal import build_decision_journal
 from decision_memory import build_learning_summary, run_learning_memory_forever, update_decision_memory
 from decision_outcomes import build_decision_outcomes
+from quick_links import register_quick_links
 
 sys.modules["dashboard"] = dashboard_v2
 volatility_proxy_boot.start()
+register_quick_links(dashboard_v2.app)
 
 
 def _start_learning_memory_worker() -> None:
