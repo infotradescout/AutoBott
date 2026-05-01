@@ -4,7 +4,7 @@ services:
     env: python
     plan: starter
     buildCommand: pip install -r autotrader/requirements.txt
-    startCommand: python -u autotrader/render_service.py
+    startCommand: python -u autotrader/render_service_dashboard_v2.py
     healthCheckPath: /healthz
     disk:
       name: autotrader-data
