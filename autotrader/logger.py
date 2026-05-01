@@ -3,9 +3,14 @@
 from __future__ import annotations
 
 import csv
+import os
+import time
 from pathlib import Path
 
-import config
+try:
+    from autotrader import config
+except ImportError:
+    import config
 
 
 class TradeLogger:
@@ -29,6 +34,7 @@ class TradeLogger:
         "entry_time",
         "exit_time",
         "hold_seconds",
+        "time_to_first_green_seconds",
         "entry_price",
         "exit_price",
         "realized_pnl_usd",
@@ -49,6 +55,8 @@ class TradeLogger:
         "entry_fill_slippage_vs_ask_pct",
         "entry_fill_seconds",
         "entry_attempts",
+        "index_bias_at_entry",
+        "weak_index_bias_trade",
         "exit_underlying_symbol",
         "exit_bid_submit",
         "exit_ask_submit",
@@ -99,9 +107,24 @@ class TradeLogger:
 
     def log_trade(self, row: dict):
         payload = {key: row.get(key, "") for key in self.columns}
-        with self.path.open("a", newline="", encoding="utf-8") as f:
-            writer = csv.DictWriter(f, fieldnames=self.columns)
-            writer.writerow(payload)
+        last_exc: Exception | None = None
+        for attempt in range(3):
+            try:
+                with self.path.open("a", newline="", encoding="utf-8") as f:
+                    writer = csv.DictWriter(f, fieldnames=self.columns)
+                    writer.writerow(payload)
+                    f.flush()
+                    os.fsync(f.fileno())
+                last_exc = None
+                break
+            except Exception as exc:  # noqa: BLE001
+                last_exc = exc
+                if attempt >= 2:
+                    break
+                time.sleep(0.1 * (attempt + 1))
+
+        if last_exc is not None:
+            raise last_exc
         self._trim_if_needed()
 
     def _trim_if_needed(self):
