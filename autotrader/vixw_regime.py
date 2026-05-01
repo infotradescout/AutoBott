@@ -215,7 +215,7 @@ def _log_decision(row: dict[str, Any]) -> None:
 
 
 def run_vixw_regime_forever(api_key: str, secret_key: str) -> None:
-    if not bool(getattr(config, "VIXW_HEAVY_MODE", False)):
+    if not bool(getattr(config, "VIXW_HEAVY_MODE", True)):
         print("[vixw] VIXW_HEAVY_MODE disabled.")
         return
     if bool(getattr(config, "VIXW_ONLY_PAPER_MODE", True)) and not bool(getattr(config, "PAPER", True)):
