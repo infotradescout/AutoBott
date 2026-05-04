@@ -590,12 +590,13 @@ def _scan_ticker_details(
     if len(bars_df) < min_bars_required:
         return _scan_failure(f"insufficient intraday bars ({len(bars_df)}/{min_bars_required})")
 
-    try:
-        if data_client.has_earnings_within_days(symbol, config.EARNINGS_LOOKAHEAD_DAYS, now_et=now_et):
-            return _scan_failure(f"earnings within {config.EARNINGS_LOOKAHEAD_DAYS} days", stage="hard_block")
-    except Exception as exc:  # noqa: BLE001
-        if config.EARNINGS_CHECK_STRICT:
-            return _scan_failure(f"earnings check failed: {exc}", stage="hard_block")
+    if bool(getattr(config, "ENABLE_EARNINGS_GUARD", False)):
+        try:
+            if data_client.has_earnings_within_days(symbol, config.EARNINGS_LOOKAHEAD_DAYS, now_et=now_et):
+                return _scan_failure(f"earnings within {config.EARNINGS_LOOKAHEAD_DAYS} days", stage="hard_block")
+        except Exception as exc:  # noqa: BLE001
+            if config.EARNINGS_CHECK_STRICT:
+                return _scan_failure(f"earnings check failed: {exc}", stage="hard_block")
 
     rvol = calculate_rvol(
         symbol=symbol,
