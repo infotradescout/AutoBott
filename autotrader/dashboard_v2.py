@@ -27,7 +27,7 @@ try:
 except ImportError:
     import config  # type: ignore
 
-from state_store import load_bot_state
+from state_store import load_bot_state, save_bot_state
 from trading_control import load_trading_control, set_manual_stop
 
 API_KEY = str(os.getenv("ALPACA_API_KEY") or "").strip()
@@ -357,12 +357,12 @@ def _truth_loss_profile(realized: dict[str, Any]) -> dict[str, Any]:
     dominant_cause = causes.most_common(1)[0][0] if causes else ""
     loss_count = len(diagnoses)
     min_signal = min(
-        float(getattr(config, "ADAPTIVE_LOSS_MAX_SIGNAL_SCORE", 9.2) or 9.2),
-        float(getattr(config, "ADAPTIVE_LOSS_MIN_SIGNAL_SCORE", 7.8) or 7.8)
-        + loss_count * float(getattr(config, "ADAPTIVE_LOSS_SIGNAL_SCORE_ADD_PER_LOSS", 0.15) or 0.15),
+        float(getattr(config, "ADAPTIVE_LOSS_MAX_SIGNAL_SCORE", 9.2)),
+        float(getattr(config, "ADAPTIVE_LOSS_MIN_SIGNAL_SCORE", 7.8))
+        + loss_count * float(getattr(config, "ADAPTIVE_LOSS_SIGNAL_SCORE_ADD_PER_LOSS", 0.15)),
     )
-    min_direction = float(getattr(config, "ADAPTIVE_LOSS_MIN_DIRECTION_SCORE", 0.65) or 0.65)
-    max_spread = float(getattr(config, "ADAPTIVE_LOSS_MAX_SPREAD_PCT", 4.0) or 4.0)
+    min_direction = float(getattr(config, "ADAPTIVE_LOSS_MIN_DIRECTION_SCORE", 0.65))
+    max_spread = float(getattr(config, "ADAPTIVE_LOSS_MAX_SPREAD_PCT", 4.0))
     return {
         "source": "dashboard_alpaca_truth",
         "source_closed_count": int(realized.get("closed_count", 0) or 0),
@@ -432,6 +432,7 @@ def _truth_payload() -> dict[str, Any]:
         adaptive_loss["blocked_tickers"] = sorted((truth_profile.get("ticker_losses") or {}).keys())
     scanner = _scanner_summary()
     scanner["passes"] = len(filled_option_entry_orders)
+    scanner["trade_passes"] = len(filled_option_entry_orders)
     scanner["fails"] = max(0, int(scanner.get("scan_rows_today", 0) or 0) - int(scanner["passes"]))
     scanner["pass_rate_pct"] = round((float(scanner["passes"]) / float(scanner["scan_rows_today"])) * 100.0, 2) if int(scanner.get("scan_rows_today", 0) or 0) > 0 else 0.0
     return {"generated_at_et": _now_et().isoformat(), "mode": "paper" if PAPER else "live", "source_of_truth": "alpaca_orders_positions", "account": _account(), "clock": _clock(), "runtime": runtime, "positions": positions, "orders": {"submitted_today": len(all_orders), "filled_today": len(filled_orders), "filled_option_orders_today": len(filled_option_orders), "filled_option_entry_orders_today": len(filled_option_entry_orders), "status_counts": dict(Counter(str(o.get("status", "") or "unknown") for o in all_orders)), "side_counts": dict(Counter(str(o.get("side", "") or "unknown") for o in filled_orders)), "recent": [_compact_order(o) for o in all_orders[:50]]}, "realized": realized, "scanner": scanner}
@@ -541,6 +542,21 @@ def api_control_close_all_positions():
     set_manual_stop(True, reason="close_all_positions_dashboard_v2")
     close_result = _broker_close_all_positions()
     return jsonify({"ok": bool(close_result.get("ok")), "control": _control_payload(), "close": close_result})
+
+
+@app.post("/api/control/reset-adaptive-loss")
+def api_control_reset_adaptive_loss():
+    ok, err, status = _verify_control_token()
+    if not ok:
+        return jsonify({"ok": False, "error": err}), status
+    state = load_bot_state()
+    if not isinstance(state, dict):
+        state = {}
+    state["adaptive_loss_active"] = False
+    state["adaptive_loss_blocked_tickers"] = []
+    state["adaptive_loss_profile"] = {}
+    save_bot_state(state)
+    return jsonify({"ok": True, "runtime": _runtime()})
 
 
 @app.get("/api/runtime-debug")
