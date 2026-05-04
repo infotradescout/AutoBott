@@ -60,6 +60,9 @@ class TradeLogger:
         "exit_fill_seconds",
         "exit_attempts",
         "exit_reason",
+        "loss_cause",
+        "loss_adaptation_action",
+        "loss_underlying_move_pct",
     ]
 
     def __init__(self, path: Path | None = None):

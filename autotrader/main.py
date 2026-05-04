@@ -1120,16 +1120,25 @@ def _alpaca_option_day_pnl_snapshot(broker: AlpacaBroker, now_et: datetime) -> d
         price = float(item["price"])
         side = str(item["side"])
         if side == "buy":
-            lots.setdefault(symbol, []).append({"qty": qty_remaining, "price": price})
+            lots.setdefault(symbol, []).append(
+                {"qty": qty_remaining, "price": price, "filled_at": item["filled_at"]}
+            )
             continue
 
         realized = 0.0
         paired_qty = 0.0
+        entry_notional = 0.0
+        first_entry_at = None
         open_lots = lots.setdefault(symbol, [])
         while qty_remaining > 0 and open_lots:
             lot = open_lots[0]
             use_qty = min(qty_remaining, float(lot["qty"]))
-            realized += (price - float(lot["price"])) * use_qty * 100.0
+            lot_price = float(lot["price"])
+            lot_time = lot.get("filled_at")
+            realized += (price - lot_price) * use_qty * 100.0
+            entry_notional += lot_price * use_qty
+            if isinstance(lot_time, datetime) and (first_entry_at is None or lot_time < first_entry_at):
+                first_entry_at = lot_time
             lot["qty"] = float(lot["qty"]) - use_qty
             qty_remaining -= use_qty
             paired_qty += use_qty
@@ -1137,13 +1146,24 @@ def _alpaca_option_day_pnl_snapshot(broker: AlpacaBroker, now_et: datetime) -> d
                 open_lots.pop(0)
         if paired_qty > 0:
             ticker, direction = _parse_option_symbol(symbol)
+            cost_basis = entry_notional * 100.0
+            exit_time = item["filled_at"]
+            hold_seconds = 0
+            if isinstance(first_entry_at, datetime) and isinstance(exit_time, datetime):
+                hold_seconds = max(0, int((exit_time - first_entry_at).total_seconds()))
             closed.append(
                 {
                     "symbol": symbol,
                     "ticker": ticker,
                     "direction": direction,
                     "qty": round(paired_qty, 4),
+                    "entry_price": round((entry_notional / paired_qty), 4) if paired_qty > 0 else 0.0,
+                    "exit_price": round(price, 4),
+                    "entry_time": first_entry_at.isoformat() if isinstance(first_entry_at, datetime) else "",
+                    "exit_time": exit_time.isoformat() if isinstance(exit_time, datetime) else "",
+                    "hold_seconds": hold_seconds,
                     "realized_pnl_usd": round(realized, 2),
+                    "realized_pnl_pct": round((realized / cost_basis) * 100.0, 4) if cost_basis > 0 else 0.0,
                 }
             )
 
@@ -1615,6 +1635,7 @@ def main():
         for item in (state.get("adaptive_loss_blocked_tickers") or [])
         if str(item).strip()
     )
+    adaptive_loss_profile: dict = dict(state.get("adaptive_loss_profile") or {})
     opening_entries_today_count = int(state.get("opening_entries_today_count", 0) or 0)
     opening_fresh_premium_deployed_usd = float(state.get("opening_fresh_premium_deployed_usd", 0.0) or 0.0)
     opening_expensive_entries_today_count = int(state.get("opening_expensive_entries_today_count", 0) or 0)
@@ -1749,6 +1770,7 @@ def main():
                 "broker_truth_last_error": broker_truth_last_error,
                 "adaptive_loss_active": adaptive_loss_active,
                 "adaptive_loss_blocked_tickers": sorted(adaptive_loss_blocked_tickers),
+                "adaptive_loss_profile": adaptive_loss_profile,
                 "opening_entries_today_count": opening_entries_today_count,
                 "opening_fresh_premium_deployed_usd": round(opening_fresh_premium_deployed_usd, 6),
                 "opening_expensive_entries_today_count": opening_expensive_entries_today_count,
@@ -1791,6 +1813,273 @@ def main():
             f"[{ts(now_et)}] {key}: loss cooldown armed for {cooldown_minutes}m "
             f"(until {ts(ticker_loss_cooldown_until[key])}; reason={reason})."
         )
+
+    def _blank_loss_profile(day_key: str) -> dict:
+        return {
+            "day": day_key,
+            "source": "",
+            "source_closed_count": 0,
+            "loss_count": 0,
+            "dominant_cause": "",
+            "causes": {},
+            "ticker_losses": {},
+            "min_signal_score": float(getattr(config, "ADAPTIVE_LOSS_MIN_SIGNAL_SCORE", 7.8) or 7.8),
+            "min_direction_score": float(getattr(config, "ADAPTIVE_LOSS_MIN_DIRECTION_SCORE", 0.65) or 0.65),
+            "max_spread_pct": float(getattr(config, "ADAPTIVE_LOSS_MAX_SPREAD_PCT", 4.0) or 4.0),
+            "min_abs_roc_pct": 0.0,
+            "min_rvol": 0.0,
+            "diagnoses": [],
+            "last_diagnosis": {},
+            "updated_at_et": "",
+        }
+
+    def _underlying_move_between(ticker: str, entry_iso: str, exit_iso: str) -> float | None:
+        symbol = str(ticker or "").upper()
+        entry_dt = _parse_state_datetime(str(entry_iso or ""))
+        exit_dt = _parse_state_datetime(str(exit_iso or ""))
+        if not symbol or entry_dt is None or exit_dt is None or exit_dt <= entry_dt:
+            return None
+        try:
+            bars = data_client.get_intraday_bars_window(
+                symbol,
+                entry_dt - timedelta(minutes=2),
+                exit_dt + timedelta(minutes=2),
+                limit=80,
+            )
+            if bars is None or bars.empty or len(bars) < 2:
+                return None
+            entry_price = float(bars["close"].iloc[0])
+            exit_price = float(bars["close"].iloc[-1])
+            if entry_price <= 0:
+                return None
+            return ((exit_price - entry_price) / entry_price) * 100.0
+        except Exception as exc:  # noqa: BLE001
+            print(f"[{ts()}] {symbol}: loss diagnosis underlying move unavailable: {exc}")
+            return None
+
+    def _diagnose_loss_trade(trade: dict, now_et: datetime, *, source: str) -> dict:
+        symbol = str(trade.get("option_symbol") or trade.get("symbol") or "").upper()
+        ticker = str(trade.get("ticker") or "").upper()
+        direction = str(trade.get("direction") or "").lower()
+        if (not ticker or not direction) and symbol:
+            parsed_ticker, parsed_direction = _parse_option_symbol(symbol)
+            ticker = ticker or parsed_ticker.upper()
+            direction = direction or parsed_direction
+        hold_seconds = int(_safe_signal_float(trade.get("hold_seconds"), 0.0))
+        pnl_usd = _safe_signal_float(trade.get("realized_pnl_usd"), 0.0)
+        pnl_pct = _safe_signal_float(trade.get("realized_pnl_pct", trade.get("pnl_pct")), 0.0)
+        if abs(pnl_pct) <= 1.0 and "pnl_pct" in trade:
+            pnl_pct *= 100.0
+        entry_spread = _safe_signal_float(
+            trade.get("entry_spread_pct", trade.get("contract_spread_pct")),
+            0.0,
+        )
+        exit_spread = _safe_signal_float(trade.get("exit_spread_pct"), 0.0)
+        entry_slip = _safe_signal_float(trade.get("entry_fill_slippage_vs_ask_pct"), 0.0)
+        exit_slip = _safe_signal_float(trade.get("exit_fill_slippage_vs_bid_pct"), 0.0)
+        max_spread = max(entry_spread, exit_spread)
+        max_slippage = max(entry_slip, exit_slip)
+        underlying_move_pct = _underlying_move_between(
+            ticker,
+            str(trade.get("entry_time") or trade.get("entry_time_iso") or ""),
+            str(trade.get("exit_time") or ""),
+        )
+
+        wrong_way_threshold = float(
+            getattr(config, "ADAPTIVE_LOSS_WRONG_WAY_UNDERLYING_MOVE_PCT", 0.05) or 0.05
+        )
+        spread_threshold = float(getattr(config, "ADAPTIVE_LOSS_SPREAD_CAUSE_PCT", 4.0) or 4.0)
+        slip_threshold = float(getattr(config, "ADAPTIVE_LOSS_SLIPPAGE_CAUSE_PCT", 2.0) or 2.0)
+        quick_seconds = int(getattr(config, "ADAPTIVE_LOSS_QUICK_SECONDS", 180) or 180)
+        wrong_way = False
+        if underlying_move_pct is not None:
+            if direction == "call" and underlying_move_pct <= -wrong_way_threshold:
+                wrong_way = True
+            elif direction == "put" and underlying_move_pct >= wrong_way_threshold:
+                wrong_way = True
+
+        if wrong_way:
+            cause = "wrong_direction"
+            action = "raise direction conviction and block ticker"
+        elif max_spread >= spread_threshold or max_slippage >= slip_threshold:
+            cause = "execution_slippage"
+            action = "tighten spread cap and cool ticker"
+        elif hold_seconds > 0 and hold_seconds <= quick_seconds:
+            cause = "rapid_stopout"
+            action = "require stronger momentum before next entry"
+        elif underlying_move_pct is not None and abs(underlying_move_pct) < wrong_way_threshold:
+            cause = "chop_no_followthrough"
+            action = "require stronger ROC/RVOL before next entry"
+        else:
+            cause = "timing_or_decay"
+            action = "raise signal quality and cool ticker"
+
+        return {
+            "source": source,
+            "timestamp_et": now_et.isoformat(),
+            "ticker": ticker,
+            "symbol": symbol,
+            "direction": direction,
+            "cause": cause,
+            "action": action,
+            "hold_seconds": hold_seconds,
+            "realized_pnl_usd": round(pnl_usd, 2),
+            "realized_pnl_pct": round(pnl_pct, 4),
+            "underlying_move_pct": round(float(underlying_move_pct), 4) if underlying_move_pct is not None else None,
+            "entry_spread_pct": round(entry_spread, 4),
+            "exit_spread_pct": round(exit_spread, 4),
+            "max_slippage_pct": round(max_slippage, 4),
+            "signal_score": _safe_signal_float(trade.get("signal_score"), 0.0),
+            "direction_score": _safe_signal_float(trade.get("direction_score"), 0.0),
+        }
+
+    def _build_loss_profile(diagnoses: list[dict], now_et: datetime, *, source: str, closed_count: int) -> dict:
+        day_key = now_et.date().isoformat()
+        profile = _blank_loss_profile(day_key)
+        causes: dict[str, int] = {}
+        ticker_losses: dict[str, int] = {}
+        for diag in diagnoses:
+            cause = str(diag.get("cause", "unknown") or "unknown")
+            ticker = str(diag.get("ticker", "") or "").upper()
+            causes[cause] = int(causes.get(cause, 0)) + 1
+            if ticker:
+                ticker_losses[ticker] = int(ticker_losses.get(ticker, 0)) + 1
+
+        loss_count = len(diagnoses)
+        wrong_count = int(causes.get("wrong_direction", 0))
+        execution_count = int(causes.get("execution_slippage", 0))
+        momentum_loss_count = int(causes.get("rapid_stopout", 0)) + int(causes.get("chop_no_followthrough", 0))
+        min_signal = float(getattr(config, "ADAPTIVE_LOSS_MIN_SIGNAL_SCORE", 7.8) or 7.8)
+        min_signal += loss_count * float(getattr(config, "ADAPTIVE_LOSS_SIGNAL_SCORE_ADD_PER_LOSS", 0.15) or 0.15)
+        min_signal = min(float(getattr(config, "ADAPTIVE_LOSS_MAX_SIGNAL_SCORE", 9.2) or 9.2), min_signal)
+        min_direction = float(getattr(config, "ADAPTIVE_LOSS_MIN_DIRECTION_SCORE", 0.65) or 0.65)
+        min_direction += wrong_count * float(getattr(config, "ADAPTIVE_LOSS_DIRECTION_ADD_PER_WRONG", 0.05) or 0.05)
+        min_direction = min(
+            float(getattr(config, "ADAPTIVE_LOSS_MAX_DIRECTION_SCORE", 0.85) or 0.85),
+            min_direction,
+        )
+        max_spread = float(getattr(config, "ADAPTIVE_LOSS_MAX_SPREAD_PCT", 4.0) or 4.0)
+        if execution_count > 0:
+            max_spread = min(
+                max_spread,
+                float(getattr(config, "ADAPTIVE_LOSS_EXECUTION_MAX_SPREAD_PCT", 3.0) or 3.0),
+            )
+        momentum_trigger = int(getattr(config, "ADAPTIVE_LOSS_REQUIRE_MOMENTUM_AFTER_LOSSES", 2) or 2)
+        min_abs_roc = 0.0
+        min_rvol = 0.0
+        if momentum_loss_count >= momentum_trigger:
+            min_abs_roc = float(getattr(config, "ADAPTIVE_LOSS_MIN_ABS_ROC_PCT", 0.12) or 0.12)
+            min_rvol = float(getattr(config, "ADAPTIVE_LOSS_MIN_RVOL", 0.50) or 0.50)
+
+        dominant_cause = ""
+        if causes:
+            dominant_cause = sorted(causes.items(), key=lambda item: (-int(item[1]), str(item[0])))[0][0]
+        profile.update(
+            {
+                "source": source,
+                "source_closed_count": int(closed_count),
+                "loss_count": loss_count,
+                "dominant_cause": dominant_cause,
+                "causes": causes,
+                "ticker_losses": ticker_losses,
+                "min_signal_score": round(min_signal, 4),
+                "min_direction_score": round(min_direction, 4),
+                "max_spread_pct": round(max_spread, 4),
+                "min_abs_roc_pct": round(min_abs_roc, 4),
+                "min_rvol": round(min_rvol, 4),
+                "diagnoses": diagnoses[-5:],
+                "last_diagnosis": diagnoses[-1] if diagnoses else {},
+                "updated_at_et": now_et.isoformat(),
+            }
+        )
+        return profile
+
+    def _activate_loss_profile(profile: dict, now_et: datetime) -> None:
+        nonlocal adaptive_loss_active, adaptive_loss_profile
+        adaptive_loss_profile = profile
+        if int(profile.get("loss_count", 0) or 0) <= 0:
+            return
+        adaptive_loss_active = True
+        block_after = max(1, int(getattr(config, "ADAPTIVE_LOSS_BLOCK_TICKER_AFTER_LOSSES", 1) or 1))
+        if bool(getattr(config, "ADAPTIVE_BLOCK_LOSING_TICKERS", True)):
+            for ticker, count in dict(profile.get("ticker_losses") or {}).items():
+                if int(count or 0) >= block_after:
+                    adaptive_loss_blocked_tickers.add(str(ticker).upper())
+        last = profile.get("last_diagnosis") if isinstance(profile.get("last_diagnosis"), dict) else {}
+        if last:
+            print(
+                f"[{ts(now_et)}] Adaptive diagnosis: {last.get('ticker', '')} "
+                f"cause={last.get('cause', 'unknown')} action={last.get('action', '')}. "
+                f"Profile gates score>={float(profile.get('min_signal_score', 0) or 0):.2f} "
+                f"dir>={float(profile.get('min_direction_score', 0) or 0):.2f} "
+                f"spread<={float(profile.get('max_spread_pct', 0) or 0):.2f}%."
+            )
+
+    def _refresh_adaptive_loss_profile_from_truth(truth_snapshot: dict, now_et: datetime) -> bool:
+        closed_count = int(truth_snapshot.get("closed_count", 0) or 0)
+        if (
+            isinstance(adaptive_loss_profile, dict)
+            and str(adaptive_loss_profile.get("source", "")) == "alpaca_truth"
+            and int(adaptive_loss_profile.get("source_closed_count", -1) or -1) == closed_count
+        ):
+            return False
+        losses = [
+            item
+            for item in list(truth_snapshot.get("closed_trades") or [])
+            if _safe_signal_float(item.get("realized_pnl_usd"), 0.0) < 0
+        ]
+        if not losses:
+            return False
+        window = max(1, int(getattr(config, "ADAPTIVE_LOSS_CAUSE_WINDOW", 12) or 12))
+        diagnoses = [
+            _diagnose_loss_trade(item, now_et, source="alpaca_truth")
+            for item in losses[-window:]
+        ]
+        profile = _build_loss_profile(diagnoses, now_et, source="alpaca_truth", closed_count=closed_count)
+        _activate_loss_profile(profile, now_et)
+        return True
+
+    def _record_local_loss_diagnosis(trade_row: dict, now_et: datetime) -> dict:
+        window = max(1, int(getattr(config, "ADAPTIVE_LOSS_CAUSE_WINDOW", 12) or 12))
+        existing = []
+        if isinstance(adaptive_loss_profile, dict):
+            existing = [
+                item for item in list(adaptive_loss_profile.get("diagnoses") or [])
+                if isinstance(item, dict)
+            ]
+        diagnosis = _diagnose_loss_trade(trade_row, now_et, source="local_close")
+        profile = _build_loss_profile(
+            (existing + [diagnosis])[-window:],
+            now_et,
+            source="local_close",
+            closed_count=int(broker_truth_closed_count or 0),
+        )
+        _activate_loss_profile(profile, now_et)
+        return diagnosis
+
+    def _cooldown_minutes_for_loss_cause(cause: str, fallback_minutes: int) -> int:
+        normalized = str(cause or "").lower()
+        if normalized == "wrong_direction":
+            return max(
+                int(fallback_minutes),
+                int(getattr(config, "ADAPTIVE_LOSS_WRONG_DIRECTION_COOLDOWN_MINUTES", 90) or 90),
+            )
+        if normalized == "execution_slippage":
+            return max(
+                int(fallback_minutes),
+                int(getattr(config, "ADAPTIVE_LOSS_EXECUTION_COOLDOWN_MINUTES", 60) or 60),
+            )
+        if normalized == "rapid_stopout":
+            return max(
+                int(fallback_minutes),
+                int(getattr(config, "ADAPTIVE_LOSS_QUICK_COOLDOWN_MINUTES", 45) or 45),
+            )
+        if normalized == "chop_no_followthrough":
+            return max(
+                int(fallback_minutes),
+                int(getattr(config, "ADAPTIVE_LOSS_CHOP_COOLDOWN_MINUTES", 30) or 30),
+            )
+        return int(fallback_minutes)
 
     def _safe_get_clock(*, phase: str, now_et: datetime, now_ct: datetime):
         nonlocal last_alpaca_auth_error_et, last_alpaca_auth_error
@@ -2476,6 +2765,7 @@ def main():
             broker_truth_last_error = ""
             adaptive_loss_active = False
             adaptive_loss_blocked_tickers = set()
+            adaptive_loss_profile = {}
             opening_entries_today_count = 0
             opening_fresh_premium_deployed_usd = 0.0
             opening_expensive_entries_today_count = 0
@@ -2505,6 +2795,7 @@ def main():
                 truth_snapshot = _alpaca_option_day_pnl_snapshot(broker, now_et)
                 adaptive_before = adaptive_loss_active
                 blocked_before = set(adaptive_loss_blocked_tickers)
+                profile_before = dict(adaptive_loss_profile)
                 broker_truth_day_pnl_usd = float(truth_snapshot.get("realized_pnl_usd", 0.0) or 0.0)
                 broker_truth_closed_count = int(truth_snapshot.get("closed_count", 0) or 0)
                 broker_truth_last_error = ""
@@ -2516,13 +2807,12 @@ def main():
                             f"Alpaca realized P/L ${broker_truth_day_pnl_usd:.2f}."
                         )
                     adaptive_loss_active = True
-                    if bool(getattr(config, "ADAPTIVE_BLOCK_LOSING_TICKERS", True)):
-                        adaptive_loss_blocked_tickers.update(
-                            str(item).upper()
-                            for item in (truth_snapshot.get("losing_tickers") or [])
-                            if str(item).strip()
-                        )
-                if adaptive_loss_active != adaptive_before or adaptive_loss_blocked_tickers != blocked_before:
+                    _refresh_adaptive_loss_profile_from_truth(truth_snapshot, now_et)
+                if (
+                    adaptive_loss_active != adaptive_before
+                    or adaptive_loss_blocked_tickers != blocked_before
+                    or adaptive_loss_profile != profile_before
+                ):
                     _save_runtime_state()
                 truth_loss_limit = abs(
                     float(
@@ -2988,8 +3278,15 @@ def main():
                     continue
                 signal_score_now = float(signal.get("signal_score", 0.0) or 0.0)
                 direction_score_now = abs(float(signal.get("direction_score", 0.0) or 0.0))
-                adaptive_min_signal = float(getattr(config, "ADAPTIVE_LOSS_MIN_SIGNAL_SCORE", 7.8) or 7.8)
-                adaptive_min_direction = float(getattr(config, "ADAPTIVE_LOSS_MIN_DIRECTION_SCORE", 0.65) or 0.65)
+                profile = adaptive_loss_profile if isinstance(adaptive_loss_profile, dict) else {}
+                adaptive_min_signal = max(
+                    float(getattr(config, "ADAPTIVE_LOSS_MIN_SIGNAL_SCORE", 7.8) or 7.8),
+                    float(profile.get("min_signal_score", 0.0) or 0.0),
+                )
+                adaptive_min_direction = max(
+                    float(getattr(config, "ADAPTIVE_LOSS_MIN_DIRECTION_SCORE", 0.65) or 0.65),
+                    float(profile.get("min_direction_score", 0.0) or 0.0),
+                )
                 if signal_score_now < adaptive_min_signal or direction_score_now < adaptive_min_direction:
                     _mark_skip("adaptive_loss_quality_gate")
                     _mark_stage4_reject(reason="adaptive_loss_quality_gate", ticker=ticker)
@@ -2997,6 +3294,25 @@ def main():
                         f"[{ts(now_et)}] {ticker}: skip (adaptive loss quality gate; "
                         f"score {signal_score_now:.2f}/{adaptive_min_signal:.2f}, "
                         f"direction {direction_score_now:.2f}/{adaptive_min_direction:.2f})."
+                    )
+                    continue
+                adaptive_min_roc = float(profile.get("min_abs_roc_pct", 0.0) or 0.0)
+                adaptive_min_rvol = float(profile.get("min_rvol", 0.0) or 0.0)
+                signal_abs_roc = abs(float(signal.get("roc", 0.0) or 0.0))
+                signal_rvol = float(signal.get("rvol", 0.0) or 0.0)
+                if (
+                    adaptive_min_roc > 0
+                    and signal_abs_roc < adaptive_min_roc
+                ) or (
+                    adaptive_min_rvol > 0
+                    and signal_rvol < adaptive_min_rvol
+                ):
+                    _mark_skip("adaptive_loss_momentum_gate")
+                    _mark_stage4_reject(reason="adaptive_loss_momentum_gate", ticker=ticker)
+                    print(
+                        f"[{ts(now_et)}] {ticker}: skip (adaptive momentum gate; "
+                        f"roc {signal_abs_roc:.2f}/{adaptive_min_roc:.2f}, "
+                        f"rvol {signal_rvol:.2f}/{adaptive_min_rvol:.2f})."
                     )
                     continue
 
@@ -3275,6 +3591,10 @@ def main():
                 signal_entry_max_spread = signal.get("entry_max_quote_spread_pct")
                 if adaptive_loss_active:
                     adaptive_spread = float(getattr(config, "ADAPTIVE_LOSS_MAX_SPREAD_PCT", 0.0) or 0.0)
+                    if isinstance(adaptive_loss_profile, dict):
+                        profile_spread = float(adaptive_loss_profile.get("max_spread_pct", 0.0) or 0.0)
+                        if profile_spread > 0:
+                            adaptive_spread = min(adaptive_spread or profile_spread, profile_spread)
                     if adaptive_spread > 0:
                         try:
                             current_spread_cap = float(signal_entry_max_spread or adaptive_spread)
@@ -4006,6 +4326,13 @@ def main():
                         "exit_attempts": close_execution.get("attempts", ""),
                         "exit_reason": exit_reason,
                     }
+                    loss_diagnosis = {}
+                    if trade_pnl_usd < 0:
+                        loss_diagnosis = _record_local_loss_diagnosis(trade_row, now_et)
+                        trade_row["loss_cause"] = loss_diagnosis.get("cause", "")
+                        trade_row["loss_adaptation_action"] = loss_diagnosis.get("action", "")
+                        trade_row["loss_underlying_move_pct"] = loss_diagnosis.get("underlying_move_pct", "")
+                        last_exit_debug["loss_diagnosis"] = loss_diagnosis
                     try:
                         trade_logger.log_trade(trade_row)
                         trade_telemetry_last_log_error = ""
@@ -4043,11 +4370,15 @@ def main():
                                 getattr(config, "STOP_LOSS_REENTRY_COOLDOWN_MINUTES", loss_cd_minutes)
                                 or loss_cd_minutes
                             )
+                        loss_cd_minutes = _cooldown_minutes_for_loss_cause(
+                            str(loss_diagnosis.get("cause", "")),
+                            loss_cd_minutes,
+                        )
                         _set_ticker_loss_cooldown(
                             ticker,
                             now_et,
                             minutes=loss_cd_minutes,
-                            reason=str(exit_reason),
+                            reason=str(loss_diagnosis.get("cause") or exit_reason),
                         )
                     if (
                         ticker

@@ -311,6 +311,7 @@ def _runtime() -> dict[str, Any]:
         "adaptive_loss": {
             "active": bool(state.get("adaptive_loss_active", False)),
             "blocked_tickers": list(state.get("adaptive_loss_blocked_tickers") or []),
+            "profile": _as_dict(state.get("adaptive_loss_profile")),
         },
         "entry_debug": _entry_debug_summary(state),
     }
