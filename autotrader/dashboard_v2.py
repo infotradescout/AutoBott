@@ -273,7 +273,7 @@ def _scanner_summary() -> dict[str, Any]:
     pass_rows = [r for r in today_rows if str(r.get("result", "") or "").lower() == "pass"]
     fail_rows = [r for r in today_rows if str(r.get("result", "") or "").lower() == "fail"]
     reason_counts = Counter(str(r.get("reason", "") or "unknown") for r in fail_rows)
-    return {"scan_rows_today": len(today_rows), "passes": len(pass_rows), "fails": len(fail_rows), "pass_rate_pct": round((len(pass_rows) / len(today_rows)) * 100.0, 2) if today_rows else 0.0, "last_scan": str(today_rows[-1].get("timestamp", "") or "") if today_rows else "", "top_fail_reasons": [{"reason": key, "count": value} for key, value in reason_counts.most_common(8)], "recent_rows": list(reversed(today_rows[-20:]))}
+    return {"scan_rows_today": len(today_rows), "candidate_passes": len(pass_rows), "passes": 0, "fails": len(fail_rows), "pass_rate_pct": 0.0, "last_scan": str(today_rows[-1].get("timestamp", "") or "") if today_rows else "", "top_fail_reasons": [{"reason": key, "count": value} for key, value in reason_counts.most_common(8)], "recent_rows": list(reversed(today_rows[-20:]))}
 
 
 def _as_dict(value: Any) -> dict[str, Any]:
@@ -415,6 +415,9 @@ def _truth_payload() -> dict[str, Any]:
     all_orders = _all_orders_today()
     filled_orders = [o for o in all_orders if str(o.get("status", "") or "").lower() == "filled"]
     filled_option_orders = [o for o in filled_orders if _is_option_symbol(str(o.get("symbol", "") or ""))]
+    filled_option_entry_orders = [
+        o for o in filled_option_orders if str(o.get("side", "") or "").lower() == "buy"
+    ]
     realized = _realized_from_orders(filled_option_orders)
     positions = _positions()
     unrealized = round(sum(float(p.get("unrealized_pl", 0.0)) for p in positions), 2)
@@ -427,7 +430,11 @@ def _truth_payload() -> dict[str, Any]:
         adaptive_loss["active"] = True
         adaptive_loss["profile"] = truth_profile
         adaptive_loss["blocked_tickers"] = sorted((truth_profile.get("ticker_losses") or {}).keys())
-    return {"generated_at_et": _now_et().isoformat(), "mode": "paper" if PAPER else "live", "source_of_truth": "alpaca_orders_positions", "account": _account(), "clock": _clock(), "runtime": runtime, "positions": positions, "orders": {"submitted_today": len(all_orders), "filled_today": len(filled_orders), "filled_option_orders_today": len(filled_option_orders), "status_counts": dict(Counter(str(o.get("status", "") or "unknown") for o in all_orders)), "side_counts": dict(Counter(str(o.get("side", "") or "unknown") for o in filled_orders)), "recent": [_compact_order(o) for o in all_orders[:50]]}, "realized": realized, "scanner": _scanner_summary()}
+    scanner = _scanner_summary()
+    scanner["passes"] = len(filled_option_entry_orders)
+    scanner["fails"] = max(0, int(scanner.get("scan_rows_today", 0) or 0) - int(scanner["passes"]))
+    scanner["pass_rate_pct"] = round((float(scanner["passes"]) / float(scanner["scan_rows_today"])) * 100.0, 2) if int(scanner.get("scan_rows_today", 0) or 0) > 0 else 0.0
+    return {"generated_at_et": _now_et().isoformat(), "mode": "paper" if PAPER else "live", "source_of_truth": "alpaca_orders_positions", "account": _account(), "clock": _clock(), "runtime": runtime, "positions": positions, "orders": {"submitted_today": len(all_orders), "filled_today": len(filled_orders), "filled_option_orders_today": len(filled_option_orders), "filled_option_entry_orders_today": len(filled_option_entry_orders), "status_counts": dict(Counter(str(o.get("status", "") or "unknown") for o in all_orders)), "side_counts": dict(Counter(str(o.get("side", "") or "unknown") for o in filled_orders)), "recent": [_compact_order(o) for o in all_orders[:50]]}, "realized": realized, "scanner": scanner}
 
 
 def _verify_control_token() -> tuple[bool, str, int]:
