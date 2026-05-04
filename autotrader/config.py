@@ -351,7 +351,7 @@ FEATURE_TICKER_SCORECARDS            = False
 FEATURE_STRATEGY_PROFILES            = False
 FEATURE_BAD_FILL_DETECTOR            = False
 FEATURE_WEEKLY_REVIEW_GENERATOR      = False
-AUTO_RESUME_TRADING_ON_BOOT          = True
+AUTO_RESUME_TRADING_ON_BOOT          = False
 
 TRADES_CSV_PATH          = _DATA_DIR / "trades.csv"
 STATE_JSON_PATH          = _DATA_DIR / "runtime_state.json"

@@ -17,7 +17,7 @@ from typing import Any
 
 import pytz
 import requests
-from flask import Flask, jsonify, render_template_string
+from flask import Flask, jsonify, render_template_string, request
 
 from env_config import load_runtime_env
 
@@ -28,13 +28,14 @@ except ImportError:
     import config  # type: ignore
 
 from state_store import load_bot_state
-from trading_control import load_trading_control
+from trading_control import load_trading_control, set_manual_stop
 
 API_KEY = str(os.getenv("ALPACA_API_KEY") or "").strip()
 SECRET_KEY = str(os.getenv("ALPACA_SECRET_KEY") or "").strip()
 PAPER = bool(getattr(config, "PAPER", True))
 BASE_URL = "https://paper-api.alpaca.markets" if PAPER else "https://api.alpaca.markets"
 HEADERS = {"APCA-API-KEY-ID": API_KEY, "APCA-API-SECRET-KEY": SECRET_KEY}
+CONTROL_TOKEN = str(getattr(config, "DASHBOARD_CONTROL_TOKEN", "") or "").strip()
 EASTERN = pytz.timezone(str(getattr(config, "EASTERN_TZ", "US/Eastern") or "US/Eastern"))
 DISPLAY_TZ = pytz.timezone(str(os.getenv("DASHBOARD_DISPLAY_TZ", "America/Chicago") or "America/Chicago"))
 SCAN_LOG_CSV = Path(getattr(config, "SCAN_LOG_CSV_PATH"))
@@ -324,6 +325,52 @@ def _truth_payload() -> dict[str, Any]:
     return {"generated_at_et": _now_et().isoformat(), "mode": "paper" if PAPER else "live", "source_of_truth": "alpaca_orders_positions", "account": _account(), "clock": _clock(), "runtime": _runtime(), "positions": positions, "orders": {"submitted_today": len(all_orders), "filled_today": len(filled_orders), "filled_option_orders_today": len(filled_option_orders), "status_counts": dict(Counter(str(o.get("status", "") or "unknown") for o in all_orders)), "side_counts": dict(Counter(str(o.get("side", "") or "unknown") for o in filled_orders)), "recent": [_compact_order(o) for o in all_orders[:50]]}, "realized": realized, "scanner": _scanner_summary()}
 
 
+def _verify_control_token() -> tuple[bool, str, int]:
+    if not CONTROL_TOKEN:
+        return False, "Dashboard control token is not configured.", 503
+    supplied = str(request.headers.get("X-Control-Token") or request.args.get("token") or "").strip()
+    if not supplied and request.is_json:
+        payload = request.get_json(silent=True) or {}
+        if isinstance(payload, dict):
+            supplied = str(payload.get("token", "") or "").strip()
+    if not supplied:
+        return False, "Missing control token.", 401
+    if supplied != CONTROL_TOKEN:
+        return False, "Invalid control token.", 403
+    return True, "", 200
+
+
+def _control_payload() -> dict[str, Any]:
+    state = load_trading_control()
+    if not isinstance(state, dict):
+        state = {}
+    return {
+        "manual_stop": bool(state.get("manual_stop", False)),
+        "dry_run": bool(state.get("dry_run", False)),
+        "strategy_profile": str(state.get("strategy_profile", "") or ""),
+        "updated_at_et": str(state.get("updated_at_et", "") or ""),
+        "reason": str(state.get("reason", "") or ""),
+    }
+
+
+def _broker_close_all_positions() -> dict[str, Any]:
+    try:
+        from broker import AlpacaBroker
+
+        broker = AlpacaBroker(API_KEY, SECRET_KEY, paper=PAPER)
+        cancel_result = broker.cancel_all_open_orders()
+        total, closed, results = broker.close_all_positions()
+        return {
+            "ok": True,
+            "cancel_result": str(cancel_result),
+            "positions_seen": total,
+            "close_orders_submitted": closed,
+            "results": results,
+        }
+    except Exception as exc:  # noqa: BLE001
+        return {"ok": False, "error": str(exc)[:500]}
+
+
 @app.after_request
 def _no_cache(response):
     if str(getattr(response, "status", "") or "") and str(response.status).startswith("2"):
@@ -339,6 +386,47 @@ def healthz():
 @app.get("/api/truth")
 def api_truth():
     return jsonify(_truth_payload())
+
+
+@app.get("/api/trading-control")
+def api_trading_control():
+    return jsonify(_control_payload())
+
+
+@app.post("/api/trading-control/stop")
+def api_trading_control_stop():
+    ok, err, status = _verify_control_token()
+    if not ok:
+        return jsonify({"ok": False, "error": err}), status
+    payload = request.get_json(silent=True) if request.is_json else {}
+    if not isinstance(payload, dict):
+        payload = {}
+    reason = str(payload.get("reason", "") or "manual_stop_dashboard_v2")
+    set_manual_stop(True, reason=reason)
+    return jsonify({"ok": True, **_control_payload()})
+
+
+@app.post("/api/trading-control/start")
+def api_trading_control_start():
+    ok, err, status = _verify_control_token()
+    if not ok:
+        return jsonify({"ok": False, "error": err}), status
+    payload = request.get_json(silent=True) if request.is_json else {}
+    if not isinstance(payload, dict):
+        payload = {}
+    reason = str(payload.get("reason", "") or "manual_start_dashboard_v2")
+    set_manual_stop(False, reason=reason)
+    return jsonify({"ok": True, **_control_payload()})
+
+
+@app.post("/api/control/close-all-positions")
+def api_control_close_all_positions():
+    ok, err, status = _verify_control_token()
+    if not ok:
+        return jsonify({"ok": False, "error": err}), status
+    set_manual_stop(True, reason="close_all_positions_dashboard_v2")
+    close_result = _broker_close_all_positions()
+    return jsonify({"ok": bool(close_result.get("ok")), "control": _control_payload(), "close": close_result})
 
 
 @app.get("/api/runtime-debug")
