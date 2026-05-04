@@ -1233,6 +1233,20 @@ def _hydrate_missing_position_meta(open_trade_meta: dict[str, dict], option_posi
     return hydrated
 
 
+def _prune_stale_open_trade_meta(open_trade_meta: dict[str, dict], option_positions: list) -> int:
+    live_symbols: set[str] = set()
+    for pos in option_positions:
+        symbol = str(getattr(pos, "symbol", "") or "")
+        qty = position_qty_as_int(getattr(pos, "qty", 0))
+        if symbol and qty > 0:
+            live_symbols.add(symbol)
+
+    stale_symbols = [symbol for symbol in list(open_trade_meta) if symbol not in live_symbols]
+    for symbol in stale_symbols:
+        open_trade_meta.pop(symbol, None)
+    return len(stale_symbols)
+
+
 def _detect_catalyst_event(
     data_client: AlpacaDataClient,
     now_et: datetime,
@@ -2336,6 +2350,10 @@ def main():
             set_catalyst_mode(False, "")
 
         option_positions = broker.get_open_option_positions()
+        stale_meta_count = _prune_stale_open_trade_meta(open_trade_meta, option_positions)
+        if stale_meta_count > 0:
+            print(f"[{ts(now_et)}] Pruned {stale_meta_count} stale runtime position record(s) not present at Alpaca.")
+            _save_runtime_state()
         hydrated_count = _hydrate_missing_position_meta(open_trade_meta, option_positions, now_et)
         if hydrated_count > 0:
             for meta in open_trade_meta.values():
@@ -2605,7 +2623,7 @@ def main():
             skips[reason] = int(skips.get(reason, 0)) + 1
             entry_debug["skips"] = skips
 
-        def _mark_stage4_reject(*, reason: str, ticker: str) -> None:
+        def _mark_stage4_reject(*, reason: str, ticker: str, detail: str = "") -> None:
             reject_reasons = entry_debug.get("entry_stage4_reject_reasons", {})
             if not isinstance(reject_reasons, dict):
                 reject_reasons = {}
@@ -2623,7 +2641,7 @@ def main():
             _set_signal_outcome(
                 ticker=ticker,
                 disposition=f"blocked_{_normalize_disposition_reason(reason)}",
-                detail=reason,
+                detail=str(detail or reason),
             )
 
         def _mark_stage4_eligible(*, ticker: str) -> None:
@@ -2820,12 +2838,13 @@ def main():
                 print(f"[{ts(now_et)}] {ticker}: skip ({opening_quality_reason}).")
                 continue
 
-            fast_start_ok, fast_start_reason = _fast_start_entry_quality_ok(signal, now_et)
-            if not fast_start_ok:
-                _mark_skip("fast_start_quality_gate")
-                _mark_stage4_reject(reason="fast_start_quality_gate", ticker=ticker)
-                print(f"[{ts(now_et)}] {ticker}: skip ({fast_start_reason}).")
-                continue
+            if bool(getattr(config, "ENABLE_FAST_START_ENTRY_QUALITY", True)):
+                fast_start_ok, fast_start_reason = _fast_start_entry_quality_ok(signal, now_et)
+                if not fast_start_ok:
+                    _mark_skip("fast_start_quality_gate")
+                    _mark_stage4_reject(reason="fast_start_quality_gate", ticker=ticker, detail=fast_start_reason)
+                    print(f"[{ts(now_et)}] {ticker}: skip ({fast_start_reason}).")
+                    continue
 
             if not _is_valid_long_direction(direction):
                 _mark_skip("invalid_strategy_direction")
