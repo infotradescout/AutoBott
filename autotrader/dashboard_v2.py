@@ -327,6 +327,8 @@ def _truth_payload() -> dict[str, Any]:
 
 def _verify_control_token() -> tuple[bool, str, int]:
     if not CONTROL_TOKEN:
+        if PAPER:
+            return True, "", 200
         return False, "Dashboard control token is not configured.", 503
     supplied = str(request.headers.get("X-Control-Token") or request.args.get("token") or "").strip()
     if not supplied and request.is_json:
