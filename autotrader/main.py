@@ -3902,7 +3902,7 @@ def main():
                     close_poll_override = None
                     close_wait_override = None
                     close_retry_override = None
-                    if exit_reason == "stop_loss":
+                    if exit_reason in {"stop_loss", "stop_loss_pct"}:
                         close_poll_override = int(
                             getattr(config, "STOPLOSS_EXIT_ORDER_STATUS_POLL_SECONDS", 1) or 1
                         )
