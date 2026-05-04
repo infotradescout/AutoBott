@@ -2630,6 +2630,29 @@ def main():
         dry_run_enabled = bool(control_state.get("dry_run", False)) and is_enabled("FEATURE_DRY_RUN_MODE", False)
         manual_stop = bool(control_state.get("manual_stop", False))
         if manual_stop:
+            if bool(getattr(config, "ENABLE_ALPACA_TRUTH_LOSS_GUARD", True)):
+                try:
+                    truth_snapshot = _alpaca_option_day_pnl_snapshot(broker, now_et)
+                    adaptive_before = adaptive_loss_active
+                    blocked_before = set(adaptive_loss_blocked_tickers)
+                    profile_before = dict(adaptive_loss_profile)
+                    broker_truth_day_pnl_usd = float(truth_snapshot.get("realized_pnl_usd", 0.0) or 0.0)
+                    broker_truth_closed_count = int(truth_snapshot.get("closed_count", 0) or 0)
+                    broker_truth_last_error = ""
+                    adapt_after_loss = abs(float(getattr(config, "ALPACA_TRUTH_ADAPT_AFTER_LOSS_USD", 0.0) or 0.0))
+                    if adapt_after_loss > 0 and broker_truth_day_pnl_usd <= -adapt_after_loss:
+                        adaptive_loss_active = True
+                        _refresh_adaptive_loss_profile_from_truth(truth_snapshot, now_et)
+                    if (
+                        adaptive_loss_active != adaptive_before
+                        or adaptive_loss_blocked_tickers != blocked_before
+                        or adaptive_loss_profile != profile_before
+                    ):
+                        _save_runtime_state()
+                except Exception as exc:  # noqa: BLE001
+                    broker_truth_last_error = str(exc)[:300]
+                    _save_runtime_state()
+                    print(f"[{ts(now_et)}] Paused truth-loss analysis unavailable: {type(exc).__name__}: {exc!r}")
             if not manual_stop_latched:
                 reason = str(control_state.get("reason", "") or "manual_stop")
                 print(

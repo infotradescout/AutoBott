@@ -169,7 +169,7 @@ def _all_orders_today() -> list[dict[str, Any]]:
 
 def _realized_from_orders(orders: list[dict[str, Any]]) -> dict[str, Any]:
     chronological = sorted(orders, key=lambda item: str(item.get("filled_at") or item.get("submitted_at") or ""))
-    lots: dict[str, list[dict[str, float]]] = defaultdict(list)
+    lots: dict[str, list[dict[str, Any]]] = defaultdict(list)
     closed: list[dict[str, Any]] = []
 
     for order in chronological:
@@ -183,8 +183,9 @@ def _realized_from_orders(orders: list[dict[str, Any]]) -> dict[str, Any]:
         price = _order_fill_price(order)
         if qty <= 0 or price <= 0:
             continue
+        order_time = _parse_dt(order.get("filled_at") or order.get("submitted_at") or "")
         if side == "buy":
-            lots[symbol].append({"qty": qty, "price": price})
+            lots[symbol].append({"qty": qty, "price": price, "filled_at": order_time})
             continue
         if side != "sell":
             continue
@@ -192,18 +193,38 @@ def _realized_from_orders(orders: list[dict[str, Any]]) -> dict[str, Any]:
         realized = 0.0
         cost_basis = 0.0
         paired_qty = 0.0
+        first_entry_at = None
         while remaining > 0 and lots[symbol]:
             lot = lots[symbol][0]
             use_qty = min(remaining, lot["qty"])
             realized += (price - lot["price"]) * use_qty * 100.0
             cost_basis += lot["price"] * use_qty * 100.0
             paired_qty += use_qty
+            lot_time = lot.get("filled_at")
+            if isinstance(lot_time, datetime) and (first_entry_at is None or lot_time < first_entry_at):
+                first_entry_at = lot_time
             lot["qty"] -= use_qty
             remaining -= use_qty
             if lot["qty"] <= 0.000001:
                 lots[symbol].pop(0)
         if paired_qty > 0:
-            closed.append({"symbol": symbol, "underlying": _underlying_from_option(symbol), "qty": round(paired_qty, 4), "sell_price": round(price, 4), "realized_pnl_usd": round(realized, 2), "realized_pnl_pct": round((realized / cost_basis) * 100.0, 2) if cost_basis > 0 else 0.0, "filled_at": str(order.get("filled_at") or order.get("submitted_at") or "")})
+            hold_seconds = 0
+            if isinstance(first_entry_at, datetime) and isinstance(order_time, datetime):
+                hold_seconds = max(0, int((order_time - first_entry_at).total_seconds()))
+            closed.append(
+                {
+                    "symbol": symbol,
+                    "underlying": _underlying_from_option(symbol),
+                    "qty": round(paired_qty, 4),
+                    "entry_price": round(cost_basis / (paired_qty * 100.0), 4) if paired_qty > 0 else 0.0,
+                    "sell_price": round(price, 4),
+                    "realized_pnl_usd": round(realized, 2),
+                    "realized_pnl_pct": round((realized / cost_basis) * 100.0, 2) if cost_basis > 0 else 0.0,
+                    "entry_time": first_entry_at.isoformat() if isinstance(first_entry_at, datetime) else "",
+                    "filled_at": str(order.get("filled_at") or order.get("submitted_at") or ""),
+                    "hold_seconds": hold_seconds,
+                }
+            )
 
     wins = [item for item in closed if float(item["realized_pnl_usd"]) > 0]
     losses = [item for item in closed if float(item["realized_pnl_usd"]) < 0]
@@ -212,7 +233,7 @@ def _realized_from_orders(orders: list[dict[str, Any]]) -> dict[str, Any]:
     by_underlying: dict[str, float] = defaultdict(float)
     for item in closed:
         by_underlying[str(item["underlying"])] += float(item["realized_pnl_usd"])
-    return {"closed_trades": closed, "closed_count": len(closed), "wins": len(wins), "losses": len(losses), "win_rate_pct": round((len(wins) / len(closed)) * 100.0, 2) if closed else 0.0, "realized_pnl_usd": round(sum(float(item["realized_pnl_usd"]) for item in closed), 2), "gross_profit_usd": gross_profit, "gross_loss_usd": gross_loss, "profit_factor": round(gross_profit / gross_loss, 4) if gross_loss > 0 else None, "best_trade": max(closed, key=lambda item: float(item["realized_pnl_usd"]), default=None), "worst_trade": min(closed, key=lambda item: float(item["realized_pnl_usd"]), default=None), "by_underlying": sorted([{"symbol": key, "pnl_usd": round(value, 2)} for key, value in by_underlying.items()], key=lambda item: float(item["pnl_usd"]), reverse=True)}
+    return {"closed_trades": closed, "closed_count": len(closed), "wins": len(wins), "losses": len(losses), "win_rate_pct": round((len(wins) / len(closed)) * 100.0, 2) if closed else 0.0, "realized_pnl_usd": round(sum(float(item["realized_pnl_usd"]) for item in closed), 2), "gross_profit_usd": gross_profit, "gross_loss_usd": gross_loss, "profit_factor": round(gross_profit / gross_loss, 4) if gross_loss > 0 else None, "best_trade": max(wins, key=lambda item: float(item["realized_pnl_usd"]), default=None), "least_bad_trade": max(losses, key=lambda item: float(item["realized_pnl_usd"]), default=None), "worst_trade": min(closed, key=lambda item: float(item["realized_pnl_usd"]), default=None), "by_underlying": sorted([{"symbol": key, "pnl_usd": round(value, 2)} for key, value in by_underlying.items()], key=lambda item: float(item["pnl_usd"]), reverse=True)}
 
 
 def _positions() -> list[dict[str, Any]]:
@@ -289,6 +310,75 @@ def _entry_debug_summary(state: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _truth_loss_profile(realized: dict[str, Any]) -> dict[str, Any]:
+    losses = [
+        item
+        for item in list(realized.get("closed_trades") or [])
+        if _num(item.get("realized_pnl_usd")) < 0
+    ]
+    if not losses:
+        return {}
+
+    causes: Counter[str] = Counter()
+    ticker_losses: Counter[str] = Counter()
+    diagnoses: list[dict[str, Any]] = []
+    quick_seconds = int(getattr(config, "ADAPTIVE_LOSS_QUICK_SECONDS", 180) or 180)
+    for item in losses[-int(getattr(config, "ADAPTIVE_LOSS_CAUSE_WINDOW", 12) or 12) :]:
+        ticker = str(item.get("underlying", "") or "").upper()
+        hold_seconds = int(_num(item.get("hold_seconds")))
+        pnl_pct = _num(item.get("realized_pnl_pct"))
+        if hold_seconds > 0 and hold_seconds <= quick_seconds:
+            cause = "rapid_stopout"
+            action = "require stronger momentum before next entry"
+        elif ticker and sum(1 for loss in losses if str(loss.get("underlying", "") or "").upper() == ticker) >= 2:
+            cause = "repeated_ticker_loss"
+            action = "block ticker for the day"
+        elif pnl_pct <= -10:
+            cause = "large_option_decay_or_wrong_way"
+            action = "raise signal and direction gates"
+        else:
+            cause = "timing_or_decay"
+            action = "raise signal quality and cool ticker"
+        causes[cause] += 1
+        if ticker:
+            ticker_losses[ticker] += 1
+        diagnoses.append(
+            {
+                "ticker": ticker,
+                "symbol": str(item.get("symbol", "") or ""),
+                "cause": cause,
+                "action": action,
+                "hold_seconds": hold_seconds,
+                "realized_pnl_usd": _money(item.get("realized_pnl_usd")),
+                "realized_pnl_pct": round(pnl_pct, 4),
+            }
+        )
+
+    dominant_cause = causes.most_common(1)[0][0] if causes else ""
+    loss_count = len(diagnoses)
+    min_signal = min(
+        float(getattr(config, "ADAPTIVE_LOSS_MAX_SIGNAL_SCORE", 9.2) or 9.2),
+        float(getattr(config, "ADAPTIVE_LOSS_MIN_SIGNAL_SCORE", 7.8) or 7.8)
+        + loss_count * float(getattr(config, "ADAPTIVE_LOSS_SIGNAL_SCORE_ADD_PER_LOSS", 0.15) or 0.15),
+    )
+    min_direction = float(getattr(config, "ADAPTIVE_LOSS_MIN_DIRECTION_SCORE", 0.65) or 0.65)
+    max_spread = float(getattr(config, "ADAPTIVE_LOSS_MAX_SPREAD_PCT", 4.0) or 4.0)
+    return {
+        "source": "dashboard_alpaca_truth",
+        "source_closed_count": int(realized.get("closed_count", 0) or 0),
+        "loss_count": loss_count,
+        "dominant_cause": dominant_cause,
+        "causes": dict(causes),
+        "ticker_losses": dict(ticker_losses),
+        "min_signal_score": round(min_signal, 4),
+        "min_direction_score": round(min_direction, 4),
+        "max_spread_pct": round(max_spread, 4),
+        "diagnoses": diagnoses[-5:],
+        "last_diagnosis": diagnoses[-1] if diagnoses else {},
+        "updated_at_et": _now_et().isoformat(),
+    }
+
+
 def _runtime() -> dict[str, Any]:
     state = load_bot_state()
     if not isinstance(state, dict):
@@ -330,7 +420,14 @@ def _truth_payload() -> dict[str, Any]:
     unrealized = round(sum(float(p.get("unrealized_pl", 0.0)) for p in positions), 2)
     realized["open_unrealized_pnl_usd"] = unrealized
     realized["total_intraday_pnl_usd"] = round(float(realized["realized_pnl_usd"]) + unrealized, 2)
-    return {"generated_at_et": _now_et().isoformat(), "mode": "paper" if PAPER else "live", "source_of_truth": "alpaca_orders_positions", "account": _account(), "clock": _clock(), "runtime": _runtime(), "positions": positions, "orders": {"submitted_today": len(all_orders), "filled_today": len(filled_orders), "filled_option_orders_today": len(filled_option_orders), "status_counts": dict(Counter(str(o.get("status", "") or "unknown") for o in all_orders)), "side_counts": dict(Counter(str(o.get("side", "") or "unknown") for o in filled_orders)), "recent": [_compact_order(o) for o in all_orders[:50]]}, "realized": realized, "scanner": _scanner_summary()}
+    runtime = _runtime()
+    truth_profile = _truth_loss_profile(realized)
+    adaptive_loss = runtime.get("adaptive_loss") if isinstance(runtime, dict) else {}
+    if isinstance(adaptive_loss, dict) and truth_profile and not adaptive_loss.get("profile"):
+        adaptive_loss["active"] = True
+        adaptive_loss["profile"] = truth_profile
+        adaptive_loss["blocked_tickers"] = sorted((truth_profile.get("ticker_losses") or {}).keys())
+    return {"generated_at_et": _now_et().isoformat(), "mode": "paper" if PAPER else "live", "source_of_truth": "alpaca_orders_positions", "account": _account(), "clock": _clock(), "runtime": runtime, "positions": positions, "orders": {"submitted_today": len(all_orders), "filled_today": len(filled_orders), "filled_option_orders_today": len(filled_option_orders), "status_counts": dict(Counter(str(o.get("status", "") or "unknown") for o in all_orders)), "side_counts": dict(Counter(str(o.get("side", "") or "unknown") for o in filled_orders)), "recent": [_compact_order(o) for o in all_orders[:50]]}, "realized": realized, "scanner": _scanner_summary()}
 
 
 def _verify_control_token() -> tuple[bool, str, int]:
