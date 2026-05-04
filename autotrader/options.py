@@ -50,6 +50,15 @@ def _safe_date(value: Any) -> date | None:
         return None
 
 
+def _minutes_until_hard_close(now_et: datetime) -> int | None:
+    try:
+        hour_text, minute_text = str(getattr(config, "HARD_CLOSE_TIME", "16:00")).split(":", 1)
+        close_dt = now_et.replace(hour=int(hour_text), minute=int(minute_text), second=0, microsecond=0)
+        return int((close_dt - now_et).total_seconds() // 60)
+    except Exception:
+        return None
+
+
 def _extract_delta(contract: dict[str, Any]) -> float | None:
     raw = contract.get("delta")
     if raw is None:
@@ -279,8 +288,18 @@ def select_atm_option_contract_with_reason(
         return None, reason
 
     scored: list[dict[str, Any]] = []
+    avoid_0dte_minutes = int(getattr(config, "AVOID_0DTE_ENTRY_WITHIN_CLOSE_MINUTES", 0) or 0)
+    minutes_to_close = _minutes_until_hard_close(now_et)
+    avoid_0dte_now = (
+        avoid_0dte_minutes > 0
+        and minutes_to_close is not None
+        and minutes_to_close <= avoid_0dte_minutes
+    )
     for contract in filtered:
         exp_date = _safe_date(contract.get("expiration_date"))
+        if exp_date == today and avoid_0dte_now:
+            fail_counts["expires_too_soon"] = fail_counts.get("expires_too_soon", 0) + 1
+            continue
         open_interest = _safe_float(contract.get("open_interest")) or 0.0
         if (not config.EMERGENCY_EXECUTION_MODE) and exp_date == today and open_interest < float(config.MIN_OPTION_OPEN_INTEREST_0DTE):
             fail_counts["low_open_interest"] += 1
@@ -318,7 +337,11 @@ def select_atm_option_contract_with_reason(
     if not scored:
         # Fail-open fallback: if stricter 0DTE quality checks empty the pool,
         # fall back to the already-liquidity-filtered set so entries can proceed.
-        scored = list(filtered)
+        scored = [
+            contract
+            for contract in filtered
+            if not (avoid_0dte_now and _safe_date(contract.get("expiration_date")) == today)
+        ]
         for contract in scored:
             strike_val = _contract_strike(contract)
             if strike_val is None:
@@ -326,6 +349,8 @@ def select_atm_option_contract_with_reason(
             strike_gap = abs(float(strike_val) - underlying_price)
             contract["_select_score"] = strike_gap * 0.05
         if not scored:
+            if avoid_0dte_now:
+                return None, f"no eligible non-0DTE contracts within {avoid_0dte_minutes}m of close"
             return None, "no eligible contracts after 0DTE/quality checks"
 
     scored.sort(key=lambda c: (float(c.get("_select_score", 99.0)), c.get("expiration_date", "")))
