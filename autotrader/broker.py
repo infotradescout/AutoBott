@@ -113,6 +113,16 @@ class AlpacaBroker:
 
         return self.trading_client.get_order_by_id(order_id)
 
+    def get_recent_orders(self, *, limit: int = 500):
+        """Return recent orders, newest first."""
+        from alpaca.trading.enums import QueryOrderStatus
+        from alpaca.trading.requests import GetOrdersRequest
+
+        req = GetOrdersRequest(status=QueryOrderStatus.ALL, nested=False, limit=max(1, int(limit)))
+        orders = self.trading_client.get_orders(filter=req) or []
+        orders.sort(key=lambda o: str(getattr(o, "submitted_at", "") or ""), reverse=True)
+        return orders
+
     def cancel_order(self, order_id: str):
         """Cancel a single order by ID."""
         return self.trading_client.cancel_order_by_id(order_id)

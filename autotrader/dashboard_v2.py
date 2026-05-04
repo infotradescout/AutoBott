@@ -305,6 +305,13 @@ def _runtime() -> dict[str, Any]:
         "dry_run": bool(control.get("dry_run", False)),
         "control": control,
         "state_updated_at": str(state.get("_state_updated_at_iso", "") or ""),
+        "broker_truth_day_pnl_usd": _num(state.get("broker_truth_day_pnl_usd")),
+        "broker_truth_closed_count": _int_value(state.get("broker_truth_closed_count")),
+        "broker_truth_last_error": str(state.get("broker_truth_last_error", "") or ""),
+        "adaptive_loss": {
+            "active": bool(state.get("adaptive_loss_active", False)),
+            "blocked_tickers": list(state.get("adaptive_loss_blocked_tickers") or []),
+        },
         "entry_debug": _entry_debug_summary(state),
     }
 

@@ -33,7 +33,7 @@ from session_rules import (
 )
 from strategy_profiles import get_profile_overrides, normalize_profile_name
 from state_store import load_bot_state, save_bot_state
-from trading_control import load_trading_control
+from trading_control import load_trading_control, set_manual_stop
 from watchlist_control import load_watchlist_control
 
 
@@ -1050,6 +1050,119 @@ def _option_symbol_matches_direction(option_symbol: str, direction: str) -> bool
     return parsed_direction == str(direction or "").lower()
 
 
+def _enum_text(value) -> str:
+    try:
+        value = getattr(value, "value", value)
+    except Exception:
+        pass
+    text = str(value or "").strip().lower()
+    if "." in text:
+        text = text.split(".")[-1]
+    return text
+
+
+def _as_et_datetime(value, tz) -> datetime | None:
+    if isinstance(value, datetime):
+        if value.tzinfo is None:
+            return tz.localize(value)
+        return value.astimezone(tz)
+    raw = str(value or "").strip()
+    if not raw:
+        return None
+    try:
+        parsed = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+        if parsed.tzinfo is None:
+            return tz.localize(parsed)
+        return parsed.astimezone(tz)
+    except Exception:
+        return None
+
+
+def _order_fill_price(order) -> float:
+    for field in ("filled_avg_price", "average_fill_price", "limit_price"):
+        try:
+            value = float(getattr(order, field, 0) or 0)
+        except (TypeError, ValueError):
+            value = 0.0
+        if value > 0:
+            return value
+    return 0.0
+
+
+def _alpaca_option_day_pnl_snapshot(broker: AlpacaBroker, now_et: datetime) -> dict[str, object]:
+    tz = pytz.timezone(config.EASTERN_TZ)
+    filled: list[dict[str, object]] = []
+    for order in broker.get_recent_orders(limit=500):
+        if _enum_text(getattr(order, "status", "")) != "filled":
+            continue
+        symbol = str(getattr(order, "symbol", "") or "").upper()
+        if not _parse_option_symbol(symbol)[0]:
+            continue
+        filled_at = _as_et_datetime(
+            getattr(order, "filled_at", None) or getattr(order, "submitted_at", None),
+            tz,
+        )
+        if filled_at is None or filled_at.date() != now_et.date():
+            continue
+        side = _enum_text(getattr(order, "side", ""))
+        qty = position_qty_as_int(getattr(order, "filled_qty", None) or getattr(order, "qty", 0))
+        price = _order_fill_price(order)
+        if side not in {"buy", "sell"} or qty <= 0 or price <= 0:
+            continue
+        filled.append({"symbol": symbol, "side": side, "qty": qty, "price": price, "filled_at": filled_at})
+
+    filled.sort(key=lambda item: item["filled_at"])
+    lots: dict[str, list[dict[str, float]]] = {}
+    closed: list[dict[str, object]] = []
+    for item in filled:
+        symbol = str(item["symbol"])
+        qty_remaining = float(item["qty"])
+        price = float(item["price"])
+        side = str(item["side"])
+        if side == "buy":
+            lots.setdefault(symbol, []).append({"qty": qty_remaining, "price": price})
+            continue
+
+        realized = 0.0
+        paired_qty = 0.0
+        open_lots = lots.setdefault(symbol, [])
+        while qty_remaining > 0 and open_lots:
+            lot = open_lots[0]
+            use_qty = min(qty_remaining, float(lot["qty"]))
+            realized += (price - float(lot["price"])) * use_qty * 100.0
+            lot["qty"] = float(lot["qty"]) - use_qty
+            qty_remaining -= use_qty
+            paired_qty += use_qty
+            if float(lot["qty"]) <= 0:
+                open_lots.pop(0)
+        if paired_qty > 0:
+            ticker, direction = _parse_option_symbol(symbol)
+            closed.append(
+                {
+                    "symbol": symbol,
+                    "ticker": ticker,
+                    "direction": direction,
+                    "qty": round(paired_qty, 4),
+                    "realized_pnl_usd": round(realized, 2),
+                }
+            )
+
+    return {
+        "realized_pnl_usd": round(sum(float(item["realized_pnl_usd"]) for item in closed), 2),
+        "closed_count": len(closed),
+        "filled_option_orders_today": len(filled),
+        "closed_trades": closed,
+        "losing_tickers": sorted(
+            {
+                str(item["ticker"])
+                for item in closed
+                if float(item["realized_pnl_usd"]) < 0 and str(item["ticker"])
+            }
+        ),
+        "open_lot_symbols": sorted([symbol for symbol, symbol_lots in lots.items() if symbol_lots]),
+    }
+
+
 def _parse_option_expiry_from_symbol(option_symbol: str) -> date | None:
     symbol = str(option_symbol or "").upper().strip()
     match = _OPTION_SYMBOL_RE.match(symbol)
@@ -1493,6 +1606,15 @@ def main():
     trade_telemetry_total_pnl_usd = float(state.get("trade_telemetry_total_pnl_usd", 0.0) or 0.0)
     trade_telemetry_last_close_iso = str(state.get("trade_telemetry_last_close_iso", "") or "")
     trade_telemetry_last_log_error = str(state.get("trade_telemetry_last_log_error", "") or "")
+    broker_truth_day_pnl_usd = float(state.get("broker_truth_day_pnl_usd", 0.0) or 0.0)
+    broker_truth_closed_count = int(state.get("broker_truth_closed_count", 0) or 0)
+    broker_truth_last_error = str(state.get("broker_truth_last_error", "") or "")
+    adaptive_loss_active = bool(state.get("adaptive_loss_active", False))
+    adaptive_loss_blocked_tickers: set[str] = set(
+        str(item).upper()
+        for item in (state.get("adaptive_loss_blocked_tickers") or [])
+        if str(item).strip()
+    )
     opening_entries_today_count = int(state.get("opening_entries_today_count", 0) or 0)
     opening_fresh_premium_deployed_usd = float(state.get("opening_fresh_premium_deployed_usd", 0.0) or 0.0)
     opening_expensive_entries_today_count = int(state.get("opening_expensive_entries_today_count", 0) or 0)
@@ -1622,6 +1744,11 @@ def main():
                 "trade_telemetry_total_pnl_usd": round(trade_telemetry_total_pnl_usd, 6),
                 "trade_telemetry_last_close_iso": trade_telemetry_last_close_iso,
                 "trade_telemetry_last_log_error": trade_telemetry_last_log_error,
+                "broker_truth_day_pnl_usd": round(broker_truth_day_pnl_usd, 6),
+                "broker_truth_closed_count": broker_truth_closed_count,
+                "broker_truth_last_error": broker_truth_last_error,
+                "adaptive_loss_active": adaptive_loss_active,
+                "adaptive_loss_blocked_tickers": sorted(adaptive_loss_blocked_tickers),
                 "opening_entries_today_count": opening_entries_today_count,
                 "opening_fresh_premium_deployed_usd": round(opening_fresh_premium_deployed_usd, 6),
                 "opening_expensive_entries_today_count": opening_expensive_entries_today_count,
@@ -1921,6 +2048,7 @@ def main():
 
         critical_exit_reasons = {
             "stop_loss",
+            "stop_loss_pct",
             "eod_close",
             "overnight_forced_close",
             "pre_expiry_exit",
@@ -2343,6 +2471,11 @@ def main():
             trade_telemetry_total_pnl_usd = 0.0
             trade_telemetry_last_close_iso = ""
             trade_telemetry_last_log_error = ""
+            broker_truth_day_pnl_usd = 0.0
+            broker_truth_closed_count = 0
+            broker_truth_last_error = ""
+            adaptive_loss_active = False
+            adaptive_loss_blocked_tickers = set()
             opening_entries_today_count = 0
             opening_fresh_premium_deployed_usd = 0.0
             opening_expensive_entries_today_count = 0
@@ -2366,6 +2499,66 @@ def main():
         if normalized_fills > 0:
             option_positions = broker.get_open_option_positions()
         open_count = len(option_positions)
+
+        if bool(getattr(config, "ENABLE_ALPACA_TRUTH_LOSS_GUARD", True)):
+            try:
+                truth_snapshot = _alpaca_option_day_pnl_snapshot(broker, now_et)
+                adaptive_before = adaptive_loss_active
+                blocked_before = set(adaptive_loss_blocked_tickers)
+                broker_truth_day_pnl_usd = float(truth_snapshot.get("realized_pnl_usd", 0.0) or 0.0)
+                broker_truth_closed_count = int(truth_snapshot.get("closed_count", 0) or 0)
+                broker_truth_last_error = ""
+                adapt_after_loss = abs(float(getattr(config, "ALPACA_TRUTH_ADAPT_AFTER_LOSS_USD", 0.0) or 0.0))
+                if adapt_after_loss > 0 and broker_truth_day_pnl_usd <= -adapt_after_loss:
+                    if not adaptive_loss_active:
+                        print(
+                            f"[{ts(now_et)}] Adaptive loss mode active: "
+                            f"Alpaca realized P/L ${broker_truth_day_pnl_usd:.2f}."
+                        )
+                    adaptive_loss_active = True
+                    if bool(getattr(config, "ADAPTIVE_BLOCK_LOSING_TICKERS", True)):
+                        adaptive_loss_blocked_tickers.update(
+                            str(item).upper()
+                            for item in (truth_snapshot.get("losing_tickers") or [])
+                            if str(item).strip()
+                        )
+                if adaptive_loss_active != adaptive_before or adaptive_loss_blocked_tickers != blocked_before:
+                    _save_runtime_state()
+                truth_loss_limit = abs(
+                    float(
+                        getattr(
+                            config,
+                            "ALPACA_TRUTH_DAILY_LOSS_LIMIT_USD",
+                            getattr(config, "DAILY_LOSS_LIMIT_USD", 0.0),
+                        )
+                        or 0.0
+                    )
+                )
+                if truth_loss_limit > 0 and broker_truth_day_pnl_usd <= -truth_loss_limit:
+                    reason = (
+                        f"alpaca_truth_daily_loss_limit "
+                        f"pnl=${broker_truth_day_pnl_usd:.2f} <= -${truth_loss_limit:.2f}"
+                    )
+                    set_manual_stop(True, reason=reason[:240])
+                    print(f"[{ts(now_et)}] ALPACA TRUTH LOSS GUARD hit: {reason}. Flattening and pausing.")
+                    alerts.send(
+                        "alpaca_truth_daily_loss_guard",
+                        f"Alpaca truth loss guard hit: {reason}. Trading paused.",
+                        level="error",
+                        dedupe_key=f"alpaca-truth-loss-{now_et.date().isoformat()}",
+                    )
+                    _flatten_positions_for_killswitch(broker, now_et, label="ALPACA_TRUTH_LOSS_GUARD")
+                    option_positions = broker.get_open_option_positions()
+                    open_trade_meta.clear()
+                    open_count = len(option_positions)
+                    _save_runtime_state()
+                    time.sleep(config.LOOP_INTERVAL_SECONDS)
+                    continue
+            except Exception as exc:  # noqa: BLE001
+                broker_truth_last_error = str(exc)[:300]
+                print(f"[{ts(now_et)}] Alpaca truth loss guard unavailable: {type(exc).__name__}: {exc!r}")
+                _save_runtime_state()
+
         if alerts.enabled() and time.time() >= next_heartbeat_at:
             alerts.send(
                 "heartbeat",
@@ -2784,6 +2977,29 @@ def main():
             direction = signal["direction"]
             _set_signal_outcome(ticker=ticker, disposition="setup_pass")
 
+            if adaptive_loss_active:
+                if ticker in adaptive_loss_blocked_tickers:
+                    _mark_skip("adaptive_losing_ticker_block")
+                    _mark_stage4_reject(reason="adaptive_losing_ticker_block", ticker=ticker)
+                    print(
+                        f"[{ts(now_et)}] {ticker}: skip "
+                        "(adaptive loss mode blocked ticker after same-day Alpaca loss)."
+                    )
+                    continue
+                signal_score_now = float(signal.get("signal_score", 0.0) or 0.0)
+                direction_score_now = abs(float(signal.get("direction_score", 0.0) or 0.0))
+                adaptive_min_signal = float(getattr(config, "ADAPTIVE_LOSS_MIN_SIGNAL_SCORE", 7.8) or 7.8)
+                adaptive_min_direction = float(getattr(config, "ADAPTIVE_LOSS_MIN_DIRECTION_SCORE", 0.65) or 0.65)
+                if signal_score_now < adaptive_min_signal or direction_score_now < adaptive_min_direction:
+                    _mark_skip("adaptive_loss_quality_gate")
+                    _mark_stage4_reject(reason="adaptive_loss_quality_gate", ticker=ticker)
+                    print(
+                        f"[{ts(now_et)}] {ticker}: skip (adaptive loss quality gate; "
+                        f"score {signal_score_now:.2f}/{adaptive_min_signal:.2f}, "
+                        f"direction {direction_score_now:.2f}/{adaptive_min_direction:.2f})."
+                    )
+                    continue
+
             # --- Loss throttle (keep trading, but demand stronger setups after losses) ---
             throttle_after_losses = max(1, int(getattr(config, "LOSS_THROTTLE_AFTER_CONSEC_LOSSES", 1) or 1))
             if consecutive_losses >= throttle_after_losses:
@@ -3057,6 +3273,14 @@ def main():
                 )
                 signal_strategy_profile = str(signal.get("strategy_profile", "") or "generic")
                 signal_entry_max_spread = signal.get("entry_max_quote_spread_pct")
+                if adaptive_loss_active:
+                    adaptive_spread = float(getattr(config, "ADAPTIVE_LOSS_MAX_SPREAD_PCT", 0.0) or 0.0)
+                    if adaptive_spread > 0:
+                        try:
+                            current_spread_cap = float(signal_entry_max_spread or adaptive_spread)
+                        except (TypeError, ValueError):
+                            current_spread_cap = adaptive_spread
+                        signal_entry_max_spread = min(current_spread_cap, adaptive_spread)
                 volatility_profile = _signal_volatility_profile(signal)
                 base_signal_stop_loss_usd = float(signal.get("stop_loss_usd", _runtime_stop_loss_usd()) or _runtime_stop_loss_usd())
                 signal_stop_loss_usd = round(
