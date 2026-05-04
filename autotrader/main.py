@@ -439,6 +439,11 @@ def _fast_start_entry_quality_ok(signal: dict[str, Any], now_et: datetime) -> tu
         min_abs_roc = max(min_abs_roc, float(getattr(config, "OPENING_FAST_START_MIN_ABS_ROC_PCT", min_abs_roc) or min_abs_roc))
         min_vwap_dist = max(min_vwap_dist, float(getattr(config, "OPENING_FAST_START_MIN_VWAP_DISTANCE_PCT", min_vwap_dist) or min_vwap_dist))
 
+    if is_at_or_after(now_et, config.RVOL_IGNORE_AFTER):
+        min_rvol = 0.0
+    elif is_at_or_after(now_et, config.RVOL_RELAX_AFTER):
+        min_rvol = min(min_rvol, float(getattr(config, "RVOL_RELAXED_MIN", min_rvol) or min_rvol))
+
     vwap_dist = 0.0
     if vwap > 0 and price > 0:
         vwap_dist = abs(price - vwap) / vwap * 100.0
@@ -447,7 +452,7 @@ def _fast_start_entry_quality_ok(signal: dict[str, Any], now_et: datetime) -> tu
         return False, f"signal score too weak ({signal_score:.2f}<{min_signal:.2f})"
     if direction_score < min_direction:
         return False, f"direction conviction too weak ({direction_score:.2f}<{min_direction:.2f})"
-    if rvol < min_rvol:
+    if min_rvol > 0 and rvol < min_rvol:
         return False, f"RVOL too weak ({rvol:.2f}<{min_rvol:.2f})"
     if roc_pct < min_abs_roc:
         return False, f"ROC too weak ({roc_pct:.2f}%<{min_abs_roc:.2f}%)"
@@ -3369,6 +3374,7 @@ def main():
                 time.sleep(config.RATE_LIMIT_SLEEP_SECONDS)
 
         last_entry_debug = entry_debug
+        _save_runtime_state()
 
         # --- Exit management ---
         option_positions = broker.get_open_option_positions()

@@ -254,6 +254,40 @@ def _scanner_summary() -> dict[str, Any]:
     return {"scan_rows_today": len(today_rows), "passes": len(pass_rows), "fails": len(fail_rows), "pass_rate_pct": round((len(pass_rows) / len(today_rows)) * 100.0, 2) if today_rows else 0.0, "last_scan": str(today_rows[-1].get("timestamp", "") or "") if today_rows else "", "top_fail_reasons": [{"reason": key, "count": value} for key, value in reason_counts.most_common(8)], "recent_rows": list(reversed(today_rows[-20:]))}
 
 
+def _as_dict(value: Any) -> dict[str, Any]:
+    return value if isinstance(value, dict) else {}
+
+
+def _int_value(value: Any) -> int:
+    try:
+        return int(float(value))
+    except (TypeError, ValueError):
+        return 0
+
+
+def _entry_debug_summary(state: dict[str, Any]) -> dict[str, Any]:
+    debug = _as_dict(state.get("last_entry_debug"))
+    reasons = _as_dict(debug.get("entry_stage4_reject_reasons"))
+    top_reasons = [
+        {"reason": str(reason), "count": _int_value(count)}
+        for reason, count in sorted(reasons.items(), key=lambda item: _int_value(item[1]), reverse=True)[:8]
+    ]
+    top_label = "--"
+    if top_reasons:
+        first = top_reasons[0]
+        top_label = f"{first['reason']} ({first['count']})"
+    return {
+        "loop_ts_et": str(debug.get("loop_ts_et", "") or ""),
+        "signals_considered": _int_value(debug.get("signals_considered")),
+        "entry_stage4_eligible_count": _int_value(debug.get("entry_stage4_eligible_count")),
+        "entry_stage4_reject_count": _int_value(debug.get("entry_stage4_reject_count")),
+        "entry_orders_submitted": _int_value(debug.get("entry_orders_submitted")),
+        "entries_filled": _int_value(debug.get("entries_filled")),
+        "top_reject_reason": top_label,
+        "top_reject_reasons": top_reasons,
+    }
+
+
 def _runtime() -> dict[str, Any]:
     state = load_bot_state()
     if not isinstance(state, dict):
@@ -263,7 +297,15 @@ def _runtime() -> dict[str, Any]:
         control = {}
     heartbeat = _parse_dt(state.get("last_trader_heartbeat_et"))
     age = int((_now_et() - heartbeat).total_seconds()) if heartbeat is not None else None
-    return {"heartbeat_age_seconds": age, "heartbeat_label": f"{age}s ago" if age is not None else "unknown", "manual_stop": bool(control.get("manual_stop", False)), "dry_run": bool(control.get("dry_run", False)), "control": control}
+    return {
+        "heartbeat_age_seconds": age,
+        "heartbeat_label": f"{age}s ago" if age is not None else "unknown",
+        "manual_stop": bool(control.get("manual_stop", False)),
+        "dry_run": bool(control.get("dry_run", False)),
+        "control": control,
+        "state_updated_at": str(state.get("_state_updated_at_iso", "") or ""),
+        "entry_debug": _entry_debug_summary(state),
+    }
 
 
 def _compact_order(order: dict[str, Any]) -> dict[str, Any]:
@@ -297,6 +339,25 @@ def healthz():
 @app.get("/api/truth")
 def api_truth():
     return jsonify(_truth_payload())
+
+
+@app.get("/api/runtime-debug")
+def api_runtime_debug():
+    state = load_bot_state()
+    if not isinstance(state, dict):
+        state = {}
+    return jsonify(
+        {
+            "generated_at_et": _now_et().isoformat(),
+            "state_updated_at": str(state.get("_state_updated_at_iso", "") or ""),
+            "runtime": _runtime(),
+            "last_entry_debug": _as_dict(state.get("last_entry_debug")),
+            "last_exit_debug": _as_dict(state.get("last_exit_debug")),
+            "open_trade_meta_count": len(_as_dict(state.get("open_trade_meta"))),
+            "ticker_loss_cooldown_until": _as_dict(state.get("ticker_loss_cooldown_until")),
+            "bad_fill_tracker": _as_dict(state.get("bad_fill_tracker")),
+        }
+    )
 
 
 @app.get("/")
