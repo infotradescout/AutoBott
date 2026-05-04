@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from decimal import Decimal
+from decimal import Decimal, ROUND_HALF_UP
 import re
 
 from alpaca.trading.client import TradingClient
@@ -18,6 +18,10 @@ def _assert_option_symbol(symbol: str) -> None:
     normalized = str(symbol or "").upper().strip()
     if not _OPTION_SYMBOL_RE.match(normalized):
         raise ValueError(f"invalid option symbol: {symbol!r}")
+
+
+def _limit_price_decimal(value: float) -> Decimal:
+    return Decimal(str(value)).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
 
 
 def _normalize_asset_class(raw_asset_class) -> str:
@@ -65,7 +69,7 @@ class AlpacaBroker:
             qty=qty,
             side=OrderSide.BUY,
             time_in_force=TimeInForce.DAY,
-            limit_price=Decimal(str(ask_price)),
+            limit_price=_limit_price_decimal(ask_price),
         )
         return self.trading_client.submit_order(order_data=req)
 
@@ -76,7 +80,7 @@ class AlpacaBroker:
             qty=qty,
             side=OrderSide.SELL,
             time_in_force=TimeInForce.DAY,
-            limit_price=Decimal(str(limit_price)),
+            limit_price=_limit_price_decimal(limit_price),
         )
         return self.trading_client.submit_order(order_data=req)
 
