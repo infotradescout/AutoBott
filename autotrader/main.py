@@ -3503,6 +3503,9 @@ def main():
             stop_loss_usd_cap = float(meta.get("stop_loss_usd", _runtime_stop_loss_usd()) or _runtime_stop_loss_usd())
             if exit_reason is None and should_trigger_stop_loss(unrealized_usd, stop_loss_usd_cap):
                 exit_reason = "stop_loss"
+            stop_loss_pct_cap = abs(float(getattr(config, "STOP_LOSS_PCT", 0.0) or 0.0))
+            if exit_reason is None and stop_loss_pct_cap > 0 and plpc <= -stop_loss_pct_cap:
+                exit_reason = "stop_loss_pct"
 
             # --- Stateful profit management ---
             trade_state = _trade_state_from_meta(meta)
