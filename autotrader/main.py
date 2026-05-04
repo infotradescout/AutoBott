@@ -1949,27 +1949,27 @@ def main():
         wrong_count = int(causes.get("wrong_direction", 0))
         execution_count = int(causes.get("execution_slippage", 0))
         momentum_loss_count = int(causes.get("rapid_stopout", 0)) + int(causes.get("chop_no_followthrough", 0))
-        min_signal = float(getattr(config, "ADAPTIVE_LOSS_MIN_SIGNAL_SCORE", 7.8) or 7.8)
-        min_signal += loss_count * float(getattr(config, "ADAPTIVE_LOSS_SIGNAL_SCORE_ADD_PER_LOSS", 0.15) or 0.15)
-        min_signal = min(float(getattr(config, "ADAPTIVE_LOSS_MAX_SIGNAL_SCORE", 9.2) or 9.2), min_signal)
-        min_direction = float(getattr(config, "ADAPTIVE_LOSS_MIN_DIRECTION_SCORE", 0.65) or 0.65)
-        min_direction += wrong_count * float(getattr(config, "ADAPTIVE_LOSS_DIRECTION_ADD_PER_WRONG", 0.05) or 0.05)
+        min_signal = float(getattr(config, "ADAPTIVE_LOSS_MIN_SIGNAL_SCORE", 7.8))
+        min_signal += loss_count * float(getattr(config, "ADAPTIVE_LOSS_SIGNAL_SCORE_ADD_PER_LOSS", 0.15))
+        min_signal = min(float(getattr(config, "ADAPTIVE_LOSS_MAX_SIGNAL_SCORE", 9.2)), min_signal)
+        min_direction = float(getattr(config, "ADAPTIVE_LOSS_MIN_DIRECTION_SCORE", 0.65))
+        min_direction += wrong_count * float(getattr(config, "ADAPTIVE_LOSS_DIRECTION_ADD_PER_WRONG", 0.05))
         min_direction = min(
-            float(getattr(config, "ADAPTIVE_LOSS_MAX_DIRECTION_SCORE", 0.85) or 0.85),
+            float(getattr(config, "ADAPTIVE_LOSS_MAX_DIRECTION_SCORE", 0.85)),
             min_direction,
         )
-        max_spread = float(getattr(config, "ADAPTIVE_LOSS_MAX_SPREAD_PCT", 4.0) or 4.0)
+        max_spread = float(getattr(config, "ADAPTIVE_LOSS_MAX_SPREAD_PCT", 4.0))
         if execution_count > 0:
             max_spread = min(
                 max_spread,
-                float(getattr(config, "ADAPTIVE_LOSS_EXECUTION_MAX_SPREAD_PCT", 3.0) or 3.0),
+                float(getattr(config, "ADAPTIVE_LOSS_EXECUTION_MAX_SPREAD_PCT", 3.0)),
             )
-        momentum_trigger = int(getattr(config, "ADAPTIVE_LOSS_REQUIRE_MOMENTUM_AFTER_LOSSES", 2) or 2)
+        momentum_trigger = int(getattr(config, "ADAPTIVE_LOSS_REQUIRE_MOMENTUM_AFTER_LOSSES", 2))
         min_abs_roc = 0.0
         min_rvol = 0.0
         if momentum_loss_count >= momentum_trigger:
-            min_abs_roc = float(getattr(config, "ADAPTIVE_LOSS_MIN_ABS_ROC_PCT", 0.12) or 0.12)
-            min_rvol = float(getattr(config, "ADAPTIVE_LOSS_MIN_RVOL", 0.50) or 0.50)
+            min_abs_roc = float(getattr(config, "ADAPTIVE_LOSS_MIN_ABS_ROC_PCT", 0.12))
+            min_rvol = float(getattr(config, "ADAPTIVE_LOSS_MIN_RVOL", 0.50))
 
         dominant_cause = ""
         if causes:
@@ -3293,7 +3293,7 @@ def main():
             if adaptive_loss_active:
                 profile = adaptive_loss_profile if isinstance(adaptive_loss_profile, dict) else {}
                 ticker_losses = dict(profile.get("ticker_losses") or {})
-                block_after = max(1, int(getattr(config, "ADAPTIVE_LOSS_BLOCK_TICKER_AFTER_LOSSES", 1) or 1))
+                block_after = max(1, int(getattr(config, "ADAPTIVE_LOSS_BLOCK_TICKER_AFTER_LOSSES", 1)))
                 ticker_loss_count = int(ticker_losses.get(ticker, 0) or 0)
                 if ticker in adaptive_loss_blocked_tickers and ticker_loss_count >= block_after:
                     _mark_skip("adaptive_losing_ticker_block")
@@ -3306,20 +3306,20 @@ def main():
                 signal_score_now = float(signal.get("signal_score", 0.0) or 0.0)
                 direction_score_now = abs(float(signal.get("direction_score", 0.0) or 0.0))
                 adaptive_min_signal = max(
-                    float(getattr(config, "ADAPTIVE_LOSS_MIN_SIGNAL_SCORE", 7.8) or 7.8),
+                    float(getattr(config, "ADAPTIVE_LOSS_MIN_SIGNAL_SCORE", 7.8)),
                     float(profile.get("min_signal_score", 0.0) or 0.0),
                 )
                 adaptive_min_signal = min(
                     adaptive_min_signal,
-                    float(getattr(config, "ADAPTIVE_LOSS_MAX_SIGNAL_SCORE", adaptive_min_signal) or adaptive_min_signal),
+                    float(getattr(config, "ADAPTIVE_LOSS_MAX_SIGNAL_SCORE", adaptive_min_signal)),
                 )
                 adaptive_min_direction = max(
-                    float(getattr(config, "ADAPTIVE_LOSS_MIN_DIRECTION_SCORE", 0.65) or 0.65),
+                    float(getattr(config, "ADAPTIVE_LOSS_MIN_DIRECTION_SCORE", 0.65)),
                     float(profile.get("min_direction_score", 0.0) or 0.0),
                 )
                 adaptive_min_direction = min(
                     adaptive_min_direction,
-                    float(getattr(config, "ADAPTIVE_LOSS_MAX_DIRECTION_SCORE", adaptive_min_direction) or adaptive_min_direction),
+                    float(getattr(config, "ADAPTIVE_LOSS_MAX_DIRECTION_SCORE", adaptive_min_direction)),
                 )
                 if signal_score_now < adaptive_min_signal or direction_score_now < adaptive_min_direction:
                     _mark_skip("adaptive_loss_quality_gate")
@@ -3335,12 +3335,12 @@ def main():
                 if adaptive_min_roc > 0:
                     adaptive_min_roc = min(
                         adaptive_min_roc,
-                        float(getattr(config, "ADAPTIVE_LOSS_MIN_ABS_ROC_PCT", adaptive_min_roc) or adaptive_min_roc),
+                        float(getattr(config, "ADAPTIVE_LOSS_MIN_ABS_ROC_PCT", adaptive_min_roc)),
                     )
                 if adaptive_min_rvol > 0:
                     adaptive_min_rvol = min(
                         adaptive_min_rvol,
-                        float(getattr(config, "ADAPTIVE_LOSS_MIN_RVOL", adaptive_min_rvol) or adaptive_min_rvol),
+                        float(getattr(config, "ADAPTIVE_LOSS_MIN_RVOL", adaptive_min_rvol)),
                     )
                 signal_abs_roc = abs(float(signal.get("roc", 0.0) or 0.0))
                 signal_rvol = float(signal.get("rvol", 0.0) or 0.0)
