@@ -590,6 +590,8 @@ def _scan_ticker_details(
     if len(bars_df) < min_bars_required:
         return _scan_failure(f"insufficient intraday bars ({len(bars_df)}/{min_bars_required})")
 
+    # Avoid binary earnings outcomes. The data guard only looks forward from
+    # today, so symbols become tradable again the day after the report date.
     if bool(getattr(config, "ENABLE_EARNINGS_GUARD", False)):
         try:
             if data_client.has_earnings_within_days(symbol, config.EARNINGS_LOOKAHEAD_DAYS, now_et=now_et):

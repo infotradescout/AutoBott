@@ -299,7 +299,9 @@ ALLOW_MARKET_ENTRY_WITHOUT_QUOTE  = False
 PDT_MIN_EQUITY         = 25000.0
 PDT_MAX_DAY_TRADES_5D  = 3
 ENFORCE_PDT_GUARD      = False
-ENABLE_EARNINGS_GUARD = False
+ENABLE_EARNINGS_GUARD = True
+# Block report-risk names before and on the earnings date. The next day is allowed
+# again so the bot can trade post-earnings momentum after the outcome is known.
 EARNINGS_LOOKAHEAD_DAYS  = 2
 EARNINGS_CHECK_STRICT    = False
 EARNINGS_SKIP_SYMBOLS    = ("SPY", "QQQ", "IWM", "DIA", "VIX", "^VIX")

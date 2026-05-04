@@ -590,7 +590,11 @@ class AlpacaDataClient:
 
     def has_earnings_within_days(self, symbol: str, days: int, now_et: datetime) -> bool:
         """
-        Returns True if the symbol has an earnings announcement within `days` calendar days.
+        Returns True if the symbol has an earnings announcement from today through
+        `days` calendar days forward.
+
+        This intentionally blocks the report date but not the day after. Once the
+        announcement is in the past, post-earnings momentum is eligible again.
         Uses yfinance as the data source - free, no API key required.
         Wraps in try/except so a lookup failure never blocks a trade.
         """
