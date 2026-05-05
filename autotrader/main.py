@@ -1907,6 +1907,33 @@ def main():
         global_key = f"global|{signature}"
         return signature, ticker_key, global_key
 
+    def _signal_number_summary(payload: dict) -> str:
+        return (
+            f"vwap={_vwap_side_bucket(payload)}, "
+            f"rvol={_pattern_bucket(payload.get('rvol'), step=0.5, limit=8.0)}, "
+            f"roc={_pattern_bucket(payload.get('roc'), step=0.1, limit=5.0)}, "
+            f"rsi={_pattern_bucket(payload.get('rsi'), step=5.0, limit=100.0)}, "
+            f"direction_score={_pattern_bucket(payload.get('direction_score'), step=0.1, limit=1.0)}, "
+            f"signal_score={_pattern_bucket(payload.get('signal_score'), step=0.5, limit=12.0)}, "
+            f"volatility_score={_pattern_bucket(payload.get('volatility_score'), step=0.5, limit=12.0)}, "
+            f"flow={_pattern_bucket(payload.get('flow_score'), step=0.25, limit=1.0)}, "
+            f"atr={_pattern_bucket(payload.get('atr_pct'), step=0.5, limit=10.0)}, "
+            f"iv_rank={_pattern_bucket(payload.get('iv_rank'), step=10.0, limit=100.0)}"
+        )
+
+    def _pattern_memory_explanation(memory: dict, current_direction: str, preferred_direction: str) -> str:
+        numbers = str(memory.get("last_signal_numbers", "") or "same signal-number bucket")
+        result = str(memory.get("last_result_text", "") or "loss not profit")
+        old_choice = str(memory.get("last_choice", "") or current_direction or "").upper()
+        better_choice = str(memory.get("last_better_choice", "") or preferred_direction or "").upper()
+        current = str(current_direction or "").upper()
+        preferred = str(preferred_direction or "").upper()
+        return (
+            f"Last time when the numbers were {numbers}, the result was {result}, "
+            f"and I picked {old_choice} instead of {better_choice} to get that result; "
+            f"so now this time I need to pick {preferred} instead of {current}."
+        )
+
     def _record_signal_pattern_outcome(trade_row: dict, now_et: datetime) -> None:
         if not bool(getattr(config, "ENABLE_SIGNAL_PATTERN_MEMORY", True)):
             return
@@ -1941,10 +1968,18 @@ def main():
                 item["preferred_direction"] = preferred
                 item["last_outcome"] = "loss"
                 item["last_pnl_usd"] = round(pnl, 2)
+                item["last_result_text"] = f"loss ${abs(pnl):.2f} not profit"
+                item["last_choice"] = direction.upper()
+                item["last_better_choice"] = preferred.upper() if preferred else ""
+                item["last_signal_numbers"] = _signal_number_summary(trade_row)
             else:
                 wins[direction] = int(wins.get(direction, 0) or 0) + 1
                 item["last_outcome"] = "win"
                 item["last_pnl_usd"] = round(pnl, 2)
+                item["last_result_text"] = f"profit ${pnl:.2f} not loss"
+                item["last_choice"] = direction.upper()
+                item["last_better_choice"] = direction.upper()
+                item["last_signal_numbers"] = _signal_number_summary(trade_row)
                 current_preferred = str(item.get("preferred_direction", "") or "").lower()
                 if current_preferred not in {"call", "put"}:
                     item["preferred_direction"] = direction
@@ -1961,12 +1996,12 @@ def main():
             for key, _item in stale[: len(signal_pattern_memory) - 1000]:
                 signal_pattern_memory.pop(key, None)
 
-    def _pattern_direction_override(signal: dict, ticker: str, current_direction: str, now_et: datetime) -> tuple[str, str]:
+    def _pattern_direction_override(signal: dict, ticker: str, current_direction: str, now_et: datetime) -> tuple[str, str, str]:
         if not bool(getattr(config, "ENABLE_SIGNAL_PATTERN_MEMORY", True)):
-            return current_direction, ""
+            return current_direction, "", ""
         direction = str(current_direction or "").lower()
         if direction not in {"call", "put"}:
-            return current_direction, ""
+            return current_direction, "", ""
         _signature, ticker_key, global_key = _signal_pattern_keys(signal, ticker, now_et=now_et)
         keys = [ticker_key]
         if bool(getattr(config, "SIGNAL_PATTERN_MEMORY_USE_GLOBAL", True)):
@@ -1993,8 +2028,8 @@ def main():
                 and current_losses >= min_losses
                 and current_losses > current_wins
             ):
-                return preferred, key
-        return direction, ""
+                return preferred, key, _pattern_memory_explanation(memory, direction, preferred)
+        return direction, "", ""
 
     def _blank_loss_profile(day_key: str) -> dict:
         return {
@@ -3512,22 +3547,21 @@ def main():
             ticker = str(signal["symbol"]).upper()
             direction = str(signal["direction"]).lower()
             _set_signal_outcome(ticker=ticker, disposition="setup_pass")
-            pattern_direction, pattern_key = _pattern_direction_override(signal, ticker, direction, now_et)
+            pattern_direction, pattern_key, pattern_explanation = _pattern_direction_override(signal, ticker, direction, now_et)
             if pattern_direction != direction:
                 previous_direction = direction
                 direction = pattern_direction
                 signal = dict(signal)
                 signal["direction"] = direction
                 signal["pattern_direction_override"] = pattern_key
+                signal["pattern_direction_override_reason"] = pattern_explanation
                 _set_signal_outcome(
                     ticker=ticker,
                     disposition="pattern_direction_override",
-                    detail=f"{previous_direction}->{direction}",
+                    detail=pattern_explanation or f"{previous_direction}->{direction}",
                 )
                 print(
-                    f"[{ts(now_et)}] {ticker}: pattern memory changed direction "
-                    f"{previous_direction.upper()} -> {direction.upper()} "
-                    f"because this signal-number pattern lost before."
+                    f"[{ts(now_et)}] {ticker}: {pattern_explanation}"
                 )
 
             if adaptive_loss_active:
@@ -4204,6 +4238,7 @@ def main():
                     "signal_pattern_key": pattern_key,
                     "signal_pattern_global_key": pattern_global_key,
                     "pattern_direction_override": signal.get("pattern_direction_override", ""),
+                    "pattern_direction_override_reason": signal.get("pattern_direction_override_reason", ""),
                     "volatility_stop_loss_mult": round(float(volatility_profile.get("stop_loss_mult", 1.0) or 1.0), 4),
                     "volatility_premium_cap_mult": round(float(volatility_profile.get("premium_cap_mult", 1.0) or 1.0), 4),
                     "entry_bid_submit": entry_result.get("submit_bid"),
@@ -4636,6 +4671,7 @@ def main():
                         "signal_pattern_key": meta.get("signal_pattern_key", ""),
                         "signal_pattern_global_key": meta.get("signal_pattern_global_key", ""),
                         "pattern_direction_override": meta.get("pattern_direction_override", ""),
+                        "pattern_direction_override_reason": meta.get("pattern_direction_override_reason", ""),
                         "entry_time": meta.get("entry_time_iso", ""),
                         "exit_time": now_et.isoformat(),
                         "hold_seconds": hold_seconds,
