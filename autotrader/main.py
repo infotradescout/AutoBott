@@ -2070,6 +2070,92 @@ def main():
                 return preferred, key, _pattern_memory_explanation(memory, direction, preferred)
         return direction, "", ""
 
+    def _pre_execution_history_check(signal: dict, ticker: str, direction: str, now_et: datetime) -> tuple[bool, str]:
+        if not bool(getattr(config, "ENABLE_PRE_EXECUTION_HISTORY_CHECK", True)):
+            return True, ""
+        if not bool(getattr(config, "ENABLE_SIGNAL_PATTERN_MEMORY", True)):
+            return True, ""
+        normalized_direction = str(direction or "").lower()
+        if normalized_direction not in {"call", "put"}:
+            return False, f"history check blocked invalid direction={direction!r}"
+
+        recalculated_direction, _recheck_key, recalculated_reason = _pattern_direction_override(
+            signal,
+            ticker,
+            normalized_direction,
+            now_et,
+        )
+        if str(recalculated_direction or "").lower() != normalized_direction:
+            return (
+                False,
+                recalculated_reason
+                or (
+                    f"history check blocked {normalized_direction.upper()} before order; "
+                    f"memory now prefers {str(recalculated_direction).upper()} for this setup."
+                ),
+            )
+
+        _signature, ticker_key, global_key = _signal_pattern_keys(signal, ticker, now_et=now_et)
+        keys = [ticker_key]
+        if bool(getattr(config, "SIGNAL_PATTERN_MEMORY_USE_GLOBAL", True)):
+            keys.append(global_key)
+        min_losses = max(1, int(getattr(config, "SIGNAL_PATTERN_MEMORY_MIN_LOSSES", 1) or 1))
+
+        reviewed = False
+        pass_detail = ""
+        opposite = _opposite_direction(normalized_direction)
+        for key in [item for item in keys if item]:
+            memory = signal_pattern_memory.get(key)
+            if not isinstance(memory, dict):
+                continue
+            reviewed = True
+            losses = memory.get("losses_by_direction")
+            wins = memory.get("wins_by_direction")
+            if not isinstance(losses, dict):
+                losses = {}
+            if not isinstance(wins, dict):
+                wins = {}
+            current_losses = int(losses.get(normalized_direction, 0) or 0)
+            current_wins = int(wins.get(normalized_direction, 0) or 0)
+            opposite_losses = int(losses.get(opposite, 0) or 0) if opposite else 0
+            opposite_wins = int(wins.get(opposite, 0) or 0) if opposite else 0
+            avoid = str(memory.get("avoid_direction", "") or "").lower()
+            preferred = str(memory.get("preferred_direction", "") or "").lower()
+
+            if current_losses >= min_losses and current_losses > current_wins:
+                better_direction = preferred if preferred in {"call", "put"} and preferred != normalized_direction else opposite
+                explanation = _pattern_memory_explanation(memory, normalized_direction, better_direction)
+                return (
+                    False,
+                    (
+                        f"history check blocked {normalized_direction.upper()} before order: "
+                        f"this number bucket has {current_losses} loss(es) vs {current_wins} win(s) "
+                        f"for {normalized_direction.upper()}. {explanation}"
+                    ),
+                )
+
+            if avoid == normalized_direction and preferred in {"call", "put"} and preferred != normalized_direction:
+                if current_losses >= min_losses:
+                    explanation = _pattern_memory_explanation(memory, normalized_direction, preferred)
+                    return (
+                        False,
+                        (
+                            f"history check blocked {normalized_direction.upper()} before order: "
+                            f"memory says avoid {normalized_direction.upper()} and prefer {preferred.upper()}. "
+                            f"{explanation}"
+                        ),
+                    )
+
+            if not pass_detail:
+                pass_detail = (
+                    f"history check passed before order: {normalized_direction.upper()} "
+                    f"{current_wins}W/{current_losses}L"
+                )
+                if opposite:
+                    pass_detail += f", {opposite.upper()} {opposite_wins}W/{opposite_losses}L"
+
+        return True, pass_detail if reviewed else ""
+
     def _parse_trade_history_time(row: dict, fallback: datetime) -> datetime:
         for key in ("exit_time", "timestamp", "entry_time", "entry_time_iso"):
             raw = str(row.get(key, "") or "").strip()
@@ -2574,6 +2660,35 @@ def main():
                 )
                 return False
 
+            reversal_signal = {
+                "symbol": ticker,
+                "ticker": ticker,
+                "direction": direction,
+                "strategy_profile": "reversal_snapback",
+                "entry_time_iso": now_et.isoformat(),
+                "price": stock_price,
+                "signal_score": 0.0,
+                "direction_score": 0.0,
+                "rvol": 0.0,
+                "rsi": 0.0,
+                "roc": 0.0,
+                "iv_rank": 0.0,
+                "flow_score": 0.0,
+                "atr_pct": 0.0,
+                "volatility_score": 0.0,
+            }
+            history_ok, history_reason = _pre_execution_history_check(
+                reversal_signal,
+                ticker,
+                direction,
+                now_et,
+            )
+            if not history_ok:
+                print(f"[{ts(now_et)}] {ticker}: reversal skipped ({history_reason}).")
+                return False
+            if history_reason:
+                print(f"[{ts(now_et)}] {ticker}: reversal {history_reason}.")
+
             qty = 1
             entry_result = _execute_limit_entry(
                 broker=broker,
@@ -2614,6 +2729,7 @@ def main():
                 return False
 
             prior_entries = int(ticker_entry_counts.get(ticker, 0))
+            pattern_signature, pattern_key, pattern_global_key = _signal_pattern_keys(reversal_signal, ticker, now_et=now_et)
             open_trade_meta[option_symbol] = {
                 "timestamp": ts(now_et),
                 "entry_time_iso": now_et.isoformat(),
@@ -2631,7 +2747,19 @@ def main():
                 "rsi": 0.0,
                 "roc": 0.0,
                 "iv_rank": 0.0,
+                "price": round(float(stock_price or 0.0), 4),
+                "vwap": 0.0,
+                "flow_score": 0.0,
+                "regime_score": 0.0,
                 "contract_spread_pct": round(float(entry_result.get("submit_spread_pct", 0.0) or 0.0), 4),
+                "atr_pct": 0.0,
+                "volatility_score": 0.0,
+                "signal_pattern_signature": pattern_signature,
+                "signal_pattern_key": pattern_key,
+                "signal_pattern_global_key": pattern_global_key,
+                "pattern_direction_override": "",
+                "pattern_direction_override_reason": history_reason,
+                "pre_execution_history_check": history_reason,
                 "entry_bid_submit": entry_result.get("submit_bid"),
                 "entry_ask_submit": entry_result.get("submit_ask"),
                 "entry_midpoint_submit": entry_result.get("submit_midpoint"),
@@ -4259,6 +4387,17 @@ def main():
                     time.sleep(config.RATE_LIMIT_SLEEP_SECONDS)
                     continue
 
+                history_ok, history_reason = _pre_execution_history_check(signal, ticker, direction, now_et)
+                if not history_ok:
+                    _mark_skip("pre_execution_history_check")
+                    _mark_stage4_reject(reason="pre_execution_history_check", ticker=ticker, detail=history_reason)
+                    print(f"[{ts(now_et)}] {ticker}: skip ({history_reason}).")
+                    continue
+                if history_reason:
+                    signal = dict(signal)
+                    signal["pre_execution_history_check"] = history_reason
+                    print(f"[{ts(now_et)}] {ticker}: {history_reason}.")
+
                 _mark_stage4_eligible(ticker=ticker)
                 entry_attempts_loop += 1
                 if _is_in_opening_strict_window(now_et):
@@ -4357,6 +4496,7 @@ def main():
                     "signal_pattern_global_key": pattern_global_key,
                     "pattern_direction_override": signal.get("pattern_direction_override", ""),
                     "pattern_direction_override_reason": signal.get("pattern_direction_override_reason", ""),
+                    "pre_execution_history_check": signal.get("pre_execution_history_check", ""),
                     "volatility_stop_loss_mult": round(float(volatility_profile.get("stop_loss_mult", 1.0) or 1.0), 4),
                     "volatility_premium_cap_mult": round(float(volatility_profile.get("premium_cap_mult", 1.0) or 1.0), 4),
                     "entry_bid_submit": entry_result.get("submit_bid"),
@@ -4790,6 +4930,7 @@ def main():
                         "signal_pattern_global_key": meta.get("signal_pattern_global_key", ""),
                         "pattern_direction_override": meta.get("pattern_direction_override", ""),
                         "pattern_direction_override_reason": meta.get("pattern_direction_override_reason", ""),
+                        "pre_execution_history_check": meta.get("pre_execution_history_check", ""),
                         "entry_time": meta.get("entry_time_iso", ""),
                         "exit_time": now_et.isoformat(),
                         "hold_seconds": hold_seconds,

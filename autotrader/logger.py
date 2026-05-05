@@ -37,6 +37,7 @@ class TradeLogger:
         "signal_pattern_global_key",
         "pattern_direction_override",
         "pattern_direction_override_reason",
+        "pre_execution_history_check",
         "entry_time",
         "exit_time",
         "hold_seconds",
