@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import csv
 import time
 from datetime import date, datetime, timedelta
 import re
@@ -1934,14 +1935,51 @@ def main():
             f"so now this time I need to pick {preferred} instead of {current}."
         )
 
-    def _record_signal_pattern_outcome(trade_row: dict, now_et: datetime) -> None:
+    def _trade_row_pnl_usd(trade_row: dict) -> float | None:
+        for key in (
+            "realized_pnl_usd",
+            "pnl_usd",
+            "paper_reported_pnl_usd",
+            "conservative_executable_pnl_usd",
+        ):
+            raw = trade_row.get(key)
+            if raw is None or str(raw).strip() == "":
+                continue
+            text = str(raw).replace("$", "").replace(",", "").strip()
+            return _safe_signal_float(text, 0.0)
+
+        entry = _safe_signal_float(str(trade_row.get("entry_price", "")).replace("$", "").replace(",", ""), 0.0)
+        exit_ = _safe_signal_float(str(trade_row.get("exit_price", "")).replace("$", "").replace(",", ""), 0.0)
+        qty = max(1, int(_safe_signal_float(trade_row.get("qty"), 1.0)))
+        if entry > 0 and exit_ > 0:
+            return (exit_ - entry) * qty * 100.0
+
+        for key in ("realized_pnl_pct", "pnl_pct", "paper_reported_pnl_pct", "conservative_executable_pnl_pct"):
+            raw = trade_row.get(key)
+            if raw is None or str(raw).strip() == "":
+                continue
+            pct = _safe_signal_float(str(raw).replace("%", "").replace(",", ""), 0.0)
+            if pct < 0:
+                return -0.01
+            if pct > 0:
+                return 0.01
+            return 0.0
+        return None
+
+    def _record_signal_pattern_outcome(trade_row: dict, now_et: datetime) -> bool:
         if not bool(getattr(config, "ENABLE_SIGNAL_PATTERN_MEMORY", True)):
-            return
+            return False
         ticker = str(trade_row.get("ticker", "") or trade_row.get("symbol", "") or "").upper()
         direction = str(trade_row.get("direction", "") or "").lower()
+        if (not ticker or direction not in {"call", "put"}) and trade_row.get("option_symbol"):
+            parsed_ticker, parsed_direction = _parse_option_symbol(str(trade_row.get("option_symbol", "")))
+            ticker = ticker or parsed_ticker.upper()
+            direction = direction if direction in {"call", "put"} else parsed_direction
         if direction not in {"call", "put"}:
-            return
-        pnl = _safe_signal_float(trade_row.get("realized_pnl_usd", trade_row.get("pnl_usd")), 0.0)
+            return False
+        pnl = _trade_row_pnl_usd(trade_row)
+        if pnl is None:
+            return False
         signature, ticker_key, global_key = _signal_pattern_keys(trade_row, ticker, now_et=now_et)
         keys = [key for key in (ticker_key, global_key) if key]
         for key in keys:
@@ -1995,6 +2033,7 @@ def main():
             )
             for key, _item in stale[: len(signal_pattern_memory) - 1000]:
                 signal_pattern_memory.pop(key, None)
+        return True
 
     def _pattern_direction_override(signal: dict, ticker: str, current_direction: str, now_et: datetime) -> tuple[str, str, str]:
         if not bool(getattr(config, "ENABLE_SIGNAL_PATTERN_MEMORY", True)):
@@ -2030,6 +2069,84 @@ def main():
             ):
                 return preferred, key, _pattern_memory_explanation(memory, direction, preferred)
         return direction, "", ""
+
+    def _parse_trade_history_time(row: dict, fallback: datetime) -> datetime:
+        for key in ("exit_time", "timestamp", "entry_time", "entry_time_iso"):
+            raw = str(row.get(key, "") or "").strip()
+            if not raw:
+                continue
+            parsed = _parse_state_datetime(raw)
+            if parsed is not None:
+                return parsed
+
+            suffix_zone = None
+            text = raw
+            upper = text.upper()
+            if upper.endswith((" EDT", " EST")):
+                suffix_zone = pytz.timezone(config.EASTERN_TZ)
+                text = text[:-4]
+            elif upper.endswith((" CDT", " CST")):
+                suffix_zone = pytz.timezone(config.CENTRAL_TZ)
+                text = text[:-4]
+
+            for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%dT%H:%M:%S", "%m/%d/%Y %H:%M:%S"):
+                try:
+                    parsed_naive = datetime.strptime(text, fmt)
+                    localized = (suffix_zone or tz).localize(parsed_naive)
+                    return localized.astimezone(tz)
+                except Exception:
+                    continue
+        return fallback
+
+    def _seed_signal_pattern_memory_from_trade_history(now_et: datetime) -> None:
+        if not bool(getattr(config, "ENABLE_SIGNAL_PATTERN_MEMORY", True)):
+            return
+        path = config.TRADES_CSV_PATH
+        if not path.exists():
+            print(f"[{ts(now_et)}] Signal pattern memory: no trade history found at {path}.")
+            return
+        try:
+            with path.open("r", newline="", encoding="utf-8") as f:
+                rows = list(csv.DictReader(f))
+        except Exception as exc:  # noqa: BLE001
+            print(f"[{ts(now_et)}] Signal pattern memory: trade history read failed: {exc}")
+            return
+
+        history_limit = max(0, int(getattr(config, "SIGNAL_PATTERN_MEMORY_HISTORY_ROWS", 1000) or 1000))
+        if history_limit > 0:
+            rows = rows[-history_limit:]
+
+        state_memory = {
+            str(key): value
+            for key, value in signal_pattern_memory.items()
+            if isinstance(value, dict)
+        }
+        signal_pattern_memory.clear()
+        learned = 0
+        skipped = 0
+        for row in rows:
+            if not isinstance(row, dict):
+                skipped += 1
+                continue
+            trade_time = _parse_trade_history_time(row, now_et)
+            if _record_signal_pattern_outcome(row, trade_time):
+                learned += 1
+            else:
+                skipped += 1
+
+        state_only = 0
+        for key, item in state_memory.items():
+            if key not in signal_pattern_memory:
+                signal_pattern_memory[key] = item
+                state_only += 1
+
+        if learned > 0 or state_only > 0:
+            _save_runtime_state()
+        print(
+            f"[{ts(now_et)}] Signal pattern memory loaded from trade history: "
+            f"rows={len(rows)} learned={learned} skipped={skipped} "
+            f"patterns={len(signal_pattern_memory)} state_only={state_only}."
+        )
 
     def _blank_loss_profile(day_key: str) -> dict:
         return {
@@ -2765,6 +2882,7 @@ def main():
         return total_filled
 
     mode = "PAPER" if config.PAPER else "LIVE"
+    _seed_signal_pattern_memory_from_trade_history(datetime.now(tz))
     try:
         acct = broker.get_account()
         print(
