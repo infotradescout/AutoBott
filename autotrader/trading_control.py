@@ -20,7 +20,7 @@ def _default_state() -> dict:
         "dry_run": False,
         "strategy_profile": "conservative",
         "updated_at_et": "",
-        "reason": "",
+        "reason": "edge_mode_default",
     }
 
 

@@ -1636,6 +1636,7 @@ def main():
         if str(item).strip()
     )
     adaptive_loss_profile: dict = dict(state.get("adaptive_loss_profile") or {})
+    signal_pattern_memory: dict[str, dict] = dict(state.get("signal_pattern_memory") or {})
     opening_entries_today_count = int(state.get("opening_entries_today_count", 0) or 0)
     opening_fresh_premium_deployed_usd = float(state.get("opening_fresh_premium_deployed_usd", 0.0) or 0.0)
     opening_expensive_entries_today_count = int(state.get("opening_expensive_entries_today_count", 0) or 0)
@@ -1645,7 +1646,7 @@ def main():
     manual_stop_latched = False
     control_state = load_trading_control()
     strategy_profile = normalize_profile_name(str(control_state.get("strategy_profile", "balanced") or "balanced"))
-    dry_run_enabled = bool(control_state.get("dry_run", False)) and is_enabled("FEATURE_DRY_RUN_MODE", False)
+    dry_run_enabled = bool(control_state.get("dry_run", False)) or is_enabled("FEATURE_DRY_RUN_MODE", False)
     option_expiry_cache: dict[str, date | None] = {}
 
     def _resolve_option_expiry(symbol: str, meta: dict) -> date | None:
@@ -1771,6 +1772,7 @@ def main():
                 "adaptive_loss_active": adaptive_loss_active,
                 "adaptive_loss_blocked_tickers": sorted(adaptive_loss_blocked_tickers),
                 "adaptive_loss_profile": adaptive_loss_profile,
+                "signal_pattern_memory": signal_pattern_memory,
                 "opening_entries_today_count": opening_entries_today_count,
                 "opening_fresh_premium_deployed_usd": round(opening_fresh_premium_deployed_usd, 6),
                 "opening_expensive_entries_today_count": opening_expensive_entries_today_count,
@@ -1813,6 +1815,186 @@ def main():
             f"[{ts(now_et)}] {key}: loss cooldown armed for {cooldown_minutes}m "
             f"(until {ts(ticker_loss_cooldown_until[key])}; reason={reason})."
         )
+
+    def _opposite_direction(direction: str) -> str:
+        normalized = str(direction or "").strip().lower()
+        if normalized == "call":
+            return "put"
+        if normalized == "put":
+            return "call"
+        return ""
+
+    def _arm_loss_direction_flip(ticker: str, losing_direction: str, now_et: datetime, *, reason: str) -> str:
+        if not bool(getattr(config, "ENABLE_LOSS_DIRECTION_FLIP", True)):
+            return ""
+        key = str(ticker or "").upper()
+        opposite = _opposite_direction(losing_direction)
+        if not key or opposite not in {"call", "put"}:
+            return ""
+        ticker_reentry_armed[key] = True
+        ticker_reentry_expected_direction[key] = opposite
+        print(
+            f"[{ts(now_et)}] {key}: loss direction flip armed. "
+            f"Lost on {str(losing_direction).upper()}, next allowed direction is {opposite.upper()} "
+            f"(reason={reason})."
+        )
+        return opposite
+
+    def _pattern_bucket(value, *, step: float, limit: float | None = None) -> str:
+        raw = value
+        if raw is None or str(raw).strip() == "":
+            return "na"
+        try:
+            number = float(raw)
+        except (TypeError, ValueError):
+            return "na"
+        if math.isnan(number) or math.isinf(number):
+            return "na"
+        if limit is not None:
+            number = max(-float(limit), min(float(limit), number))
+        bucket = round(number / float(step)) * float(step)
+        if abs(bucket) < (float(step) / 2.0):
+            bucket = 0.0
+        return f"{bucket:+.2f}"
+
+    def _time_pattern_bucket(value) -> str:
+        dt = _parse_state_datetime(str(value or "")) if value else None
+        hour = dt.hour if isinstance(dt, datetime) else datetime.now(tz).hour
+        if hour < 10:
+            return "open"
+        if hour < 12:
+            return "morning"
+        if hour < 14:
+            return "midday"
+        return "late"
+
+    def _vwap_side_bucket(payload: dict) -> str:
+        price = _safe_signal_float(payload.get("price"), 0.0)
+        vwap = _safe_signal_float(payload.get("vwap"), 0.0)
+        if price <= 0 or vwap <= 0:
+            return "na"
+        distance_pct = ((price - vwap) / vwap) * 100.0
+        if abs(distance_pct) < 0.05:
+            return "near"
+        return "above" if distance_pct > 0 else "below"
+
+    def _signal_pattern_signature(payload: dict, *, now_et: datetime | None = None) -> str:
+        entry_time = payload.get("entry_time") or payload.get("entry_time_iso") or ""
+        time_bucket = _time_pattern_bucket(entry_time) if entry_time else _time_pattern_bucket((now_et or datetime.now(tz)).isoformat())
+        profile = str(payload.get("strategy_profile", "") or payload.get("profile", "") or "generic").strip().lower()
+        parts = [
+            f"t={time_bucket}",
+            f"p={profile}",
+            f"vwap={_vwap_side_bucket(payload)}",
+            f"rvol={_pattern_bucket(payload.get('rvol'), step=0.5, limit=8.0)}",
+            f"roc={_pattern_bucket(payload.get('roc'), step=0.1, limit=5.0)}",
+            f"rsi={_pattern_bucket(payload.get('rsi'), step=5.0, limit=100.0)}",
+            f"ds={_pattern_bucket(payload.get('direction_score'), step=0.1, limit=1.0)}",
+            f"sig={_pattern_bucket(payload.get('signal_score'), step=0.5, limit=12.0)}",
+            f"vol={_pattern_bucket(payload.get('volatility_score'), step=0.5, limit=12.0)}",
+            f"flow={_pattern_bucket(payload.get('flow_score'), step=0.25, limit=1.0)}",
+            f"atr={_pattern_bucket(payload.get('atr_pct'), step=0.5, limit=10.0)}",
+            f"ivr={_pattern_bucket(payload.get('iv_rank'), step=10.0, limit=100.0)}",
+        ]
+        return "|".join(parts)
+
+    def _signal_pattern_keys(payload: dict, ticker: str, *, now_et: datetime | None = None) -> tuple[str, str, str]:
+        signature = str(payload.get("signal_pattern_signature", "") or "").strip()
+        if not signature:
+            signature = _signal_pattern_signature(payload, now_et=now_et)
+        symbol = str(ticker or payload.get("ticker", "") or payload.get("symbol", "") or "").upper()
+        ticker_key = f"ticker:{symbol}|{signature}" if symbol else ""
+        global_key = f"global|{signature}"
+        return signature, ticker_key, global_key
+
+    def _record_signal_pattern_outcome(trade_row: dict, now_et: datetime) -> None:
+        if not bool(getattr(config, "ENABLE_SIGNAL_PATTERN_MEMORY", True)):
+            return
+        ticker = str(trade_row.get("ticker", "") or trade_row.get("symbol", "") or "").upper()
+        direction = str(trade_row.get("direction", "") or "").lower()
+        if direction not in {"call", "put"}:
+            return
+        pnl = _safe_signal_float(trade_row.get("realized_pnl_usd", trade_row.get("pnl_usd")), 0.0)
+        signature, ticker_key, global_key = _signal_pattern_keys(trade_row, ticker, now_et=now_et)
+        keys = [key for key in (ticker_key, global_key) if key]
+        for key in keys:
+            item = signal_pattern_memory.get(key)
+            if not isinstance(item, dict):
+                item = {
+                    "signature": signature,
+                    "ticker": ticker if key.startswith("ticker:") else "*",
+                    "wins_by_direction": {},
+                    "losses_by_direction": {},
+                    "samples": 0,
+                }
+            wins = item.get("wins_by_direction")
+            if not isinstance(wins, dict):
+                wins = {}
+            losses = item.get("losses_by_direction")
+            if not isinstance(losses, dict):
+                losses = {}
+            item["samples"] = int(item.get("samples", 0) or 0) + 1
+            if pnl < 0:
+                losses[direction] = int(losses.get(direction, 0) or 0) + 1
+                preferred = _opposite_direction(direction)
+                item["avoid_direction"] = direction
+                item["preferred_direction"] = preferred
+                item["last_outcome"] = "loss"
+                item["last_pnl_usd"] = round(pnl, 2)
+            else:
+                wins[direction] = int(wins.get(direction, 0) or 0) + 1
+                item["last_outcome"] = "win"
+                item["last_pnl_usd"] = round(pnl, 2)
+                current_preferred = str(item.get("preferred_direction", "") or "").lower()
+                if current_preferred not in {"call", "put"}:
+                    item["preferred_direction"] = direction
+            item["wins_by_direction"] = wins
+            item["losses_by_direction"] = losses
+            item["updated_at_et"] = now_et.isoformat()
+            signal_pattern_memory[key] = item
+
+        if len(signal_pattern_memory) > 1200:
+            stale = sorted(
+                signal_pattern_memory.items(),
+                key=lambda pair: str((pair[1] or {}).get("updated_at_et", "")),
+            )
+            for key, _item in stale[: len(signal_pattern_memory) - 1000]:
+                signal_pattern_memory.pop(key, None)
+
+    def _pattern_direction_override(signal: dict, ticker: str, current_direction: str, now_et: datetime) -> tuple[str, str]:
+        if not bool(getattr(config, "ENABLE_SIGNAL_PATTERN_MEMORY", True)):
+            return current_direction, ""
+        direction = str(current_direction or "").lower()
+        if direction not in {"call", "put"}:
+            return current_direction, ""
+        _signature, ticker_key, global_key = _signal_pattern_keys(signal, ticker, now_et=now_et)
+        keys = [ticker_key]
+        if bool(getattr(config, "SIGNAL_PATTERN_MEMORY_USE_GLOBAL", True)):
+            keys.append(global_key)
+        min_losses = max(1, int(getattr(config, "SIGNAL_PATTERN_MEMORY_MIN_LOSSES", 1) or 1))
+        for key in [item for item in keys if item]:
+            memory = signal_pattern_memory.get(key)
+            if not isinstance(memory, dict):
+                continue
+            preferred = str(memory.get("preferred_direction", "") or "").lower()
+            avoid = str(memory.get("avoid_direction", "") or "").lower()
+            losses = memory.get("losses_by_direction")
+            wins = memory.get("wins_by_direction")
+            if not isinstance(losses, dict):
+                losses = {}
+            if not isinstance(wins, dict):
+                wins = {}
+            current_losses = int(losses.get(direction, 0) or 0)
+            current_wins = int(wins.get(direction, 0) or 0)
+            if (
+                preferred in {"call", "put"}
+                and preferred != direction
+                and avoid == direction
+                and current_losses >= min_losses
+                and current_losses > current_wins
+            ):
+                return preferred, key
+        return direction, ""
 
     def _blank_loss_profile(day_key: str) -> dict:
         return {
@@ -2038,6 +2220,27 @@ def main():
         profile = _build_loss_profile(diagnoses, now_et, source="alpaca_truth", closed_count=closed_count)
         _activate_loss_profile(profile, now_et)
         return True
+
+    def _arm_loss_direction_flips_from_truth(truth_snapshot: dict, now_et: datetime) -> bool:
+        changed = False
+        if not bool(getattr(config, "ENABLE_LOSS_DIRECTION_FLIP", True)):
+            return changed
+        for item in list(truth_snapshot.get("closed_trades") or []):
+            if _safe_signal_float(item.get("realized_pnl_usd"), 0.0) >= 0:
+                continue
+            ticker = str(item.get("ticker", "") or "").upper()
+            direction = str(item.get("direction", "") or "").lower()
+            expected = _opposite_direction(direction)
+            if not ticker or expected not in {"call", "put"}:
+                continue
+            if (
+                bool(ticker_reentry_armed.get(ticker, False))
+                and str(ticker_reentry_expected_direction.get(ticker, "") or "").lower() == expected
+            ):
+                continue
+            _arm_loss_direction_flip(ticker, direction, now_et, reason="alpaca_truth_loss")
+            changed = True
+        return changed
 
     def _record_local_loss_diagnosis(trade_row: dict, now_et: datetime) -> dict:
         window = max(1, int(getattr(config, "ADAPTIVE_LOSS_CAUSE_WINDOW", 12) or 12))
@@ -2338,6 +2541,9 @@ def main():
         critical_exit_reasons = {
             "stop_loss",
             "stop_loss_pct",
+            "profit_target",
+            "base_win_bank",
+            "protected_floor_breach",
             "eod_close",
             "overnight_forced_close",
             "pre_expiry_exit",
@@ -2558,7 +2764,7 @@ def main():
         last_trader_heartbeat_et = datetime.now(tz).isoformat()
         control_state = load_trading_control()
         strategy_profile = normalize_profile_name(str(control_state.get("strategy_profile", "balanced") or "balanced"))
-        dry_run_enabled = bool(control_state.get("dry_run", False)) and is_enabled("FEATURE_DRY_RUN_MODE", False)
+        dry_run_enabled = bool(control_state.get("dry_run", False)) or is_enabled("FEATURE_DRY_RUN_MODE", False)
         manual_stop = bool(control_state.get("manual_stop", False))
         if manual_stop:
             now_et = datetime.now(tz)
@@ -2627,7 +2833,7 @@ def main():
         _touch_heartbeat(force=True)
         control_state = load_trading_control()
         strategy_profile = normalize_profile_name(str(control_state.get("strategy_profile", "balanced") or "balanced"))
-        dry_run_enabled = bool(control_state.get("dry_run", False)) and is_enabled("FEATURE_DRY_RUN_MODE", False)
+        dry_run_enabled = bool(control_state.get("dry_run", False)) or is_enabled("FEATURE_DRY_RUN_MODE", False)
         manual_stop = bool(control_state.get("manual_stop", False))
         if manual_stop:
             if bool(getattr(config, "ENABLE_ALPACA_TRUTH_LOSS_GUARD", True)):
@@ -2640,6 +2846,7 @@ def main():
                     broker_truth_closed_count = int(truth_snapshot.get("closed_count", 0) or 0)
                     broker_truth_last_error = ""
                     adapt_after_loss = abs(float(getattr(config, "ALPACA_TRUTH_ADAPT_AFTER_LOSS_USD", 0.0) or 0.0))
+                    direction_flip_changed = _arm_loss_direction_flips_from_truth(truth_snapshot, now_et)
                     if adapt_after_loss > 0 and broker_truth_day_pnl_usd <= -adapt_after_loss:
                         adaptive_loss_active = True
                         _refresh_adaptive_loss_profile_from_truth(truth_snapshot, now_et)
@@ -2647,6 +2854,7 @@ def main():
                         adaptive_loss_active != adaptive_before
                         or adaptive_loss_blocked_tickers != blocked_before
                         or adaptive_loss_profile != profile_before
+                        or direction_flip_changed
                     ):
                         _save_runtime_state()
                 except Exception as exc:  # noqa: BLE001
@@ -2823,6 +3031,7 @@ def main():
                 broker_truth_closed_count = int(truth_snapshot.get("closed_count", 0) or 0)
                 broker_truth_last_error = ""
                 adapt_after_loss = abs(float(getattr(config, "ALPACA_TRUTH_ADAPT_AFTER_LOSS_USD", 0.0) or 0.0))
+                direction_flip_changed = _arm_loss_direction_flips_from_truth(truth_snapshot, now_et)
                 if adapt_after_loss > 0 and broker_truth_day_pnl_usd <= -adapt_after_loss:
                     if not adaptive_loss_active:
                         print(
@@ -2835,6 +3044,7 @@ def main():
                     adaptive_loss_active != adaptive_before
                     or adaptive_loss_blocked_tickers != blocked_before
                     or adaptive_loss_profile != profile_before
+                    or direction_flip_changed
                 ):
                     _save_runtime_state()
                 truth_loss_limit = abs(
@@ -2847,11 +3057,24 @@ def main():
                         or 0.0
                     )
                 )
+                truth_closed_trades = list(truth_snapshot.get("closed_trades") or [])
+                truth_loss_count = sum(
+                    1
+                    for item in truth_closed_trades
+                    if _safe_signal_float(item.get("realized_pnl_usd"), 0.0) < 0
+                )
+                stop_after_losses = max(0, int(getattr(config, "ALPACA_TRUTH_STOP_AFTER_LOSSES", 0) or 0))
+                hard_stop_reasons: list[str] = []
                 if truth_loss_limit > 0 and broker_truth_day_pnl_usd <= -truth_loss_limit:
-                    reason = (
-                        f"alpaca_truth_daily_loss_limit "
-                        f"pnl=${broker_truth_day_pnl_usd:.2f} <= -${truth_loss_limit:.2f}"
+                    hard_stop_reasons.append(
+                        f"daily_loss pnl=${broker_truth_day_pnl_usd:.2f} <= -${truth_loss_limit:.2f}"
                     )
+                if stop_after_losses > 0 and truth_loss_count >= stop_after_losses:
+                    hard_stop_reasons.append(
+                        f"loss_count {truth_loss_count} >= {stop_after_losses}"
+                    )
+                if hard_stop_reasons:
+                    reason = "alpaca_truth_hard_stop " + "; ".join(hard_stop_reasons)
                     set_manual_stop(True, reason=reason[:240])
                     print(f"[{ts(now_et)}] ALPACA TRUTH LOSS GUARD hit: {reason}. Flattening and pausing.")
                     alerts.send(
@@ -3286,9 +3509,26 @@ def main():
                 _mark_skip("pdt_broker_block")
                 break
 
-            ticker = signal["symbol"]
-            direction = signal["direction"]
+            ticker = str(signal["symbol"]).upper()
+            direction = str(signal["direction"]).lower()
             _set_signal_outcome(ticker=ticker, disposition="setup_pass")
+            pattern_direction, pattern_key = _pattern_direction_override(signal, ticker, direction, now_et)
+            if pattern_direction != direction:
+                previous_direction = direction
+                direction = pattern_direction
+                signal = dict(signal)
+                signal["direction"] = direction
+                signal["pattern_direction_override"] = pattern_key
+                _set_signal_outcome(
+                    ticker=ticker,
+                    disposition="pattern_direction_override",
+                    detail=f"{previous_direction}->{direction}",
+                )
+                print(
+                    f"[{ts(now_et)}] {ticker}: pattern memory changed direction "
+                    f"{previous_direction.upper()} -> {direction.upper()} "
+                    f"because this signal-number pattern lost before."
+                )
 
             if adaptive_loss_active:
                 profile = adaptive_loss_profile if isinstance(adaptive_loss_profile, dict) else {}
@@ -3296,13 +3536,25 @@ def main():
                 block_after = max(1, int(getattr(config, "ADAPTIVE_LOSS_BLOCK_TICKER_AFTER_LOSSES", 1)))
                 ticker_loss_count = int(ticker_losses.get(ticker, 0) or 0)
                 if ticker in adaptive_loss_blocked_tickers and ticker_loss_count >= block_after:
-                    _mark_skip("adaptive_losing_ticker_block")
-                    _mark_stage4_reject(reason="adaptive_losing_ticker_block", ticker=ticker)
-                    print(
-                        f"[{ts(now_et)}] {ticker}: skip "
-                        f"(adaptive loss mode blocked ticker after {ticker_loss_count} same-day loss(es))."
+                    expected_after_loss = str(ticker_reentry_expected_direction.get(ticker, "") or "").lower()
+                    allow_direction_flip = (
+                        bool(getattr(config, "ENABLE_LOSS_DIRECTION_FLIP", True))
+                        and bool(ticker_reentry_armed.get(ticker, False))
+                        and expected_after_loss in {"call", "put"}
+                        and str(direction or "").lower() == expected_after_loss
                     )
-                    continue
+                    if not allow_direction_flip:
+                        _mark_skip("adaptive_losing_ticker_block")
+                        _mark_stage4_reject(reason="adaptive_losing_ticker_block", ticker=ticker)
+                        print(
+                            f"[{ts(now_et)}] {ticker}: skip "
+                            f"(adaptive loss mode blocked ticker after {ticker_loss_count} same-day loss(es))."
+                        )
+                        continue
+                    print(
+                        f"[{ts(now_et)}] {ticker}: adaptive loss block bypassed for "
+                        f"direction flip ({expected_after_loss.upper()})."
+                    )
                 signal_score_now = float(signal.get("signal_score", 0.0) or 0.0)
                 direction_score_now = abs(float(signal.get("direction_score", 0.0) or 0.0))
                 adaptive_min_signal = max(
@@ -3431,7 +3683,7 @@ def main():
             preferred_core = set(str(s).upper() for s in getattr(config, "PREFERRED_CORE_TICKERS", ()))
             is_non_core = ticker not in preferred_core
             if is_non_core:
-                non_core_cap = max(0, int(getattr(config, "MAX_NON_CORE_ENTRIES_PER_DAY", 4) or 4))
+                non_core_cap = max(0, int(getattr(config, "MAX_NON_CORE_ENTRIES_PER_DAY", 4)))
                 if non_core_entries_today_count >= non_core_cap:
                     _mark_skip("non_core_entry_cap")
                     _mark_stage4_reject(reason="non_core_entry_cap", ticker=ticker)
@@ -3461,12 +3713,24 @@ def main():
                 continue
             loss_cooldown_until = _active_ticker_loss_cooldown_until(ticker, now_et)
             if loss_cooldown_until is not None:
-                _mark_skip("ticker_loss_cooldown")
-                _mark_stage4_reject(reason="ticker_loss_cooldown", ticker=ticker)
-                print(
-                    f"[{ts(now_et)}] {ticker}: skip (loss cooldown until {ts(loss_cooldown_until)})."
+                expected_after_loss = str(ticker_reentry_expected_direction.get(ticker, "") or "").lower()
+                allow_direction_flip = (
+                    bool(getattr(config, "LOSS_DIRECTION_FLIP_ALLOWS_COOLDOWN_BYPASS", True))
+                    and bool(ticker_reentry_armed.get(ticker, False))
+                    and expected_after_loss in {"call", "put"}
+                    and str(direction or "").lower() == expected_after_loss
                 )
-                continue
+                if not allow_direction_flip:
+                    _mark_skip("ticker_loss_cooldown")
+                    _mark_stage4_reject(reason="ticker_loss_cooldown", ticker=ticker)
+                    print(
+                        f"[{ts(now_et)}] {ticker}: skip (loss cooldown until {ts(loss_cooldown_until)})."
+                    )
+                    continue
+                print(
+                    f"[{ts(now_et)}] {ticker}: loss cooldown bypassed for direction flip "
+                    f"({expected_after_loss.upper()})."
+                )
             if not is_at_or_after(now_et, config.NO_NEW_TRADES_BEFORE):
                 _mark_skip("before_entry_window")
                 _mark_stage4_reject(reason="before_entry_window", ticker=ticker)
@@ -3783,7 +4047,7 @@ def main():
                             f"[{ts(now_et)}] {ticker}: opening premium cap override accepted "
                             f"(${opening_fresh_premium_deployed_usd + trade_premium_usd:.2f} > ${opening_premium_cap:.2f})."
                         )
-                    opening_expensive_cap = max(0, int(getattr(config, "OPENING_MAX_EXPENSIVE_ENTRIES", 1) or 1))
+                    opening_expensive_cap = max(0, int(getattr(config, "OPENING_MAX_EXPENSIVE_ENTRIES", 1)))
                     if is_expensive_symbol and opening_expensive_entries_today_count >= opening_expensive_cap:
                         if not premium_override_ok:
                             _mark_skip("opening_expensive_symbol_cap")
@@ -3910,6 +4174,7 @@ def main():
                     time.sleep(config.RATE_LIMIT_SLEEP_SECONDS)
                     continue
 
+                pattern_signature, pattern_key, pattern_global_key = _signal_pattern_keys(signal, ticker, now_et=now_et)
                 open_trade_meta[option_symbol] = {
                     "timestamp": ts(now_et),
                     "entry_time_iso": now_et.isoformat(),
@@ -3927,10 +4192,18 @@ def main():
                     "rsi": round(float(signal.get("rsi", 0.0) or 0.0), 4),
                     "roc": round(float(signal.get("roc", 0.0) or 0.0), 4),
                     "iv_rank": round(float(signal.get("iv_rank", 0.0) or 0.0), 4),
+                    "price": round(float(signal.get("price", 0.0) or 0.0), 4),
+                    "vwap": round(float(signal.get("vwap", 0.0) or 0.0), 4),
+                    "flow_score": round(float(signal.get("flow_score", 0.0) or 0.0), 4),
+                    "regime_score": round(float(signal.get("regime_score", 0.0) or 0.0), 4),
                     "contract_spread_pct": round(float(entry_result.get("submit_spread_pct", 0.0) or 0.0), 4),
                     "atr_pct": round(float(volatility_profile.get("atr_pct", 0.0) or 0.0), 4),
                     "volatility_regime": str(volatility_profile.get("label", "normal") or "normal"),
                     "volatility_score": int(volatility_profile.get("score", 0) or 0),
+                    "signal_pattern_signature": pattern_signature,
+                    "signal_pattern_key": pattern_key,
+                    "signal_pattern_global_key": pattern_global_key,
+                    "pattern_direction_override": signal.get("pattern_direction_override", ""),
                     "volatility_stop_loss_mult": round(float(volatility_profile.get("stop_loss_mult", 1.0) or 1.0), 4),
                     "volatility_premium_cap_mult": round(float(volatility_profile.get("premium_cap_mult", 1.0) or 1.0), 4),
                     "entry_bid_submit": entry_result.get("submit_bid"),
@@ -4094,6 +4367,24 @@ def main():
             stop_loss_pct_cap = abs(float(getattr(config, "STOP_LOSS_PCT", 0.0) or 0.0))
             if exit_reason is None and stop_loss_pct_cap > 0 and plpc <= -stop_loss_pct_cap:
                 exit_reason = "stop_loss_pct"
+
+            profit_targets = []
+            immediate_take_profit_pct = _safe_signal_float(
+                meta.get("immediate_take_profit_pct", getattr(config, "IMMEDIATE_TAKE_PROFIT_PCT", 0.0)),
+                0.0,
+            )
+            if immediate_take_profit_pct > 0:
+                profit_targets.append(immediate_take_profit_pct)
+            if bool(getattr(config, "ENABLE_FIXED_PROFIT_TARGET", False)):
+                fixed_profit_target_pct = _safe_signal_float(
+                    getattr(config, "PROFIT_TARGET_PCT", 0.0),
+                    0.0,
+                )
+                if fixed_profit_target_pct > 0:
+                    profit_targets.append(fixed_profit_target_pct)
+            profit_target_pct = min(profit_targets) if profit_targets else 0.0
+            if exit_reason is None and profit_target_pct > 0 and plpc >= profit_target_pct:
+                exit_reason = "profit_target"
 
             # --- Stateful profit management ---
             trade_state = _trade_state_from_meta(meta)
@@ -4334,7 +4625,17 @@ def main():
                         "rsi": meta.get("rsi", ""),
                         "roc": meta.get("roc", ""),
                         "iv_rank": meta.get("iv_rank", ""),
+                        "price": meta.get("price", ""),
+                        "vwap": meta.get("vwap", ""),
+                        "flow_score": meta.get("flow_score", ""),
+                        "regime_score": meta.get("regime_score", ""),
                         "contract_spread_pct": meta.get("contract_spread_pct", ""),
+                        "atr_pct": meta.get("atr_pct", ""),
+                        "volatility_score": meta.get("volatility_score", ""),
+                        "signal_pattern_signature": meta.get("signal_pattern_signature", ""),
+                        "signal_pattern_key": meta.get("signal_pattern_key", ""),
+                        "signal_pattern_global_key": meta.get("signal_pattern_global_key", ""),
+                        "pattern_direction_override": meta.get("pattern_direction_override", ""),
                         "entry_time": meta.get("entry_time_iso", ""),
                         "exit_time": now_et.isoformat(),
                         "hold_seconds": hold_seconds,
@@ -4377,6 +4678,7 @@ def main():
                         trade_row["loss_adaptation_action"] = loss_diagnosis.get("action", "")
                         trade_row["loss_underlying_move_pct"] = loss_diagnosis.get("underlying_move_pct", "")
                         last_exit_debug["loss_diagnosis"] = loss_diagnosis
+                    _record_signal_pattern_outcome(trade_row, now_et)
                     try:
                         trade_logger.log_trade(trade_row)
                         trade_telemetry_last_log_error = ""
@@ -4395,10 +4697,17 @@ def main():
                     else:
                         consecutive_losses = 0
 
-                    ticker = str(meta.get("ticker", "") or "")
+                    ticker = str(meta.get("ticker", "") or "").upper()
                     reversal_direction = ""
                     reentries_used = int(ticker_reentries_used.get(ticker, 0)) if ticker else 0
                     if ticker and trade_pnl_usd < 0:
+                        losing_direction = str(meta.get("direction", "") or "").lower()
+                        reversal_direction = _arm_loss_direction_flip(
+                            ticker,
+                            losing_direction,
+                            now_et,
+                            reason=str(loss_diagnosis.get("cause") or exit_reason),
+                        )
                         loss_cd_minutes = int(getattr(config, "REENTRY_COOLDOWN_LOSS_MINUTES", 20) or 20)
                         quick_loser_minutes = int(
                             getattr(config, "QUICK_LOSER_MAX_HOLD_MINUTES", 4) or 4
@@ -4426,19 +4735,19 @@ def main():
                         )
                     if (
                         ticker
+                        and trade_pnl_usd < 0
                         and exit_reason == "stop_loss"
                         and bool(getattr(config, "ENABLE_STOPLOSS_REVERSAL_REENTRY", False))
                     ):
-                        ticker_reentry_armed[ticker] = True
-                        prior_direction = str(meta.get("direction", "") or "").lower()
-                        if prior_direction == "call":
-                            ticker_reentry_expected_direction[ticker] = "put"
-                        elif prior_direction == "put":
-                            ticker_reentry_expected_direction[ticker] = "call"
-                        else:
-                            ticker_reentry_expected_direction[ticker] = ""
+                        if not reversal_direction:
+                            reversal_direction = _arm_loss_direction_flip(
+                                ticker,
+                                str(meta.get("direction", "") or "").lower(),
+                                now_et,
+                                reason=str(exit_reason),
+                            )
                         reversal_direction = str(ticker_reentry_expected_direction.get(ticker, "") or "").lower()
-                    elif ticker:
+                    elif ticker and trade_pnl_usd >= 0:
                         ticker_reentry_armed[ticker] = False
                         ticker_reentry_expected_direction[ticker] = ""
 
