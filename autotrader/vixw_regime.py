@@ -25,6 +25,7 @@ import yfinance as yf
 import config
 from broker import AlpacaBroker
 from data import AlpacaDataClient
+from trading_control import load_trading_control
 
 EASTERN = pytz.timezone(str(getattr(config, "EASTERN_TZ", "US/Eastern") or "US/Eastern"))
 VIX_PROXY_LOG_COLUMNS = [
@@ -86,6 +87,188 @@ def _cfg(name: str, default: Any) -> Any:
     return getattr(config, name, default)
 
 
+def _enum_text(value: Any) -> str:
+    try:
+        value = getattr(value, "value", value)
+    except Exception:  # noqa: BLE001
+        pass
+    return str(value or "").strip().lower()
+
+
+def _order_field_text(order: Any, field: str) -> str:
+    return _enum_text(getattr(order, field, ""))
+
+
+def _order_symbol(order: Any) -> str:
+    return str(getattr(order, "symbol", "") or "").strip().upper()
+
+
+def _order_submitted_at_et(order: Any) -> datetime | None:
+    raw = getattr(order, "submitted_at", None) or getattr(order, "created_at", None)
+    if raw is None:
+        return None
+    if isinstance(raw, datetime):
+        dt = raw
+    else:
+        try:
+            dt = datetime.fromisoformat(str(raw).replace("Z", "+00:00"))
+        except Exception:
+            return None
+    if dt.tzinfo is None:
+        dt = EASTERN.localize(dt)
+    return dt.astimezone(EASTERN)
+
+
+def _proxy_prefixes() -> tuple[str, ...]:
+    default_underlying = str(_cfg("VIXW_OPTION_UNDERLYING_SYMBOL", "VIXY") or "VIXY").upper()
+    raw = _cfg("VIXW_POSITION_SYMBOL_PREFIXES", (default_underlying, "VXX", "UVXY"))
+    if isinstance(raw, str):
+        items = [raw]
+    else:
+        try:
+            items = list(raw)
+        except TypeError:
+            items = []
+    prefixes: list[str] = []
+    for item in [default_underlying, *items]:
+        prefix = str(item or "").strip().upper()
+        if prefix and prefix not in prefixes:
+            prefixes.append(prefix)
+    return tuple(prefixes or (default_underlying,))
+
+
+def _is_proxy_symbol(symbol: str) -> bool:
+    clean = str(symbol or "").strip().upper()
+    return bool(clean) and clean.startswith(_proxy_prefixes())
+
+
+_ACTIVE_ORDER_STATUSES = {
+    "accepted",
+    "accepted_for_bidding",
+    "calculated",
+    "held",
+    "new",
+    "partially_filled",
+    "pending_cancel",
+    "pending_new",
+    "pending_replace",
+    "stopped",
+    "suspended",
+}
+
+
+def _is_active_order(order: Any) -> bool:
+    return _order_field_text(order, "status") in _ACTIVE_ORDER_STATUSES
+
+
+def _is_proxy_buy_order(order: Any) -> bool:
+    return (
+        _is_proxy_symbol(_order_symbol(order))
+        and _order_field_text(order, "side") == "buy"
+    )
+
+
+def _recent_orders(broker: AlpacaBroker) -> tuple[list[Any], bool]:
+    limit = max(50, int(_cfg("VIXW_RECENT_ORDER_LOOKBACK_LIMIT", 500) or 500))
+    try:
+        return list(broker.get_recent_orders(limit=limit) or []), True
+    except Exception as exc:  # noqa: BLE001
+        print(f"[vix_proxy] recent order lookup failed: {exc}")
+        return [], False
+
+
+def _describe_orders(orders: list[Any], *, max_items: int = 3) -> str:
+    labels = []
+    for order in orders[:max(1, int(max_items))]:
+        symbol = _order_symbol(order) or "unknown"
+        status = _order_field_text(order, "status") or "unknown"
+        labels.append(f"{symbol}:{status}")
+    more = len(orders) - len(labels)
+    if more > 0:
+        labels.append(f"+{more} more")
+    return ", ".join(labels)
+
+
+def _trading_control_block_reason() -> str | None:
+    if not bool(_cfg("VIXW_REQUIRE_TRADING_CONTROL_CLEAR", True)):
+        return None
+    try:
+        control = load_trading_control()
+    except Exception as exc:  # noqa: BLE001
+        return f"trading control lookup failed; conservative block ({exc})"
+    if bool(control.get("manual_stop", False)):
+        return "manual stop enabled"
+    if bool(control.get("dry_run", False)):
+        return "dry run enabled"
+    return None
+
+
+def _daily_cap_excluded_statuses() -> set[str]:
+    excluded = {"expired", "rejected"}
+    if not bool(_cfg("VIXW_COUNT_CANCELED_ORDERS_IN_DAILY_CAP", True)):
+        excluded.add("canceled")
+    return excluded
+
+
+def _proxy_position_exposure_reason(broker: AlpacaBroker) -> str | None:
+    try:
+        positions = broker.get_open_option_positions()
+    except Exception as exc:  # noqa: BLE001
+        return f"position lookup failed; conservative block ({exc})"
+
+    count = 0
+    for pos in positions:
+        symbol = str(getattr(pos, "symbol", "") or "").upper()
+        qty = _safe_int(getattr(pos, "qty", 0), 0)
+        if qty > 0 and _is_proxy_symbol(symbol):
+            count += 1
+    max_positions = int(_cfg("VIXW_MAX_OPEN_POSITIONS", 1) or 1)
+    if count >= max_positions:
+        return f"existing volatility proxy position exposure ({count}/{max_positions})"
+    return None
+
+
+def _proxy_entry_block_reason(broker: AlpacaBroker, now_et: datetime) -> str | None:
+    control_reason = _trading_control_block_reason()
+    if control_reason:
+        return control_reason
+
+    position_reason = _proxy_position_exposure_reason(broker)
+    if position_reason:
+        return position_reason
+
+    orders, orders_ok = _recent_orders(broker)
+    if not orders_ok:
+        return "proxy order lookup failed; conservative block"
+
+    proxy_buys = [order for order in orders if _is_proxy_buy_order(order)]
+    active_orders = [order for order in proxy_buys if _is_active_order(order)]
+    if bool(_cfg("VIXW_INCLUDE_OPEN_ORDERS_IN_EXPOSURE", True)) and active_orders:
+        return f"existing proxy buy order open ({_describe_orders(active_orders)})"
+
+    max_daily = int(_cfg("VIXW_MAX_BUY_ORDERS_PER_DAY", 1) or 0)
+    if max_daily > 0:
+        excluded_statuses = _daily_cap_excluded_statuses()
+        today_orders = []
+        for order in proxy_buys:
+            submitted_at = _order_submitted_at_et(order)
+            if submitted_at is None or submitted_at.date() != now_et.date():
+                continue
+            if _order_field_text(order, "status") in excluded_statuses:
+                continue
+            today_orders.append(order)
+        if len(today_orders) >= max_daily:
+            return (
+                f"daily proxy buy order cap reached "
+                f"({len(today_orders)}/{max_daily}: {_describe_orders(today_orders)})"
+            )
+    return None
+
+
+def _proxy_client_order_id(now_et: datetime, symbol: str) -> str:
+    return f"abvix-{now_et.strftime('%Y%m%d')}-{str(symbol or '').upper()}"[:48]
+
+
 def _add_trading_days(start: date, days: int) -> date:
     cursor = start
     count = 0
@@ -142,20 +325,7 @@ def _regime_direction(vix_level: float) -> tuple[str | None, str]:
 
 
 def _has_proxy_exposure(broker: AlpacaBroker) -> bool:
-    default_underlying = str(_cfg("VIXW_OPTION_UNDERLYING_SYMBOL", "VIXY") or "VIXY").upper()
-    prefixes = tuple(str(x).upper() for x in _cfg("VIXW_POSITION_SYMBOL_PREFIXES", (default_underlying, "VXX", "UVXY")))
-    try:
-        positions = broker.get_open_option_positions()
-    except Exception as exc:  # noqa: BLE001
-        print(f"[vix_proxy] position lookup failed: {exc}")
-        return True
-    count = 0
-    for pos in positions:
-        symbol = str(getattr(pos, "symbol", "") or "").upper()
-        qty = _safe_int(getattr(pos, "qty", 0), 0)
-        if qty > 0 and symbol.startswith(prefixes):
-            count += 1
-    return count >= int(_cfg("VIXW_MAX_OPEN_POSITIONS", 1) or 1)
+    return _proxy_position_exposure_reason(broker) is not None
 
 
 def _select_proxy_contract(
@@ -223,6 +393,101 @@ def _select_proxy_contract(
         return contract, "ok"
 
     return None, f"no proxy contract passed quote/spread gate max_spread={max_spread:.2f}%"
+
+
+def _order_fill_snapshot(order: Any) -> tuple[int, float | None, str]:
+    status = _order_field_text(order, "status") or "unknown"
+    filled_qty = _safe_int(getattr(order, "filled_qty", 0), 0)
+    fill_price = _safe_float(getattr(order, "filled_avg_price", None), 0.0)
+    if fill_price <= 0:
+        fill_price = _safe_float(getattr(order, "average_fill_price", None), 0.0)
+    return filled_qty, fill_price if fill_price > 0 else None, status
+
+
+def _await_proxy_entry_fill(
+    broker: AlpacaBroker,
+    *,
+    order_id: str,
+    requested_qty: int,
+) -> dict[str, Any]:
+    if not order_id:
+        return {"filled": False, "status": "missing_order_id", "filled_qty": 0, "filled_price": None}
+
+    wait_seconds = max(0, int(_cfg("VIXW_ENTRY_ORDER_STATUS_WAIT_SECONDS", 8) or 8))
+    poll_seconds = max(1, int(_cfg("VIXW_ENTRY_ORDER_POLL_SECONDS", 1) or 1))
+    terminal_no_fill = {"canceled", "expired", "rejected"}
+    deadline = time.time() + wait_seconds
+    last_status = "submitted"
+    last_filled_qty = 0
+    last_fill_price: float | None = None
+
+    while True:
+        try:
+            order = broker.get_order_status(order_id)
+            filled_qty, fill_price, status = _order_fill_snapshot(order)
+        except Exception as exc:  # noqa: BLE001
+            return {
+                "filled": False,
+                "status": f"status_lookup_error:{type(exc).__name__}",
+                "filled_qty": last_filled_qty,
+                "filled_price": last_fill_price,
+            }
+
+        last_status = status
+        last_filled_qty = filled_qty
+        last_fill_price = fill_price
+        if filled_qty > 0:
+            if filled_qty < requested_qty and _is_active_order(order):
+                try:
+                    broker.cancel_order(order_id)
+                except Exception as exc:  # noqa: BLE001
+                    print(f"[vix_proxy] partial-fill cancel failed for {order_id}: {exc}")
+            return {
+                "filled": True,
+                "status": status,
+                "filled_qty": min(filled_qty, requested_qty),
+                "filled_price": fill_price,
+            }
+        if status in terminal_no_fill or time.time() >= deadline:
+            break
+        time.sleep(poll_seconds)
+
+    cancel_note = ""
+    if bool(_cfg("VIXW_CANCEL_UNFILLED_ENTRY_ORDERS", True)):
+        try:
+            broker.cancel_order(order_id)
+            cancel_note = "cancel_requested"
+        except Exception as exc:  # noqa: BLE001
+            cancel_note = f"cancel_failed:{type(exc).__name__}"
+            print(f"[vix_proxy] cancel unfilled entry order {order_id} failed: {exc}")
+
+    return {
+        "filled": False,
+        "status": last_status,
+        "filled_qty": last_filled_qty,
+        "filled_price": last_fill_price,
+        "cancel_note": cancel_note,
+    }
+
+
+def _submit_proxy_limit_buy(
+    broker: AlpacaBroker,
+    *,
+    symbol: str,
+    qty: int,
+    limit_price: float,
+    now_et: datetime,
+) -> dict[str, Any]:
+    order = broker.place_option_limit_buy(
+        symbol,
+        qty,
+        limit_price,
+        client_order_id=_proxy_client_order_id(now_et, symbol),
+    )
+    order_id = str(getattr(order, "id", "") or "")
+    result = _await_proxy_entry_fill(broker, order_id=order_id, requested_qty=qty)
+    result["order_id"] = order_id
+    return result
 
 
 def _coerce_legacy_row(row: dict[str, Any]) -> dict[str, Any]:
@@ -324,6 +589,12 @@ def run_vixw_regime_forever(api_key: str, secret_key: str) -> None:
                 time.sleep(sleep_seconds)
                 continue
 
+            entry_block_reason = _proxy_entry_block_reason(broker, now_et)
+            if entry_block_reason:
+                _log_decision({"timestamp": now_et.isoformat(), "decision": "skip", "reason": entry_block_reason})
+                time.sleep(sleep_seconds)
+                continue
+
             vix_level = _latest_vix_level()
             if vix_level is None or vix_level <= 0:
                 _log_decision({"timestamp": now_et.isoformat(), "decision": "skip", "reason": "VIX level unavailable"})
@@ -333,11 +604,6 @@ def run_vixw_regime_forever(api_key: str, secret_key: str) -> None:
             direction, regime_reason = _regime_direction(vix_level)
             if direction is None:
                 _log_decision({"timestamp": now_et.isoformat(), "vix_level": round(vix_level, 4), "average_level": _cfg("VIXW_REGIME_AVERAGE_LEVEL", 19.0), "decision": "skip", "reason": regime_reason})
-                time.sleep(sleep_seconds)
-                continue
-
-            if _has_proxy_exposure(broker):
-                _log_decision({"timestamp": now_et.isoformat(), "vix_level": round(vix_level, 4), "average_level": _cfg("VIXW_REGIME_AVERAGE_LEVEL", 19.0), "direction": direction, "decision": "skip", "reason": "existing volatility proxy exposure or position lookup conservative block"})
                 time.sleep(sleep_seconds)
                 continue
 
@@ -360,10 +626,37 @@ def run_vixw_regime_forever(api_key: str, secret_key: str) -> None:
             limit_price = round(ask * limit_multiplier, 2)
             symbol = str(contract.get("symbol", "") or "")
 
-            order = broker.place_option_limit_buy(symbol, qty, limit_price)
-            order_id = str(getattr(order, "id", "") or "")
+            entry_result = _submit_proxy_limit_buy(
+                broker,
+                symbol=symbol,
+                qty=qty,
+                limit_price=limit_price,
+                now_et=now_et,
+            )
             last_entry_at = now_et
-            print(f"[vix_proxy] submitted {direction.upper()} buy {symbol} qty={qty} limit={limit_price:.2f} vix={vix_level:.2f} order={order_id}")
+            order_id = str(entry_result.get("order_id", "") or "")
+            filled_qty = _safe_int(entry_result.get("filled_qty"), 0)
+            filled_price = _safe_float(entry_result.get("filled_price"), 0.0)
+            status = str(entry_result.get("status", "unknown") or "unknown")
+            if bool(entry_result.get("filled")):
+                decision = "filled_buy"
+                reason = regime_reason
+                log_qty = filled_qty or qty
+                print(
+                    f"[vix_proxy] filled {direction.upper()} buy {symbol} qty={log_qty} "
+                    f"limit={limit_price:.2f} fill={filled_price:.2f} vix={vix_level:.2f} order={order_id}"
+                )
+            else:
+                cancel_note = str(entry_result.get("cancel_note", "") or "").strip()
+                decision = "entry_not_filled"
+                reason = f"{regime_reason}; entry status={status}"
+                if cancel_note:
+                    reason = f"{reason}; {cancel_note}"
+                log_qty = qty
+                print(
+                    f"[vix_proxy] submitted but not filled {direction.upper()} buy {symbol} "
+                    f"qty={qty} limit={limit_price:.2f} status={status} order={order_id}"
+                )
             _log_decision({
                 "timestamp": now_et.isoformat(),
                 "vix_level": round(vix_level, 4),
@@ -371,15 +664,15 @@ def run_vixw_regime_forever(api_key: str, secret_key: str) -> None:
                 "proxy_underlying": contract.get("proxy_underlying", ""),
                 "proxy_underlying_price": contract.get("underlying_price", ""),
                 "direction": direction,
-                "decision": "submitted_buy",
-                "reason": regime_reason,
+                "decision": decision,
+                "reason": reason,
                 "option_symbol": symbol,
                 "strike": contract.get("strike_price", ""),
                 "expiration": contract.get("expiration_date", ""),
                 "ask": ask,
                 "bid": contract.get("bid_price", ""),
                 "spread_pct": contract.get("spread_pct", ""),
-                "qty": qty,
+                "qty": log_qty,
             })
         except Exception as exc:  # noqa: BLE001
             print(f"[vix_proxy] sidecar error: {exc}")

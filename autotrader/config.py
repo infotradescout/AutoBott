@@ -291,6 +291,33 @@ ENABLE_VIX_GUARD           = False
 VIX_MIN                    = 13.0
 VIX_MAX                    = 80.0
 
+# Volatility proxy sidecar (VIX -> VIXY/VXX/UVXY options). Keep it active, but
+# make duplicate/exposure mistakes impossible instead of using a global pause.
+VIXW_HEAVY_MODE                       = True
+VIXW_ONLY_PAPER_MODE                  = True
+VIXW_REQUIRE_TRADING_CONTROL_CLEAR    = False
+VIXW_SIGNAL_SOURCE_SYMBOL             = "^VIX"
+VIXW_REGIME_AVERAGE_LEVEL             = 19.0
+VIXW_NEUTRAL_BAND                     = 0.0
+VIXW_OPTION_UNDERLYING_SYMBOL         = "VIXY"
+VIXW_POSITION_SYMBOL_PREFIXES         = ("VIXY", "VXX", "UVXY")
+VIXW_MAX_OPEN_POSITIONS               = 1
+VIXW_INCLUDE_OPEN_ORDERS_IN_EXPOSURE  = True
+VIXW_MAX_BUY_ORDERS_PER_DAY           = 1
+VIXW_COUNT_CANCELED_ORDERS_IN_DAILY_CAP = True
+VIXW_RECENT_ORDER_LOOKBACK_LIMIT      = 500
+VIXW_MIN_DTE_TRADING_DAYS             = 2
+VIXW_MAX_DTE_TRADING_DAYS             = 7
+VIXW_MAX_OPTION_SPREAD_PCT            = 3.0
+VIXW_POSITION_SIZE_USD                = 300.0
+VIXW_MAX_CONTRACTS_PER_ENTRY          = 1
+VIXW_ENTRY_LIMIT_PRICE_MULTIPLIER     = 1.0
+VIXW_ENTRY_ORDER_STATUS_WAIT_SECONDS  = 8
+VIXW_ENTRY_ORDER_POLL_SECONDS         = 1
+VIXW_CANCEL_UNFILLED_ENTRY_ORDERS     = True
+VIXW_POLL_SECONDS                     = 60
+VIXW_MIN_SECONDS_BETWEEN_ENTRIES      = 1800
+
 ENABLE_ENTRY_CONFIRMATION              = True
 ENTRY_CONFIRM_BARS                     = 2
 ENTRY_CONFIRM_BYPASS_MIN_SIGNAL_SCORE  = 9.5

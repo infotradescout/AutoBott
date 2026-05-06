@@ -62,15 +62,25 @@ class AlpacaBroker:
             if _normalize_asset_class(getattr(p, "asset_class", "")) in option_asset_classes
         ]
 
-    def place_option_limit_buy(self, option_symbol: str, qty: int, ask_price: float):
+    def place_option_limit_buy(
+        self,
+        option_symbol: str,
+        qty: int,
+        ask_price: float,
+        *,
+        client_order_id: str | None = None,
+    ):
         _assert_option_symbol(option_symbol)
-        req = LimitOrderRequest(
-            symbol=option_symbol,
-            qty=qty,
-            side=OrderSide.BUY,
-            time_in_force=TimeInForce.DAY,
-            limit_price=_limit_price_decimal(ask_price),
-        )
+        payload = {
+            "symbol": option_symbol,
+            "qty": qty,
+            "side": OrderSide.BUY,
+            "time_in_force": TimeInForce.DAY,
+            "limit_price": _limit_price_decimal(ask_price),
+        }
+        if client_order_id:
+            payload["client_order_id"] = str(client_order_id).strip()[:48]
+        req = LimitOrderRequest(**payload)
         return self.trading_client.submit_order(order_data=req)
 
     def place_option_limit_sell(self, option_symbol: str, qty: int, limit_price: float):
