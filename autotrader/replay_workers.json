@@ -1,0 +1,36 @@
+[
+  {
+    "name": "recent_indexes_cache_roll",
+    "symbols": ["SPY", "QQQ", "IWM", "DIA"],
+    "interval": "5m",
+    "start": "2026-04-01",
+    "end": "2026-05-01",
+    "window_days": 5,
+    "step_days": 5,
+    "max_windows": 4,
+    "sleep_seconds": 900,
+    "scan_bars": 20,
+    "min_trades": 5,
+    "min_win_loss_ratio": 1.25,
+    "rolling": true,
+    "rolling_step_days": 1,
+    "rolling_end_policy": "cache"
+  },
+  {
+    "name": "mega_cap_cache_roll",
+    "symbols": ["AAPL", "MSFT", "NVDA", "AMZN", "META", "GOOGL", "TSLA"],
+    "interval": "5m",
+    "start": "2026-04-01",
+    "end": "2026-05-01",
+    "window_days": 5,
+    "step_days": 5,
+    "max_windows": 4,
+    "sleep_seconds": 900,
+    "scan_bars": 20,
+    "min_trades": 5,
+    "min_win_loss_ratio": 1.30,
+    "rolling": true,
+    "rolling_step_days": 1,
+    "rolling_end_policy": "cache"
+  }
+]

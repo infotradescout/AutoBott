@@ -27,6 +27,13 @@ def _is_writable_dir(path: Path) -> bool:
         return False
 
 
+def _env_bool(name: str, default: bool) -> bool:
+    raw = str(os.getenv(name, "") or "").strip().lower()
+    if not raw:
+        return bool(default)
+    return raw in {"1", "true", "yes", "y", "on"}
+
+
 def _resolve_data_dir() -> Path:
     env_path = os.getenv("DATA_DIR")
     candidates: list[Path] = []
@@ -57,6 +64,7 @@ TICKERS = [
 ]
 CORE_TICKERS = TICKERS[:]
 
+UNIVERSE_MODE = "core"  # options: core, movers, all_optionable
 AUTO_EXPAND_UNIVERSE_WITH_MOVERS = False
 UNIVERSE_MOVER_TOP                = 10
 UNIVERSE_MAX_TICKERS              = 10
@@ -70,6 +78,10 @@ SIGNAL_LOOKBACK     = 20
 SCAN_INTRADAY_BARS  = 60
 SCAN_MIN_BARS       = 5
 SCAN_DAILY_BARS     = 30
+SCAN_MIN_DAILY_BARS = 8
+RVOL_AVG_DAILY_BARS = 8
+ATR_PERIOD          = 7
+ATR_MIN_PERIOD      = 4
 
 MAX_POSITIONS                       = 2
 POSITION_SIZE_USD                   = 300
@@ -405,7 +417,7 @@ FEATURE_TICKER_SCORECARDS            = False
 FEATURE_STRATEGY_PROFILES            = False
 FEATURE_BAD_FILL_DETECTOR            = False
 FEATURE_WEEKLY_REVIEW_GENERATOR      = False
-AUTO_RESUME_TRADING_ON_BOOT          = False
+AUTO_RESUME_TRADING_ON_BOOT          = _env_bool("AUTO_RESUME_TRADING_ON_BOOT", True)
 
 TRADES_CSV_PATH          = _DATA_DIR / "trades.csv"
 STATE_JSON_PATH          = _DATA_DIR / "runtime_state.json"

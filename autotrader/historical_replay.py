@@ -15,9 +15,9 @@ import argparse
 import csv
 import json
 import math
-import os
+import re
 from dataclasses import dataclass
-from datetime import datetime, time, timedelta
+from datetime import date, datetime, time, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -44,6 +44,34 @@ class ReplayConfig:
     max_signals_per_scan: int
     output: Path
     cache_dir: Path
+    daily_lookback_days: int
+    min_daily_bars: int
+    scan_bars: int = int(getattr(config, "SCAN_INTRADAY_BARS", 60))
+    offline: bool = False
+
+
+REPLAY_RESULT_COLUMNS = [
+    "timestamp",
+    "symbol",
+    "direction",
+    "strategy_profile",
+    "signal_score",
+    "direction_score",
+    "rvol",
+    "roc",
+    "rsi",
+    "volatility_score",
+    "reason",
+    "evaluated",
+    "verdict",
+    "entry_price",
+    "exit_price",
+    "exit_time",
+    "directional_move_pct",
+    "max_favorable_pct",
+    "max_adverse_pct",
+    "bars_used",
+]
 
 
 def _safe_float(value: Any, default: float = 0.0) -> float:
@@ -56,7 +84,7 @@ def _safe_float(value: Any, default: float = 0.0) -> float:
     return parsed
 
 
-def _normalize_bars(df: pd.DataFrame) -> pd.DataFrame:
+def _normalize_bars(df: pd.DataFrame, *, daily: bool = False) -> pd.DataFrame:
     if df is None or df.empty:
         return pd.DataFrame(columns=["timestamp", "open", "high", "low", "close", "volume"])
     if isinstance(df.columns, pd.MultiIndex):
@@ -78,11 +106,57 @@ def _normalize_bars(df: pd.DataFrame) -> pd.DataFrame:
     required = ["timestamp", "open", "high", "low", "close", "volume"]
     if not set(required).issubset(df.columns):
         return pd.DataFrame(columns=required)
-    df["timestamp"] = pd.to_datetime(df["timestamp"], utc=True, errors="coerce").dt.tz_convert(EASTERN)
+    if daily:
+        date_text = df["timestamp"].astype(str).str.slice(0, 10)
+        parsed_dates = pd.to_datetime(date_text, errors="coerce")
+        df["timestamp"] = parsed_dates.apply(
+            lambda item: EASTERN.localize(datetime.combine(item.date(), time(12, 0))) if pd.notna(item) else pd.NaT
+        )
+    else:
+        df["timestamp"] = pd.to_datetime(df["timestamp"], utc=True, errors="coerce").dt.tz_convert(EASTERN)
     for col in ["open", "high", "low", "close", "volume"]:
         df[col] = pd.to_numeric(df[col], errors="coerce")
     df = df.dropna(subset=["timestamp", "open", "high", "low", "close"]).sort_values("timestamp")
     return df[required].reset_index(drop=True)
+
+
+def _parse_cache_range_from_filename(path: Path) -> tuple[date, date] | None:
+    """Return the date window encoded in a cache filename, if available."""
+    match = re.match(
+        r"^(?P<symbol>.+)_(?P<interval>[^_]+)_(?P<start>\d{4}-\d{2}-\d{2})_(?P<end>\d{4}-\d{2}-\d{2})\.csv$",
+        path.name,
+    )
+    if not match:
+        return None
+    try:
+        return datetime.fromisoformat(match.group("start")).date(), datetime.fromisoformat(match.group("end")).date()
+    except ValueError:
+        return None
+
+
+def _iter_cache_files(cache_dir: Path, symbol: str, interval: str):
+    pattern = f"{symbol.upper()}_{interval}_*.csv"
+    return cache_dir.glob(pattern)
+
+
+def _find_cached_file(cache_dir: Path, symbol: str, interval: str, start: str, end: str) -> Path | None:
+    start_date = datetime.fromisoformat(start).date()
+    end_date = datetime.fromisoformat(end).date()
+    preferred = _cache_path(cache_dir, symbol, interval, start, end)
+    if preferred.exists():
+        return preferred
+    candidates: list[tuple[tuple[date, date], Path]] = []
+    for path in _iter_cache_files(cache_dir, symbol, interval):
+        parsed = _parse_cache_range_from_filename(path)
+        if not parsed:
+            continue
+        file_start, file_end = parsed
+        if file_start <= start_date and file_end >= end_date:
+            candidates.append(((file_start, file_end), path))
+    if not candidates:
+        return None
+    candidates.sort(key=lambda item: ((item[0][1] - item[0][0]).days, item[0][1]))
+    return candidates[0][1]
 
 
 def _cache_path(cache_dir: Path, symbol: str, interval: str, start: str, end: str) -> Path:
@@ -92,9 +166,19 @@ def _cache_path(cache_dir: Path, symbol: str, interval: str, start: str, end: st
 
 def _load_or_fetch_bars(symbol: str, cfg: ReplayConfig) -> pd.DataFrame:
     cfg.cache_dir.mkdir(parents=True, exist_ok=True)
-    path = _cache_path(cfg.cache_dir, symbol, cfg.interval, cfg.start, cfg.end)
-    if path.exists():
-        return _normalize_bars(pd.read_csv(path))
+    cache_path = _cache_path(cfg.cache_dir, symbol, cfg.interval, cfg.start, cfg.end)
+    path = _find_cached_file(cfg.cache_dir, symbol, cfg.interval, cfg.start, cfg.end)
+    if path is not None:
+        out = _normalize_bars(pd.read_csv(path))
+        if out.empty:
+            return out
+        start_ts = datetime.fromisoformat(cfg.start).replace(tzinfo=None)
+        end_ts = datetime.fromisoformat(cfg.end).replace(tzinfo=None)
+        start_at = EASTERN.localize(start_ts)
+        end_at = EASTERN.localize(end_ts)
+        return out[(out["timestamp"] >= start_at) & (out["timestamp"] < end_at)].reset_index(drop=True)
+    if cfg.offline:
+        raise FileNotFoundError(f"[historical_replay] Missing cache file for {symbol}: {symbol}_{cfg.interval}_{cfg.start}_{cfg.end}.csv")
 
     df = yf.download(
         symbol,
@@ -108,7 +192,41 @@ def _load_or_fetch_bars(symbol: str, cfg: ReplayConfig) -> pd.DataFrame:
     )
     out = _normalize_bars(df)
     if not out.empty:
-        out.to_csv(path, index=False)
+        out.to_csv(cache_path, index=False)
+    return out
+
+
+def _daily_history_start(start: str, lookback_days: int) -> str:
+    parsed = datetime.fromisoformat(str(start)).date()
+    return (parsed - timedelta(days=max(30, int(lookback_days)))).isoformat()
+
+
+def _load_or_fetch_daily_bars(symbol: str, cfg: ReplayConfig) -> pd.DataFrame:
+    cfg.cache_dir.mkdir(parents=True, exist_ok=True)
+    daily_start = _daily_history_start(cfg.start, cfg.daily_lookback_days)
+    cache_path = _cache_path(cfg.cache_dir, symbol, "1d", daily_start, cfg.end)
+    path = _find_cached_file(cfg.cache_dir, symbol, "1d", daily_start, cfg.end)
+    if path is not None:
+        out = _normalize_bars(pd.read_csv(path), daily=True)
+        if out.empty:
+            return out
+        return out[(out["timestamp"].dt.date >= datetime.fromisoformat(daily_start).date()) & (out["timestamp"].dt.date < datetime.fromisoformat(cfg.end).date())].reset_index(drop=True)
+    if cfg.offline:
+        return pd.DataFrame()
+
+    df = yf.download(
+        symbol,
+        start=daily_start,
+        end=cfg.end,
+        interval="1d",
+        auto_adjust=True,
+        progress=False,
+        prepost=False,
+        threads=False,
+    )
+    out = _normalize_bars(df, daily=True)
+    if not out.empty:
+        out.to_csv(cache_path, index=False)
     return out
 
 
@@ -124,8 +242,17 @@ def _session_rows(df: pd.DataFrame) -> pd.DataFrame:
 class HistoricalReplayDataClient:
     """DataClient-compatible adapter pinned to a replay timestamp."""
 
-    def __init__(self, bars_by_symbol: dict[str, pd.DataFrame]):
+    def __init__(
+        self,
+        bars_by_symbol: dict[str, pd.DataFrame],
+        daily_bars_by_symbol: dict[str, pd.DataFrame] | None = None,
+    ):
         self.bars_by_symbol = {k.upper(): _session_rows(v) for k, v in bars_by_symbol.items()}
+        self.daily_bars_by_symbol = {
+            k.upper(): v.sort_values("timestamp").reset_index(drop=True)
+            for k, v in (daily_bars_by_symbol or {}).items()
+            if v is not None and not v.empty
+        }
         self.now_et: datetime | None = None
 
     def set_time(self, now_et: datetime) -> None:
@@ -193,6 +320,14 @@ class HistoricalReplayDataClient:
         return out.tail(limit).reset_index(drop=True)
 
     def get_stock_daily_bars(self, symbol: str, limit: int = 30) -> pd.DataFrame:
+        daily = self.daily_bars_by_symbol.get(symbol.upper(), pd.DataFrame())
+        if not daily.empty:
+            out = daily
+            if self.now_et is not None:
+                session_date = self.now_et.astimezone(EASTERN).date()
+                out = out[out["timestamp"].dt.date < session_date]
+            return out.tail(limit).reset_index(drop=True)
+
         df = self._bars_until_now(symbol)
         if df.empty:
             return pd.DataFrame()
@@ -229,7 +364,7 @@ class HistoricalReplayDataClient:
                 "tradable": True,
                 "open_interest": 1000,
                 "volume": 100,
-                "implied_volatility": 0.50,
+                "implied_volatility": None,
                 "delta": 0.50 if suffix == "C" else -0.50,
             }
         ]
@@ -318,21 +453,49 @@ def _simulate_outcome(
     }
 
 
+def _result_columns(rows: list[dict[str, Any]]) -> list[str]:
+    columns = list(REPLAY_RESULT_COLUMNS)
+    for row in rows:
+        for key in row.keys():
+            if key not in columns:
+                columns.append(key)
+    return columns
+
+
 def _write_rows(path: Path, rows: list[dict[str, Any]]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    if not rows:
-        return
-    fieldnames = list(rows[0].keys())
+    fieldnames = _result_columns(rows)
     with path.open("w", newline="", encoding="utf-8") as handle:
-        writer = csv.DictWriter(handle, fieldnames=fieldnames)
+        writer = csv.DictWriter(handle, fieldnames=fieldnames, extrasaction="ignore")
         writer.writeheader()
-        writer.writerows(rows)
+        for row in rows:
+            writer.writerow({field: row.get(field, "") for field in fieldnames})
 
 
-def _summarize(rows: list[dict[str, Any]]) -> dict[str, Any]:
+def _summarize(
+    rows: list[dict[str, Any]],
+    *,
+    scan_iterations: int = 0,
+    failure_rows: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
     evaluated = [r for r in rows if str(r.get("evaluated")) == "True" or r.get("evaluated") is True]
     wins = [r for r in evaluated if r.get("verdict") == "win"]
     losses = [r for r in evaluated if r.get("verdict") == "loss"]
+    failure_counts: dict[str, int] = {}
+    failure_detail_counts: dict[str, int] = {}
+    for row in failure_rows or []:
+        reason = str(row.get("reason", "") or "unknown").strip() or "unknown"
+        family = reason.split(":", 1)[0].strip() if ":" in reason else reason
+        failure_counts[family] = failure_counts.get(family, 0) + 1
+        failure_detail_counts[reason] = failure_detail_counts.get(reason, 0) + 1
+    top_failures = [
+        {"reason": key, "count": count}
+        for key, count in sorted(failure_counts.items(), key=lambda item: item[1], reverse=True)[:8]
+    ]
+    top_failure_details = [
+        {"reason": key, "count": count}
+        for key, count in sorted(failure_detail_counts.items(), key=lambda item: item[1], reverse=True)[:12]
+    ]
     by_profile: dict[str, dict[str, int]] = {}
     for row in evaluated:
         key = str(row.get("strategy_profile") or "unknown")
@@ -349,6 +512,10 @@ def _summarize(rows: list[dict[str, Any]]) -> dict[str, Any]:
     profile_rows.sort(key=lambda item: (float(item["win_rate_pct"]), int(item["trades"])), reverse=True)
     total = max(1, len(evaluated))
     return {
+        "scan_iterations": int(scan_iterations),
+        "scan_failures": len(failure_rows or []),
+        "top_failures": top_failures,
+        "top_failure_details": top_failure_details,
         "opportunities": len(rows),
         "evaluated": len(evaluated),
         "wins": len(wins),
@@ -359,13 +526,44 @@ def _summarize(rows: list[dict[str, Any]]) -> dict[str, Any]:
 
 
 def run_replay(cfg: ReplayConfig) -> dict[str, Any]:
-    old_sleep = config.RATE_LIMIT_SLEEP_SECONDS
+    old_config = {
+        "RATE_LIMIT_SLEEP_SECONDS": config.RATE_LIMIT_SLEEP_SECONDS,
+        "SCAN_INTRADAY_BARS": config.SCAN_INTRADAY_BARS,
+        "SCAN_MIN_DAILY_BARS": getattr(config, "SCAN_MIN_DAILY_BARS", 8),
+        "RVOL_AVG_DAILY_BARS": getattr(config, "RVOL_AVG_DAILY_BARS", 8),
+        "ATR_PERIOD": getattr(config, "ATR_PERIOD", 7),
+        "ATR_MIN_PERIOD": getattr(config, "ATR_MIN_PERIOD", 4),
+    }
+    min_daily_bars = max(3, int(cfg.min_daily_bars))
     config.RATE_LIMIT_SLEEP_SECONDS = 0.0
+    config.SCAN_INTRADAY_BARS = max(1, int(cfg.scan_bars))
+    config.SCAN_MIN_DAILY_BARS = min_daily_bars
+    config.RVOL_AVG_DAILY_BARS = min_daily_bars
+    config.ATR_PERIOD = max(2, min(int(old_config["ATR_PERIOD"] or 7), min_daily_bars - 1))
+    config.ATR_MIN_PERIOD = max(2, min(int(old_config["ATR_MIN_PERIOD"] or 4), min_daily_bars - 1))
     try:
-        bars_by_symbol = {symbol: _load_or_fetch_bars(symbol, cfg) for symbol in cfg.symbols}
+        bars_by_symbol = {}
+        missing_symbol_rows: list[str] = []
+        for symbol in cfg.symbols:
+            try:
+                bars_by_symbol[symbol] = _load_or_fetch_bars(symbol, cfg)
+            except FileNotFoundError:
+                missing_symbol_rows.append(symbol)
+        if missing_symbol_rows and cfg.offline:
+            missing = ", ".join(missing_symbol_rows)
+            raise FileNotFoundError(
+                "Offline replay requires cached bars for all requested symbols. "
+                f"Missing: {missing}. Build cache first by running with network or preloading."
+            )
         bars_by_symbol = {s: df for s, df in bars_by_symbol.items() if not df.empty}
-        data_client = HistoricalReplayDataClient(bars_by_symbol)
-        scanner = IntradayScanner(data_client)  # type: ignore[arg-type]
+        if not bars_by_symbol:
+            raise ValueError("No symbols with usable intraday data were loaded for replay.")
+        daily_bars_by_symbol = {
+            symbol: _load_or_fetch_daily_bars(symbol, cfg)
+            for symbol in bars_by_symbol.keys()
+        }
+        data_client = HistoricalReplayDataClient(bars_by_symbol, daily_bars_by_symbol)
+        scanner = IntradayScanner(data_client, emit_summary=False, write_scan_log=False)  # type: ignore[arg-type]
 
         all_times = sorted(
             {
@@ -375,6 +573,8 @@ def run_replay(cfg: ReplayConfig) -> dict[str, Any]:
             }
         )
         rows: list[dict[str, Any]] = []
+        failure_rows: list[dict[str, Any]] = []
+        scan_iterations = 0
         last_scan: datetime | None = None
         for now_et in all_times:
             now_et = now_et.astimezone(EASTERN)
@@ -385,9 +585,13 @@ def run_replay(cfg: ReplayConfig) -> dict[str, Any]:
             last_scan = now_et
             data_client.set_time(now_et)
             signals = scanner.run_scan(list(bars_by_symbol.keys()), now_et=now_et)
+            scan_iterations += 1
+            failure_rows.extend(list(getattr(scanner, "last_failures", []) or []))
             for signal in signals[: cfg.max_signals_per_scan]:
                 symbol = str(signal.get("symbol", "") or "").upper()
                 direction = str(signal.get("direction", "") or "").lower()
+                if direction not in {"call", "put"}:
+                    continue
                 outcome = _simulate_outcome(
                     bars=bars_by_symbol.get(symbol, pd.DataFrame()),
                     direction=direction,
@@ -413,20 +617,33 @@ def run_replay(cfg: ReplayConfig) -> dict[str, Any]:
                     }
                 )
         _write_rows(cfg.output, rows)
-        summary = _summarize(rows)
+        summary = _summarize(rows, scan_iterations=scan_iterations, failure_rows=failure_rows)
         summary_path = cfg.output.with_suffix(".summary.json")
         summary_path.write_text(json.dumps(summary, indent=2), encoding="utf-8")
         return {"output": str(cfg.output), "summary_path": str(summary_path), "summary": summary}
     finally:
-        config.RATE_LIMIT_SLEEP_SECONDS = old_sleep
+        for key, value in old_config.items():
+            setattr(config, key, value)
 
 
 def _parse_args() -> ReplayConfig:
     parser = argparse.ArgumentParser(description="Replay historical bars through AutoBott scanner.")
     parser.add_argument("--symbols", default=",".join(config.CORE_TICKERS), help="Comma-separated symbols.")
+    parser.add_argument(
+        "--offline",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Load bars only from cache files. Use --offline/--no-offline to control. Default: --offline.",
+    )
     parser.add_argument("--start", required=True, help="YYYY-MM-DD start date.")
     parser.add_argument("--end", required=True, help="YYYY-MM-DD end date.")
     parser.add_argument("--interval", default="5m", help="yfinance interval, e.g. 1m, 5m, 15m, 1d.")
+    parser.add_argument(
+        "--scan-bars",
+        type=int,
+        default=int(getattr(config, "SCAN_INTRADAY_BARS", 60)),
+        help="Number of intraday bars passed to each scanner snapshot.",
+    )
     parser.add_argument("--scan-every-minutes", type=int, default=5)
     parser.add_argument("--horizon-minutes", type=int, default=45)
     parser.add_argument("--take-profit-pct", type=float, default=0.35, help="Underlying directional move percent.")
@@ -434,6 +651,8 @@ def _parse_args() -> ReplayConfig:
     parser.add_argument("--max-signals-per-scan", type=int, default=2)
     parser.add_argument("--output", default=str(Path(config.DATA_DIR) / "historical_replay_results.csv"))
     parser.add_argument("--cache-dir", default=str(Path(config.DATA_DIR) / "historical_cache"))
+    parser.add_argument("--daily-lookback-days", type=int, default=90, help="Calendar days of daily bars to backfill for scanner context.")
+    parser.add_argument("--min-daily-bars", type=int, default=int(getattr(config, "SCAN_MIN_DAILY_BARS", 8)), help="Minimum prior daily bars required by the replay scanner.")
     args = parser.parse_args()
     symbols = [s.strip().upper() for s in str(args.symbols).split(",") if s.strip()]
     return ReplayConfig(
@@ -441,6 +660,7 @@ def _parse_args() -> ReplayConfig:
         start=str(args.start),
         end=str(args.end),
         interval=str(args.interval),
+        scan_bars=max(1, int(args.scan_bars)),
         scan_every_minutes=max(1, int(args.scan_every_minutes)),
         horizon_minutes=max(1, int(args.horizon_minutes)),
         take_profit_pct=float(args.take_profit_pct),
@@ -448,6 +668,9 @@ def _parse_args() -> ReplayConfig:
         max_signals_per_scan=max(1, int(args.max_signals_per_scan)),
         output=Path(args.output),
         cache_dir=Path(args.cache_dir),
+        daily_lookback_days=max(30, int(args.daily_lookback_days)),
+        min_daily_bars=max(3, int(args.min_daily_bars)),
+        offline=bool(args.offline),
     )
 
 

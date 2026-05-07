@@ -583,6 +583,54 @@ class AlpacaDataClient:
             raise last_exc
         return [], []
 
+    def get_all_optionable_tickers(self, *, max_count: int | None = None) -> list[str]:
+        """
+        Return tradable option-enabled US equity symbols from Alpaca assets.
+
+        The endpoint is paginated, so this method follows `next_page_token`.
+        """
+        cap = int(max_count) if (max_count is not None and int(max_count) > 0) else 0
+        params: dict[str, Any] = {
+            "status": "active",
+            "asset_class": "us_equity",
+            "tradable": "true",
+        }
+        symbols: list[str] = []
+        seen: set[str] = set()
+        next_page_token: str | None = None
+
+        while True:
+            request_params = dict(params)
+            if next_page_token:
+                request_params["page_token"] = next_page_token
+            resp = self.trade_session.get(
+                f"{self.base_url}/v2/assets",
+                params=request_params,
+                timeout=15,
+            )
+            resp.raise_for_status()
+            payload = resp.json()
+            items = payload.get("assets", []) if isinstance(payload, dict) else []
+            for item in items:
+                if not isinstance(item, dict):
+                    continue
+                symbol = str(item.get("symbol", "") or "").strip().upper()
+                if not symbol or symbol in seen:
+                    continue
+                if not bool(item.get("tradable", True)):
+                    continue
+                if not bool(item.get("options_enabled", False)):
+                    continue
+                seen.add(symbol)
+                symbols.append(symbol)
+                if cap and len(symbols) >= cap:
+                    return symbols
+            next_page_token = payload.get("next_page_token") if isinstance(payload, dict) else None
+            if not next_page_token:
+                break
+
+        return symbols
+
     def get_asset(self, symbol: str) -> dict[str, Any]:
         resp = self.trade_session.get(f"{self.base_url}/v2/assets/{symbol}", timeout=15)
         resp.raise_for_status()

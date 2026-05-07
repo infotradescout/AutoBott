@@ -21,6 +21,11 @@ autotrader/runtime_state.json
 autotrader/trades.csv
 autotrader/scan_log.csv
 autotrader/observation_log.csv
+autotrader/historical_replay_results*.csv
+autotrader/historical_replay_results*.json
+autotrader/historical_cache/
+autotrader/replay_optimizer/
+autotrader/replay_farm/
 autotrader/autobott_lisa_feed.json
 autotrader/autobott_lisa_feed.ndjson
 autotrader/autobott_lisa_feed_published.json

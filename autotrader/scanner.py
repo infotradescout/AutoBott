@@ -89,22 +89,32 @@ def calculate_vwap(bars_df: pd.DataFrame) -> float:
     return float((typical * volume).sum() / denom)
 
 
-def calculate_atr(symbol: str, daily_bars_df: pd.DataFrame, period: int = 14) -> float:
-    if daily_bars_df is None or daily_bars_df.empty or len(daily_bars_df) < period + 1:
+def calculate_atr(symbol: str, daily_bars_df: pd.DataFrame, period: int | None = None) -> float:
+    if daily_bars_df is None or daily_bars_df.empty:
+        return float("nan")
+    requested_period = int(period if period is not None else getattr(config, "ATR_PERIOD", 14) or 14)
+    min_period = max(2, int(getattr(config, "ATR_MIN_PERIOD", 4) or 4))
+    available_period = max(0, len(daily_bars_df) - 1)
+    effective_period = min(max(2, requested_period), available_period)
+    if effective_period < min_period:
         return float("nan")
     high = daily_bars_df["high"].astype(float)
     low = daily_bars_df["low"].astype(float)
     close = daily_bars_df["close"].astype(float)
     prev_close = close.shift(1)
     tr = pd.concat([(high - low), (high - prev_close).abs(), (low - prev_close).abs()], axis=1).max(axis=1)
-    atr = tr.rolling(period).mean()
+    atr = tr.rolling(effective_period).mean()
     return float(atr.iloc[-1]) if pd.notna(atr.iloc[-1]) else float("nan")
 
 
 def calculate_rvol(symbol: str, today_volume: float, daily_bars_df: pd.DataFrame, minutes_since_open: int) -> float:
-    if daily_bars_df is None or daily_bars_df.empty or len(daily_bars_df) < 20:
+    if daily_bars_df is None or daily_bars_df.empty:
         return float("nan")
-    avg_daily_volume = float(daily_bars_df["volume"].tail(20).astype(float).mean())
+    min_daily_bars = max(2, int(getattr(config, "SCAN_MIN_DAILY_BARS", 8) or 8))
+    if len(daily_bars_df) < min_daily_bars:
+        return float("nan")
+    lookback = max(1, min(int(getattr(config, "RVOL_AVG_DAILY_BARS", min_daily_bars) or min_daily_bars), len(daily_bars_df)))
+    avg_daily_volume = float(daily_bars_df["volume"].tail(lookback).astype(float).mean())
     if avg_daily_volume <= 0:
         return float("nan")
     scaled = avg_daily_volume * max(minutes_since_open, 1) / 390
@@ -553,8 +563,10 @@ def _scan_ticker_details(
 ) -> dict[str, Any]:
     if bars_df is None or bars_df.empty:
         return _scan_failure("insufficient intraday bars")
-    if daily_bars_df is None or daily_bars_df.empty or len(daily_bars_df) < 20:
-        return _scan_failure("insufficient daily bars")
+    min_daily_bars = max(2, int(getattr(config, "SCAN_MIN_DAILY_BARS", 8) or 8))
+    if daily_bars_df is None or daily_bars_df.empty or len(daily_bars_df) < min_daily_bars:
+        current_bars = 0 if daily_bars_df is None or daily_bars_df.empty else len(daily_bars_df)
+        return _scan_failure(f"insufficient daily bars ({current_bars}/{min_daily_bars})")
 
     bars = bars_df.copy()
     closes = bars["close"].astype(float)
@@ -619,7 +631,7 @@ def _scan_ticker_details(
         if rvol < effective_rvol_min:
             return _scan_failure(f"RVOL {rvol:.1f}x (too low)")
 
-    atr = calculate_atr(symbol=symbol, daily_bars_df=daily_bars_df, period=14)
+    atr = calculate_atr(symbol=symbol, daily_bars_df=daily_bars_df, period=int(getattr(config, "ATR_PERIOD", 14) or 14))
     if math.isnan(atr) or price <= 0:
         return _scan_failure("ATR unavailable")
     atr_pct = (atr / price) * 100
@@ -863,10 +875,20 @@ def _scan_ticker_details(
 
 
 class IntradayScanner:
-    def __init__(self, data_client: AlpacaDataClient):
+    def __init__(
+        self,
+        data_client: AlpacaDataClient,
+        *,
+        emit_summary: bool = True,
+        write_scan_log: bool = True,
+    ):
         self.data_client = data_client
         self.tz = pytz.timezone(config.EASTERN_TZ)
         self.last_failures: list[dict[str, str]] = []
+        self.emit_summary = bool(emit_summary)
+        self.write_scan_log = bool(write_scan_log)
+        self._full_universe_cache: list[str] = []
+        self._full_universe_loaded = False
         # symbol -> {until: datetime, bucket: str, reason: str}
         self._reject_cooldowns: dict[str, dict[str, Any]] = {}
 
@@ -958,22 +980,55 @@ class IntradayScanner:
     def _clear_reject_cooldown(self, symbol: str) -> None:
         self._reject_cooldowns.pop(str(symbol or "").upper(), None)
 
-    def build_watchlist(self) -> list[str]:
-        base = list(dict.fromkeys(list(config.TICKERS) + list(config.CORE_TICKERS)))
-        gainers: list[str] = []
-        losers: list[str] = []
-        if bool(getattr(config, "AUTO_EXPAND_UNIVERSE_WITH_MOVERS", True)):
-            movers_top = int(getattr(config, "UNIVERSE_MOVER_TOP", getattr(config, "SCREENER_TOP_N", 20)) or 20)
-            try:
-                gainers, losers = self.data_client.get_top_movers(top=movers_top)
-            except Exception as exc:  # noqa: BLE001
-                print(f"[{self._ts()}] Movers endpoint unavailable ({exc}). Using core tickers only.")
+    def _resolve_universe_mode(self) -> str:
+        return str(getattr(config, "UNIVERSE_MODE", "core") or "core").strip().lower()
 
-        candidates = []
-        candidates.extend(base)
-        per_side = int(getattr(config, "MOVER_SYMBOLS_PER_SIDE", 10) or 10)
-        candidates.extend(gainers[:per_side])
-        candidates.extend(losers[:per_side])
+    def _build_full_optionable_universe(self) -> list[str]:
+        if self._full_universe_loaded:
+            return list(self._full_universe_cache)
+
+        max_tickers = int(getattr(config, "UNIVERSE_MAX_TICKERS", 0) or 0)
+        try:
+            candidates = self.data_client.get_all_optionable_tickers(
+                max_count=max_tickers if max_tickers > 0 else None
+            )
+            self._full_universe_cache = [str(sym).upper() for sym in candidates if str(sym).strip()]
+        except Exception as exc:  # noqa: BLE001
+            print(f"[scanner] failed building full option universe from broker assets: {exc}")
+            self._full_universe_cache = []
+        self._full_universe_loaded = True
+        return list(self._full_universe_cache)
+
+    def build_watchlist(self) -> list[str]:
+        mode = self._resolve_universe_mode()
+        if mode in {"all", "all_optionable", "all_optionable_assets"}:
+            candidates = self._build_full_optionable_universe()
+            if not candidates:
+                print("[scanner] full optionable mode unavailable; falling back to core symbols.")
+                candidates = list(dict.fromkeys(list(config.TICKERS) + list(config.CORE_TICKERS)))
+        else:
+            base = list(dict.fromkeys(list(config.TICKERS) + list(config.CORE_TICKERS)))
+            candidates = base
+            auto_expand = bool(getattr(config, "AUTO_EXPAND_UNIVERSE_WITH_MOVERS", False))
+            if mode == "movers" or auto_expand:
+                movers_top = int(getattr(config, "UNIVERSE_MOVER_TOP", getattr(config, "SCREENER_TOP_N", 20)) or 20)
+                try:
+                    gainers, losers = self.data_client.get_top_movers(top=movers_top)
+                except Exception as exc:  # noqa: BLE001
+                    print(f"[{self._ts()}] Movers endpoint unavailable ({exc}). Using core tickers only.")
+                    gainers = []
+                    losers = []
+                per_side = int(getattr(config, "MOVER_SYMBOLS_PER_SIDE", 10) or 10)
+                candidates.extend(gainers[:per_side])
+                candidates.extend(losers[:per_side])
+
+        if mode in {"all", "all_optionable", "all_optionable_assets"}:
+            candidates = list(dict.fromkeys(candidates))
+
+        if not candidates:
+            return []
+
+        filtered: list[str] = []
 
         deduped: list[str] = []
         seen: set[str] = set()
@@ -985,7 +1040,6 @@ class IntradayScanner:
                 seen.add(usym)
                 deduped.append(usym)
 
-        filtered: list[str] = []
         for sym in deduped:
             try:
                 price = self.data_client.get_latest_stock_price(sym)
@@ -1210,25 +1264,27 @@ class IntradayScanner:
                 reverse=True,
             )
         self.last_failures = failed
-        if failopen_triggered:
+        if failopen_triggered and self.emit_summary:
             print(f"[{now_et.strftime('%H:%M ET')}] RVOL fail-open engaged: widespread low RVOL detected.")
         self._print_summary(now_et, len(watchlist), passed, failed)
         return passed
 
     def _print_summary(self, now_et: datetime, total: int, passed: list[dict], failed: list[dict[str, str]]) -> None:
-        print(f"[{now_et.strftime('%H:%M ET')}] SCAN RESULTS - {len(passed)} of {total} tickers passed")
-        for item in passed:
-            vwap_side = "Above VWAP" if item["direction"] == "call" else "Below VWAP"
-            ivr_print = f"{float(item['iv_rank']):.0f}%" if item.get("iv_rank") is not None else "N/A"
-            print(
-                f"  + {item['symbol']:<5} | {str(item.get('strategy_profile', 'base')):<18} | "
-                f"{item['direction'].upper():<4} | RVOL {item['rvol']:.1f}x | "
-                f"RSI {item['rsi']:.0f} | ROC {item['roc']:+.1f}% | IVR {ivr_print} | "
-                f"VOL {float(item.get('volatility_score', 0.0) or 0.0):.2f} | {vwap_side}"
-            )
-        for item in failed[:8]:
-            print(f"  - {item['symbol']:<5} | failed: {item['reason']}")
-        self._write_scan_log(now_et, passed, failed)
+        if self.emit_summary:
+            print(f"[{now_et.strftime('%H:%M ET')}] SCAN RESULTS - {len(passed)} of {total} tickers passed")
+            for item in passed:
+                vwap_side = "Above VWAP" if item["direction"] == "call" else "Below VWAP"
+                ivr_print = f"{float(item['iv_rank']):.0f}%" if item.get("iv_rank") is not None else "N/A"
+                print(
+                    f"  + {item['symbol']:<5} | {str(item.get('strategy_profile', 'base')):<18} | "
+                    f"{item['direction'].upper():<4} | RVOL {item['rvol']:.1f}x | "
+                    f"RSI {item['rsi']:.0f} | ROC {item['roc']:+.1f}% | IVR {ivr_print} | "
+                    f"VOL {float(item.get('volatility_score', 0.0) or 0.0):.2f} | {vwap_side}"
+                )
+            for item in failed[:8]:
+                print(f"  - {item['symbol']:<5} | failed: {item['reason']}")
+        if self.write_scan_log:
+            self._write_scan_log(now_et, passed, failed)
 
     def _write_scan_log(self, now_et: datetime, passed: list[dict], failed: list[dict[str, str]]) -> None:
         import csv
