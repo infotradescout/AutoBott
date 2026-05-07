@@ -170,6 +170,7 @@ def _start_embedded_trader_if_stale(trigger: str) -> dict[str, Any]:
     with _embedded_trader_lock:
         if _embedded_trader_thread is not None and _embedded_trader_thread.is_alive():
             return {"enabled": True, "started": False, "reason": "already_running"}
+        _apply_boot_auto_resume_for_direct_dashboard()
         control = load_trading_control()
         if not isinstance(control, dict):
             control = {}
@@ -181,7 +182,6 @@ def _start_embedded_trader_if_stale(trigger: str) -> dict[str, Any]:
         age = _heartbeat_age_seconds(state)
         if age is not None and age < TRADER_HEARTBEAT_STALE_SECONDS:
             return {"enabled": True, "started": False, "reason": "heartbeat_fresh", "heartbeat_age_seconds": age}
-        _apply_boot_auto_resume_for_direct_dashboard()
         _embedded_trader_thread = threading.Thread(
             target=_run_trader_forever_embedded,
             name="embedded-trader-fallback",
