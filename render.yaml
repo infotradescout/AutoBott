@@ -23,3 +23,5 @@ services:
         sync: false
       - key: DATA_DIR
         value: /data
+      - key: AUTO_RESUME_TRADING_ON_BOOT
+        value: "true"

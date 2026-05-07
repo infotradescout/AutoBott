@@ -215,7 +215,12 @@ def _print_startup_readiness() -> None:
 
 
 def _apply_boot_auto_resume() -> None:
-    if not bool(getattr(config, "AUTO_RESUME_TRADING_ON_BOOT", True)):
+    env_value = str(os.getenv("AUTO_RESUME_TRADING_ON_BOOT", "") or "").strip().lower()
+    if env_value:
+        auto_resume_enabled = env_value in {"1", "true", "yes", "y", "on"}
+    else:
+        auto_resume_enabled = bool(getattr(config, "AUTO_RESUME_TRADING_ON_BOOT", True))
+    if not auto_resume_enabled:
         return
     try:
         control = load_trading_control()

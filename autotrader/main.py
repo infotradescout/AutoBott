@@ -3048,6 +3048,7 @@ def main():
         dry_run_enabled = bool(control_state.get("dry_run", False)) or is_enabled("FEATURE_DRY_RUN_MODE", False)
         manual_stop = bool(control_state.get("manual_stop", False))
         if manual_stop:
+            _touch_heartbeat(force=True)
             now_et = datetime.now(tz)
             now_ct = datetime.now(pytz.timezone(config.CENTRAL_TZ))
             if not manual_stop_latched:
