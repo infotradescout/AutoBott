@@ -9,6 +9,9 @@ from __future__ import annotations
 import csv
 import os
 import re
+import threading
+import time
+import traceback
 from collections import Counter, defaultdict, deque
 from dataclasses import dataclass
 from datetime import datetime, time
@@ -589,5 +592,71 @@ HTML = r'''
 
 
 if __name__ == "__main__":
+    def _env_bool(name: str, default: bool) -> bool:
+        raw = str(os.getenv(name, "") or "").strip().lower()
+        if not raw:
+            return bool(default)
+        return raw in {"1", "true", "yes", "y", "on"}
+
+    def _patch_runtime_state(updates: dict) -> None:
+        try:
+            state = load_bot_state()
+            if not isinstance(state, dict):
+                state = {}
+            state.update(updates)
+            save_bot_state(state)
+        except Exception as exc:  # noqa: BLE001
+            print(f"[dashboard_v2] runtime state patch failed: {exc}")
+
+    def _apply_boot_auto_resume_for_direct_dashboard() -> None:
+        if not _env_bool("AUTO_RESUME_TRADING_ON_BOOT", True):
+            return
+        try:
+            control = load_trading_control()
+            if bool(control.get("manual_stop", False)):
+                updated = set_manual_stop(False, reason="boot_auto_resume_dashboard_v2")
+                print(
+                    "[dashboard_v2] AUTO_RESUME_TRADING_ON_BOOT cleared manual_stop "
+                    f"(previous reason={str(control.get('reason', '') or '')!r}, "
+                    f"updated_at={str(updated.get('updated_at_et', '') or '')!r})."
+                )
+        except Exception as exc:  # noqa: BLE001
+            print(f"[dashboard_v2] boot auto-resume failed: {exc}")
+
+    def _run_trader_forever_embedded() -> None:
+        restart_count = 0
+        while True:
+            restart_count += 1
+            _patch_runtime_state(
+                {
+                    "trader_thread_last_start_et": _now_et().isoformat(),
+                    "trader_thread_restart_count": restart_count,
+                }
+            )
+            try:
+                from main import main as trader_main  # local import to avoid circular import during app bootstrap
+
+                trader_main()
+            except Exception as exc:  # noqa: BLE001
+                print(f"[dashboard_v2] Embedded trader crashed: {exc}")
+                traceback.print_exc()
+                _patch_runtime_state(
+                    {
+                        "trader_thread_last_crash_et": _now_et().isoformat(),
+                        "trader_thread_last_crash": str(exc)[:500],
+                    }
+                )
+            finally:
+                _patch_runtime_state({"trader_thread_last_stop_et": _now_et().isoformat()})
+            time.sleep(30)
+
+    # Fallback: if this module is run directly as the service start command,
+    # still run the trader loop in-process so the dashboard is not "view-only".
+    if _env_bool("ENABLE_EMBEDDED_TRADER_ON_DASHBOARD", True):
+        _apply_boot_auto_resume_for_direct_dashboard()
+        trader_thread = threading.Thread(target=_run_trader_forever_embedded, daemon=True)
+        trader_thread.start()
+        print("[dashboard_v2] Embedded trader thread started.")
+
     port = int(os.getenv("PORT", "5000"))
     app.run(host="0.0.0.0", port=port, debug=False)
