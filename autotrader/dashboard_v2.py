@@ -9,8 +9,9 @@ from __future__ import annotations
 import csv
 import os
 import re
+import socket
 import threading
-import time
+import time as time_module
 import traceback
 from collections import Counter, defaultdict, deque
 from dataclasses import dataclass
@@ -44,6 +45,168 @@ DISPLAY_TZ = pytz.timezone(str(os.getenv("DASHBOARD_DISPLAY_TZ", "America/Chicag
 SCAN_LOG_CSV = Path(getattr(config, "SCAN_LOG_CSV_PATH"))
 
 app = Flask(__name__)
+
+
+def _env_bool(name: str, default: bool) -> bool:
+    raw = str(os.getenv(name, "") or "").strip().lower()
+    if not raw:
+        return bool(default)
+    return raw in {"1", "true", "yes", "y", "on"}
+
+
+def _env_int(name: str, default: int, *, minimum: int, maximum: int) -> int:
+    raw = str(os.getenv(name, "") or "").strip()
+    if not raw:
+        return max(minimum, min(maximum, int(default)))
+    try:
+        value = int(float(raw))
+    except ValueError:
+        value = int(default)
+    return max(minimum, min(maximum, value))
+
+
+TRADER_HEARTBEAT_STALE_SECONDS = _env_int(
+    "TRADER_HEARTBEAT_STALE_SECONDS",
+    1800,
+    minimum=300,
+    maximum=86400,
+)
+ENABLE_EMBEDDED_TRADER_FALLBACK = _env_bool("ENABLE_EMBEDDED_TRADER_FALLBACK", True)
+
+_embedded_trader_lock = threading.Lock()
+_embedded_trader_thread: threading.Thread | None = None
+
+
+def _key_hint(value: str) -> str:
+    token = str(value or "").strip()
+    if len(token) <= 8:
+        return token[:2] + "***" if token else ""
+    return f"{token[:4]}...{token[-4:]}"
+
+
+def _deployment_meta() -> dict[str, Any]:
+    meta = {
+        "service_name": str(os.getenv("RENDER_SERVICE_NAME", "") or ""),
+        "service_id": str(os.getenv("RENDER_SERVICE_ID", "") or ""),
+        "instance_id": str(os.getenv("RENDER_INSTANCE_ID", "") or ""),
+        "git_commit": str(os.getenv("RENDER_GIT_COMMIT", "") or ""),
+        "git_branch": str(os.getenv("RENDER_GIT_BRANCH", "") or ""),
+        "external_url": str(os.getenv("RENDER_EXTERNAL_URL", "") or ""),
+        "region": str(os.getenv("RENDER_REGION", "") or ""),
+        "hostname": socket.gethostname(),
+        "alpaca_key_hint": _key_hint(API_KEY),
+        "paper": bool(PAPER),
+    }
+    return {key: value for key, value in meta.items() if value not in ("", None)}
+
+
+def _patch_runtime_state(updates: dict[str, Any]) -> None:
+    try:
+        state = load_bot_state()
+        if not isinstance(state, dict):
+            state = {}
+        state.update(updates)
+        save_bot_state(state)
+    except Exception as exc:  # noqa: BLE001
+        print(f"[dashboard_v2] runtime state patch failed: {exc}")
+
+
+def _apply_boot_auto_resume_for_direct_dashboard() -> None:
+    if not _env_bool("AUTO_RESUME_TRADING_ON_BOOT", True):
+        return
+    try:
+        control = load_trading_control()
+        if bool(control.get("manual_stop", False)):
+            updated = set_manual_stop(False, reason="boot_auto_resume_dashboard_v2")
+            print(
+                "[dashboard_v2] AUTO_RESUME_TRADING_ON_BOOT cleared manual_stop "
+                f"(previous reason={str(control.get('reason', '') or '')!r}, "
+                f"updated_at={str(updated.get('updated_at_et', '') or '')!r})."
+            )
+    except Exception as exc:  # noqa: BLE001
+        print(f"[dashboard_v2] boot auto-resume failed: {exc}")
+
+
+def _run_trader_forever_embedded() -> None:
+    restart_count = 0
+    while True:
+        restart_count += 1
+        _patch_runtime_state(
+            {
+                "trader_thread_last_start_et": _now_et().isoformat(),
+                "trader_thread_restart_count": restart_count,
+                "embedded_trader_runner": "dashboard_v2_fallback",
+            }
+        )
+        try:
+            from main import main as trader_main  # local import to avoid circular import during app bootstrap
+
+            trader_main()
+        except Exception as exc:  # noqa: BLE001
+            print(f"[dashboard_v2] Embedded trader crashed: {exc}")
+            traceback.print_exc()
+            _patch_runtime_state(
+                {
+                    "trader_thread_last_crash_et": _now_et().isoformat(),
+                    "trader_thread_last_crash": str(exc)[:500],
+                }
+            )
+        finally:
+            _patch_runtime_state({"trader_thread_last_stop_et": _now_et().isoformat()})
+        time_module.sleep(30)
+
+
+def _heartbeat_age_seconds(state: dict[str, Any]) -> int | None:
+    heartbeat = _parse_dt(state.get("last_trader_heartbeat_et"))
+    if heartbeat is None:
+        return None
+    return max(0, int((_now_et() - heartbeat).total_seconds()))
+
+
+def _start_embedded_trader_if_stale(trigger: str) -> dict[str, Any]:
+    global _embedded_trader_thread
+    if not ENABLE_EMBEDDED_TRADER_FALLBACK:
+        return {"enabled": False, "started": False, "reason": "disabled"}
+    with _embedded_trader_lock:
+        if _embedded_trader_thread is not None and _embedded_trader_thread.is_alive():
+            return {"enabled": True, "started": False, "reason": "already_running"}
+        control = load_trading_control()
+        if not isinstance(control, dict):
+            control = {}
+        if bool(control.get("manual_stop", False)):
+            return {"enabled": True, "started": False, "reason": "manual_stop_active"}
+        state = load_bot_state()
+        if not isinstance(state, dict):
+            state = {}
+        age = _heartbeat_age_seconds(state)
+        if age is not None and age < TRADER_HEARTBEAT_STALE_SECONDS:
+            return {"enabled": True, "started": False, "reason": "heartbeat_fresh", "heartbeat_age_seconds": age}
+        _apply_boot_auto_resume_for_direct_dashboard()
+        _embedded_trader_thread = threading.Thread(
+            target=_run_trader_forever_embedded,
+            name="embedded-trader-fallback",
+            daemon=True,
+        )
+        _embedded_trader_thread.start()
+        now_iso = _now_et().isoformat()
+        _patch_runtime_state(
+            {
+                "embedded_trader_boot_at_et": now_iso,
+                "embedded_trader_boot_trigger": str(trigger or ""),
+                "embedded_trader_boot_prev_heartbeat_age_seconds": age,
+            }
+        )
+        print(
+            "[dashboard_v2] Embedded trader fallback started "
+            f"(trigger={trigger}, previous_heartbeat_age_seconds={age})."
+        )
+        return {
+            "enabled": True,
+            "started": True,
+            "trigger": str(trigger or ""),
+            "started_at_et": now_iso,
+            "previous_heartbeat_age_seconds": age,
+        }
 
 
 @dataclass(frozen=True)
@@ -255,7 +418,24 @@ def _account() -> dict[str, Any]:
     if not result.ok or not isinstance(result.data, dict):
         return {"error": result.error or "account unavailable"}
     raw = result.data
-    return {"equity": _money(raw.get("equity")), "cash": _money(raw.get("cash")), "buying_power": _money(raw.get("buying_power")), "portfolio_value": _money(raw.get("portfolio_value")), "last_equity": _money(raw.get("last_equity")), "status": raw.get("status"), "pattern_day_trader": raw.get("pattern_day_trader")}
+    return {
+        "id": str(raw.get("id", "") or ""),
+        "account_number": str(raw.get("account_number", "") or ""),
+        "currency": str(raw.get("currency", "") or ""),
+        "equity": _money(raw.get("equity")),
+        "cash": _money(raw.get("cash")),
+        "buying_power": _money(raw.get("buying_power")),
+        "portfolio_value": _money(raw.get("portfolio_value")),
+        "last_equity": _money(raw.get("last_equity")),
+        "status": str(raw.get("status", "") or ""),
+        "trading_blocked": bool(raw.get("trading_blocked", False)),
+        "account_blocked": bool(raw.get("account_blocked", False)),
+        "transfers_blocked": bool(raw.get("transfers_blocked", False)),
+        "pattern_day_trader": bool(raw.get("pattern_day_trader", False)),
+        "options_approved_level": str(raw.get("options_approved_level", "") or ""),
+        "options_trading_level": str(raw.get("options_trading_level", "") or ""),
+        "mode": "paper" if PAPER else "live",
+    }
 
 
 def _clock() -> dict[str, Any]:
@@ -389,11 +569,13 @@ def _runtime() -> dict[str, Any]:
     control = load_trading_control()
     if not isinstance(control, dict):
         control = {}
-    heartbeat = _parse_dt(state.get("last_trader_heartbeat_et"))
-    age = int((_now_et() - heartbeat).total_seconds()) if heartbeat is not None else None
+    age = _heartbeat_age_seconds(state)
+    stale = bool(age is None or age >= TRADER_HEARTBEAT_STALE_SECONDS)
     return {
         "heartbeat_age_seconds": age,
         "heartbeat_label": f"{age}s ago" if age is not None else "unknown",
+        "trader_loop_stale": stale,
+        "trader_loop_stale_after_seconds": TRADER_HEARTBEAT_STALE_SECONDS,
         "manual_stop": bool(control.get("manual_stop", False)),
         "dry_run": bool(control.get("dry_run", False)),
         "control": control,
@@ -401,6 +583,14 @@ def _runtime() -> dict[str, Any]:
         "broker_truth_day_pnl_usd": _num(state.get("broker_truth_day_pnl_usd")),
         "broker_truth_closed_count": _int_value(state.get("broker_truth_closed_count")),
         "broker_truth_last_error": str(state.get("broker_truth_last_error", "") or ""),
+        "trader_thread_last_start_et": str(state.get("trader_thread_last_start_et", "") or ""),
+        "trader_thread_last_stop_et": str(state.get("trader_thread_last_stop_et", "") or ""),
+        "trader_thread_restart_count": _int_value(state.get("trader_thread_restart_count")),
+        "trader_thread_last_crash_et": str(state.get("trader_thread_last_crash_et", "") or ""),
+        "trader_thread_last_crash": str(state.get("trader_thread_last_crash", "") or ""),
+        "embedded_trader_boot_at_et": str(state.get("embedded_trader_boot_at_et", "") or ""),
+        "embedded_trader_boot_trigger": str(state.get("embedded_trader_boot_trigger", "") or ""),
+        "embedded_trader_boot_prev_heartbeat_age_seconds": state.get("embedded_trader_boot_prev_heartbeat_age_seconds"),
         "adaptive_loss": {
             "active": bool(state.get("adaptive_loss_active", False)),
             "blocked_tickers": list(state.get("adaptive_loss_blocked_tickers") or []),
@@ -415,6 +605,7 @@ def _compact_order(order: dict[str, Any]) -> dict[str, Any]:
 
 
 def _truth_payload() -> dict[str, Any]:
+    embedded_boot = _start_embedded_trader_if_stale("api_truth")
     all_orders = _all_orders_today()
     filled_orders = [o for o in all_orders if str(o.get("status", "") or "").lower() == "filled"]
     filled_option_orders = [o for o in filled_orders if _is_option_symbol(str(o.get("symbol", "") or ""))]
@@ -438,7 +629,28 @@ def _truth_payload() -> dict[str, Any]:
     scanner["trade_passes"] = len(filled_option_entry_orders)
     scanner["fails"] = max(0, int(scanner.get("scan_rows_today", 0) or 0) - int(scanner["passes"]))
     scanner["pass_rate_pct"] = round((float(scanner["passes"]) / float(scanner["scan_rows_today"])) * 100.0, 2) if int(scanner.get("scan_rows_today", 0) or 0) > 0 else 0.0
-    return {"generated_at_et": _now_et().isoformat(), "mode": "paper" if PAPER else "live", "source_of_truth": "alpaca_orders_positions", "account": _account(), "clock": _clock(), "runtime": runtime, "positions": positions, "orders": {"submitted_today": len(all_orders), "filled_today": len(filled_orders), "filled_option_orders_today": len(filled_option_orders), "filled_option_entry_orders_today": len(filled_option_entry_orders), "status_counts": dict(Counter(str(o.get("status", "") or "unknown") for o in all_orders)), "side_counts": dict(Counter(str(o.get("side", "") or "unknown") for o in filled_orders)), "recent": [_compact_order(o) for o in all_orders[:50]]}, "realized": realized, "scanner": scanner}
+    return {
+        "generated_at_et": _now_et().isoformat(),
+        "mode": "paper" if PAPER else "live",
+        "source_of_truth": "alpaca_orders_positions",
+        "deployment": _deployment_meta(),
+        "embedded_trader_fallback": embedded_boot,
+        "account": _account(),
+        "clock": _clock(),
+        "runtime": runtime,
+        "positions": positions,
+        "orders": {
+            "submitted_today": len(all_orders),
+            "filled_today": len(filled_orders),
+            "filled_option_orders_today": len(filled_option_orders),
+            "filled_option_entry_orders_today": len(filled_option_entry_orders),
+            "status_counts": dict(Counter(str(o.get("status", "") or "unknown") for o in all_orders)),
+            "side_counts": dict(Counter(str(o.get("side", "") or "unknown") for o in filled_orders)),
+            "recent": [_compact_order(o) for o in all_orders[:50]],
+        },
+        "realized": realized,
+        "scanner": scanner,
+    }
 
 
 def _verify_control_token() -> tuple[bool, str, int]:
@@ -498,7 +710,20 @@ def _no_cache(response):
 
 @app.get("/healthz")
 def healthz():
-    return jsonify({"ok": True, "service": "autobott-dashboard-v2", "paper": PAPER, "alpaca_key_present": bool(API_KEY), "alpaca_secret_present": bool(SECRET_KEY)})
+    runtime = _runtime()
+    embedded_boot = _start_embedded_trader_if_stale("healthz")
+    return jsonify(
+        {
+            "ok": True,
+            "service": "autobott-dashboard-v2",
+            "paper": PAPER,
+            "alpaca_key_present": bool(API_KEY),
+            "alpaca_secret_present": bool(SECRET_KEY),
+            "runtime": runtime,
+            "deployment": _deployment_meta(),
+            "embedded_trader_fallback": embedded_boot,
+        }
+    )
 
 
 @app.get("/api/truth")
@@ -564,12 +789,15 @@ def api_control_reset_adaptive_loss():
 
 @app.get("/api/runtime-debug")
 def api_runtime_debug():
+    embedded_boot = _start_embedded_trader_if_stale("api_runtime_debug")
     state = load_bot_state()
     if not isinstance(state, dict):
         state = {}
     return jsonify(
         {
             "generated_at_et": _now_et().isoformat(),
+            "deployment": _deployment_meta(),
+            "embedded_trader_fallback": embedded_boot,
             "state_updated_at": str(state.get("_state_updated_at_iso", "") or ""),
             "runtime": _runtime(),
             "last_entry_debug": _as_dict(state.get("last_entry_debug")),
@@ -592,71 +820,12 @@ HTML = r'''
 
 
 if __name__ == "__main__":
-    def _env_bool(name: str, default: bool) -> bool:
-        raw = str(os.getenv(name, "") or "").strip().lower()
-        if not raw:
-            return bool(default)
-        return raw in {"1", "true", "yes", "y", "on"}
-
-    def _patch_runtime_state(updates: dict) -> None:
-        try:
-            state = load_bot_state()
-            if not isinstance(state, dict):
-                state = {}
-            state.update(updates)
-            save_bot_state(state)
-        except Exception as exc:  # noqa: BLE001
-            print(f"[dashboard_v2] runtime state patch failed: {exc}")
-
-    def _apply_boot_auto_resume_for_direct_dashboard() -> None:
-        if not _env_bool("AUTO_RESUME_TRADING_ON_BOOT", True):
-            return
-        try:
-            control = load_trading_control()
-            if bool(control.get("manual_stop", False)):
-                updated = set_manual_stop(False, reason="boot_auto_resume_dashboard_v2")
-                print(
-                    "[dashboard_v2] AUTO_RESUME_TRADING_ON_BOOT cleared manual_stop "
-                    f"(previous reason={str(control.get('reason', '') or '')!r}, "
-                    f"updated_at={str(updated.get('updated_at_et', '') or '')!r})."
-                )
-        except Exception as exc:  # noqa: BLE001
-            print(f"[dashboard_v2] boot auto-resume failed: {exc}")
-
-    def _run_trader_forever_embedded() -> None:
-        restart_count = 0
-        while True:
-            restart_count += 1
-            _patch_runtime_state(
-                {
-                    "trader_thread_last_start_et": _now_et().isoformat(),
-                    "trader_thread_restart_count": restart_count,
-                }
-            )
-            try:
-                from main import main as trader_main  # local import to avoid circular import during app bootstrap
-
-                trader_main()
-            except Exception as exc:  # noqa: BLE001
-                print(f"[dashboard_v2] Embedded trader crashed: {exc}")
-                traceback.print_exc()
-                _patch_runtime_state(
-                    {
-                        "trader_thread_last_crash_et": _now_et().isoformat(),
-                        "trader_thread_last_crash": str(exc)[:500],
-                    }
-                )
-            finally:
-                _patch_runtime_state({"trader_thread_last_stop_et": _now_et().isoformat()})
-            time.sleep(30)
-
     # Fallback: if this module is run directly as the service start command,
     # still run the trader loop in-process so the dashboard is not "view-only".
     if _env_bool("ENABLE_EMBEDDED_TRADER_ON_DASHBOARD", True):
-        _apply_boot_auto_resume_for_direct_dashboard()
-        trader_thread = threading.Thread(target=_run_trader_forever_embedded, daemon=True)
-        trader_thread.start()
-        print("[dashboard_v2] Embedded trader thread started.")
+        boot = _start_embedded_trader_if_stale("__main__")
+        if boot.get("started"):
+            print("[dashboard_v2] Embedded trader thread started from __main__.")
 
     port = int(os.getenv("PORT", "5000"))
     app.run(host="0.0.0.0", port=port, debug=False)

@@ -147,6 +147,39 @@ def _is_trader_loop_stale(runtime_state: dict) -> bool:
     return heartbeat_age_seconds > stale_after
 
 
+def _heartbeat_age_seconds(runtime_state: dict) -> int | None:
+    heartbeat_raw = str(runtime_state.get("last_trader_heartbeat_et", "") or "")
+    heartbeat_dt = _parse_iso_datetime(heartbeat_raw)
+    if heartbeat_dt is None:
+        return None
+    now_dt = datetime.now(heartbeat_dt.tzinfo) if heartbeat_dt.tzinfo is not None else datetime.now()
+    return max(0, int((now_dt - heartbeat_dt).total_seconds()))
+
+
+def _watchdog_hard_stale_seconds() -> int:
+    default = max(1200, int(getattr(config, "LOOP_INTERVAL_SECONDS", 30) or 30) * 30)
+    raw = str(os.getenv("TRADER_HEARTBEAT_STALE_SECONDS", "") or "").strip()
+    if not raw:
+        return default
+    try:
+        value = int(float(raw))
+    except ValueError:
+        value = default
+    return max(300, min(86400, value))
+
+
+def _watchdog_check_seconds() -> int:
+    raw = str(os.getenv("TRADER_WATCHDOG_CHECK_SECONDS", "") or "").strip()
+    default = 30
+    if not raw:
+        return default
+    try:
+        value = int(float(raw))
+    except ValueError:
+        value = default
+    return max(10, min(600, value))
+
+
 def _position_unrealized_usd(pos) -> float | None:
     try:
         pl_raw = float(getattr(pos, "unrealized_pl", 0) or 0)
@@ -328,13 +361,78 @@ def _run_independent_stoploss_guard() -> None:
         time.sleep(guard_sleep_seconds)
 
 
+def _run_trader_watchdog(trader_thread: threading.Thread) -> None:
+    hard_stale_seconds = _watchdog_hard_stale_seconds()
+    check_seconds = _watchdog_check_seconds()
+    print(
+        f"[render_service] Trader watchdog enabled "
+        f"(check_every={check_seconds}s, hard_stale={hard_stale_seconds}s)."
+    )
+    while True:
+        try:
+            if not trader_thread.is_alive():
+                _patch_runtime_state(
+                    {
+                        "trader_watchdog_last_restart_request_et": _now_et_iso(),
+                        "trader_watchdog_reason": "trader_thread_not_alive",
+                    }
+                )
+                print("[render_service] WATCHDOG: trader thread not alive; forcing process restart.")
+                ALERTS.send(
+                    "trader_watchdog_restart",
+                    "Trader watchdog requested restart: trader thread not alive.",
+                    level="error",
+                    dedupe_key=f"watchdog-dead-{int(time.time() // 300)}",
+                )
+                time.sleep(2)
+                os._exit(1)
+
+            runtime_state = load_bot_state()
+            if not isinstance(runtime_state, dict):
+                runtime_state = {}
+            heartbeat_age = _heartbeat_age_seconds(runtime_state)
+            if heartbeat_age is not None and heartbeat_age >= hard_stale_seconds:
+                _patch_runtime_state(
+                    {
+                        "trader_watchdog_last_restart_request_et": _now_et_iso(),
+                        "trader_watchdog_reason": f"heartbeat_stale_{heartbeat_age}s",
+                        "trader_watchdog_last_heartbeat_age_seconds": heartbeat_age,
+                    }
+                )
+                print(
+                    "[render_service] WATCHDOG: heartbeat stale "
+                    f"({heartbeat_age}s >= {hard_stale_seconds}s); forcing process restart."
+                )
+                ALERTS.send(
+                    "trader_watchdog_restart",
+                    (
+                        "Trader watchdog requested restart: "
+                        f"heartbeat stale for {heartbeat_age}s (threshold {hard_stale_seconds}s)."
+                    ),
+                    level="error",
+                    dedupe_key=f"watchdog-stale-{int(time.time() // 300)}",
+                )
+                time.sleep(2)
+                os._exit(1)
+        except Exception as exc:  # noqa: BLE001
+            print(f"[render_service] WATCHDOG error: {exc}")
+        time.sleep(check_seconds)
+
+
 if __name__ == "__main__":
     _apply_boot_auto_resume()
     _print_startup_readiness()
-    trader_thread = threading.Thread(target=_run_trader_forever, daemon=True)
+    trader_thread = threading.Thread(target=_run_trader_forever, daemon=True, name="autobott-trader")
     trader_thread.start()
-    stoploss_guard_thread = threading.Thread(target=_run_independent_stoploss_guard, daemon=True)
+    stoploss_guard_thread = threading.Thread(target=_run_independent_stoploss_guard, daemon=True, name="autobott-stoploss")
     stoploss_guard_thread.start()
+    watchdog_thread = threading.Thread(
+        target=_run_trader_watchdog,
+        args=(trader_thread,),
+        daemon=True,
+        name="autobott-trader-watchdog",
+    )
+    watchdog_thread.start()
 
     port = int(os.getenv("PORT", "5000"))
     print(f"[render_service] Starting dashboard on 0.0.0.0:{port}")
