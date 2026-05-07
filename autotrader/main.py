@@ -806,6 +806,46 @@ def _execute_limit_entry(
         if still_open:
             time.sleep(1)
 
+    if bool(getattr(config, "ENABLE_ENTRY_MARKET_FALLBACK", True)):
+        market_wait_seconds = max(1, int(getattr(config, "ENTRY_MARKET_FALLBACK_WAIT_SECONDS", 3) or 3))
+        try:
+            market_order = broker.place_option_market_buy(option_symbol, qty)
+            market_order_id = str(getattr(market_order, "id", "") or "")
+            if market_order_id:
+                filled_qty, fill_price, status, still_open = _await_order_fill(
+                    broker,
+                    order_id=market_order_id,
+                    requested_qty=qty,
+                    now_et=now_et,
+                    label=f"{label} market-fallback",
+                    poll_seconds=1,
+                    max_wait_seconds=market_wait_seconds,
+                )
+                if filled_qty > 0:
+                    return {
+                        "filled": True,
+                        "status": status,
+                        "filled_qty": filled_qty,
+                        "filled_price": fill_price,
+                        "attempts": len(attempt_quotes) + 1,
+                        "submit_bid": None,
+                        "submit_ask": None,
+                        "submit_midpoint": None,
+                        "submit_spread_pct": None,
+                        "intended_limit": None,
+                        "fill_seconds": None,
+                        "fill_slippage_vs_ask_pct": None,
+                        "order_id": market_order_id,
+                        "fallback": "market",
+                    }
+                if still_open:
+                    try:
+                        broker.cancel_order(market_order_id)
+                    except Exception as exc:  # noqa: BLE001
+                        print(f"[{ts(now_et)}] {label}: cancel market fallback order {market_order_id} failed: {exc}")
+        except Exception as exc:  # noqa: BLE001
+            print(f"[{ts(now_et)}] {label}: market fallback submit failed: {exc}")
+
     return {"filled": False, "status": "not_filled", "attempts": len(attempt_quotes)}
 
 
