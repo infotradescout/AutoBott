@@ -327,6 +327,7 @@ def _optimizer_command(
     optimizer = Path(__file__).resolve().with_name("replay_optimizer.py")
     args = [
         str(python_exe),
+        "-u",
         str(optimizer),
         "--symbols",
         ",".join(spec.symbols),
@@ -558,11 +559,14 @@ def aggregate_farm(
     target_expectancy_pct: float,
     min_win_loss_ratio: float,
     min_worker_win_loss_ratio: float,
+    worker_names: set[str] | None = None,
 ) -> dict[str, Any]:
     registry = _load_registry(output_root)
     all_rows: list[dict[str, Any]] = []
     fieldnames: list[str] = ["worker"]
     for name, item in sorted(registry.get("workers", {}).items()):
+        if worker_names is not None and name not in worker_names:
+            continue
         output_dir = Path(str(item.get("output_dir", "")))
         rows = _read_csv(output_dir / "optimizer_runs.csv")
         for row in rows:
@@ -663,8 +667,9 @@ def aggregate_farm(
     payload = {
         "generated_at": datetime.now().isoformat(timespec="seconds"),
         "farm_runs_csv": str(farm_runs),
-        "worker_count": len(registry.get("workers", {})),
+        "worker_count": len({str(row.get("worker", "") or "") for row in all_rows}),
         "row_count": len(all_rows),
+        "worker_filter": sorted(worker_names) if worker_names is not None else [],
         "requirements": {
             "min_total_trades": min_total_trades,
             "min_workers": min_workers,

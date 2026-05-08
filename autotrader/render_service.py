@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+import csv
+import json
 import os
 import shutil
+import sys
 import threading
 import time
 import traceback
@@ -108,6 +111,8 @@ from alerts import AlertManager
 from broker import AlpacaBroker
 from dashboard import app
 from main import main as trader_main
+import replay_farm
+from replay_promotion import build_promotion_snapshot
 from state_store import load_bot_state, save_bot_state
 from trading_control import load_trading_control, set_manual_stop
 
@@ -180,6 +185,447 @@ def _watchdog_check_seconds() -> int:
     return max(10, min(600, value))
 
 
+def _env_bool(name: str, default: bool) -> bool:
+    raw = str(os.getenv(name, "") or "").strip().lower()
+    if not raw:
+        return bool(default)
+    return raw in {"1", "true", "yes", "y", "on"}
+
+
+def _env_float(name: str, default: float, *, minimum: float, maximum: float) -> float:
+    raw = str(os.getenv(name, "") or "").strip()
+    if not raw:
+        value = float(default)
+    else:
+        try:
+            value = float(raw)
+        except ValueError:
+            value = float(default)
+    return max(float(minimum), min(float(maximum), float(value)))
+
+
+def _historical_learning_enabled() -> bool:
+    return _env_bool("ENABLE_HISTORICAL_REPLAY_LEARNING", True)
+
+
+def _historical_learning_offline() -> bool:
+    return _env_bool("HISTORICAL_REPLAY_OFFLINE", False)
+
+
+def _historical_learning_check_seconds() -> int:
+    raw = str(os.getenv("HISTORICAL_REPLAY_HEALTH_CHECK_SECONDS", "") or "").strip()
+    default = 120
+    if not raw:
+        return default
+    try:
+        value = int(float(raw))
+    except ValueError:
+        value = default
+    return max(20, min(3600, value))
+
+
+def _historical_learning_restart_cooldown_seconds() -> int:
+    raw = str(os.getenv("HISTORICAL_REPLAY_RESTART_COOLDOWN_SECONDS", "") or "").strip()
+    default = 180
+    if not raw:
+        return default
+    try:
+        value = int(float(raw))
+    except ValueError:
+        value = default
+    return max(30, min(7200, value))
+
+
+def _historical_learning_stagger_seconds() -> int:
+    raw = str(os.getenv("HISTORICAL_REPLAY_STAGGER_SECONDS", "") or "").strip()
+    default = 30
+    if not raw:
+        return default
+    try:
+        value = int(float(raw))
+    except ValueError:
+        value = default
+    return max(0, min(300, value))
+
+
+def _historical_learning_output_root() -> Path:
+    raw = str(os.getenv("REPLAY_FARM_OUTPUT_ROOT", "") or "").strip()
+    if raw:
+        return Path(raw).expanduser()
+    return Path(config.DATA_DIR) / "replay_farm"
+
+
+def _historical_learning_cache_dir() -> Path:
+    raw = str(os.getenv("REPLAY_FARM_CACHE_DIR", "") or "").strip()
+    if raw:
+        return Path(raw).expanduser()
+    return Path(config.DATA_DIR) / "historical_cache"
+
+
+def _historical_learning_python_exe() -> Path:
+    raw = str(os.getenv("REPLAY_FARM_PYTHON_EXE", "") or "").strip()
+    if raw:
+        return Path(raw).expanduser()
+    return Path(sys.executable)
+
+
+def _historical_learning_workers_file() -> Path | None:
+    raw = str(os.getenv("REPLAY_FARM_WORKERS_FILE", "") or "").strip()
+    if raw:
+        candidate = Path(raw).expanduser()
+        return candidate if candidate.exists() else None
+    default_file = Path(__file__).resolve().with_name("replay_workers.json")
+    return default_file if default_file.exists() else None
+
+
+_REPLAY_AUTO_PROMOTE_OVERRIDE_KEYS = (
+    "MIN_SIGNAL_SCORE",
+    "DIRECTION_CONVICTION_MIN",
+    "RVOL_MIN",
+    "ATR_PCT_MIN",
+)
+_REPLAY_AUTO_PROMOTE_BASELINE: dict[str, float] = {
+    key: float(getattr(config, key, 0.0) or 0.0)
+    for key in _REPLAY_AUTO_PROMOTE_OVERRIDE_KEYS
+}
+
+
+def _replay_auto_promote_enabled() -> bool:
+    return _env_bool("ENABLE_REPLAY_AUTO_PROMOTE", True)
+
+
+def _replay_auto_promote_paper_only() -> bool:
+    return _env_bool("REPLAY_AUTO_PROMOTE_PAPER_ONLY", True)
+
+
+def _replay_auto_promote_min_total_trades() -> int:
+    return int(_env_float("REPLAY_AUTO_PROMOTE_MIN_TOTAL_TRADES", 100, minimum=1, maximum=1000000))
+
+
+def _replay_auto_promote_min_workers(expected_worker_count: int) -> int:
+    default = 2 if expected_worker_count >= 2 else 1
+    return int(_env_float("REPLAY_AUTO_PROMOTE_MIN_WORKERS", default, minimum=1, maximum=500))
+
+
+def _replay_auto_promote_min_passing_workers(expected_worker_count: int) -> int:
+    default = 2 if expected_worker_count >= 2 else 1
+    return int(_env_float("REPLAY_AUTO_PROMOTE_MIN_PASSING_WORKERS", default, minimum=1, maximum=500))
+
+
+def _replay_auto_promote_min_passing_window_pct() -> float:
+    return _env_float("REPLAY_AUTO_PROMOTE_MIN_PASSING_WINDOW_PCT", 40.0, minimum=0.0, maximum=100.0)
+
+
+def _replay_auto_promote_target_win_rate_pct() -> float:
+    return _env_float("REPLAY_AUTO_PROMOTE_TARGET_WIN_RATE_PCT", 55.0, minimum=0.0, maximum=100.0)
+
+
+def _replay_auto_promote_target_expectancy_pct() -> float:
+    return _env_float("REPLAY_AUTO_PROMOTE_TARGET_EXPECTANCY_PCT", 0.05, minimum=-100.0, maximum=100.0)
+
+
+def _replay_auto_promote_min_win_loss_ratio() -> float:
+    return _env_float("REPLAY_AUTO_PROMOTE_MIN_WIN_LOSS_RATIO", 1.25, minimum=0.0, maximum=1000.0)
+
+
+def _replay_auto_promote_min_worker_win_loss_ratio() -> float:
+    return _env_float("REPLAY_AUTO_PROMOTE_MIN_WORKER_WIN_LOSS_RATIO", 1.15, minimum=0.0, maximum=1000.0)
+
+
+def _replay_auto_promote_check_seconds() -> int:
+    return int(_env_float("REPLAY_AUTO_PROMOTE_CHECK_SECONDS", 300, minimum=30, maximum=3600))
+
+
+def _replay_auto_promote_revert_when_not_promotable() -> bool:
+    return _env_bool("REPLAY_AUTO_PROMOTE_REVERT_WHEN_NOT_PROMOTABLE", False)
+
+
+def _apply_replay_auto_promote_overrides(overrides: dict[str, Any]) -> dict[str, float]:
+    applied: dict[str, float] = {}
+    for key in _REPLAY_AUTO_PROMOTE_OVERRIDE_KEYS:
+        if key not in overrides:
+            continue
+        try:
+            value = float(overrides.get(key))
+        except (TypeError, ValueError):
+            continue
+        if not math.isfinite(value):
+            continue
+        setattr(config, key, value)
+        applied[key] = float(value)
+    return applied
+
+
+def _apply_replay_auto_promote_baseline() -> dict[str, float]:
+    for key, value in _REPLAY_AUTO_PROMOTE_BASELINE.items():
+        setattr(config, key, float(value))
+    return dict(_REPLAY_AUTO_PROMOTE_BASELINE)
+
+
+def _replay_auto_promote_signature(candidate: str, overrides: dict[str, Any]) -> str:
+    parts = [str(candidate or "").strip()]
+    for key in sorted(_REPLAY_AUTO_PROMOTE_OVERRIDE_KEYS):
+        if key not in overrides:
+            continue
+        try:
+            value = float(overrides.get(key))
+        except (TypeError, ValueError):
+            continue
+        if not math.isfinite(value):
+            continue
+        parts.append(f"{key}={value:.8f}")
+    return "|".join(parts)
+
+
+def _replay_auto_promote_events_path() -> Path:
+    return Path(config.DATA_DIR) / "replay_auto_promote_events.csv"
+
+
+def _append_replay_auto_promote_event(status: dict[str, Any]) -> None:
+    path = _replay_auto_promote_events_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    columns = [
+        "timestamp_et",
+        "enabled",
+        "paper_mode",
+        "candidate",
+        "promotable",
+        "applied",
+        "reason",
+        "signature",
+        "worker_filter_json",
+        "overrides_json",
+        "best_json",
+        "aggregate_requirements_json",
+    ]
+    row = {
+        "timestamp_et": str(status.get("updated_at_et", "") or _now_et_iso()),
+        "enabled": bool(status.get("enabled", False)),
+        "paper_mode": bool(status.get("paper_mode", bool(getattr(config, "PAPER", True)))),
+        "candidate": str(status.get("candidate", "") or ""),
+        "promotable": bool(status.get("promotable", False)),
+        "applied": bool(status.get("applied", False)),
+        "reason": str(status.get("reason", "") or ""),
+        "signature": str(status.get("signature", "") or ""),
+        "worker_filter_json": json.dumps(list(status.get("worker_filter") or []), sort_keys=True),
+        "overrides_json": json.dumps(dict(status.get("overrides") or {}), sort_keys=True),
+        "best_json": json.dumps(dict(status.get("best") or {}), sort_keys=True),
+        "aggregate_requirements_json": json.dumps(dict(status.get("aggregate_requirements") or {}), sort_keys=True),
+    }
+    write_header = not path.exists()
+    with path.open("a", newline="", encoding="utf-8") as handle:
+        writer = csv.DictWriter(handle, fieldnames=columns)
+        if write_header:
+            writer.writeheader()
+        writer.writerow(row)
+
+
+def _evaluate_replay_auto_promotion(*, output_root: Path, worker_names: set[str], current_signature: str) -> tuple[dict[str, Any], str]:
+    status: dict[str, Any] = {
+        "enabled": _replay_auto_promote_enabled(),
+        "paper_mode": bool(getattr(config, "PAPER", True)),
+        "worker_filter": sorted(worker_names),
+        "candidate": "",
+        "promotable": False,
+        "applied": False,
+        "overrides": {},
+        "signature": current_signature,
+        "reason": "",
+    }
+    if not status["enabled"]:
+        status["reason"] = "disabled"
+        return status, current_signature
+    if _replay_auto_promote_paper_only() and not bool(getattr(config, "PAPER", True)):
+        status["reason"] = "paper_only_guard"
+        return status, current_signature
+
+    min_workers = _replay_auto_promote_min_workers(len(worker_names))
+    min_passing_workers = _replay_auto_promote_min_passing_workers(len(worker_names))
+    min_workers = min(min_workers, max(1, len(worker_names)))
+    min_passing_workers = min(min_passing_workers, max(1, len(worker_names)))
+
+    aggregate = replay_farm.aggregate_farm(
+        output_root=output_root,
+        min_total_trades=_replay_auto_promote_min_total_trades(),
+        min_workers=min_workers,
+        min_passing_workers=min_passing_workers,
+        min_passing_window_pct=_replay_auto_promote_min_passing_window_pct(),
+        target_win_rate_pct=_replay_auto_promote_target_win_rate_pct(),
+        target_expectancy_pct=_replay_auto_promote_target_expectancy_pct(),
+        min_win_loss_ratio=_replay_auto_promote_min_win_loss_ratio(),
+        min_worker_win_loss_ratio=_replay_auto_promote_min_worker_win_loss_ratio(),
+        worker_names=set(worker_names),
+    )
+    snapshot = build_promotion_snapshot(
+        aggregate_payload=aggregate,
+        worker_names=set(worker_names),
+        allowed_override_keys=_REPLAY_AUTO_PROMOTE_OVERRIDE_KEYS,
+    )
+    status["candidate"] = str(snapshot.get("candidate", "") or "")
+    status["promotable"] = bool(snapshot.get("promotable", False))
+    status["aggregate_requirements"] = dict(aggregate.get("requirements", {}))
+    status["best"] = snapshot.get("best", {}) if isinstance(snapshot.get("best"), dict) else {}
+    status["override_source"] = snapshot.get("override_source", {}) if isinstance(snapshot.get("override_source"), dict) else {}
+
+    overrides = snapshot.get("overrides", {}) if isinstance(snapshot.get("overrides"), dict) else {}
+    if not status["promotable"] or not overrides:
+        status["reason"] = "not_promotable_or_no_overrides"
+        if _replay_auto_promote_revert_when_not_promotable() and current_signature:
+            baseline = _apply_replay_auto_promote_baseline()
+            status["applied"] = True
+            status["overrides"] = baseline
+            status["signature"] = ""
+            status["reason"] = "reverted_to_baseline"
+            return status, ""
+        return status, current_signature
+
+    signature = _replay_auto_promote_signature(str(status["candidate"]), overrides)
+    status["signature"] = signature
+    if signature and signature != current_signature:
+        applied = _apply_replay_auto_promote_overrides(overrides)
+        status["overrides"] = applied
+        status["applied"] = bool(applied)
+        status["reason"] = "applied_new_candidate" if applied else "candidate_missing_valid_overrides"
+        return status, signature if applied else current_signature
+
+    status["overrides"] = dict(overrides)
+    status["reason"] = "already_applied"
+    return status, current_signature
+
+
+def _load_historical_learning_specs() -> tuple[dict[str, replay_farm.FarmWorkerSpec], str]:
+    workers_file = _historical_learning_workers_file()
+    if workers_file is not None:
+        try:
+            specs = replay_farm._load_worker_specs(workers_file.resolve())
+            if specs:
+                return specs, f"workers_file={workers_file}"
+        except Exception as exc:  # noqa: BLE001
+            print(f"[render_service] historical replay worker-file load failed: {exc}")
+    return replay_farm.default_worker_specs(), "built_in_defaults"
+
+
+def _run_historical_learning_supervisor() -> None:
+    output_root = _historical_learning_output_root()
+    cache_dir = _historical_learning_cache_dir()
+    python_exe = _historical_learning_python_exe()
+    check_seconds = _historical_learning_check_seconds()
+    restart_cooldown_seconds = _historical_learning_restart_cooldown_seconds()
+    stagger_seconds = _historical_learning_stagger_seconds()
+    offline = _historical_learning_offline()
+
+    specs, spec_source = _load_historical_learning_specs()
+    if not specs:
+        print("[render_service] historical replay supervisor disabled: no worker specs available.")
+        return
+    expected_names = list(specs.keys())
+    expected_name_set = set(expected_names)
+    auto_promote_enabled = _replay_auto_promote_enabled()
+    auto_promote_check_seconds = _replay_auto_promote_check_seconds()
+    print(
+        "[render_service] Historical replay supervisor enabled "
+        f"(workers={len(expected_names)}, offline={offline}, check={check_seconds}s, "
+        f"source={spec_source}, output_root={output_root}, cache_dir={cache_dir})."
+    )
+    if auto_promote_enabled:
+        print(
+            "[render_service] Replay auto-promote enabled "
+            f"(paper_only={_replay_auto_promote_paper_only()}, check={auto_promote_check_seconds}s, "
+            f"override_keys={','.join(_REPLAY_AUTO_PROMOTE_OVERRIDE_KEYS)})."
+        )
+    else:
+        print("[render_service] Replay auto-promote disabled by ENABLE_REPLAY_AUTO_PROMOTE=false.")
+        _patch_runtime_state(
+            {
+                "replay_auto_promote_status": {
+                    "enabled": False,
+                    "reason": "disabled",
+                    "updated_at_et": _now_et_iso(),
+                    "worker_filter": sorted(expected_name_set),
+                }
+            }
+        )
+
+    last_restart_attempt = 0.0
+    last_auto_promote_signature = ""
+    last_auto_promote_digest = ""
+    next_auto_promote_eval_at = 0.0
+    while True:
+        try:
+            status = replay_farm.status_workers(output_root=output_root)
+            running_by_name = {
+                str(item.get("worker", "") or ""): bool(item.get("running", False))
+                for item in status.get("workers", [])
+                if isinstance(item, dict)
+            }
+            down_or_missing = [name for name in expected_names if not running_by_name.get(name, False)]
+            if down_or_missing:
+                now = time.time()
+                if now - last_restart_attempt >= restart_cooldown_seconds:
+                    worker_names = ",".join(down_or_missing)
+                    print(
+                        "[render_service] Historical replay: starting/restarting workers "
+                        f"({worker_names})."
+                    )
+                    result = replay_farm.start_workers(
+                        worker_names=worker_names,
+                        worker_specs=specs,
+                        output_root=output_root,
+                        cache_dir=cache_dir,
+                        python_exe=python_exe,
+                        stagger_seconds=stagger_seconds,
+                        offline=offline,
+                        restart=True,
+                    )
+                    started_count = len(result.get("started", []))
+                    skipped_count = len(result.get("skipped", []))
+                    print(
+                        "[render_service] Historical replay supervisor action complete "
+                        f"(started={started_count}, skipped={skipped_count})."
+                    )
+                    last_restart_attempt = now
+                else:
+                    remaining = int(restart_cooldown_seconds - (now - last_restart_attempt))
+                    print(
+                        "[render_service] Historical replay: workers down but restart cooldown active "
+                        f"({remaining}s remaining)."
+                    )
+        except Exception as exc:  # noqa: BLE001
+            print(f"[render_service] historical replay supervisor error: {exc}")
+
+        if auto_promote_enabled:
+            now = time.time()
+            if now >= next_auto_promote_eval_at:
+                try:
+                    promote_status, last_auto_promote_signature = _evaluate_replay_auto_promotion(
+                        output_root=output_root,
+                        worker_names=expected_name_set,
+                        current_signature=last_auto_promote_signature,
+                    )
+                    promote_status["updated_at_et"] = _now_et_iso()
+                    _patch_runtime_state({"replay_auto_promote_status": promote_status})
+                    digest = (
+                        f"{promote_status.get('candidate', '')}|"
+                        f"{promote_status.get('promotable', False)}|"
+                        f"{promote_status.get('reason', '')}|"
+                        f"{promote_status.get('signature', '')}"
+                    )
+                    if digest != last_auto_promote_digest:
+                        print(
+                            "[render_service] Replay auto-promote status "
+                            f"(candidate={promote_status.get('candidate', '')}, "
+                            f"promotable={promote_status.get('promotable', False)}, "
+                            f"reason={promote_status.get('reason', '')}, "
+                            f"applied={promote_status.get('applied', False)})."
+                        )
+                        _append_replay_auto_promote_event(promote_status)
+                        last_auto_promote_digest = digest
+                except Exception as exc:  # noqa: BLE001
+                    print(f"[render_service] replay auto-promote evaluation error: {exc}")
+                next_auto_promote_eval_at = now + auto_promote_check_seconds
+        time.sleep(check_seconds)
+
+
 def _position_unrealized_usd(pos) -> float | None:
     try:
         pl_raw = float(getattr(pos, "unrealized_pl", 0) or 0)
@@ -245,6 +691,10 @@ def _print_startup_readiness() -> None:
     print(f"[render_service] dashboard_control_auth_enabled={token_enabled}")
     print(f"[render_service] manual_stop={bool(control.get('manual_stop', False))}")
     print(f"[render_service] dry_run={bool(control.get('dry_run', False))}")
+    print(f"[render_service] historical_replay_learning_enabled={_historical_learning_enabled()}")
+    print(f"[render_service] historical_replay_offline={_historical_learning_offline()}")
+    print(f"[render_service] replay_auto_promote_enabled={_replay_auto_promote_enabled()}")
+    print(f"[render_service] replay_auto_promote_paper_only={_replay_auto_promote_paper_only()}")
 
 
 def _apply_boot_auto_resume() -> None:
@@ -433,6 +883,15 @@ if __name__ == "__main__":
         name="autobott-trader-watchdog",
     )
     watchdog_thread.start()
+    if _historical_learning_enabled():
+        historical_learning_thread = threading.Thread(
+            target=_run_historical_learning_supervisor,
+            daemon=True,
+            name="autobott-historical-replay-supervisor",
+        )
+        historical_learning_thread.start()
+    else:
+        print("[render_service] Historical replay supervisor disabled by ENABLE_HISTORICAL_REPLAY_LEARNING=false.")
 
     port = int(os.getenv("PORT", "5000"))
     print(f"[render_service] Starting dashboard on 0.0.0.0:{port}")

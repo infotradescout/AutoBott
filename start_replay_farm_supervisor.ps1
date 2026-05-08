@@ -5,6 +5,7 @@ param(
     [string]$CacheDir = "$PSScriptRoot\autotrader\historical_cache",
     [int]$StaggerSeconds = 30,
     [int]$HealthCheckSeconds = 60,
+    [switch]$Offline,
     [switch]$NoOffline,
     [switch]$OneShot,
     [switch]$NoStopOnOneShot,
@@ -27,6 +28,19 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
+
+if (-not $PSBoundParameters.ContainsKey("OutputRoot")) {
+    $dataDir = [string]$env:DATA_DIR
+    if (-not [string]::IsNullOrWhiteSpace($dataDir)) {
+        $OutputRoot = Join-Path $dataDir "replay_farm"
+    }
+}
+if (-not $PSBoundParameters.ContainsKey("CacheDir")) {
+    $dataDir = [string]$env:DATA_DIR
+    if (-not [string]::IsNullOrWhiteSpace($dataDir)) {
+        $CacheDir = Join-Path $dataDir "historical_cache"
+    }
+}
 
 function Write-SupervisorLog {
     param(
@@ -85,13 +99,16 @@ $startArgs = @(
     "autotrader\replay_farm.py",
     "start",
     "--workers-file", $workersFilePath,
-    "--offline",
+    "--no-offline",
     "--restart",
     "--stagger-seconds", $StaggerSeconds,
     "--output-root", $OutputRoot,
     "--cache-dir", $CacheDir,
     "--python", $pythonExePath
 )
+if ($Offline) {
+    $startArgs += "--offline"
+}
 if ($NoOffline) {
     $startArgs += "--no-offline"
 }

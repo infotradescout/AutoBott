@@ -191,6 +191,66 @@ class ReplayFarmTests(unittest.TestCase):
         self.assertFalse(by_candidate["one_dataset_only"]["promotable"])
         self.assertTrue(farm_runs_exists)
 
+    def test_aggregate_worker_filter_limits_scope(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            worker_a = root / "dataset_a"
+            worker_b = root / "dataset_b"
+            replay_farm._write_registry(
+                root,
+                {
+                    "workers": {
+                        "dataset_a": {"pid": 0, "output_dir": str(worker_a)},
+                        "dataset_b": {"pid": 0, "output_dir": str(worker_b)},
+                    }
+                },
+            )
+            _write_optimizer_rows(
+                worker_a / "optimizer_runs.csv",
+                [
+                    {
+                        "candidate": "quality_score",
+                        "evaluated": 60,
+                        "wins": 36,
+                        "losses": 24,
+                        "win_rate_pct": 60.0,
+                        "expectancy_pct": 0.08,
+                        "pass_target": True,
+                    }
+                ],
+            )
+            _write_optimizer_rows(
+                worker_b / "optimizer_runs.csv",
+                [
+                    {
+                        "candidate": "quality_score",
+                        "evaluated": 60,
+                        "wins": 12,
+                        "losses": 48,
+                        "win_rate_pct": 20.0,
+                        "expectancy_pct": -0.15,
+                        "pass_target": False,
+                    }
+                ],
+            )
+
+            filtered = replay_farm.aggregate_farm(
+                output_root=root,
+                min_total_trades=50,
+                min_workers=1,
+                min_passing_workers=1,
+                min_passing_window_pct=40.0,
+                target_win_rate_pct=55.0,
+                target_expectancy_pct=0.05,
+                min_win_loss_ratio=1.1,
+                min_worker_win_loss_ratio=1.1,
+                worker_names={"dataset_a"},
+            )
+
+        self.assertEqual(filtered["worker_count"], 1)
+        self.assertEqual(filtered["best"]["candidate"], "quality_score")
+        self.assertTrue(filtered["best"]["promotable"])
+
     def test_aggregate_respects_global_win_loss_ratio_threshold(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

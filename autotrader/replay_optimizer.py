@@ -148,6 +148,8 @@ def _next_window_dates(
     args: argparse.Namespace,
     symbols: list[str],
     cache_dir: Path,
+    *,
+    offline: bool = True,
 ) -> tuple[date, date] | None:
     policy = str(getattr(args, "rolling_end_policy", "fixed")).strip().lower()
     if policy not in {"fixed", "today", "cache"}:
@@ -163,6 +165,27 @@ def _next_window_dates(
         if candidate_end <= current_end:
             return None
         candidate_start = candidate_end - span
+        if offline:
+            for symbol in symbols:
+                if not _has_cached_window(
+                    cache_dir,
+                    symbol,
+                    str(args.interval),
+                    candidate_start,
+                    candidate_end,
+                ):
+                    return None
+        return candidate_start, candidate_end
+
+    candidate_end = _latest_cached_end_date(symbols, str(args.interval), cache_dir)
+    if candidate_end is None or candidate_end <= current_end:
+        if offline:
+            return None
+        candidate_end = datetime.now().date()
+        if candidate_end <= current_end:
+            return None
+    candidate_start = candidate_end - span
+    if offline:
         for symbol in symbols:
             if not _has_cached_window(
                 cache_dir,
@@ -172,21 +195,6 @@ def _next_window_dates(
                 candidate_end,
             ):
                 return None
-        return candidate_start, candidate_end
-
-    candidate_end = _latest_cached_end_date(symbols, str(args.interval), cache_dir)
-    if candidate_end is None or candidate_end <= current_end:
-        return None
-    candidate_start = candidate_end - span
-    for symbol in symbols:
-        if not _has_cached_window(
-            cache_dir,
-            symbol,
-            str(args.interval),
-            candidate_start,
-            candidate_end,
-        ):
-            return None
     return candidate_start, candidate_end
 
 
@@ -552,12 +560,14 @@ def run_optimizer(args: argparse.Namespace) -> dict[str, Any]:
                 args=args,
                 symbols=symbols,
                 cache_dir=Path(args.cache_dir),
+                offline=offline,
             )
             if next_window is None:
                 print(
                     json.dumps(
                         {
                             "status": "waiting_for_new_data",
+                            "offline": offline,
                             "rolling_end_policy": str(getattr(args, "rolling_end_policy", "fixed")),
                             "window_start": str(current_start),
                             "window_end": str(current_end),

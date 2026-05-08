@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import tempfile
 import unittest
-from datetime import date
+from datetime import date, timedelta
 from pathlib import Path
 from types import SimpleNamespace
 import csv
@@ -67,6 +67,56 @@ class ReplayOptimizerTests(unittest.TestCase):
             )
             self.assertIsNone(nxt)
 
+    def test_next_window_dates_today_online_does_not_require_cache(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            current_start = date.today() - timedelta(days=20)
+            current_end = date.today() - timedelta(days=10)
+            span = current_end - current_start
+            args = self._namespace(
+                rolling_step_days=1,
+                rolling_end_policy="today",
+                interval="5m",
+            )
+            nxt = replay_optimizer._next_window_dates(
+                current_start=current_start,
+                current_end=current_end,
+                args=args,
+                symbols=["AAPL", "MSFT"],
+                cache_dir=root,
+                offline=False,
+            )
+            self.assertIsNotNone(nxt)
+            self.assertEqual(nxt[1], date.today())
+            self.assertEqual(nxt[0], date.today() - span)
+
+    def test_next_window_dates_cache_online_falls_back_to_today_when_stale(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            current_end = date.today() - timedelta(days=8)
+            current_start = current_end - timedelta(days=10)
+            span = current_end - current_start
+            stale_start = current_start.isoformat()
+            stale_end = current_end.isoformat()
+            (root / f"AAPL_5m_{stale_start}_{stale_end}.csv").touch()
+            (root / f"MSFT_5m_{stale_start}_{stale_end}.csv").touch()
+
+            args = self._namespace(
+                rolling_step_days=1,
+                rolling_end_policy="cache",
+                interval="5m",
+            )
+            nxt = replay_optimizer._next_window_dates(
+                current_start=current_start,
+                current_end=current_end,
+                args=args,
+                symbols=["AAPL", "MSFT"],
+                cache_dir=root,
+                offline=False,
+            )
+            self.assertIsNotNone(nxt)
+            self.assertEqual(nxt[1], date.today())
+            self.assertEqual(nxt[0], date.today() - span)
 
     def test_append_ratio_history(self):
         with tempfile.TemporaryDirectory() as tmp:

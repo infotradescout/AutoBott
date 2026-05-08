@@ -96,8 +96,8 @@ Continuously sweep replay candidates and write a leaderboard:
 .\.venv\Scripts\python.exe autotrader\replay_optimizer.py --symbols SPY,QQQ,AAPL,AMD --start YYYY-MM-DD --end YYYY-MM-DD --iterations 0
 ```
 
-The optimizer writes `replay_optimizer\optimizer_runs.csv`, `replay_optimizer\best_candidate.json`, and `replay_optimizer\optimizer_win_loss_ratio.csv` in the active data directory. It is offline only: no orders are placed, and any "best" candidate should be reviewed before changing live settings.
-It starts in offline mode by default. Keep `--no-offline` only when you explicitly want live fetches.
+The optimizer writes `replay_optimizer\optimizer_runs.csv`, `replay_optimizer\best_candidate.json`, and `replay_optimizer\optimizer_win_loss_ratio.csv` in the active data directory. It is replay-only: no orders are placed, and any "best" candidate should be reviewed before changing live settings.
+It starts in offline mode by default. Use `--no-offline` when you want rolling windows to keep moving without pre-seeding cache for every new day.
 Reduce scan memory/compute by lowering `--scan-bars` (how many intraday bars each scan sees).
 Use `--min-win-loss-ratio` to require a stronger wins/losses edge before a candidate is marked passable or promotable.
 For fresh data loops, add rolling mode and let the optimizer advance the window after each run:
@@ -107,6 +107,7 @@ For fresh data loops, add rolling mode and let the optimizer advance the window 
 ```
 
 `--rolling-end-policy cache` keeps advancing using the latest end date available in local cache files for every symbol (all offline), while `--rolling-end-policy today` uses the current date.
+When `--no-offline` is enabled, rolling windows can now advance even if cache is not already populated for the next window (missing bars are fetched during replay).
 `--iterations 0` keeps the optimizer running continuously and appends a cumulative win/loss rollup per candidate to `optimizer_win_loss_ratio.csv`.
 
 To sweep the full US optionsable universe from Alpaca, run:
@@ -144,11 +145,16 @@ If you want it fully hands-off, use the project launcher:
 powershell -ExecutionPolicy Bypass -File .\start_replay_farm.ps1
 ```
 
+The launcher defaults to `--no-offline` so rolling windows keep learning without manual cache warm-ups. Add `-Offline` if you intentionally want cache-only runs.
+If `DATA_DIR` is set, launcher defaults now automatically use `DATA_DIR/replay_farm` and `DATA_DIR/historical_cache`.
+
 For continuous supervised uptime with auto-restart and live ratio snapshots, use:
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File .\start_replay_farm_supervisor.ps1
 ```
+
+This supervisor launcher also defaults to `--no-offline`; pass `-Offline` for cache-only behavior.
 
 The supervisor keeps workers running, checks status every `-HealthCheckSeconds` (default 60), and logs each cycle with latest `win_loss_ratio` / `win_rate` values from each worker’s `optimizer_win_loss_ratio.csv`.
 Use it for long-running local operation.
@@ -156,6 +162,14 @@ It also runs farm aggregate checks every `-AggregateEveryCycles` cycles (default
 By default it writes aggregate snapshots to `replay_farm\snapshots`:
 - `farm_summary_YYYY-MM-DD.json` (latest daily state)
 - `farm_summary_history.csv` (append-only cycle history)
+
+Render service note:
+- `render_service.py` now includes a built-in replay-farm supervisor thread for 24/7 historical learning.
+- Control it with `ENABLE_HISTORICAL_REPLAY_LEARNING` (default `true`) and `HISTORICAL_REPLAY_OFFLINE` (default `false`).
+- Optional auto-promote is also built in: when aggregate replay evidence is promotable, the service can apply allowlisted scanner thresholds (`MIN_SIGNAL_SCORE`, `DIRECTION_CONVICTION_MIN`, `RVOL_MIN`, `ATR_PCT_MIN`) at runtime.
+- Auto-promote controls: `ENABLE_REPLAY_AUTO_PROMOTE` (default `true`) and `REPLAY_AUTO_PROMOTE_PAPER_ONLY` (default `true`).
+- Promotion decisions are logged to `DATA_DIR/replay_auto_promote_events.csv` for audit history.
+- Read-only API: `GET /api/replay-auto-promote` returns current auto-promote status and recent audit events.
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File .\start_replay_farm_supervisor.ps1 -HealthCheckSeconds 120 -StaggerSeconds 45

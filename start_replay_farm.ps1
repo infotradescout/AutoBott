@@ -4,12 +4,26 @@ param(
     [string]$OutputRoot = "$PSScriptRoot\autotrader\replay_farm",
     [string]$CacheDir = "$PSScriptRoot\autotrader\historical_cache",
     [int]$StaggerSeconds = 30,
+    [switch]$Offline,
     [switch]$NoOffline
 )
 
 $ErrorActionPreference = "Stop"
 
 $repoRoot = Resolve-Path $PSScriptRoot
+
+if (-not $PSBoundParameters.ContainsKey("OutputRoot")) {
+    $dataDir = [string]$env:DATA_DIR
+    if (-not [string]::IsNullOrWhiteSpace($dataDir)) {
+        $OutputRoot = Join-Path $dataDir "replay_farm"
+    }
+}
+if (-not $PSBoundParameters.ContainsKey("CacheDir")) {
+    $dataDir = [string]$env:DATA_DIR
+    if (-not [string]::IsNullOrWhiteSpace($dataDir)) {
+        $CacheDir = Join-Path $dataDir "historical_cache"
+    }
+}
 
 $pythonExePath = Resolve-Path $PythonExe
 $workersFilePath = Resolve-Path $WorkersFile
@@ -35,13 +49,16 @@ $argumentList = @(
     "autotrader\replay_farm.py",
     "start",
     "--workers-file", $workersFilePath,
-    "--offline",
+    "--no-offline",
     "--restart",
     "--stagger-seconds", $StaggerSeconds,
     "--output-root", $OutputRoot,
     "--cache-dir", $CacheDir,
     "--python", $pythonExePath
 )
+if ($Offline) {
+    $argumentList += "--offline"
+}
 if ($NoOffline) {
     $argumentList += "--no-offline"
 }

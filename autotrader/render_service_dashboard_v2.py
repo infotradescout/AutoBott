@@ -10,9 +10,12 @@ and registers always-available quick-link buttons.
 
 from __future__ import annotations
 
+import csv
 import runpy
 import sys
 import threading
+from collections import deque
+from pathlib import Path
 
 from flask import jsonify, request
 
@@ -22,6 +25,7 @@ from decision_journal import build_decision_journal
 from decision_memory import build_learning_summary, run_learning_memory_forever, update_decision_memory
 from decision_outcomes import build_decision_outcomes
 from quick_links import register_quick_links
+from state_store import load_bot_state
 
 sys.modules["dashboard"] = dashboard_v2
 volatility_proxy_boot.start()
@@ -77,6 +81,39 @@ def api_decision_learning():
 def api_decision_learning_update():
     """Force a read-only learning memory refresh."""
     return jsonify(update_decision_memory())
+
+
+def _replay_auto_promote_events(limit: int) -> list[dict[str, str]]:
+    data_dir = Path(getattr(dashboard_v2.config, "DATA_DIR"))
+    path = data_dir / "replay_auto_promote_events.csv"
+    if not path.exists():
+        return []
+    try:
+        with path.open("r", newline="", encoding="utf-8") as handle:
+            rows = list(deque(csv.DictReader(handle), maxlen=max(1, limit)))
+    except Exception:
+        return []
+    return rows
+
+
+@dashboard_v2.app.get("/api/replay-auto-promote")
+def api_replay_auto_promote():
+    """Read-only replay auto-promote status + recent audit events."""
+    try:
+        limit = int(str(request.args.get("limit", "50") or "50"))
+    except ValueError:
+        limit = 50
+    limit = max(1, min(500, limit))
+    state = load_bot_state()
+    if not isinstance(state, dict):
+        state = {}
+    return jsonify(
+        {
+            "generated_at_et": dashboard_v2._now_et().isoformat(),
+            "status": state.get("replay_auto_promote_status", {}) if isinstance(state.get("replay_auto_promote_status"), dict) else {},
+            "events": _replay_auto_promote_events(limit=limit),
+        }
+    )
 
 
 runpy.run_module("render_service", run_name="__main__")
