@@ -5,6 +5,7 @@ from __future__ import annotations
 import csv
 import json
 import os
+import socket
 import shutil
 import sys
 import threading
@@ -130,6 +131,43 @@ def _position_qty_as_int(qty_value) -> int:
         return int(float(qty_value))
     except (TypeError, ValueError):
         return 0
+
+
+def _can_bind_port(host: str, port: int) -> bool:
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
+            probe.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            probe.bind((host, int(port)))
+        return True
+    except OSError:
+        return False
+
+
+def _resolve_dashboard_port() -> int:
+    raw_port = str(os.getenv("PORT", "5000") or "5000").strip()
+    try:
+        requested_port = int(raw_port)
+    except ValueError:
+        requested_port = 5000
+    requested_port = max(1, min(65535, requested_port))
+
+    candidates: list[int] = []
+    for candidate in (requested_port, 5000, 5051, 5052, 8080):
+        if candidate not in candidates:
+            candidates.append(candidate)
+
+    for candidate in candidates:
+        if _can_bind_port("0.0.0.0", candidate):
+            if candidate != requested_port:
+                print(
+                    f"[render_service] Requested PORT={requested_port} unavailable; "
+                    f"falling back to {candidate}."
+                )
+            os.environ["PORT"] = str(candidate)
+            return candidate
+
+    os.environ["PORT"] = str(requested_port)
+    return requested_port
 
 
 def _parse_iso_datetime(value: str | None) -> datetime | None:
@@ -893,6 +931,6 @@ if __name__ == "__main__":
     else:
         print("[render_service] Historical replay supervisor disabled by ENABLE_HISTORICAL_REPLAY_LEARNING=false.")
 
-    port = int(os.getenv("PORT", "5000"))
+    port = _resolve_dashboard_port()
     print(f"[render_service] Starting dashboard on 0.0.0.0:{port}")
     app.run(host="0.0.0.0", port=port, debug=False)
