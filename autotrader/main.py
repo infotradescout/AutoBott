@@ -1614,6 +1614,9 @@ def main():
     daily_realized_loss_usd = float(state.get("daily_realized_loss_usd", 0.0) or 0.0)
     weekly_realized_loss_usd = float(state.get("weekly_realized_loss_usd", 0.0) or 0.0)
     consecutive_losses = int(state.get("consecutive_losses", 0) or 0)
+    consecutive_loss_cooldown_until = _parse_state_datetime(state.get("consecutive_loss_cooldown_until_iso"))
+    consecutive_loss_cooldown_loss_count = int(state.get("consecutive_loss_cooldown_loss_count", 0) or 0)
+    consecutive_loss_recovery_announced_count = int(state.get("consecutive_loss_recovery_announced_count", 0) or 0)
     loss_counters_day_raw = state.get("loss_counters_day")
     loss_counters_day = None
     if loss_counters_day_raw:
@@ -1774,6 +1777,13 @@ def main():
                 "daily_realized_loss_usd": round(daily_realized_loss_usd, 6),
                 "weekly_realized_loss_usd": round(weekly_realized_loss_usd, 6),
                 "consecutive_losses": consecutive_losses,
+                "consecutive_loss_cooldown_until_iso": (
+                    consecutive_loss_cooldown_until.isoformat()
+                    if isinstance(consecutive_loss_cooldown_until, datetime)
+                    else ""
+                ),
+                "consecutive_loss_cooldown_loss_count": consecutive_loss_cooldown_loss_count,
+                "consecutive_loss_recovery_announced_count": consecutive_loss_recovery_announced_count,
                 "loss_counters_day": loss_counters_day.isoformat() if loss_counters_day else None,
                 "weekly_loss_key": weekly_loss_key,
                 "blocked_day_notice": blocked_day_notice,
@@ -1830,6 +1840,62 @@ def main():
         last_trader_heartbeat_et = datetime.now(tz).isoformat()
         _save_runtime_state()
         last_heartbeat_persist_at = now_ts
+
+    def _consecutive_loss_cooldown_active(now_et: datetime) -> bool:
+        nonlocal consecutive_loss_cooldown_until, consecutive_loss_cooldown_loss_count
+        nonlocal consecutive_loss_recovery_announced_count
+        limit = int(getattr(config, "CONSECUTIVE_LOSS_LIMIT", 0) or 0)
+        if limit <= 0 or consecutive_losses < limit:
+            consecutive_loss_cooldown_until = None
+            consecutive_loss_cooldown_loss_count = 0
+            consecutive_loss_recovery_announced_count = 0
+            return False
+
+        if bool(getattr(config, "CONSECUTIVE_LOSS_HARD_STOP_REST_OF_DAY", False)):
+            _mark_skip("consecutive_loss_limit")
+            print(
+                f"[{ts(now_et)}] {consecutive_losses} consecutive losses. "
+                "Pausing new entries for the rest of the day."
+            )
+            return True
+
+        cooldown_minutes = max(0, int(getattr(config, "CONSECUTIVE_LOSS_COOLDOWN_MINUTES", 0) or 0))
+        if cooldown_minutes <= 0:
+            return False
+
+        needs_new_cooldown = (
+            consecutive_loss_cooldown_loss_count != consecutive_losses
+            or consecutive_loss_cooldown_until is None
+        )
+        if needs_new_cooldown:
+            consecutive_loss_cooldown_until = now_et + timedelta(minutes=cooldown_minutes)
+            consecutive_loss_cooldown_loss_count = consecutive_losses
+            consecutive_loss_recovery_announced_count = 0
+            _mark_skip("consecutive_loss_cooldown")
+            print(
+                f"[{ts(now_et)}] {consecutive_losses} consecutive losses. "
+                f"Cooling down new entries for {cooldown_minutes}m, then recovery mode can trade stricter setups."
+            )
+            _save_runtime_state()
+            return True
+
+        if consecutive_loss_cooldown_until > now_et:
+            remaining_seconds = int((consecutive_loss_cooldown_until - now_et).total_seconds())
+            _mark_skip("consecutive_loss_cooldown")
+            print(
+                f"[{ts(now_et)}] {consecutive_losses} consecutive losses. "
+                f"Cooldown active for {max(1, remaining_seconds // 60)}m more."
+            )
+            return True
+
+        if consecutive_loss_recovery_announced_count != consecutive_losses:
+            consecutive_loss_recovery_announced_count = consecutive_losses
+            print(
+                f"[{ts(now_et)}] Consecutive-loss cooldown expired after {consecutive_losses} losses; "
+                "recovery mode will allow only stricter loss-throttle setups."
+            )
+            _save_runtime_state()
+        return False
 
     def _active_ticker_loss_cooldown_until(ticker: str, now_et: datetime) -> datetime | None:
         key = str(ticker or "").upper()
@@ -3289,6 +3355,9 @@ def main():
         if loss_counters_day != now_et.date():
             daily_realized_loss_usd = 0.0
             consecutive_losses = 0
+            consecutive_loss_cooldown_until = None
+            consecutive_loss_cooldown_loss_count = 0
+            consecutive_loss_recovery_announced_count = 0
             loss_counters_day = now_et.date()
             watchlist = []
             observation_done = False
@@ -3768,13 +3837,8 @@ def main():
                 )
                 break
 
-            # --- Consecutive loss circuit breaker ---
-            if consecutive_losses >= config.CONSECUTIVE_LOSS_LIMIT:
-                _mark_skip("consecutive_loss_limit")
-                print(
-                    f"[{ts(now_et)}] {consecutive_losses} consecutive losses. "
-                    f"Pausing new entries for the rest of the day."
-                )
+            # --- Consecutive loss recovery brake ---
+            if _consecutive_loss_cooldown_active(now_et):
                 break
 
             # --- Net P&L circuit breaker ---
