@@ -3450,6 +3450,7 @@ def main():
         if normalized_fills > 0:
             option_positions = broker.get_open_option_positions()
         open_count = len(option_positions)
+        alpaca_truth_ticker_roundtrips: dict[str, int] = {}
 
         if bool(getattr(config, "ENABLE_ALPACA_TRUTH_LOSS_GUARD", True)):
             try:
@@ -3488,6 +3489,12 @@ def main():
                     )
                 )
                 truth_closed_trades = list(truth_snapshot.get("closed_trades") or [])
+                for item in truth_closed_trades:
+                    truth_ticker = str(item.get("ticker", "") or "").upper()
+                    if truth_ticker:
+                        alpaca_truth_ticker_roundtrips[truth_ticker] = (
+                            int(alpaca_truth_ticker_roundtrips.get(truth_ticker, 0)) + 1
+                        )
                 truth_loss_count = sum(
                     1
                     for item in truth_closed_trades
@@ -4142,6 +4149,20 @@ def main():
                 print(
                     f"[{ts(now_et)}] {ticker}: skip "
                     f"(round-trip diversification cooldown until {ts(roundtrip_cooldown_until)})."
+                )
+                continue
+            truth_roundtrip_cap = max(
+                0,
+                int(getattr(config, "MAX_ALPACA_TRUTH_ROUNDTRIPS_PER_TICKER_PER_DAY", 1) or 0),
+            )
+            truth_roundtrip_count = int(alpaca_truth_ticker_roundtrips.get(ticker, 0))
+            if truth_roundtrip_cap > 0 and truth_roundtrip_count >= truth_roundtrip_cap:
+                _mark_skip("alpaca_truth_ticker_roundtrip_cap")
+                _mark_stage4_reject(reason="alpaca_truth_ticker_roundtrip_cap", ticker=ticker)
+                print(
+                    f"[{ts(now_et)}] {ticker}: skip "
+                    f"(Alpaca truth has {truth_roundtrip_count}/{truth_roundtrip_cap} "
+                    "closed round-trip(s) today)."
                 )
                 continue
             loss_cooldown_until = _active_ticker_loss_cooldown_until(ticker, now_et)
