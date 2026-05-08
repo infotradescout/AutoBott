@@ -1651,6 +1651,11 @@ def main():
         _dt = _parse_state_datetime(_v)
         if _dt is not None:
             ticker_loss_cooldown_until[str(_k).upper()] = _dt
+    ticker_roundtrip_cooldown_until: dict[str, datetime] = {}
+    for _k, _v in dict(state.get("ticker_roundtrip_cooldown_until") or {}).items():
+        _dt = _parse_state_datetime(_v)
+        if _dt is not None:
+            ticker_roundtrip_cooldown_until[str(_k).upper()] = _dt
     last_entry_debug: dict = dict(state.get("last_entry_debug") or {})
     last_exit_debug: dict = dict(state.get("last_exit_debug") or {})
     open_position_pl_history: dict[str, list[dict[str, float | str | None]]] = dict(
@@ -1800,6 +1805,11 @@ def main():
                     for k, v in ticker_loss_cooldown_until.items()
                     if isinstance(v, datetime)
                 },
+                "ticker_roundtrip_cooldown_until": {
+                    str(k).upper(): v.isoformat()
+                    for k, v in ticker_roundtrip_cooldown_until.items()
+                    if isinstance(v, datetime)
+                },
                 "last_entry_debug": last_entry_debug,
                 "last_exit_debug": last_exit_debug,
                 "open_position_pl_history": open_position_pl_history,
@@ -1921,6 +1931,34 @@ def main():
         print(
             f"[{ts(now_et)}] {key}: loss cooldown armed for {cooldown_minutes}m "
             f"(until {ts(ticker_loss_cooldown_until[key])}; reason={reason})."
+        )
+
+    def _active_ticker_roundtrip_cooldown_until(ticker: str, now_et: datetime) -> datetime | None:
+        key = str(ticker or "").upper()
+        if not key:
+            return None
+        until_dt = ticker_roundtrip_cooldown_until.get(key)
+        if until_dt is None:
+            return None
+        if until_dt <= now_et:
+            ticker_roundtrip_cooldown_until.pop(key, None)
+            return None
+        return until_dt
+
+    def _set_ticker_roundtrip_cooldown(ticker: str, now_et: datetime, *, minutes: int, reason: str) -> None:
+        key = str(ticker or "").upper()
+        if not key:
+            return
+        cooldown_minutes = max(0, int(minutes))
+        if cooldown_minutes <= 0:
+            return
+        until_dt = now_et + timedelta(minutes=cooldown_minutes)
+        prior = ticker_roundtrip_cooldown_until.get(key)
+        if prior is None or until_dt > prior:
+            ticker_roundtrip_cooldown_until[key] = until_dt
+        print(
+            f"[{ts(now_et)}] {key}: round-trip diversification cooldown armed for {cooldown_minutes}m "
+            f"(until {ts(ticker_roundtrip_cooldown_until[key])}; reason={reason})."
         )
 
     def _opposite_direction(direction: str) -> str:
@@ -3372,6 +3410,7 @@ def main():
             ticker_reentry_expected_direction = {}
             ticker_reentries_used = {}
             ticker_loss_cooldown_until = {}
+            ticker_roundtrip_cooldown_until = {}
             premarket_opening_signals = []
             premarket_signals_day = ""
             premarket_scan_runs = 0
@@ -4095,6 +4134,15 @@ def main():
                 _mark_skip("bad_fill_cooldown")
                 _mark_stage4_reject(reason="bad_fill_cooldown", ticker=ticker)
                 print(f"[{ts(now_et)}] {ticker}: skip (bad-fill cooldown active).")
+                continue
+            roundtrip_cooldown_until = _active_ticker_roundtrip_cooldown_until(ticker, now_et)
+            if roundtrip_cooldown_until is not None:
+                _mark_skip("ticker_roundtrip_cooldown")
+                _mark_stage4_reject(reason="ticker_roundtrip_cooldown", ticker=ticker)
+                print(
+                    f"[{ts(now_et)}] {ticker}: skip "
+                    f"(round-trip diversification cooldown until {ts(roundtrip_cooldown_until)})."
+                )
                 continue
             loss_cooldown_until = _active_ticker_loss_cooldown_until(ticker, now_et)
             if loss_cooldown_until is not None:
@@ -5100,6 +5148,13 @@ def main():
                     ticker = str(meta.get("ticker", "") or "").upper()
                     reversal_direction = ""
                     reentries_used = int(ticker_reentries_used.get(ticker, 0)) if ticker else 0
+                    if ticker and remaining_qty <= 0:
+                        _set_ticker_roundtrip_cooldown(
+                            ticker,
+                            now_et,
+                            minutes=int(getattr(config, "TICKER_ROUNDTRIP_COOLDOWN_MINUTES", 0) or 0),
+                            reason=str(exit_reason or "closed_roundtrip"),
+                        )
                     if ticker and trade_pnl_usd < 0:
                         losing_direction = str(meta.get("direction", "") or "").lower()
                         reversal_direction = _arm_loss_direction_flip(
