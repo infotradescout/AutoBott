@@ -22,7 +22,7 @@ EASTERN = pytz.timezone(config.EASTERN_TZ)
 
 class FakeOrder:
     def __init__(self, symbol: str, side: str, status: str, submitted_at: datetime):
-        self.id = "fake-order-id"
+        self.id = f"fake-{symbol}-{submitted_at.timestamp()}"
         self.symbol = symbol
         self.side = side
         self.status = status
@@ -34,9 +34,13 @@ class FakeOrder:
 class FakeBroker:
     def __init__(self, orders):
         self._orders = list(orders)
+        self.canceled_order_ids = []
 
     def get_recent_orders(self, limit: int = 500):
         return self._orders[:limit]
+
+    def cancel_order(self, order_id: str):
+        self.canceled_order_ids.append(order_id)
 
 
 class FakeEntryBroker:
@@ -72,6 +76,7 @@ class MainOrderGuardTests(unittest.TestCase):
             "ENTRY_ORDER_STATUS_WAIT_SECONDS": config.ENTRY_ORDER_STATUS_WAIT_SECONDS,
             "ENTRY_LIMIT_ATTEMPTS": config.ENTRY_LIMIT_ATTEMPTS,
             "ENABLE_ENTRY_MARKET_FALLBACK": config.ENABLE_ENTRY_MARKET_FALLBACK,
+            "ENTRY_RESTING_ORDER_MAX_MINUTES": config.ENTRY_RESTING_ORDER_MAX_MINUTES,
         }
         config.ALPACA_BUY_ORDER_CAP_COUNTS_CANCELED = False
         config.ALPACA_CANCELED_BUY_ORDER_COOLDOWN_MINUTES = 10
@@ -80,6 +85,7 @@ class MainOrderGuardTests(unittest.TestCase):
         config.ENTRY_ORDER_STATUS_WAIT_SECONDS = 1
         config.ENTRY_LIMIT_ATTEMPTS = 1
         config.ENABLE_ENTRY_MARKET_FALLBACK = False
+        config.ENTRY_RESTING_ORDER_MAX_MINUTES = 10
         self.now = EASTERN.localize(datetime(2026, 5, 11, 9, 55, 0))
 
     def tearDown(self):
@@ -220,6 +226,34 @@ class MainOrderGuardTests(unittest.TestCase):
         counts = main._alpaca_active_option_buy_order_counts_by_ticker_today(broker, self.now)
 
         self.assertEqual(counts.get("ORCL"), 1)
+
+    def test_stale_active_entry_order_is_canceled_after_max_rest(self):
+        order = FakeOrder(
+            "ORCL260515C00195000",
+            "buy",
+            "new",
+            self.now - timedelta(minutes=11),
+        )
+        broker = FakeBroker([order])
+
+        canceled = main._cancel_stale_active_entry_buy_orders(broker, self.now)
+
+        self.assertEqual(canceled, 1)
+        self.assertEqual(broker.canceled_order_ids, [order.id])
+
+    def test_recent_active_entry_order_is_left_resting(self):
+        order = FakeOrder(
+            "ORCL260515C00195000",
+            "buy",
+            "new",
+            self.now - timedelta(minutes=5),
+        )
+        broker = FakeBroker([order])
+
+        canceled = main._cancel_stale_active_entry_buy_orders(broker, self.now)
+
+        self.assertEqual(canceled, 0)
+        self.assertEqual(broker.canceled_order_ids, [])
 
 
 if __name__ == "__main__":  # pragma: no cover

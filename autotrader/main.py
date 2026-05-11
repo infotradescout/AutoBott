@@ -1329,6 +1329,55 @@ def _alpaca_active_option_buy_order_counts_by_ticker_today(
     return counts
 
 
+def _cancel_stale_active_entry_buy_orders(
+    broker: AlpacaBroker,
+    now_et: datetime,
+    *,
+    limit: int = 500,
+) -> int:
+    max_age_minutes = max(0.0, float(getattr(config, "ENTRY_RESTING_ORDER_MAX_MINUTES", 0) or 0))
+    if max_age_minutes <= 0:
+        return 0
+    tz = pytz.timezone(config.EASTERN_TZ)
+    canceled = 0
+    try:
+        orders = broker.get_recent_orders(limit=max(1, int(limit)))
+    except Exception as exc:  # noqa: BLE001
+        print(f"[{ts(now_et)}] Stale entry-order lookup failed: {exc}")
+        return 0
+
+    for order in orders:
+        if _enum_text(getattr(order, "side", "")) != "buy":
+            continue
+        if not _is_active_entry_order_status(getattr(order, "status", "")):
+            continue
+        symbol = str(getattr(order, "symbol", "") or "").upper()
+        if not _parse_option_symbol(symbol)[0]:
+            continue
+        submitted_at = _as_et_datetime(
+            getattr(order, "submitted_at", None) or getattr(order, "created_at", None),
+            tz,
+        )
+        if submitted_at is None or submitted_at.date() != now_et.date():
+            continue
+        age_minutes = (now_et - submitted_at).total_seconds() / 60.0
+        if age_minutes < max_age_minutes:
+            continue
+        order_id = str(getattr(order, "id", "") or "")
+        if not order_id:
+            continue
+        try:
+            broker.cancel_order(order_id)
+            canceled += 1
+            print(
+                f"[{ts(now_et)}] Canceled stale entry buy order {order_id} "
+                f"{symbol} age={age_minutes:.1f}m max={max_age_minutes:.1f}m."
+            )
+        except Exception as exc:  # noqa: BLE001
+            print(f"[{ts(now_et)}] Cancel stale entry order {order_id} failed: {exc}")
+    return canceled
+
+
 def _parse_option_expiry_from_symbol(option_symbol: str) -> date | None:
     symbol = str(option_symbol or "").upper().strip()
     match = _OPTION_SYMBOL_RE.match(symbol)
@@ -3568,6 +3617,9 @@ def main():
         alpaca_buy_orders_by_ticker: dict[str, int] = {}
         alpaca_active_buy_orders_by_ticker: dict[str, int] = {}
         try:
+            stale_entry_cancels = _cancel_stale_active_entry_buy_orders(broker, now_et)
+            if stale_entry_cancels > 0:
+                time.sleep(config.RATE_LIMIT_SLEEP_SECONDS)
             alpaca_buy_orders_by_ticker = _alpaca_option_buy_order_counts_by_ticker_today(broker, now_et)
             alpaca_active_buy_orders_by_ticker = _alpaca_active_option_buy_order_counts_by_ticker_today(broker, now_et)
         except Exception as exc:  # noqa: BLE001
