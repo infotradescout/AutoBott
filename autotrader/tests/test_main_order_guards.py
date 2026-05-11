@@ -54,6 +54,13 @@ class FakeBroker:
         self.canceled_order_ids.append(order_id)
 
 
+class FakePosition:
+    def __init__(self, symbol: str, qty: int = 1, underlying_symbol: str | None = None):
+        self.symbol = symbol
+        self.qty = str(qty)
+        self.underlying_symbol = underlying_symbol
+
+
 class FakeEntryBroker:
     def __init__(self, status: str = "new"):
         self.order = FakeOrder("ORCL260515C00195000", "buy", status, EASTERN.localize(datetime(2026, 5, 11, 13, 10, 0)))
@@ -290,7 +297,21 @@ class MainOrderGuardTests(unittest.TestCase):
         canceled = main._cancel_stale_active_entry_buy_orders(broker, self.now)
 
         self.assertEqual(canceled, 0)
-        self.assertEqual(broker.canceled_order_ids, [])
+
+    def test_active_entry_order_for_open_ticker_is_canceled(self):
+        order = FakeOrder(
+            "ORCL260515C00195000",
+            "buy",
+            "new",
+            self.now - timedelta(minutes=1),
+        )
+        broker = FakeBroker([order])
+        positions = [FakePosition("ORCL260515C00195000", qty=1)]
+
+        canceled = main._cancel_active_entry_buys_for_open_tickers(broker, positions, self.now)
+
+        self.assertEqual(canceled, 1)
+        self.assertEqual(broker.canceled_order_ids, [order.id])
 
 
 if __name__ == "__main__":  # pragma: no cover
