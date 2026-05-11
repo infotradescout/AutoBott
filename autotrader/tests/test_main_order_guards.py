@@ -134,19 +134,19 @@ class MainOrderGuardTests(unittest.TestCase):
 
         self.assertNotIn("JPM", counts)
 
-    def test_minimum_hold_blocks_stop_loss_before_ten_minutes(self):
+    def test_minimum_hold_defers_strategy_before_ten_minutes(self):
         entry_time = self.now - timedelta(minutes=4)
 
-        blocked = main._minimum_hold_blocks_exit("stop_loss", entry_time, self.now)
+        deferred = main._is_in_anti_churn_window(entry_time, self.now)
 
-        self.assertTrue(blocked)
+        self.assertTrue(deferred)
 
-    def test_minimum_hold_allows_stop_loss_after_ten_minutes(self):
+    def test_minimum_hold_releases_strategy_after_ten_minutes(self):
         entry_time = self.now - timedelta(minutes=10, seconds=1)
 
-        blocked = main._minimum_hold_blocks_exit("stop_loss", entry_time, self.now)
+        deferred = main._is_in_anti_churn_window(entry_time, self.now)
 
-        self.assertFalse(blocked)
+        self.assertFalse(deferred)
 
     def test_minimum_hold_allows_eod_bypass(self):
         entry_time = self.now - timedelta(minutes=4)

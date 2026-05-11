@@ -4904,6 +4904,37 @@ def main():
                         close_qty = qty - 1
             if exit_reason is None and should_force_same_day_exit(entry_time, now_et):
                 exit_reason = "overnight_forced_close"
+            if exit_reason is None:
+                expiry_date = _resolve_option_expiry(symbol, meta)
+                if expiry_date is not None:
+                    cutoff_date = _subtract_trading_days(
+                        expiry_date,
+                        int(config.OPTION_FORCE_EXIT_DAYS_BEFORE_EXPIRY),
+                    )
+                    if now_et.date() > cutoff_date:
+                        exit_reason = "pre_expiry_exit_overdue"
+                    elif now_et.date() == cutoff_date and is_at_or_after(now_et, config.OPTION_EXPIRY_EXIT_TIME):
+                        exit_reason = "pre_expiry_exit"
+            if exit_reason is None and is_at_or_after(now_et, config.HARD_CLOSE_TIME):
+                exit_reason = "eod_close"
+            if exit_reason is None and _is_in_anti_churn_window(entry_time, now_et):
+                held_seconds = max(0, int((now_et - entry_time).total_seconds())) if entry_time else 0
+                min_hold_minutes = float(getattr(config, "ANTI_CHURN_HOLD_MINUTES", 10) or 10)
+                last_exit_debug = {
+                    "loop_ts_et": ts(now_et),
+                    "symbol": symbol,
+                    "reason": "minimum_hold_active",
+                    "held_seconds": held_seconds,
+                    "min_hold_minutes": min_hold_minutes,
+                    "result": "strategy_deferred_minimum_hold",
+                }
+                print(
+                    f"[{ts(now_et)}] {symbol}: minimum hold active "
+                    f"({held_seconds / 60.0:.1f}/{min_hold_minutes:.1f}m); "
+                    "strategy exits deferred."
+                )
+                _save_runtime_state()
+                continue
             # Rule 1: fixed-dollar stop loss
             stop_loss_usd_cap = float(meta.get("stop_loss_usd", _runtime_stop_loss_usd()) or _runtime_stop_loss_usd())
             if exit_reason is None and should_trigger_stop_loss(unrealized_usd, stop_loss_usd_cap):
@@ -5067,26 +5098,6 @@ def main():
                     max_hold_minutes = int(meta.get("max_hold_minutes", config.MAX_HOLD_MINUTES) or config.MAX_HOLD_MINUTES)
                     if held_minutes >= max_hold_minutes:
                         exit_reason = "time_stop"
-
-            if _minimum_hold_blocks_exit(exit_reason, entry_time, now_et):
-                held_seconds = max(0, int((now_et - entry_time).total_seconds())) if entry_time else 0
-                min_hold_minutes = float(getattr(config, "ANTI_CHURN_HOLD_MINUTES", 10) or 10)
-                last_exit_debug = {
-                    "loop_ts_et": ts(now_et),
-                    "symbol": symbol,
-                    "reason": "minimum_hold_active",
-                    "blocked_exit_reason": exit_reason,
-                    "held_seconds": held_seconds,
-                    "min_hold_minutes": min_hold_minutes,
-                    "result": "held_minimum_not_met",
-                }
-                print(
-                    f"[{ts(now_et)}] {symbol}: holding through minimum "
-                    f"{min_hold_minutes:.1f}m window; blocked exit={exit_reason} "
-                    f"held={held_seconds / 60.0:.1f}m."
-                )
-                exit_reason = None
-                _save_runtime_state()
 
             if exit_reason:
                 if dry_run_enabled:
