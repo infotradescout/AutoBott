@@ -1566,7 +1566,16 @@ def _build_scan_universe(data_client: AlpacaDataClient) -> list[str]:
     protected = set(base + core)
     base = list(dict.fromkeys(base + core))
     mover_candidates: list[str] = []
-    if config.AUTO_EXPAND_UNIVERSE_WITH_MOVERS:
+    universe_mode = str(getattr(config, "UNIVERSE_MODE", "core") or "core").strip().lower()
+    if universe_mode in {"all", "all_optionable", "all_optionable_assets"}:
+        try:
+            all_optionable = data_client.get_all_optionable_tickers(
+                max_count=max(1, int(getattr(config, "UNIVERSE_MAX_TICKERS", 60) or 60) * 3)
+            )
+            base.extend(str(sym).upper() for sym in all_optionable if str(sym).strip())
+        except Exception as exc:  # noqa: BLE001
+            print(f"[{ts()}] All-optionable universe unavailable ({exc}); using core/movers fallback.")
+    if config.AUTO_EXPAND_UNIVERSE_WITH_MOVERS or universe_mode == "movers":
         try:
             gainers, losers = data_client.get_top_movers(top=int(config.UNIVERSE_MOVER_TOP))
             mover_candidates.extend(str(sym).upper() for sym in gainers if str(sym).strip())
@@ -5514,7 +5523,29 @@ def main():
             break
 
         _save_runtime_state()
-        time.sleep(config.LOOP_INTERVAL_SECONDS)
+        loop_sleep_seconds = max(1, int(config.LOOP_INTERVAL_SECONDS))
+        if bool(getattr(config, "CONTINUOUS_ENTRY_SEARCH_ENABLED", False)):
+            entries_filled_this_loop = int(entry_debug.get("entries_filled", 0) or 0)
+            orders_submitted_this_loop = int(entry_debug.get("entry_orders_submitted", 0) or 0)
+            active_entry_orders = sum(int(v) for v in alpaca_active_buy_orders_by_ticker.values())
+            can_search_for_entry = (
+                entries_filled_this_loop <= 0
+                and orders_submitted_this_loop <= 0
+                and active_entry_orders <= 0
+                and open_count < int(getattr(config, "MAX_POSITIONS", 1) or 1)
+                and is_at_or_after(now_et, config.NO_NEW_TRADES_BEFORE)
+                and not is_at_or_after(now_et, config.NO_NEW_TRADES_AFTER)
+            )
+            if can_search_for_entry:
+                loop_sleep_seconds = max(
+                    1,
+                    int(getattr(config, "CONTINUOUS_ENTRY_SEARCH_SLEEP_SECONDS", 1) or 1),
+                )
+                print(
+                    f"[{ts(now_et)}] No executable entry found; continuing search in "
+                    f"{loop_sleep_seconds}s across {len(watchlist)} tickers."
+                )
+        time.sleep(loop_sleep_seconds)
 
     print(f"[{ts()}] Trader stopped.")
 

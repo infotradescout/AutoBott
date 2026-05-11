@@ -64,12 +64,12 @@ TICKERS = [
 ]
 CORE_TICKERS = TICKERS[:]
 
-UNIVERSE_MODE = "core"  # options: core, movers, all_optionable
-AUTO_EXPAND_UNIVERSE_WITH_MOVERS = False
-UNIVERSE_MOVER_TOP                = 10
-UNIVERSE_MAX_TICKERS              = 10
-SCREENER_TOP_N                    = 20
-MOVER_SYMBOLS_PER_SIDE            = 10
+UNIVERSE_MODE = "movers"  # options: core, movers, all_optionable
+AUTO_EXPAND_UNIVERSE_WITH_MOVERS = True
+UNIVERSE_MOVER_TOP                = 50
+UNIVERSE_MAX_TICKERS              = 60
+SCREENER_TOP_N                    = 50
+MOVER_SYMBOLS_PER_SIDE            = 25
 MIN_SHARE_PRICE                   = 10
 MAX_SHARE_PRICE                   = 2000
 
@@ -187,6 +187,8 @@ PREMARKET_APPLY_UNTIL              = "09:35"
 PREMARKET_SCAN_INTERVAL_SECONDS    = 120
 PREMARKET_SCAN_MAX_RUNS            = 0
 LOOP_INTERVAL_SECONDS              = 15
+CONTINUOUS_ENTRY_SEARCH_ENABLED    = True
+CONTINUOUS_ENTRY_SEARCH_SLEEP_SECONDS = 1
 MAX_HOLD_MINUTES                   = 90
 ANTI_CHURN_HOLD_MINUTES            = 10
 MIN_HOLD_EXIT_BYPASS_REASONS       = (
