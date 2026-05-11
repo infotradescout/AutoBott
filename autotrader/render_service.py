@@ -199,6 +199,100 @@ def _heartbeat_age_seconds(runtime_state: dict) -> int | None:
     return max(0, int((now_dt - heartbeat_dt).total_seconds()))
 
 
+def _enum_text(value) -> str:
+    try:
+        value = getattr(value, "value", value)
+    except Exception:
+        pass
+    text = str(value or "").strip().lower()
+    if "." in text:
+        text = text.split(".")[-1]
+    return text
+
+
+def _now_et_dt() -> datetime:
+    if pytz is not None:
+        try:
+            return datetime.now(pytz.timezone(str(getattr(config, "EASTERN_TZ", "US/Eastern"))))
+        except Exception:
+            pass
+    return datetime.utcnow()
+
+
+def _as_et_datetime(value) -> datetime | None:
+    if value is None:
+        return None
+    tz = pytz.timezone(str(getattr(config, "EASTERN_TZ", "US/Eastern"))) if pytz is not None else None
+    if isinstance(value, datetime):
+        if tz is not None:
+            if value.tzinfo is None:
+                return tz.localize(value)
+            return value.astimezone(tz)
+        return value
+    raw = str(value or "").strip()
+    if not raw:
+        return None
+    try:
+        parsed = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+        if tz is not None:
+            if parsed.tzinfo is None:
+                return tz.localize(parsed)
+            return parsed.astimezone(tz)
+        return parsed
+    except Exception:
+        return None
+
+
+def _runtime_position_entry_time(runtime_state: dict, symbol: str) -> datetime | None:
+    meta = dict((runtime_state.get("open_trade_meta") or {}).get(symbol) or {})
+    for field in ("entry_time_iso", "timestamp"):
+        parsed = _as_et_datetime(meta.get(field))
+        if parsed is not None:
+            return parsed
+    return None
+
+
+def _recent_filled_buy_entry_time(broker: AlpacaBroker, symbol: str, now_et: datetime) -> datetime | None:
+    latest: datetime | None = None
+    try:
+        orders = broker.get_recent_orders(limit=100)
+    except Exception:
+        return None
+    want = str(symbol or "").upper()
+    for order in orders:
+        if str(getattr(order, "symbol", "") or "").upper() != want:
+            continue
+        if _enum_text(getattr(order, "side", "")) != "buy":
+            continue
+        if _enum_text(getattr(order, "status", "")) != "filled":
+            continue
+        filled_at = _as_et_datetime(getattr(order, "filled_at", None) or getattr(order, "submitted_at", None))
+        if filled_at is None or filled_at.date() != now_et.date():
+            continue
+        if latest is None or filled_at > latest:
+            latest = filled_at
+    return latest
+
+
+def _minimum_hold_remaining_seconds(
+    *,
+    runtime_state: dict,
+    broker: AlpacaBroker,
+    symbol: str,
+    now_et: datetime,
+) -> int:
+    min_hold_seconds = max(0, int(float(getattr(config, "ANTI_CHURN_HOLD_MINUTES", 10) or 10) * 60))
+    if min_hold_seconds <= 0:
+        return 0
+    entry_time = _runtime_position_entry_time(runtime_state, symbol)
+    if entry_time is None:
+        entry_time = _recent_filled_buy_entry_time(broker, symbol, now_et)
+    if entry_time is None:
+        return 0
+    elapsed = max(0, int((now_et - entry_time).total_seconds()))
+    return max(0, min_hold_seconds - elapsed)
+
+
 def _watchdog_hard_stale_seconds() -> int:
     default = max(1200, int(getattr(config, "LOOP_INTERVAL_SECONDS", 30) or 30) * 30)
     raw = str(os.getenv("TRADER_HEARTBEAT_STALE_SECONDS", "") or "").strip()
@@ -815,6 +909,28 @@ def _run_independent_stoploss_guard() -> None:
                     continue
                 unrealized_usd = _position_unrealized_usd(pos)
                 if unrealized_usd is None or unrealized_usd > -stop_cap:
+                    continue
+                now_et = _now_et_dt()
+                min_hold_remaining = _minimum_hold_remaining_seconds(
+                    runtime_state=runtime_state,
+                    broker=broker,
+                    symbol=symbol,
+                    now_et=now_et,
+                )
+                if min_hold_remaining > 0:
+                    _patch_runtime_state(
+                        {
+                            "independent_stoploss_last_deferred_et": now_et.isoformat(),
+                            "independent_stoploss_last_deferred_symbol": symbol,
+                            "independent_stoploss_last_deferred_unrealized_usd": round(float(unrealized_usd), 4),
+                            "independent_stoploss_last_deferred_seconds_remaining": min_hold_remaining,
+                        }
+                    )
+                    print(
+                        f"[render_service] INDEPENDENT_STOPLOSS deferred {symbol} "
+                        f"for minimum hold ({min_hold_remaining}s remaining); "
+                        f"unrealized_usd={unrealized_usd:.2f} cap=-{stop_cap:.2f}"
+                    )
                     continue
                 if broker.has_open_order_for_symbol(symbol=symbol, side="sell"):
                     continue
