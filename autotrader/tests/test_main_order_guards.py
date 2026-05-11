@@ -21,12 +21,23 @@ EASTERN = pytz.timezone(config.EASTERN_TZ)
 
 
 class FakeOrder:
-    def __init__(self, symbol: str, side: str, status: str, submitted_at: datetime):
+    def __init__(
+        self,
+        symbol: str,
+        side: str,
+        status: str,
+        submitted_at: datetime,
+        *,
+        qty: int = 1,
+        limit_price: float | None = None,
+    ):
         self.id = f"fake-{symbol}-{submitted_at.timestamp()}"
         self.symbol = symbol
         self.side = side
         self.status = status
         self.submitted_at = submitted_at
+        self.qty = qty
+        self.limit_price = limit_price
         self.filled_qty = 0
         self.filled_avg_price = None
 
@@ -226,6 +237,32 @@ class MainOrderGuardTests(unittest.TestCase):
         counts = main._alpaca_active_option_buy_order_counts_by_ticker_today(broker, self.now)
 
         self.assertEqual(counts.get("ORCL"), 1)
+
+    def test_active_buy_order_premium_counts_pending_exposure(self):
+        broker = FakeBroker(
+            [
+                FakeOrder(
+                    "ORCL260515C00195000",
+                    "buy",
+                    "new",
+                    self.now - timedelta(minutes=1),
+                    qty=2,
+                    limit_price=5.12,
+                ),
+                FakeOrder(
+                    "JPM260515P00290000",
+                    "buy",
+                    "canceled",
+                    self.now - timedelta(minutes=1),
+                    qty=1,
+                    limit_price=0.73,
+                ),
+            ]
+        )
+
+        premium = main._alpaca_active_option_buy_order_premium_usd_today(broker, self.now)
+
+        self.assertEqual(premium, 1024.0)
 
     def test_stale_active_entry_order_is_canceled_after_max_rest(self):
         order = FakeOrder(

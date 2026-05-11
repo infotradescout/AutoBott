@@ -1329,6 +1329,36 @@ def _alpaca_active_option_buy_order_counts_by_ticker_today(
     return counts
 
 
+def _alpaca_active_option_buy_order_premium_usd_today(
+    broker: AlpacaBroker,
+    now_et: datetime,
+    *,
+    limit: int = 500,
+) -> float:
+    tz = pytz.timezone(config.EASTERN_TZ)
+    total = 0.0
+    for order in broker.get_recent_orders(limit=max(1, int(limit))):
+        if _enum_text(getattr(order, "side", "")) != "buy":
+            continue
+        if not _is_active_entry_order_status(getattr(order, "status", "")):
+            continue
+        submitted_at = _as_et_datetime(
+            getattr(order, "submitted_at", None) or getattr(order, "created_at", None),
+            tz,
+        )
+        if submitted_at is None or submitted_at.date() != now_et.date():
+            continue
+        symbol = str(getattr(order, "symbol", "") or "").upper()
+        if not _parse_option_symbol(symbol)[0]:
+            continue
+        qty = position_qty_as_int(getattr(order, "qty", 0))
+        price = _order_fill_price(order)
+        if qty <= 0 or price <= 0:
+            continue
+        total += qty * price * 100.0
+    return round(total, 2)
+
+
 def _cancel_stale_active_entry_buy_orders(
     broker: AlpacaBroker,
     now_et: datetime,
@@ -3655,12 +3685,14 @@ def main():
         alpaca_truth_ticker_roundtrips: dict[str, int] = {}
         alpaca_buy_orders_by_ticker: dict[str, int] = {}
         alpaca_active_buy_orders_by_ticker: dict[str, int] = {}
+        active_entry_order_premium_usd = 0.0
         try:
             stale_entry_cancels = _cancel_stale_active_entry_buy_orders(broker, now_et)
             if stale_entry_cancels > 0:
                 time.sleep(config.RATE_LIMIT_SLEEP_SECONDS)
             alpaca_buy_orders_by_ticker = _alpaca_option_buy_order_counts_by_ticker_today(broker, now_et)
             alpaca_active_buy_orders_by_ticker = _alpaca_active_option_buy_order_counts_by_ticker_today(broker, now_et)
+            active_entry_order_premium_usd = _alpaca_active_option_buy_order_premium_usd_today(broker, now_et)
         except Exception as exc:  # noqa: BLE001
             print(f"[{ts(now_et)}] Alpaca buy-order cap lookup unavailable: {type(exc).__name__}: {exc!r}")
 
@@ -4530,20 +4562,26 @@ def main():
             # Re-check live position count right before placing a new order.
             option_positions = broker.get_open_option_positions()
             open_count = len(option_positions)
+            pending_entry_count = sum(int(v) for v in alpaca_active_buy_orders_by_ticker.values())
+            effective_open_count = open_count + pending_entry_count
             if _is_in_opening_strict_window(now_et):
                 opening_max_concurrent = max(1, int(getattr(config, "OPENING_MAX_CONCURRENT_POSITIONS", 3) or 3))
-                if open_count >= opening_max_concurrent:
+                if effective_open_count >= opening_max_concurrent:
                     _mark_skip("opening_concurrent_position_cap")
                     _mark_stage4_reject(reason="opening_concurrent_position_cap", ticker=ticker)
                     print(
                         f"[{ts(now_et)}] Opening concurrent-position cap reached "
-                        f"({open_count}/{opening_max_concurrent})."
+                        f"({open_count} open + {pending_entry_count} pending/{opening_max_concurrent})."
                     )
                     break
-            if not can_open_new_positions(open_count, config.MAX_POSITIONS):
+            if not can_open_new_positions(effective_open_count, config.MAX_POSITIONS):
                 _mark_skip("max_positions_reached")
                 _mark_stage4_reject(reason="max_positions_reached", ticker=ticker)
-                print(f"[{ts(now_et)}] Max positions reached. Stopping new entries this loop.")
+                print(
+                    f"[{ts(now_et)}] Max positions reached "
+                    f"({open_count} open + {pending_entry_count} pending/{config.MAX_POSITIONS}). "
+                    "Stopping new entries this loop."
+                )
                 break
 
             direction_lc = str(direction or "").lower()
@@ -4699,13 +4737,15 @@ def main():
                     )
 
                 total_open_premium = _current_open_premium_usd(option_positions, open_trade_meta)
+                committed_open_premium = total_open_premium + float(active_entry_order_premium_usd or 0.0)
                 max_total_open_premium_base = float(getattr(config, "MAX_TOTAL_OPEN_PREMIUM_USD", 600.0) or 600.0)
                 max_total_open_premium = max(75.0, max_total_open_premium_base * volatility_premium_mult)
-                if (total_open_premium + trade_premium_usd) > max_total_open_premium:
+                if (committed_open_premium + trade_premium_usd) > max_total_open_premium:
                     _mark_skip("total_open_premium_cap")
                     _mark_stage4_reject(reason="total_open_premium_cap", ticker=ticker)
                     print(
                         f"[{ts(now_et)}] {ticker}: skip (open premium ${total_open_premium:.2f} + "
+                        f"pending ${active_entry_order_premium_usd:.2f} + "
                         f"new ${trade_premium_usd:.2f} > cap ${max_total_open_premium:.2f})."
                     )
                     continue
