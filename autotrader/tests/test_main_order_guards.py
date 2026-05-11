@@ -22,10 +22,13 @@ EASTERN = pytz.timezone(config.EASTERN_TZ)
 
 class FakeOrder:
     def __init__(self, symbol: str, side: str, status: str, submitted_at: datetime):
+        self.id = "fake-order-id"
         self.symbol = symbol
         self.side = side
         self.status = status
         self.submitted_at = submitted_at
+        self.filled_qty = 0
+        self.filled_avg_price = None
 
 
 class FakeBroker:
@@ -36,6 +39,29 @@ class FakeBroker:
         return self._orders[:limit]
 
 
+class FakeEntryBroker:
+    def __init__(self, status: str = "new"):
+        self.order = FakeOrder("ORCL260515C00195000", "buy", status, EASTERN.localize(datetime(2026, 5, 11, 13, 10, 0)))
+        self.canceled = 0
+        self.submitted = 0
+
+    def place_option_limit_buy(self, option_symbol: str, qty: int, ask_price: float):
+        self.submitted += 1
+        self.order.symbol = option_symbol
+        return self.order
+
+    def get_order_status(self, order_id: str):
+        return self.order
+
+    def cancel_order(self, order_id: str):
+        self.canceled += 1
+
+
+class FakeDataClient:
+    def get_latest_option_quote(self, option_symbol: str):
+        return {"bid": 5.0, "ask": 5.04}
+
+
 class MainOrderGuardTests(unittest.TestCase):
     def setUp(self):
         self._config_values = {
@@ -43,11 +69,17 @@ class MainOrderGuardTests(unittest.TestCase):
             "ALPACA_CANCELED_BUY_ORDER_COOLDOWN_MINUTES": config.ALPACA_CANCELED_BUY_ORDER_COOLDOWN_MINUTES,
             "ANTI_CHURN_HOLD_MINUTES": config.ANTI_CHURN_HOLD_MINUTES,
             "MIN_HOLD_EXIT_BYPASS_REASONS": config.MIN_HOLD_EXIT_BYPASS_REASONS,
+            "ENTRY_ORDER_STATUS_WAIT_SECONDS": config.ENTRY_ORDER_STATUS_WAIT_SECONDS,
+            "ENTRY_LIMIT_ATTEMPTS": config.ENTRY_LIMIT_ATTEMPTS,
+            "ENABLE_ENTRY_MARKET_FALLBACK": config.ENABLE_ENTRY_MARKET_FALLBACK,
         }
         config.ALPACA_BUY_ORDER_CAP_COUNTS_CANCELED = False
         config.ALPACA_CANCELED_BUY_ORDER_COOLDOWN_MINUTES = 10
         config.ANTI_CHURN_HOLD_MINUTES = 10
         config.MIN_HOLD_EXIT_BYPASS_REASONS = ("eod_close", "exposure_normalize")
+        config.ENTRY_ORDER_STATUS_WAIT_SECONDS = 1
+        config.ENTRY_LIMIT_ATTEMPTS = 1
+        config.ENABLE_ENTRY_MARKET_FALLBACK = False
         self.now = EASTERN.localize(datetime(2026, 5, 11, 9, 55, 0))
 
     def tearDown(self):
@@ -154,6 +186,40 @@ class MainOrderGuardTests(unittest.TestCase):
         blocked = main._minimum_hold_blocks_exit("eod_close", entry_time, self.now)
 
         self.assertFalse(blocked)
+
+    def test_unfilled_active_limit_entry_is_left_resting(self):
+        broker = FakeEntryBroker(status="new")
+
+        result = main._execute_limit_entry(
+            broker=broker,
+            data_client=FakeDataClient(),
+            option_symbol="ORCL260515C00195000",
+            qty=1,
+            now_et=self.now,
+            label="ENTRY ORCL",
+            initial_quote={"bid": 5.0, "ask": 5.04, "midpoint": 5.02, "spread_pct": 0.8},
+        )
+
+        self.assertTrue(result.get("pending_open"))
+        self.assertEqual(result.get("status"), "new")
+        self.assertEqual(broker.submitted, 1)
+        self.assertEqual(broker.canceled, 0)
+
+    def test_active_buy_order_counts_as_resting_entry(self):
+        broker = FakeBroker(
+            [
+                FakeOrder(
+                    "ORCL260515C00195000",
+                    "buy",
+                    "new",
+                    self.now - timedelta(minutes=1),
+                )
+            ]
+        )
+
+        counts = main._alpaca_active_option_buy_order_counts_by_ticker_today(broker, self.now)
+
+        self.assertEqual(counts.get("ORCL"), 1)
 
 
 if __name__ == "__main__":  # pragma: no cover

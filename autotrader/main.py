@@ -801,13 +801,20 @@ def _execute_limit_entry(
             }
 
         order_id = str(getattr(order, "id", "") or "")
-        if order_id:
-            try:
-                broker.cancel_order(order_id)
-            except Exception as exc:  # noqa: BLE001
-                print(f"[{ts(now_et)}] {label}: cancel entry order {order_id} failed: {exc}")
         if still_open:
-            time.sleep(1)
+            return {
+                "filled": False,
+                "status": status or "pending_open",
+                "attempts": attempt_index,
+                "submit_bid": submit_quote.get("bid"),
+                "submit_ask": submit_quote.get("ask"),
+                "submit_midpoint": submit_quote.get("midpoint"),
+                "submit_spread_pct": submit_quote.get("spread_pct"),
+                "intended_limit": limit_price,
+                "fill_seconds": round(fill_seconds, 3),
+                "order_id": order_id,
+                "pending_open": True,
+            }
 
     if bool(getattr(config, "ENABLE_ENTRY_MARKET_FALLBACK", True)):
         market_wait_seconds = max(1, int(getattr(config, "ENTRY_MARKET_FALLBACK_WAIT_SECONDS", 3) or 3))
@@ -1142,6 +1149,20 @@ def _order_fill_price(order) -> float:
     return 0.0
 
 
+_ACTIVE_ENTRY_ORDER_STATUSES = {
+    "new",
+    "accepted",
+    "accepted_for_bidding",
+    "pending_new",
+    "pending_replace",
+    "partially_filled",
+}
+
+
+def _is_active_entry_order_status(status: str) -> bool:
+    return _enum_text(status) in _ACTIVE_ENTRY_ORDER_STATUSES
+
+
 def _alpaca_option_day_pnl_snapshot(broker: AlpacaBroker, now_et: datetime) -> dict[str, object]:
     tz = pytz.timezone(config.EASTERN_TZ)
     filled: list[dict[str, object]] = []
@@ -1274,6 +1295,32 @@ def _alpaca_option_buy_order_counts_by_ticker_today(
             ):
                 continue
         elif status in ignored_statuses:
+            continue
+        ticker, _direction = _parse_option_symbol(str(getattr(order, "symbol", "") or ""))
+        ticker = str(ticker or "").upper()
+        if ticker:
+            counts[ticker] = int(counts.get(ticker, 0)) + 1
+    return counts
+
+
+def _alpaca_active_option_buy_order_counts_by_ticker_today(
+    broker: AlpacaBroker,
+    now_et: datetime,
+    *,
+    limit: int = 500,
+) -> dict[str, int]:
+    tz = pytz.timezone(config.EASTERN_TZ)
+    counts: dict[str, int] = {}
+    for order in broker.get_recent_orders(limit=max(1, int(limit))):
+        if _enum_text(getattr(order, "side", "")) != "buy":
+            continue
+        if not _is_active_entry_order_status(getattr(order, "status", "")):
+            continue
+        submitted_at = _as_et_datetime(
+            getattr(order, "submitted_at", None) or getattr(order, "created_at", None),
+            tz,
+        )
+        if submitted_at is None or submitted_at.date() != now_et.date():
             continue
         ticker, _direction = _parse_option_symbol(str(getattr(order, "symbol", "") or ""))
         ticker = str(ticker or "").upper()
@@ -3510,8 +3557,10 @@ def main():
         open_count = len(option_positions)
         alpaca_truth_ticker_roundtrips: dict[str, int] = {}
         alpaca_buy_orders_by_ticker: dict[str, int] = {}
+        alpaca_active_buy_orders_by_ticker: dict[str, int] = {}
         try:
             alpaca_buy_orders_by_ticker = _alpaca_option_buy_order_counts_by_ticker_today(broker, now_et)
+            alpaca_active_buy_orders_by_ticker = _alpaca_active_option_buy_order_counts_by_ticker_today(broker, now_et)
         except Exception as exc:  # noqa: BLE001
             print(f"[{ts(now_et)}] Alpaca buy-order cap lookup unavailable: {type(exc).__name__}: {exc!r}")
 
@@ -4124,6 +4173,16 @@ def main():
                     )
                     continue
 
+            active_buy_order_count = sum(int(v) for v in alpaca_active_buy_orders_by_ticker.values())
+            max_open_entry_orders = max(0, int(getattr(config, "MAX_OPEN_ENTRY_BUY_ORDERS", 1) or 0))
+            if max_open_entry_orders > 0 and active_buy_order_count >= max_open_entry_orders:
+                _mark_skip("open_entry_order_cap")
+                print(
+                    f"[{ts(now_et)}] Open entry-order cap reached "
+                    f"({active_buy_order_count}/{max_open_entry_orders}); letting limit buy rest."
+                )
+                break
+
             loop_attempt_cap = max(1, int(getattr(config, "MAX_NEW_ENTRY_ATTEMPTS_PER_LOOP", 1) or 1))
             if entry_attempts_loop >= loop_attempt_cap:
                 _mark_skip("entry_attempt_cap")
@@ -4300,6 +4359,15 @@ def main():
                 0,
                 int(getattr(config, "MAX_ALPACA_BUY_ORDERS_PER_TICKER_PER_DAY", 1) or 0),
             )
+            active_buy_orders_for_ticker = int(alpaca_active_buy_orders_by_ticker.get(ticker, 0))
+            if active_buy_orders_for_ticker > 0:
+                _mark_skip("ticker_entry_order_open")
+                _mark_stage4_reject(reason="ticker_entry_order_open", ticker=ticker)
+                print(
+                    f"[{ts(now_et)}] {ticker}: skip "
+                    f"({active_buy_orders_for_ticker} open buy order(s) already resting)."
+                )
+                continue
             alpaca_buy_order_count = int(alpaca_buy_orders_by_ticker.get(ticker, 0))
             if alpaca_buy_order_cap > 0 and alpaca_buy_order_count >= alpaca_buy_order_cap:
                 _mark_skip("alpaca_buy_order_ticker_cap")
@@ -4669,6 +4737,23 @@ def main():
                     detail=str(entry_result.get("status", "submitted") or "submitted"),
                 )
                 if not bool(entry_result.get("filled", False)):
+                    if bool(entry_result.get("pending_open", False)):
+                        alpaca_active_buy_orders_by_ticker[ticker] = (
+                            int(alpaca_active_buy_orders_by_ticker.get(ticker, 0)) + 1
+                        )
+                        _mark_skip("entry_order_resting")
+                        _set_signal_outcome(
+                            ticker=ticker,
+                            disposition="order_resting",
+                            detail=str(entry_result.get("status", "pending_open") or "pending_open"),
+                        )
+                        print(
+                            f"[{ts(now_et)}] {ticker}: entry limit order resting "
+                            f"(status={entry_result.get('status', 'pending_open')}, "
+                            f"order={entry_result.get('order_id', '')})."
+                        )
+                        _save_runtime_state()
+                        break
                     _mark_skip("entry_not_filled_after_retry")
                     _set_signal_outcome(
                         ticker=ticker,
