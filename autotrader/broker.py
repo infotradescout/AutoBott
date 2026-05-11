@@ -104,6 +104,10 @@ class AlpacaBroker:
         )
         return self.trading_client.submit_order(order_data=req)
 
+    def cover_option_market(self, option_symbol: str, qty: int):
+        """Buy option contracts to cover an accidental short option position."""
+        return self.place_option_market_buy(option_symbol, qty)
+
     def close_option_market(self, option_symbol: str, qty: int):
         _assert_option_symbol(option_symbol)
         req = MarketOrderRequest(
@@ -182,14 +186,19 @@ class AlpacaBroker:
                 qty = int(float(getattr(pos, "qty", 0) or 0))
                 if symbol and qty > 0:
                     order = self.close_option_market(symbol, qty)
-                    order_id = str(getattr(order, "id", "unknown"))
-                    results.append({
-                        "symbol": symbol,
-                        "qty": qty,
-                        "order_id": order_id,
-                        "status": "submitted"
-                    })
-                    closed += 1
+                elif symbol and qty < 0:
+                    qty = abs(qty)
+                    order = self.cover_option_market(symbol, qty)
+                else:
+                    continue
+                order_id = str(getattr(order, "id", "unknown"))
+                results.append({
+                    "symbol": symbol,
+                    "qty": qty,
+                    "order_id": order_id,
+                    "status": "submitted"
+                })
+                closed += 1
             except Exception as exc:  # noqa: BLE001
                 symbol = str(getattr(pos, "symbol", "unknown"))
                 results.append({

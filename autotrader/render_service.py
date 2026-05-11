@@ -905,7 +905,30 @@ def _run_independent_stoploss_guard() -> None:
             for pos in positions:
                 symbol = str(getattr(pos, "symbol", "") or "")
                 qty = _position_qty_as_int(getattr(pos, "qty", 0))
-                if not symbol or qty <= 0:
+                if not symbol or qty == 0:
+                    continue
+                if qty < 0:
+                    cover_qty = abs(qty)
+                    if broker.has_open_order_for_symbol(symbol=symbol, side="buy"):
+                        continue
+                    try:
+                        broker.cover_option_market(symbol, cover_qty)
+                        _patch_runtime_state(
+                            {
+                                "independent_short_guard_last_trigger_et": _now_et_iso(),
+                                "independent_short_guard_last_symbol": symbol,
+                                "independent_short_guard_last_qty": cover_qty,
+                            }
+                        )
+                        print(f"[render_service] INDEPENDENT_SHORT_GUARD covered {symbol} qty={cover_qty}")
+                        ALERTS.send(
+                            "independent_short_guard",
+                            f"Independent short guard bought to cover {symbol} qty={cover_qty}.",
+                            level="error",
+                            dedupe_key=f"independent-short-{symbol}-{int(time.time() // 30)}",
+                        )
+                    except Exception as exc:  # noqa: BLE001
+                        print(f"[render_service] independent short cover failed for {symbol}: {exc}")
                     continue
                 unrealized_usd = _position_unrealized_usd(pos)
                 if unrealized_usd is None or unrealized_usd > -stop_cap:

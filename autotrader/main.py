@@ -3261,10 +3261,50 @@ def main():
 
     def _force_normalize_ticker_exposure(option_positions: list, now_et: datetime) -> int:
         ticker_positions: dict[str, list[tuple[str, int]]] = {}
+        total_filled = 0
         for pos in option_positions:
             symbol = str(getattr(pos, "symbol", "") or "")
             qty = position_qty_as_int(getattr(pos, "qty", 0))
-            if not symbol or qty <= 0:
+            if not symbol or qty == 0:
+                continue
+            if qty < 0:
+                cover_qty = abs(qty)
+                try:
+                    for existing_sell in broker.get_open_orders_for_symbol(symbol=symbol, side="sell"):
+                        existing_order_id = str(getattr(existing_sell, "id", "") or "")
+                        if existing_order_id:
+                            broker.cancel_order(existing_order_id)
+                            print(f"[{ts(now_et)}] SHORT_GUARD canceled open sell order {existing_order_id} for {symbol}.")
+                except Exception as exc:  # noqa: BLE001
+                    print(f"[{ts(now_et)}] SHORT_GUARD sell-order cleanup failed for {symbol}: {exc}")
+                if broker.has_open_order_for_symbol(symbol=symbol, side="buy"):
+                    print(f"[{ts(now_et)}] SHORT_GUARD {symbol}: buy-to-cover already open.")
+                    continue
+                try:
+                    order = broker.cover_option_market(symbol, cover_qty)
+                    order_id = str(getattr(order, "id", "") or "")
+                    filled_qty = 0
+                    if order_id:
+                        filled_qty, _fill_price, status, _still_open = _await_order_fill(
+                            broker,
+                            order_id=order_id,
+                            requested_qty=cover_qty,
+                            now_et=now_et,
+                            label=f"SHORT_GUARD {symbol}",
+                            poll_seconds=1,
+                            max_wait_seconds=max(3, int(getattr(config, "STOPLOSS_EXIT_ORDER_MAX_WAIT_SECONDS", 3) or 3)),
+                        )
+                    if filled_qty > 0:
+                        total_filled += filled_qty
+                        open_trade_meta.pop(symbol, None)
+                        print(
+                            f"[{ts(now_et)}] SHORT_GUARD covered short option "
+                            f"{symbol} qty={filled_qty}/{cover_qty}."
+                        )
+                    else:
+                        print(f"[{ts(now_et)}] SHORT_GUARD cover pending/not filled for {symbol} qty={cover_qty}.")
+                except Exception as exc:  # noqa: BLE001
+                    print(f"[{ts(now_et)}] SHORT_GUARD cover failed for {symbol} qty={cover_qty}: {exc}")
                 continue
             ticker = str(getattr(pos, "underlying_symbol", "") or "").upper()
             if not ticker:
@@ -3290,7 +3330,6 @@ def main():
                 if close_qty > 0:
                     close_actions.append((symbol, close_qty, ticker))
 
-        total_filled = 0
         for symbol, close_qty, ticker in close_actions:
             filled_qty, _fill_price, _close_meta = _close_position_with_confirmation(
                 symbol=symbol,
