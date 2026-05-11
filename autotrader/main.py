@@ -748,13 +748,16 @@ def _execute_limit_entry(
     if ask_price <= 0:
         return {"filled": False, "status": "no_ask", "attempts": 0}
 
+    max_attempts = max(1, int(getattr(config, "ENTRY_LIMIT_ATTEMPTS", 1) or 1))
     attempt_quotes = [quote_snapshot]
-    retry_quote = _option_quote_snapshot(data_client, option_symbol)
-    retry_ask = float(retry_quote.get("ask") or 0.0)
-    if retry_ask > 0:
-        attempt_quotes.append(retry_quote)
-    else:
-        attempt_quotes.append(quote_snapshot)
+    if max_attempts > 1:
+        retry_quote = _option_quote_snapshot(data_client, option_symbol)
+        retry_ask = float(retry_quote.get("ask") or 0.0)
+        if retry_ask > 0:
+            attempt_quotes.append(retry_quote)
+        else:
+            attempt_quotes.append(quote_snapshot)
+    attempt_quotes = attempt_quotes[:max_attempts]
 
     for attempt_index, submit_quote in enumerate(attempt_quotes, start=1):
         submit_ask = float(submit_quote.get("ask") or 0.0)
@@ -1222,6 +1225,39 @@ def _alpaca_option_day_pnl_snapshot(broker: AlpacaBroker, now_et: datetime) -> d
         ),
         "open_lot_symbols": sorted([symbol for symbol, symbol_lots in lots.items() if symbol_lots]),
     }
+
+
+def _alpaca_option_buy_order_counts_by_ticker_today(
+    broker: AlpacaBroker,
+    now_et: datetime,
+    *,
+    limit: int = 500,
+) -> dict[str, int]:
+    tz = pytz.timezone(config.EASTERN_TZ)
+    counts: dict[str, int] = {}
+    count_canceled = bool(getattr(config, "ALPACA_BUY_ORDER_CAP_COUNTS_CANCELED", True))
+    ignored_statuses = {"rejected", "expired"}
+    if not count_canceled:
+        ignored_statuses.add("canceled")
+        ignored_statuses.add("cancelled")
+
+    for order in broker.get_recent_orders(limit=max(1, int(limit))):
+        if _enum_text(getattr(order, "side", "")) != "buy":
+            continue
+        status = _enum_text(getattr(order, "status", ""))
+        if status in ignored_statuses:
+            continue
+        submitted_at = _as_et_datetime(
+            getattr(order, "submitted_at", None) or getattr(order, "created_at", None),
+            tz,
+        )
+        if submitted_at is None or submitted_at.date() != now_et.date():
+            continue
+        ticker, _direction = _parse_option_symbol(str(getattr(order, "symbol", "") or ""))
+        ticker = str(ticker or "").upper()
+        if ticker:
+            counts[ticker] = int(counts.get(ticker, 0)) + 1
+    return counts
 
 
 def _parse_option_expiry_from_symbol(option_symbol: str) -> date | None:
@@ -3451,6 +3487,11 @@ def main():
             option_positions = broker.get_open_option_positions()
         open_count = len(option_positions)
         alpaca_truth_ticker_roundtrips: dict[str, int] = {}
+        alpaca_buy_orders_by_ticker: dict[str, int] = {}
+        try:
+            alpaca_buy_orders_by_ticker = _alpaca_option_buy_order_counts_by_ticker_today(broker, now_et)
+        except Exception as exc:  # noqa: BLE001
+            print(f"[{ts(now_et)}] Alpaca buy-order cap lookup unavailable: {type(exc).__name__}: {exc!r}")
 
         if bool(getattr(config, "ENABLE_ALPACA_TRUTH_LOSS_GUARD", True)):
             try:
@@ -4233,6 +4274,20 @@ def main():
             reentries_used = int(ticker_reentries_used.get(ticker, 0))
             reentry_armed = bool(ticker_reentry_armed.get(ticker, False))
             expected_direction = str(ticker_reentry_expected_direction.get(ticker, "") or "").lower()
+            alpaca_buy_order_cap = max(
+                0,
+                int(getattr(config, "MAX_ALPACA_BUY_ORDERS_PER_TICKER_PER_DAY", 1) or 0),
+            )
+            alpaca_buy_order_count = int(alpaca_buy_orders_by_ticker.get(ticker, 0))
+            if alpaca_buy_order_cap > 0 and alpaca_buy_order_count >= alpaca_buy_order_cap:
+                _mark_skip("alpaca_buy_order_ticker_cap")
+                _mark_stage4_reject(reason="alpaca_buy_order_ticker_cap", ticker=ticker)
+                print(
+                    f"[{ts(now_et)}] {ticker}: skip "
+                    f"(Alpaca has {alpaca_buy_order_count}/{alpaca_buy_order_cap} "
+                    "same-day buy order(s) for this ticker)."
+                )
+                continue
             if _is_in_opening_strict_window(now_et) and prior_entries >= 1:
                 _mark_skip("opening_no_reentry")
                 _mark_stage4_reject(reason="opening_no_reentry", ticker=ticker)
