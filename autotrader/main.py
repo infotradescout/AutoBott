@@ -4324,7 +4324,7 @@ def main():
                         f"{prior_entries}/{max_entries_per_ticker}; no stop-loss re-entry armed)."
                     )
                     continue
-            if reentry_armed:
+            if reentry_armed and prior_entries >= max_entries_per_ticker:
                 if reentries_used >= int(config.MAX_REENTRIES_PER_TICKER):
                     _mark_skip("max_reentries_used")
                     _mark_stage4_reject(reason="max_reentries_used", ticker=ticker)
