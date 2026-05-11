@@ -1236,6 +1236,10 @@ def _alpaca_option_buy_order_counts_by_ticker_today(
     tz = pytz.timezone(config.EASTERN_TZ)
     counts: dict[str, int] = {}
     count_canceled = bool(getattr(config, "ALPACA_BUY_ORDER_CAP_COUNTS_CANCELED", True))
+    canceled_cooldown_minutes = max(
+        0,
+        int(getattr(config, "ALPACA_CANCELED_BUY_ORDER_COOLDOWN_MINUTES", 0) or 0),
+    )
     ignored_statuses = {"rejected", "expired"}
     if not count_canceled:
         ignored_statuses.add("canceled")
@@ -1245,13 +1249,22 @@ def _alpaca_option_buy_order_counts_by_ticker_today(
         if _enum_text(getattr(order, "side", "")) != "buy":
             continue
         status = _enum_text(getattr(order, "status", ""))
-        if status in ignored_statuses:
-            continue
         submitted_at = _as_et_datetime(
             getattr(order, "submitted_at", None) or getattr(order, "created_at", None),
             tz,
         )
         if submitted_at is None or submitted_at.date() != now_et.date():
+            continue
+        if (
+            not count_canceled
+            and status in {"canceled", "cancelled"}
+        ):
+            if (
+                canceled_cooldown_minutes <= 0
+                or (now_et - submitted_at).total_seconds() >= (canceled_cooldown_minutes * 60)
+            ):
+                continue
+        elif status in ignored_statuses:
             continue
         ticker, _direction = _parse_option_symbol(str(getattr(order, "symbol", "") or ""))
         ticker = str(ticker or "").upper()

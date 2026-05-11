@@ -40,15 +40,17 @@ class MainOrderGuardTests(unittest.TestCase):
     def setUp(self):
         self._config_values = {
             "ALPACA_BUY_ORDER_CAP_COUNTS_CANCELED": config.ALPACA_BUY_ORDER_CAP_COUNTS_CANCELED,
+            "ALPACA_CANCELED_BUY_ORDER_COOLDOWN_MINUTES": config.ALPACA_CANCELED_BUY_ORDER_COOLDOWN_MINUTES,
         }
-        config.ALPACA_BUY_ORDER_CAP_COUNTS_CANCELED = True
+        config.ALPACA_BUY_ORDER_CAP_COUNTS_CANCELED = False
+        config.ALPACA_CANCELED_BUY_ORDER_COOLDOWN_MINUTES = 10
         self.now = EASTERN.localize(datetime(2026, 5, 11, 9, 55, 0))
 
     def tearDown(self):
         for key, value in self._config_values.items():
             setattr(config, key, value)
 
-    def test_same_day_canceled_buy_counts_toward_ticker_cap(self):
+    def test_recent_same_day_canceled_buy_counts_during_cooldown(self):
         broker = FakeBroker(
             [
                 FakeOrder(
@@ -56,6 +58,38 @@ class MainOrderGuardTests(unittest.TestCase):
                     "buy",
                     "canceled",
                     self.now - timedelta(minutes=5),
+                )
+            ]
+        )
+
+        counts = main._alpaca_option_buy_order_counts_by_ticker_today(broker, self.now)
+
+        self.assertEqual(counts.get("JPM"), 1)
+
+    def test_old_same_day_canceled_buy_does_not_block_all_day(self):
+        broker = FakeBroker(
+            [
+                FakeOrder(
+                    "JPM260515P00290000",
+                    "buy",
+                    "canceled",
+                    self.now - timedelta(minutes=30),
+                )
+            ]
+        )
+
+        counts = main._alpaca_option_buy_order_counts_by_ticker_today(broker, self.now)
+
+        self.assertNotIn("JPM", counts)
+
+    def test_same_day_filled_buy_counts_toward_ticker_cap(self):
+        broker = FakeBroker(
+            [
+                FakeOrder(
+                    "JPM260515P00290000",
+                    "buy",
+                    "filled",
+                    self.now - timedelta(hours=2),
                 )
             ]
         )
