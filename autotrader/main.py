@@ -1468,6 +1468,60 @@ def _cancel_active_entry_buys_for_open_tickers(
     return canceled
 
 
+def _cancel_excess_active_entry_buys_per_ticker(
+    broker: AlpacaBroker,
+    now_et: datetime,
+    *,
+    limit: int = 500,
+) -> int:
+    tz = pytz.timezone(config.EASTERN_TZ)
+    try:
+        orders = broker.get_recent_orders(limit=max(1, int(limit)))
+    except Exception as exc:  # noqa: BLE001
+        print(f"[{ts(now_et)}] Excess entry-order lookup failed: {exc}")
+        return 0
+
+    active_by_ticker: dict[str, list[tuple[datetime, object]]] = {}
+    for order in orders:
+        if _enum_text(getattr(order, "side", "")) != "buy":
+            continue
+        if not _is_active_entry_order_status(getattr(order, "status", "")):
+            continue
+        symbol = str(getattr(order, "symbol", "") or "").upper()
+        ticker, _direction = _parse_option_symbol(symbol)
+        ticker = ticker.upper()
+        if not ticker:
+            continue
+        submitted_at = _as_et_datetime(
+            getattr(order, "submitted_at", None) or getattr(order, "created_at", None),
+            tz,
+        )
+        if submitted_at is None or submitted_at.date() != now_et.date():
+            continue
+        active_by_ticker.setdefault(ticker, []).append((submitted_at, order))
+
+    canceled = 0
+    for ticker, ticker_orders in active_by_ticker.items():
+        if len(ticker_orders) <= 1:
+            continue
+        ticker_orders.sort(key=lambda item: item[0], reverse=True)
+        for _submitted_at, order in ticker_orders[1:]:
+            order_id = str(getattr(order, "id", "") or "")
+            symbol = str(getattr(order, "symbol", "") or "").upper()
+            if not order_id:
+                continue
+            try:
+                broker.cancel_order(order_id)
+                canceled += 1
+                print(
+                    f"[{ts(now_et)}] Canceled excess entry buy order {order_id} "
+                    f"{symbol}: ticker {ticker} already has a newer active entry order."
+                )
+            except Exception as exc:  # noqa: BLE001
+                print(f"[{ts(now_et)}] Cancel excess entry order {order_id} failed: {exc}")
+    return canceled
+
+
 def _parse_option_expiry_from_symbol(option_symbol: str) -> date | None:
     symbol = str(option_symbol or "").upper().strip()
     match = _OPTION_SYMBOL_RE.match(symbol)
@@ -3749,6 +3803,9 @@ def main():
         try:
             duplicate_entry_cancels = _cancel_active_entry_buys_for_open_tickers(broker, option_positions, now_et)
             if duplicate_entry_cancels > 0:
+                time.sleep(config.RATE_LIMIT_SLEEP_SECONDS)
+            excess_entry_cancels = _cancel_excess_active_entry_buys_per_ticker(broker, now_et)
+            if excess_entry_cancels > 0:
                 time.sleep(config.RATE_LIMIT_SLEEP_SECONDS)
             stale_entry_cancels = _cancel_stale_active_entry_buy_orders(broker, now_et)
             if stale_entry_cancels > 0:

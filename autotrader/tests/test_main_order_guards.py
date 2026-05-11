@@ -313,6 +313,32 @@ class MainOrderGuardTests(unittest.TestCase):
         self.assertEqual(canceled, 1)
         self.assertEqual(broker.canceled_order_ids, [order.id])
 
+    def test_excess_active_entry_orders_for_same_ticker_are_canceled(self):
+        older = FakeOrder(
+            "ORCL260515C00195000",
+            "buy",
+            "new",
+            self.now - timedelta(minutes=3),
+        )
+        newer = FakeOrder(
+            "ORCL260515C00195000",
+            "buy",
+            "new",
+            self.now - timedelta(minutes=1),
+        )
+        other = FakeOrder(
+            "JPM260515P00290000",
+            "buy",
+            "new",
+            self.now - timedelta(minutes=1),
+        )
+        broker = FakeBroker([older, newer, other])
+
+        canceled = main._cancel_excess_active_entry_buys_per_ticker(broker, self.now)
+
+        self.assertEqual(canceled, 1)
+        self.assertEqual(broker.canceled_order_ids, [older.id])
+
 
 if __name__ == "__main__":  # pragma: no cover
     unittest.main()
