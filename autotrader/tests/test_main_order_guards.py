@@ -41,9 +41,13 @@ class MainOrderGuardTests(unittest.TestCase):
         self._config_values = {
             "ALPACA_BUY_ORDER_CAP_COUNTS_CANCELED": config.ALPACA_BUY_ORDER_CAP_COUNTS_CANCELED,
             "ALPACA_CANCELED_BUY_ORDER_COOLDOWN_MINUTES": config.ALPACA_CANCELED_BUY_ORDER_COOLDOWN_MINUTES,
+            "ANTI_CHURN_HOLD_MINUTES": config.ANTI_CHURN_HOLD_MINUTES,
+            "MIN_HOLD_EXIT_BYPASS_REASONS": config.MIN_HOLD_EXIT_BYPASS_REASONS,
         }
         config.ALPACA_BUY_ORDER_CAP_COUNTS_CANCELED = False
         config.ALPACA_CANCELED_BUY_ORDER_COOLDOWN_MINUTES = 10
+        config.ANTI_CHURN_HOLD_MINUTES = 10
+        config.MIN_HOLD_EXIT_BYPASS_REASONS = ("eod_close", "exposure_normalize")
         self.now = EASTERN.localize(datetime(2026, 5, 11, 9, 55, 0))
 
     def tearDown(self):
@@ -129,6 +133,27 @@ class MainOrderGuardTests(unittest.TestCase):
         counts = main._alpaca_option_buy_order_counts_by_ticker_today(broker, self.now)
 
         self.assertNotIn("JPM", counts)
+
+    def test_minimum_hold_blocks_stop_loss_before_ten_minutes(self):
+        entry_time = self.now - timedelta(minutes=4)
+
+        blocked = main._minimum_hold_blocks_exit("stop_loss", entry_time, self.now)
+
+        self.assertTrue(blocked)
+
+    def test_minimum_hold_allows_stop_loss_after_ten_minutes(self):
+        entry_time = self.now - timedelta(minutes=10, seconds=1)
+
+        blocked = main._minimum_hold_blocks_exit("stop_loss", entry_time, self.now)
+
+        self.assertFalse(blocked)
+
+    def test_minimum_hold_allows_eod_bypass(self):
+        entry_time = self.now - timedelta(minutes=4)
+
+        blocked = main._minimum_hold_blocks_exit("eod_close", entry_time, self.now)
+
+        self.assertFalse(blocked)
 
 
 if __name__ == "__main__":  # pragma: no cover

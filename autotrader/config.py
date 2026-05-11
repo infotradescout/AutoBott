@@ -188,7 +188,14 @@ PREMARKET_SCAN_INTERVAL_SECONDS    = 120
 PREMARKET_SCAN_MAX_RUNS            = 0
 LOOP_INTERVAL_SECONDS              = 15
 MAX_HOLD_MINUTES                   = 90
-ANTI_CHURN_HOLD_MINUTES            = 3
+ANTI_CHURN_HOLD_MINUTES            = 10
+MIN_HOLD_EXIT_BYPASS_REASONS       = (
+    "overnight_forced_close",
+    "pre_expiry_exit_overdue",
+    "pre_expiry_exit",
+    "eod_close",
+    "exposure_normalize",
+)
 
 OPENING_STRICT_WINDOW_MINUTES                = 20
 OPENING_STRICT_MIN_SIGNAL_SCORE              = 8.2

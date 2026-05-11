@@ -962,13 +962,11 @@ def _parse_trade_meta_entry_time(meta: dict) -> datetime | None:
 
 def _is_in_anti_churn_window(entry_time: datetime | None, now_et: datetime) -> bool:
     """
-    Check if the trade is still within the anti-churn hold window.
-    
-    During the first N minutes after entry, we skip discretionary exits
-    (reversal, immediate take-profit) to avoid round-trip losses from early
-    noise. Stop loss and profit protection still apply.
-    
-    Returns True if trade should skip discretionary exits; False if ready for them.
+    Return True while a position is inside the minimum hold window.
+
+    This is intentionally stronger than a discretionary anti-churn helper:
+    strategy exits wait until the minimum hold has elapsed so the bot does not
+    scalp in and out during early noise.
     """
     if entry_time is None:
         return False
@@ -978,6 +976,17 @@ def _is_in_anti_churn_window(entry_time: datetime | None, now_et: datetime) -> b
         return elapsed < hold_minutes
     except Exception:
         return False
+
+
+def _minimum_hold_blocks_exit(exit_reason: str | None, entry_time: datetime | None, now_et: datetime) -> bool:
+    if not exit_reason or not _is_in_anti_churn_window(entry_time, now_et):
+        return False
+    bypass_reasons = {
+        str(item).strip().lower()
+        for item in getattr(config, "MIN_HOLD_EXIT_BYPASS_REASONS", ())
+        if str(item).strip()
+    }
+    return str(exit_reason or "").strip().lower() not in bypass_reasons
 
 
 def _parse_state_datetime(value: str | None) -> datetime | None:
@@ -5058,6 +5067,26 @@ def main():
                     max_hold_minutes = int(meta.get("max_hold_minutes", config.MAX_HOLD_MINUTES) or config.MAX_HOLD_MINUTES)
                     if held_minutes >= max_hold_minutes:
                         exit_reason = "time_stop"
+
+            if _minimum_hold_blocks_exit(exit_reason, entry_time, now_et):
+                held_seconds = max(0, int((now_et - entry_time).total_seconds())) if entry_time else 0
+                min_hold_minutes = float(getattr(config, "ANTI_CHURN_HOLD_MINUTES", 10) or 10)
+                last_exit_debug = {
+                    "loop_ts_et": ts(now_et),
+                    "symbol": symbol,
+                    "reason": "minimum_hold_active",
+                    "blocked_exit_reason": exit_reason,
+                    "held_seconds": held_seconds,
+                    "min_hold_minutes": min_hold_minutes,
+                    "result": "held_minimum_not_met",
+                }
+                print(
+                    f"[{ts(now_et)}] {symbol}: holding through minimum "
+                    f"{min_hold_minutes:.1f}m window; blocked exit={exit_reason} "
+                    f"held={held_seconds / 60.0:.1f}m."
+                )
+                exit_reason = None
+                _save_runtime_state()
 
             if exit_reason:
                 if dry_run_enabled:
