@@ -62,6 +62,48 @@ class AlpacaBroker:
             if _normalize_asset_class(getattr(p, "asset_class", "")) in option_asset_classes
         ]
 
+    def _current_option_position_qty(self, option_symbol: str) -> int | None:
+        """Return current long/short option quantity, or None when Alpaca lookup fails."""
+        _assert_option_symbol(option_symbol)
+        try:
+            positions = self.get_all_positions()
+        except Exception as exc:  # noqa: BLE001
+            print(f"[broker] position lookup failed for {option_symbol}: {exc}")
+            return None
+
+        option_asset_classes = {"us_option", "option", "options"}
+        target = str(option_symbol).upper().strip()
+        for pos in positions or []:
+            if str(getattr(pos, "symbol", "") or "").upper().strip() != target:
+                continue
+            if _normalize_asset_class(getattr(pos, "asset_class", "")) not in option_asset_classes:
+                continue
+            try:
+                return int(float(getattr(pos, "qty", 0) or 0))
+            except (TypeError, ValueError):
+                return 0
+        return 0
+
+    def _safe_option_sell_qty(self, option_symbol: str, requested_qty: int) -> int:
+        requested_qty = max(0, int(requested_qty or 0))
+        if requested_qty <= 0:
+            raise ValueError(f"invalid sell qty for {option_symbol}: {requested_qty}")
+        if not config.ENFORCE_LONG_ONLY_OPTION_SELLS:
+            return requested_qty
+
+        current_qty = self._current_option_position_qty(option_symbol)
+        if current_qty is None:
+            raise RuntimeError(f"refusing option sell for {option_symbol}: position lookup failed")
+        if current_qty <= 0:
+            raise ValueError(f"refusing option sell for {option_symbol}: no long position")
+        if requested_qty > current_qty:
+            print(
+                f"[broker] capping option sell for {option_symbol}: requested {requested_qty}, "
+                f"long position {current_qty}"
+            )
+            return current_qty
+        return requested_qty
+
     def place_option_limit_buy(
         self,
         option_symbol: str,
@@ -85,9 +127,10 @@ class AlpacaBroker:
 
     def place_option_limit_sell(self, option_symbol: str, qty: int, limit_price: float):
         _assert_option_symbol(option_symbol)
+        sell_qty = self._safe_option_sell_qty(option_symbol, qty)
         req = LimitOrderRequest(
             symbol=option_symbol,
-            qty=qty,
+            qty=sell_qty,
             side=OrderSide.SELL,
             time_in_force=TimeInForce.DAY,
             limit_price=_limit_price_decimal(limit_price),
@@ -110,9 +153,10 @@ class AlpacaBroker:
 
     def close_option_market(self, option_symbol: str, qty: int):
         _assert_option_symbol(option_symbol)
+        sell_qty = self._safe_option_sell_qty(option_symbol, qty)
         req = MarketOrderRequest(
             symbol=option_symbol,
-            qty=qty,
+            qty=sell_qty,
             side=OrderSide.SELL,
             time_in_force=TimeInForce.DAY,
         )
