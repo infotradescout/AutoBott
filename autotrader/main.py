@@ -26,7 +26,7 @@ from risk import (
     is_at_or_after,
     position_matches_ticker,
 )
-from scanner import initialize_scanner, run_observation_phase, run_scan, set_catalyst_mode
+from scanner import SCAN_LOG_COLUMNS, initialize_scanner, run_observation_phase, run_scan, set_catalyst_mode
 from session_rules import (
     premarket_scan_decision,
     should_force_same_day_exit,
@@ -1890,6 +1890,37 @@ def _signal_sort_key(signal: dict) -> tuple[float, float]:
     except (TypeError, ValueError):
         rvol = 0.0
     return score, rvol
+
+
+def _append_entry_trigger_scan_log(now_et: datetime, signal: dict, *, detail: str = "") -> None:
+    try:
+        path = config.SCAN_LOG_CSV_PATH
+        path.parent.mkdir(parents=True, exist_ok=True)
+        write_header = not path.exists()
+        payload = {
+            "timestamp": now_et.strftime("%Y-%m-%d %H:%M:%S %Z"),
+            "symbol": str(signal.get("symbol", "") or ""),
+            "strategy_profile": str(signal.get("strategy_profile", "") or ""),
+            "result": "pass",
+            "direction": signal.get("direction", ""),
+            "rvol": signal.get("rvol", ""),
+            "rsi": signal.get("rsi", ""),
+            "roc": signal.get("roc", ""),
+            "iv_rank": signal.get("iv_rank", ""),
+            "volatility_score": signal.get("volatility_score", ""),
+            "regime_score": signal.get("regime_score", ""),
+            "signal_score": signal.get("signal_score", ""),
+            "flow_score": signal.get("flow_score", ""),
+            "htf_reason": signal.get("htf_reason", ""),
+            "reason": f"entry_trigger: {detail}".strip(),
+        }
+        with path.open("a", newline="", encoding="utf-8") as f:
+            writer = csv.DictWriter(f, fieldnames=SCAN_LOG_COLUMNS)
+            if write_header:
+                writer.writeheader()
+            writer.writerow({key: payload.get(key, "") for key in SCAN_LOG_COLUMNS})
+    except Exception as exc:  # noqa: BLE001
+        print(f"[{ts(now_et)}] Entry trigger scan-log write failed: {exc}")
 
 
 def _flatten_positions_for_killswitch(broker: AlpacaBroker, now_et: datetime, *, label: str = "KILLSWITCH") -> None:
@@ -5063,6 +5094,12 @@ def main():
                     initial_quote=entry_quote,
                 )
                 entry_debug["entry_orders_submitted"] = int(entry_debug.get("entry_orders_submitted", 0)) + int(entry_result.get("attempts", 0) or 0)
+                if int(entry_result.get("attempts", 0) or 0) > 0:
+                    _append_entry_trigger_scan_log(
+                        now_et,
+                        signal,
+                        detail=str(entry_result.get("status", "order_submitted") or "order_submitted"),
+                    )
                 _set_signal_outcome(
                     ticker=ticker,
                     disposition="order_submitted",

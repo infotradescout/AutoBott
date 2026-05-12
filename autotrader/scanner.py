@@ -1303,7 +1303,7 @@ class IntradayScanner:
                         "timestamp": ts_str,
                         "symbol": item["symbol"],
                         "strategy_profile": item.get("strategy_profile", ""),
-                        "result": "pass",
+                        "result": "candidate",
                         "direction": item.get("direction", ""),
                         "rvol": item.get("rvol", ""),
                         "rsi": item.get("rsi", ""),

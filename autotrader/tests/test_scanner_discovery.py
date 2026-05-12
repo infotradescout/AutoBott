@@ -1,6 +1,8 @@
 from datetime import datetime
 from pathlib import Path
+import csv
 import sys
+import tempfile
 
 import pandas as pd
 import pytz
@@ -38,3 +40,33 @@ def test_generic_discovery_profile_accepts_non_core_mover_symbol():
     assert len(passed) == 1
     assert passed[0]["symbol"] == "XYZ"
     assert passed[0]["strategy_profile"] == "generic_intraday_continuation"
+
+
+def test_scanner_logs_candidates_not_trade_passes():
+    now_et = pytz.timezone("US/Eastern").localize(datetime(2026, 5, 12, 11, 30))
+    with tempfile.TemporaryDirectory() as tmp:
+        old_path = scanner.SCAN_LOG_PATH
+        scanner.SCAN_LOG_PATH = Path(tmp) / "scan_log.csv"
+        try:
+            scan = scanner.IntradayScanner(object(), emit_summary=False, write_scan_log=True)
+            scan._write_scan_log(
+                now_et,
+                passed=[
+                    {
+                        "symbol": "XYZ",
+                        "strategy_profile": "generic_intraday_continuation",
+                        "direction": "call",
+                        "rvol": 0.2,
+                        "rsi": 50,
+                        "roc": 0.04,
+                        "signal_score": 3.2,
+                        "reason": "candidate only",
+                    }
+                ],
+                failed=[],
+            )
+            with scanner.SCAN_LOG_PATH.open("r", newline="", encoding="utf-8") as f:
+                rows = list(csv.DictReader(f))
+            assert rows[0]["result"] == "candidate"
+        finally:
+            scanner.SCAN_LOG_PATH = old_path
