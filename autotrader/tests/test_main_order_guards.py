@@ -84,6 +84,27 @@ class FakeDataClient:
         return {"bid": 5.0, "ask": 5.04}
 
 
+class FakeUniverseDataClient:
+    def __init__(self):
+        self.assets = {
+            "MSFT": {"tradable": True, "status": "active"},
+            "NVDA": {"tradable": True, "options_enabled": True, "status": "active"},
+        }
+        self.prices = {"MSFT": 420.0, "NVDA": 900.0}
+
+    def get_top_movers(self, top: int = 20):
+        return ["MSFT"], ["NVDA"]
+
+    def get_asset(self, symbol: str):
+        return self.assets[symbol]
+
+    def get_latest_stock_price(self, symbol: str):
+        return self.prices.get(symbol)
+
+    def get_all_optionable_tickers(self, *, max_count: int | None = None):
+        return ["MSFT", "NVDA", "TSLA", "META", "AMZN"]
+
+
 class MainOrderGuardTests(unittest.TestCase):
     def setUp(self):
         self._config_values = {
@@ -95,6 +116,10 @@ class MainOrderGuardTests(unittest.TestCase):
             "ENTRY_LIMIT_ATTEMPTS": config.ENTRY_LIMIT_ATTEMPTS,
             "ENABLE_ENTRY_MARKET_FALLBACK": config.ENABLE_ENTRY_MARKET_FALLBACK,
             "ENTRY_RESTING_ORDER_MAX_MINUTES": config.ENTRY_RESTING_ORDER_MAX_MINUTES,
+            "UNIVERSE_MODE": config.UNIVERSE_MODE,
+            "AUTO_EXPAND_UNIVERSE_WITH_MOVERS": config.AUTO_EXPAND_UNIVERSE_WITH_MOVERS,
+            "UNIVERSE_MAX_TICKERS": config.UNIVERSE_MAX_TICKERS,
+            "UNIVERSE_MOVER_TOP": config.UNIVERSE_MOVER_TOP,
         }
         config.ALPACA_BUY_ORDER_CAP_COUNTS_CANCELED = False
         config.ALPACA_CANCELED_BUY_ORDER_COOLDOWN_MINUTES = 10
@@ -104,6 +129,10 @@ class MainOrderGuardTests(unittest.TestCase):
         config.ENTRY_LIMIT_ATTEMPTS = 1
         config.ENABLE_ENTRY_MARKET_FALLBACK = False
         config.ENTRY_RESTING_ORDER_MAX_MINUTES = 10
+        config.UNIVERSE_MODE = "movers"
+        config.AUTO_EXPAND_UNIVERSE_WITH_MOVERS = True
+        config.UNIVERSE_MAX_TICKERS = 15
+        config.UNIVERSE_MOVER_TOP = 50
         self.now = EASTERN.localize(datetime(2026, 5, 11, 9, 55, 0))
 
     def tearDown(self):
@@ -338,6 +367,23 @@ class MainOrderGuardTests(unittest.TestCase):
 
         self.assertEqual(canceled, 1)
         self.assertEqual(broker.canceled_order_ids, [older.id])
+
+    def test_mover_filter_keeps_assets_when_options_enabled_field_is_missing(self):
+        data_client = FakeUniverseDataClient()
+
+        kept = main._filter_mover_candidates(data_client, ["MSFT"], protected=set(config.CORE_TICKERS))
+
+        self.assertEqual(kept, ["MSFT"])
+
+    def test_scan_universe_supplements_when_movers_are_too_small(self):
+        data_client = FakeUniverseDataClient()
+
+        universe = main._build_scan_universe(data_client)
+
+        self.assertIn("MSFT", universe)
+        self.assertIn("NVDA", universe)
+        self.assertIn("TSLA", universe)
+        self.assertGreater(len(universe), len(config.TICKERS))
 
 
 if __name__ == "__main__":  # pragma: no cover

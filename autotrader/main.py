@@ -1084,7 +1084,8 @@ def _filter_mover_candidates(
             asset = data_client.get_asset(sym)
             if not bool(asset.get("tradable", False)):
                 continue
-            if not bool(asset.get("options_enabled", False)):
+            options_enabled = asset.get("options_enabled")
+            if options_enabled is False:
                 continue
             if str(asset.get("status", "active") or "active").lower() != "active":
                 continue
@@ -1788,6 +1789,24 @@ def _build_scan_universe(data_client: AlpacaDataClient) -> list[str]:
 
     deduped = list(dict.fromkeys(base + filtered_movers))
     max_tickers = max(1, int(config.UNIVERSE_MAX_TICKERS))
+    if len(deduped) < max_tickers and universe_mode in {"movers", "all", "all_optionable", "all_optionable_assets"}:
+        try:
+            supplement = data_client.get_all_optionable_tickers(max_count=max_tickers * 3)
+            before = len(deduped)
+            deduped = list(dict.fromkeys(deduped + [str(sym).upper() for sym in supplement if str(sym).strip()]))
+            added = max(0, len(deduped) - before)
+            if added > 0:
+                print(
+                    f"[{ts()}] Universe supplemented with {added} optionable ticker(s) "
+                    f"after mover expansion produced only {before} candidates."
+                )
+        except Exception as exc:  # noqa: BLE001
+            print(f"[{ts()}] Universe optionable supplement unavailable ({exc}); scanning {len(deduped)} tickers.")
+    if len(deduped) <= len(base):
+        print(
+            f"[{ts()}] WARNING: mover universe produced no extra tradable symbols; "
+            f"scanning {len(deduped)} core/base tickers only."
+        )
     return deduped[:max_tickers]
 
 
