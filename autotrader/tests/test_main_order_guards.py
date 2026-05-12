@@ -124,8 +124,7 @@ class MainOrderGuardTests(unittest.TestCase):
         }
         config.ALPACA_BUY_ORDER_CAP_COUNTS_CANCELED = False
         config.ALPACA_CANCELED_BUY_ORDER_COOLDOWN_MINUTES = 10
-        config.ANTI_CHURN_HOLD_MINUTES = 10
-        config.MIN_HOLD_EXIT_BYPASS_REASONS = ("eod_close", "exposure_normalize")
+        config.ANTI_CHURN_HOLD_MINUTES = 30
         config.ENTRY_ORDER_STATUS_WAIT_SECONDS = 1
         config.ENTRY_LIMIT_ATTEMPTS = 1
         config.ENABLE_ENTRY_MARKET_FALLBACK = False
@@ -221,15 +220,22 @@ class MainOrderGuardTests(unittest.TestCase):
 
         self.assertNotIn("JPM", counts)
 
-    def test_minimum_hold_defers_strategy_before_ten_minutes(self):
+    def test_minimum_hold_defers_strategy_before_thirty_minutes(self):
         entry_time = self.now - timedelta(minutes=4)
 
         deferred = main._is_in_anti_churn_window(entry_time, self.now)
 
         self.assertTrue(deferred)
 
-    def test_minimum_hold_releases_strategy_after_ten_minutes(self):
+    def test_minimum_hold_still_defers_after_ten_minutes(self):
         entry_time = self.now - timedelta(minutes=10, seconds=1)
+
+        deferred = main._is_in_anti_churn_window(entry_time, self.now)
+
+        self.assertTrue(deferred)
+
+    def test_minimum_hold_releases_strategy_after_thirty_minutes(self):
+        entry_time = self.now - timedelta(minutes=30, seconds=1)
 
         deferred = main._is_in_anti_churn_window(entry_time, self.now)
 

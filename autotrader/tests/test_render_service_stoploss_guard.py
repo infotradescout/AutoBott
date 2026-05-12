@@ -42,7 +42,7 @@ class RenderServiceStoplossGuardTests(unittest.TestCase):
         self._config_values = {
             "ANTI_CHURN_HOLD_MINUTES": config.ANTI_CHURN_HOLD_MINUTES,
         }
-        config.ANTI_CHURN_HOLD_MINUTES = 10
+        config.ANTI_CHURN_HOLD_MINUTES = 30
         self.now = EASTERN.localize(datetime(2026, 5, 11, 13, 16, 7))
 
     def tearDown(self):
@@ -57,7 +57,7 @@ class RenderServiceStoplossGuardTests(unittest.TestCase):
                     symbol,
                     "buy",
                     "filled",
-                    self.now - timedelta(minutes=4, seconds=30),
+                    self.now - timedelta(minutes=24, seconds=30),
                 )
             ]
         )
@@ -80,7 +80,7 @@ class RenderServiceStoplossGuardTests(unittest.TestCase):
                     symbol,
                     "buy",
                     "filled",
-                    self.now - timedelta(minutes=12),
+                    self.now - timedelta(minutes=35),
                 )
             ]
         )

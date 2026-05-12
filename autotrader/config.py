@@ -190,7 +190,7 @@ LOOP_INTERVAL_SECONDS              = 15
 CONTINUOUS_ENTRY_SEARCH_ENABLED    = True
 CONTINUOUS_ENTRY_SEARCH_SLEEP_SECONDS = 1
 MAX_HOLD_MINUTES                   = 90
-ANTI_CHURN_HOLD_MINUTES            = 10
+ANTI_CHURN_HOLD_MINUTES            = 30
 MIN_HOLD_EXIT_BYPASS_REASONS       = (
     "overnight_forced_close",
     "pre_expiry_exit_overdue",
