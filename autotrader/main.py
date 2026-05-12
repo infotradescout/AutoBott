@@ -996,6 +996,48 @@ def _minimum_hold_blocks_exit(exit_reason: str | None, entry_time: datetime | No
     return str(exit_reason or "").strip().lower() not in bypass_reasons
 
 
+def _recent_filled_buy_entry_time(
+    broker: AlpacaBroker,
+    option_symbol: str,
+    now_et: datetime,
+    *,
+    limit: int = 200,
+) -> datetime | None:
+    hold_minutes = float(getattr(config, "ANTI_CHURN_HOLD_MINUTES", 10) or 10)
+    if hold_minutes <= 0:
+        return None
+    tz = pytz.timezone(config.EASTERN_TZ)
+    target = str(option_symbol or "").upper().strip()
+    best: datetime | None = None
+    try:
+        orders = broker.get_recent_orders(limit=max(1, int(limit)))
+    except Exception as exc:  # noqa: BLE001
+        print(f"[{ts(now_et)}] Recent buy lookup failed for {target}: {exc}")
+        return None
+    for order in orders:
+        if str(getattr(order, "symbol", "") or "").upper().strip() != target:
+            continue
+        if _enum_text(getattr(order, "side", "")) != "buy":
+            continue
+        if _enum_text(getattr(order, "status", "")) != "filled":
+            continue
+        filled_qty = position_qty_as_int(getattr(order, "filled_qty", None) or getattr(order, "qty", 0))
+        if filled_qty <= 0:
+            continue
+        filled_at = _as_et_datetime(
+            getattr(order, "filled_at", None) or getattr(order, "submitted_at", None),
+            tz,
+        )
+        if filled_at is None or filled_at.date() != now_et.date():
+            continue
+        age_seconds = (now_et - filled_at).total_seconds()
+        if age_seconds < 0 or age_seconds > hold_minutes * 60:
+            continue
+        if best is None or filled_at > best:
+            best = filled_at
+    return best
+
+
 def _parse_state_datetime(value: str | None) -> datetime | None:
     if not value:
         return None
@@ -3494,6 +3536,17 @@ def main():
                     close_actions.append((symbol, close_qty, ticker))
 
         for symbol, close_qty, ticker in close_actions:
+            meta = open_trade_meta.get(symbol, {})
+            entry_time = _parse_trade_meta_entry_time(meta) if meta else None
+            if entry_time is None:
+                entry_time = _recent_filled_buy_entry_time(broker, symbol, now_et)
+            if _minimum_hold_blocks_exit("exposure_normalize", entry_time, now_et):
+                held_seconds = max(0, int((now_et - entry_time).total_seconds())) if entry_time else 0
+                print(
+                    f"[{ts(now_et)}] EXPOSURE_GUARD deferred {symbol} normalize "
+                    f"({held_seconds / 60.0:.1f}/{float(getattr(config, 'ANTI_CHURN_HOLD_MINUTES', 10) or 10):.1f}m)."
+                )
+                continue
             filled_qty, _fill_price, _close_meta = _close_position_with_confirmation(
                 symbol=symbol,
                 qty=close_qty,
@@ -5254,6 +5307,8 @@ def main():
             close_qty = qty
             ticker_for_pos = str(meta.get("ticker", "") or "").upper()
             entry_time = _parse_trade_meta_entry_time(meta) if meta else None
+            if entry_time is None:
+                entry_time = _recent_filled_buy_entry_time(broker, symbol, now_et)
             if not ticker_for_pos:
                 parsed_ticker, _parsed_dir = _parse_option_symbol(symbol)
                 ticker_for_pos = parsed_ticker.upper()
@@ -5281,6 +5336,25 @@ def main():
                         exit_reason = "pre_expiry_exit"
             if exit_reason is None and is_at_or_after(now_et, config.HARD_CLOSE_TIME):
                 exit_reason = "eod_close"
+            if exit_reason is not None and _minimum_hold_blocks_exit(exit_reason, entry_time, now_et):
+                held_seconds = max(0, int((now_et - entry_time).total_seconds())) if entry_time else 0
+                min_hold_minutes = float(getattr(config, "ANTI_CHURN_HOLD_MINUTES", 10) or 10)
+                last_exit_debug = {
+                    "loop_ts_et": ts(now_et),
+                    "symbol": symbol,
+                    "reason": "minimum_hold_active",
+                    "blocked_exit_reason": exit_reason,
+                    "held_seconds": held_seconds,
+                    "min_hold_minutes": min_hold_minutes,
+                    "result": "operational_exit_deferred_minimum_hold",
+                }
+                print(
+                    f"[{ts(now_et)}] {symbol}: minimum hold active "
+                    f"({held_seconds / 60.0:.1f}/{min_hold_minutes:.1f}m); "
+                    f"{exit_reason} deferred."
+                )
+                _save_runtime_state()
+                continue
             if exit_reason is None and _is_in_anti_churn_window(entry_time, now_et):
                 held_seconds = max(0, int((now_et - entry_time).total_seconds())) if entry_time else 0
                 min_hold_minutes = float(getattr(config, "ANTI_CHURN_HOLD_MINUTES", 10) or 10)

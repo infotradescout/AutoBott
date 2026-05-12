@@ -116,6 +116,7 @@ class MainOrderGuardTests(unittest.TestCase):
             "ENTRY_LIMIT_ATTEMPTS": config.ENTRY_LIMIT_ATTEMPTS,
             "ENABLE_ENTRY_MARKET_FALLBACK": config.ENABLE_ENTRY_MARKET_FALLBACK,
             "ENTRY_RESTING_ORDER_MAX_MINUTES": config.ENTRY_RESTING_ORDER_MAX_MINUTES,
+            "MIN_HOLD_EXIT_BYPASS_REASONS": config.MIN_HOLD_EXIT_BYPASS_REASONS,
             "UNIVERSE_MODE": config.UNIVERSE_MODE,
             "AUTO_EXPAND_UNIVERSE_WITH_MOVERS": config.AUTO_EXPAND_UNIVERSE_WITH_MOVERS,
             "UNIVERSE_MAX_TICKERS": config.UNIVERSE_MAX_TICKERS,
@@ -129,6 +130,7 @@ class MainOrderGuardTests(unittest.TestCase):
         config.ENTRY_LIMIT_ATTEMPTS = 1
         config.ENABLE_ENTRY_MARKET_FALLBACK = False
         config.ENTRY_RESTING_ORDER_MAX_MINUTES = 10
+        config.MIN_HOLD_EXIT_BYPASS_REASONS = ("eod_close",)
         config.UNIVERSE_MODE = "movers"
         config.AUTO_EXPAND_UNIVERSE_WITH_MOVERS = True
         config.UNIVERSE_MAX_TICKERS = 15
@@ -239,6 +241,28 @@ class MainOrderGuardTests(unittest.TestCase):
         blocked = main._minimum_hold_blocks_exit("eod_close", entry_time, self.now)
 
         self.assertFalse(blocked)
+
+    def test_minimum_hold_blocks_exposure_normalize(self):
+        entry_time = self.now - timedelta(minutes=4)
+
+        blocked = main._minimum_hold_blocks_exit("exposure_normalize", entry_time, self.now)
+
+        self.assertTrue(blocked)
+
+    def test_recent_filled_buy_entry_time_recovers_missing_runtime_meta(self):
+        order = FakeOrder(
+            "QQQ260512C00710000",
+            "buy",
+            "filled",
+            self.now - timedelta(minutes=2),
+        )
+        order.filled_qty = 1
+        broker = FakeBroker([order])
+
+        entry_time = main._recent_filled_buy_entry_time(broker, "QQQ260512C00710000", self.now)
+
+        self.assertIsNotNone(entry_time)
+        self.assertTrue(main._minimum_hold_blocks_exit("profit_target", entry_time, self.now))
 
     def test_unfilled_active_limit_entry_is_left_resting(self):
         broker = FakeEntryBroker(status="new")

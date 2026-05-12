@@ -196,7 +196,6 @@ MIN_HOLD_EXIT_BYPASS_REASONS       = (
     "pre_expiry_exit_overdue",
     "pre_expiry_exit",
     "eod_close",
-    "exposure_normalize",
 )
 
 OPENING_STRICT_WINDOW_MINUTES                = 20
