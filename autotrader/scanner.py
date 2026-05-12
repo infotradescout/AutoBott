@@ -291,9 +291,10 @@ def _profile_signals_for_candidate(
         passed.append(enriched)
 
     # ── Generic fallback (priority 5) ─────────────────────────────────────
-    # Only fires for core/permissive names that matched nothing above.
+    # Discovery fallback: optionable mover symbols should surface even when
+    # named profiles miss. Execution gates in main.py decide what gets bought.
     # Criteria: price is directional (clear VWAP side + any ROC signal).
-    if not passed and is_core:
+    if not passed:
         generic = PROFILES.get("generic_intraday_continuation")
         if generic is not None:
             generic_ok = False
