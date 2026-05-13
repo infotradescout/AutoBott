@@ -536,6 +536,28 @@ def _execution_signal_sort_key(signal: dict[str, Any]) -> tuple[float, float, fl
     return (min(rvol, 10.0), direction_score, min(roc, 3.0), signal_score)
 
 
+def _exit_reason_allows_market_fallback(exit_reason: str | None) -> bool:
+    """
+    Only cross the spread when the exit is genuinely urgent.
+
+    Paper option marks can show a profit while the executable bid is already below
+    entry. Normal banking/trailing exits should rest as limits and retry instead
+    of converting mark-to-market noise into realized bid-side losses.
+    """
+    reason = str(exit_reason or "").strip().lower()
+    if reason.startswith("reversal_detected"):
+        return False
+    return reason in {
+        "stop_loss",
+        "stop_loss_pct",
+        "eod_close",
+        "overnight_forced_close",
+        "pre_expiry_exit",
+        "pre_expiry_exit_overdue",
+        "exposure_normalize",
+    }
+
+
 def _premium_cap_quality_override_ok(
     *,
     signal: dict[str, Any],
@@ -3474,18 +3496,7 @@ def main():
         else:
             max_wait_seconds = max(poll_seconds, int(max_wait_seconds_override))
 
-        critical_exit_reasons = {
-            "stop_loss",
-            "stop_loss_pct",
-            "profit_target",
-            "base_win_bank",
-            "protected_floor_breach",
-            "eod_close",
-            "overnight_forced_close",
-            "pre_expiry_exit",
-            "pre_expiry_exit_overdue",
-        }
-        is_critical = str(exit_reason or "").lower() in critical_exit_reasons
+        is_critical = _exit_reason_allows_market_fallback(exit_reason)
         wait_seconds = max_wait_seconds
         if poll_seconds_override is None and max_wait_seconds_override is None:
             if is_critical:

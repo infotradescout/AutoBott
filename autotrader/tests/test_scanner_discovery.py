@@ -68,7 +68,7 @@ def test_growth_frequency_config_keeps_trading_through_day():
     assert config.MAX_ALPACA_TRUTH_ROUNDTRIPS_PER_TICKER_PER_DAY == 4
     assert config.ENTRY_LIMIT_ATTEMPTS == 2
     assert config.CANCEL_UNFILLED_ENTRY_BEFORE_RETRY is True
-    assert config.ENABLE_ENTRY_MARKET_FALLBACK is True
+    assert config.ENABLE_ENTRY_MARKET_FALLBACK is False
     assert config.LOOP_INTERVAL_SECONDS == 5
     assert config.MAX_POSITIONS == 0
     assert config.MAX_POSITION_SIZE_USD == 0.0
@@ -77,12 +77,15 @@ def test_growth_frequency_config_keeps_trading_through_day():
     assert config.MAX_PREMIUM_PER_TRADE_USD == 0.0
     assert config.MAX_TOTAL_OPEN_PREMIUM_USD == 0.0
     assert config.OPENING_MAX_FRESH_PREMIUM_USD == 0.0
-    assert config.ENABLE_ENTRY_CONFIRMATION is False
-    assert config.ENABLE_SIGNAL_PATTERN_MEMORY is False
-    assert config.ENABLE_PRE_EXECUTION_HISTORY_CHECK is False
-    assert config.ADAPTIVE_BLOCK_LOSING_TICKERS is False
-    assert config.ALPACA_TRUTH_ADAPT_AFTER_LOSS_USD == 0.0
-    assert config.LOSS_THROTTLE_AFTER_CONSEC_LOSSES == 999
+    assert config.EXECUTION_MIN_RVOL_AFTER_IGNORE == 0.50
+    assert config.ENABLE_ENTRY_CONFIRMATION is True
+    assert config.ENABLE_SIGNAL_PATTERN_MEMORY is True
+    assert config.ENABLE_PRE_EXECUTION_HISTORY_CHECK is True
+    assert config.ADAPTIVE_BLOCK_LOSING_TICKERS is True
+    assert config.ALPACA_TRUTH_ADAPT_AFTER_LOSS_USD == 75.0
+    assert config.LOSS_THROTTLE_AFTER_CONSEC_LOSSES == 1
+    assert config.EARLY_RED_GUARD_ENABLED is True
+    assert config.EARLY_RED_GUARD_MAX_NET_PNL_USD == -150.0
     assert config.UNIVERSE_MAX_TICKERS == 300
     assert config.UNIVERSE_MOVER_TOP == 120
     assert config.MOVER_SYMBOLS_PER_SIDE == 60

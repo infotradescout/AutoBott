@@ -372,6 +372,17 @@ class MainOrderGuardTests(unittest.TestCase):
         self.assertFalse(ok)
         self.assertIn("RVOL too weak", reason)
 
+    def test_normal_profit_exits_do_not_use_market_fallback(self):
+        self.assertFalse(main._exit_reason_allows_market_fallback("profit_target"))
+        self.assertFalse(main._exit_reason_allows_market_fallback("base_win_bank"))
+        self.assertFalse(main._exit_reason_allows_market_fallback("protected_floor_breach"))
+        self.assertFalse(main._exit_reason_allows_market_fallback("reversal_detected(ema=1,roc=1,vwap=0)"))
+
+    def test_urgent_exits_can_use_market_fallback(self):
+        self.assertTrue(main._exit_reason_allows_market_fallback("stop_loss"))
+        self.assertTrue(main._exit_reason_allows_market_fallback("stop_loss_pct"))
+        self.assertTrue(main._exit_reason_allows_market_fallback("eod_close"))
+
     def test_execution_sort_prefers_rvol_before_raw_score(self):
         weak_high_score = {"symbol": "CRM", "signal_score": 17.26, "direction_score": 1.0, "rvol": 0.02, "roc": -0.30}
         active_lower_score = {"symbol": "IWM", "signal_score": 22.29, "direction_score": 0.50, "rvol": 7.13, "roc": 0.01}
