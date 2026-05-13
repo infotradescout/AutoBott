@@ -22,6 +22,8 @@ from feature_flags import is_enabled
 from logger import TradeLogger
 from options import select_atm_option_contract_with_reason
 from risk import (
+    calculate_entry_qty,
+    calculate_position_budget_usd,
     can_open_new_positions,
     is_at_or_after,
     position_matches_ticker,
@@ -173,6 +175,31 @@ def _safe_signal_float(value, default: float = 0.0) -> float:
     if math.isnan(parsed) or math.isinf(parsed):
         return float(default)
     return parsed
+
+
+def _entry_qty_for_budget(
+    *,
+    ask_price: float,
+    equity: float | None,
+    consecutive_losses: int,
+    max_trade_premium: float,
+) -> int:
+    budget = calculate_position_budget_usd(
+        equity=equity,
+        base_position_size_usd=float(getattr(config, "POSITION_SIZE_USD", 300.0) or 300.0),
+        risk_per_trade_pct=float(getattr(config, "RISK_PER_TRADE_PCT", 0.0) or 0.0),
+        max_position_size_usd=float(getattr(config, "MAX_POSITION_SIZE_USD", 0.0) or 0.0),
+        consecutive_losses=consecutive_losses,
+        reduce_after_consecutive_losses=int(getattr(config, "DRAWDOWN_REDUCE_AFTER_CONSEC_LOSSES", 1) or 1),
+        drawdown_size_multiplier=float(getattr(config, "DRAWDOWN_SIZE_MULTIPLIER", 0.5) or 0.5),
+    )
+    if float(max_trade_premium or 0.0) > 0:
+        budget = min(float(budget), float(max_trade_premium))
+    qty = calculate_entry_qty(budget, ask_price)
+    max_contracts = int(getattr(config, "MAX_CONTRACTS_PER_ENTRY", 0) or 0)
+    if max_contracts > 0:
+        qty = min(qty, max_contracts)
+    return max(1, qty)
 
 
 def _signal_volatility_profile(signal: dict) -> dict[str, float | str | int]:
@@ -383,6 +410,32 @@ def _direction_exposure_counts(option_positions: list, open_trade_meta: dict[str
     return len(call_symbols), len(put_symbols)
 
 
+def _ticker_open_qty(option_positions: list, open_trade_meta: dict[str, dict], ticker: str) -> int:
+    want = str(ticker or "").upper()
+    if not want:
+        return 0
+
+    live_qty = 0
+    live_symbols: set[str] = set()
+    for pos in option_positions:
+        symbol = str(getattr(pos, "symbol", "") or "")
+        qty = position_qty_as_int(getattr(pos, "qty", 0))
+        if not symbol or qty <= 0:
+            continue
+        if position_matches_ticker(symbol, want, getattr(pos, "underlying_symbol", None)):
+            live_qty += qty
+            live_symbols.add(symbol.upper())
+
+    meta_qty = 0
+    for symbol, meta in open_trade_meta.items():
+        if str(symbol or "").upper() in live_symbols:
+            continue
+        if str(meta.get("ticker", "") or "").upper() == want:
+            meta_qty += int(meta.get("qty", 0) or 0)
+
+    return max(0, live_qty + meta_qty)
+
+
 def _opening_entry_quality_ok(signal: dict[str, Any], now_et: datetime) -> tuple[bool, str]:
     if not _is_in_opening_strict_window(now_et):
         return True, ""
@@ -441,7 +494,7 @@ def _fast_start_entry_quality_ok(signal: dict[str, Any], now_et: datetime) -> tu
         min_vwap_dist = max(min_vwap_dist, float(getattr(config, "OPENING_FAST_START_MIN_VWAP_DISTANCE_PCT", min_vwap_dist) or min_vwap_dist))
 
     if is_at_or_after(now_et, config.RVOL_IGNORE_AFTER):
-        min_rvol = 0.0
+        min_rvol = float(getattr(config, "EXECUTION_MIN_RVOL_AFTER_IGNORE", 0.0) or 0.0)
     elif is_at_or_after(now_et, config.RVOL_RELAX_AFTER):
         min_rvol = min(min_rvol, float(getattr(config, "RVOL_RELAXED_MIN", min_rvol) or min_rvol))
 
@@ -460,6 +513,27 @@ def _fast_start_entry_quality_ok(signal: dict[str, Any], now_et: datetime) -> tu
     if vwap_dist < min_vwap_dist:
         return False, f"VWAP distance too shallow ({vwap_dist:.2f}%<{min_vwap_dist:.2f}%)"
     return True, ""
+
+
+def _execution_signal_sort_key(signal: dict[str, Any]) -> tuple[float, float, float, float]:
+    """Prefer trades with participation and directional evidence, not score alone."""
+    try:
+        rvol = float(signal.get("rvol", 0.0) or 0.0)
+    except (TypeError, ValueError):
+        rvol = 0.0
+    try:
+        direction_score = abs(float(signal.get("direction_score", 0.0) or 0.0))
+    except (TypeError, ValueError):
+        direction_score = 0.0
+    try:
+        roc = abs(float(signal.get("roc", 0.0) or 0.0))
+    except (TypeError, ValueError):
+        roc = 0.0
+    try:
+        signal_score = float(signal.get("signal_score", 0.0) or 0.0)
+    except (TypeError, ValueError):
+        signal_score = 0.0
+    return (min(rvol, 10.0), direction_score, min(roc, 3.0), signal_score)
 
 
 def _premium_cap_quality_override_ok(
@@ -802,6 +876,33 @@ def _execute_limit_entry(
 
         order_id = str(getattr(order, "id", "") or "")
         if still_open:
+            should_retry = (
+                bool(getattr(config, "CANCEL_UNFILLED_ENTRY_BEFORE_RETRY", False))
+                and attempt_index < max_attempts
+            )
+            if should_retry:
+                try:
+                    broker.cancel_order(order_id)
+                    print(
+                        f"[{ts(now_et)}] {label}: canceled unfilled entry attempt "
+                        f"{attempt_index}/{max_attempts}; retrying."
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    print(f"[{ts(now_et)}] {label}: cancel unfilled entry {order_id} failed: {exc}")
+                    return {
+                        "filled": False,
+                        "status": status or "pending_open",
+                        "attempts": attempt_index,
+                        "submit_bid": submit_quote.get("bid"),
+                        "submit_ask": submit_quote.get("ask"),
+                        "submit_midpoint": submit_quote.get("midpoint"),
+                        "submit_spread_pct": submit_quote.get("spread_pct"),
+                        "intended_limit": limit_price,
+                        "fill_seconds": round(fill_seconds, 3),
+                        "order_id": order_id,
+                        "pending_open": True,
+                    }
+                continue
             return {
                 "filled": False,
                 "status": status or "pending_open",
@@ -1458,7 +1559,7 @@ def _cancel_active_entry_buys_for_open_tickers(
     *,
     limit: int = 500,
 ) -> int:
-    open_tickers: set[str] = set()
+    open_qty_by_ticker: dict[str, int] = {}
     for pos in option_positions or []:
         qty = position_qty_as_int(getattr(pos, "qty", 0))
         if qty <= 0:
@@ -1468,9 +1569,18 @@ def _cancel_active_entry_buys_for_open_tickers(
         if not ticker:
             ticker, _direction = _parse_option_symbol(symbol)
         if ticker:
-            open_tickers.add(ticker.upper())
-    if not open_tickers:
+            ticker = ticker.upper()
+            open_qty_by_ticker[ticker] = int(open_qty_by_ticker.get(ticker, 0)) + qty
+    if not open_qty_by_ticker:
         return 0
+    max_contracts_per_ticker = int(
+        getattr(
+            config,
+            "MAX_CONTRACTS_PER_TICKER",
+            getattr(config, "MAX_CONTRACTS_PER_ENTRY", 0),
+        )
+        or 0
+    )
 
     tz = pytz.timezone(config.EASTERN_TZ)
     canceled = 0
@@ -1488,7 +1598,9 @@ def _cancel_active_entry_buys_for_open_tickers(
         symbol = str(getattr(order, "symbol", "") or "").upper()
         ticker, _direction = _parse_option_symbol(symbol)
         ticker = ticker.upper()
-        if not ticker or ticker not in open_tickers:
+        if not ticker or ticker not in open_qty_by_ticker:
+            continue
+        if max_contracts_per_ticker <= 0 or int(open_qty_by_ticker.get(ticker, 0)) < max_contracts_per_ticker:
             continue
         submitted_at = _as_et_datetime(
             getattr(order, "submitted_at", None) or getattr(order, "created_at", None),
@@ -1504,7 +1616,8 @@ def _cancel_active_entry_buys_for_open_tickers(
             canceled += 1
             print(
                 f"[{ts(now_et)}] Canceled duplicate entry buy order {order_id} "
-                f"{symbol}: ticker {ticker} already has an open option position."
+                f"{symbol}: ticker {ticker} is at contract cap "
+                f"{open_qty_by_ticker.get(ticker, 0)}/{max_contracts_per_ticker}."
             )
         except Exception as exc:  # noqa: BLE001
             print(f"[{ts(now_et)}] Cancel duplicate entry order {order_id} failed: {exc}")
@@ -3551,10 +3664,20 @@ def main():
             ticker_positions.setdefault(ticker, []).append((symbol, qty))
 
         close_actions: list[tuple[str, int, str]] = []
+        max_contracts_per_ticker = int(
+            getattr(
+                config,
+                "MAX_CONTRACTS_PER_TICKER",
+                getattr(config, "MAX_CONTRACTS_PER_ENTRY", 0),
+            )
+            or 0
+        )
+        if max_contracts_per_ticker <= 0:
+            return 0
         for ticker, entries in ticker_positions.items():
             # Deterministic keep order: largest qty first, then symbol.
             ordered = sorted(entries, key=lambda item: (-int(item[1]), str(item[0])))
-            allowance = 1
+            allowance = max_contracts_per_ticker
             for symbol, qty in ordered:
                 keep_qty = min(allowance, qty)
                 close_qty = max(0, qty - keep_qty)
@@ -3596,7 +3719,7 @@ def main():
                 open_trade_meta[symbol]["qty"] = existing_qty - filled_qty
             print(
                 f"[{ts(now_et)}] EXPOSURE_GUARD closed {filled_qty} {symbol} "
-                f"to normalize {ticker} to one contract."
+                f"to normalize {ticker} to {max_contracts_per_ticker} contract(s)."
             )
         if total_filled > 0:
             _save_runtime_state()
@@ -4181,10 +4304,7 @@ def main():
             opening_signal_cap = max(1, int(getattr(config, "OPENING_MAX_SIGNAL_CANDIDATES", len(signals)) or len(signals)))
             if len(signals) > opening_signal_cap:
                 signals.sort(
-                    key=lambda s: (
-                        float(s.get("signal_score", 0.0) or 0.0),
-                        float(s.get("rvol", 0.0) or 0.0),
-                    ),
+                    key=_execution_signal_sort_key,
                     reverse=True,
                 )
                 before_opening = len(signals)
@@ -4193,6 +4313,8 @@ def main():
                     f"[{ts(now_et)}] Opening strict shortlist capped signals "
                     f"{before_opening}->{len(signals)} (cap={opening_signal_cap})."
                 )
+        elif signals:
+            signals.sort(key=_execution_signal_sort_key, reverse=True)
 
         if not pdt_allowed:
             print(
@@ -4678,24 +4800,6 @@ def main():
                 print(f"[{ts(now_et)}] {ticker}: skip (hour {now_et.hour:02d}:00 ET blocked by config).")
                 continue
 
-            has_ticker_position = any(
-                position_matches_ticker(
-                    str(getattr(p, "symbol", "")),
-                    ticker,
-                    getattr(p, "underlying_symbol", None),
-                )
-                for p in option_positions
-            )
-            if has_ticker_position:
-                _mark_skip("existing_option_position")
-                _mark_stage4_reject(reason="existing_option_position", ticker=ticker)
-                print(f"[{ts(now_et)}] {ticker}: skip (existing option position).")
-                continue
-            if _has_ticker_open_meta(ticker):
-                _mark_skip("existing_ticker_runtime_state")
-                _mark_stage4_reject(reason="existing_ticker_runtime_state", ticker=ticker)
-                print(f"[{ts(now_et)}] {ticker}: skip (already open in runtime state).")
-                continue
             if dry_run_enabled:
                 _mark_skip("dry_run_mode")
                 _mark_stage4_reject(reason="dry_run_mode", ticker=ticker)
@@ -4808,46 +4912,42 @@ def main():
                 break
 
             direction_lc = str(direction or "").lower()
-            same_dir_cap = max(1, int(getattr(config, "MAX_SAME_DIRECTION_POSITIONS", 2) or 2))
+            same_dir_cap = int(getattr(config, "MAX_SAME_DIRECTION_POSITIONS", 0) or 0)
             call_exposure, put_exposure = _direction_exposure_counts(option_positions, open_trade_meta)
-            if direction_lc == "call" and call_exposure >= same_dir_cap:
+            if same_dir_cap > 0 and direction_lc == "call" and call_exposure >= same_dir_cap:
                 _mark_skip("same_direction_exposure_cap")
                 _mark_stage4_reject(reason="same_direction_exposure_cap", ticker=ticker)
                 print(f"[{ts(now_et)}] {ticker}: skip (call exposure cap {call_exposure}/{same_dir_cap}).")
                 continue
-            if direction_lc == "put" and put_exposure >= same_dir_cap:
+            if same_dir_cap > 0 and direction_lc == "put" and put_exposure >= same_dir_cap:
                 _mark_skip("same_direction_exposure_cap")
                 _mark_stage4_reject(reason="same_direction_exposure_cap", ticker=ticker)
                 print(f"[{ts(now_et)}] {ticker}: skip (put exposure cap {put_exposure}/{same_dir_cap}).")
                 continue
 
-            # Check both live Alpaca positions AND in-memory open_trade_meta to prevent
-            # duplicate entries when Alpaca API returns stale data right after an order fill.
-            existing_qty_for_ticker = 0
-            for existing_pos in option_positions:
-                existing_qty = position_qty_as_int(getattr(existing_pos, "qty", 0))
-                if existing_qty <= 0:
-                    continue
-                existing_ticker = str(getattr(existing_pos, "underlying_symbol", "") or "").upper()
-                if not existing_ticker:
-                    parsed_ticker, _parsed_direction = _parse_option_symbol(str(getattr(existing_pos, "symbol", "") or ""))
-                    existing_ticker = parsed_ticker.upper()
-                if existing_ticker == ticker:
-                    existing_qty_for_ticker += existing_qty
-            # Also check in-memory meta (catches positions placed this same loop iteration)
-            if existing_qty_for_ticker == 0:
-                for sym, m in open_trade_meta.items():
-                    if str(m.get("ticker", "") or "").upper() == ticker:
-                        existing_qty_for_ticker += int(m.get("qty", 1) or 1)
-                        break
-            if existing_qty_for_ticker > 0:
-                _mark_skip("ticker_position_already_open")
-                _mark_stage4_reject(reason="ticker_position_already_open", ticker=ticker)
+            existing_qty_for_ticker = _ticker_open_qty(option_positions, open_trade_meta, ticker)
+            max_contracts_per_ticker = int(
+                getattr(
+                    config,
+                    "MAX_CONTRACTS_PER_TICKER",
+                    getattr(config, "MAX_CONTRACTS_PER_ENTRY", 0),
+                )
+                or 0
+            )
+            if max_contracts_per_ticker > 0 and existing_qty_for_ticker >= max_contracts_per_ticker:
+                _mark_skip("ticker_contract_cap")
+                _mark_stage4_reject(reason="ticker_contract_cap", ticker=ticker)
                 print(
-                    f"[{ts(now_et)}] {ticker}: skip (existing open position qty={existing_qty_for_ticker}; "
-                    "one position per ticker.)"
+                    f"[{ts(now_et)}] {ticker}: skip (ticker contract cap "
+                    f"{existing_qty_for_ticker}/{max_contracts_per_ticker})."
                 )
                 continue
+            if existing_qty_for_ticker > 0:
+                cap_text = str(max_contracts_per_ticker) if max_contracts_per_ticker > 0 else "unlimited"
+                print(
+                    f"[{ts(now_et)}] {ticker}: scale-in allowed "
+                    f"({existing_qty_for_ticker}/{cap_text} contracts open)."
+                )
 
             try:
                 print(
@@ -4932,15 +5032,40 @@ def main():
                     continue
                 ask_price = float(entry_quote.get("ask") or 0.0)
 
-                qty = 1
-                trade_premium_usd = ask_price * qty * 100.0
                 volatility_premium_mult = max(0.1, float(volatility_profile["premium_cap_mult"]))
                 volatility_opening_premium_mult = max(0.1, float(volatility_profile["opening_premium_cap_mult"]))
-                max_trade_premium_base = float(getattr(config, "MAX_PREMIUM_PER_TRADE_USD", 150.0) or 150.0)
-                max_trade_premium = max(25.0, max_trade_premium_base * volatility_premium_mult)
+                max_trade_premium_base = float(getattr(config, "MAX_PREMIUM_PER_TRADE_USD", 0.0) or 0.0)
+                max_trade_premium = (
+                    max(25.0, max_trade_premium_base * volatility_premium_mult)
+                    if max_trade_premium_base > 0
+                    else 0.0
+                )
+                qty = _entry_qty_for_budget(
+                    ask_price=ask_price,
+                    equity=float(equity) if equity is not None else None,
+                    consecutive_losses=consecutive_losses,
+                    max_trade_premium=max_trade_premium,
+                )
+                if max_contracts_per_ticker > 0 and existing_qty_for_ticker > 0:
+                    qty = min(qty, max_contracts_per_ticker - existing_qty_for_ticker)
+                if max_contracts_per_ticker > 0 and qty <= 0:
+                    _mark_skip("ticker_contract_cap")
+                    _mark_stage4_reject(reason="ticker_contract_cap", ticker=ticker)
+                    print(
+                        f"[{ts(now_et)}] {ticker}: skip (no remaining contract capacity "
+                        f"{existing_qty_for_ticker}/{max_contracts_per_ticker})."
+                    )
+                    continue
+                trade_premium_usd = ask_price * qty * 100.0
+                contract_cap_text = str(max_contracts_per_ticker) if max_contracts_per_ticker > 0 else "unlimited"
+                print(
+                    f"[{ts(now_et)}] {ticker}: entry plan qty={qty} ask=${ask_price:.2f} "
+                    f"premium=${trade_premium_usd:.2f} open_qty={existing_qty_for_ticker}/"
+                    f"{contract_cap_text}."
+                )
                 premium_override_ok = False
                 premium_override_reason = ""
-                if trade_premium_usd > max_trade_premium:
+                if max_trade_premium > 0 and trade_premium_usd > max_trade_premium:
                     premium_override_ok, premium_override_reason = _premium_cap_quality_override_ok(
                         signal=signal,
                         entry_quote=entry_quote,
@@ -4961,9 +5086,13 @@ def main():
 
                 total_open_premium = _current_open_premium_usd(option_positions, open_trade_meta)
                 committed_open_premium = total_open_premium + float(active_entry_order_premium_usd or 0.0)
-                max_total_open_premium_base = float(getattr(config, "MAX_TOTAL_OPEN_PREMIUM_USD", 600.0) or 600.0)
-                max_total_open_premium = max(75.0, max_total_open_premium_base * volatility_premium_mult)
-                if (committed_open_premium + trade_premium_usd) > max_total_open_premium:
+                max_total_open_premium_base = float(getattr(config, "MAX_TOTAL_OPEN_PREMIUM_USD", 0.0) or 0.0)
+                max_total_open_premium = (
+                    max(75.0, max_total_open_premium_base * volatility_premium_mult)
+                    if max_total_open_premium_base > 0
+                    else 0.0
+                )
+                if max_total_open_premium > 0 and (committed_open_premium + trade_premium_usd) > max_total_open_premium:
                     _mark_skip("total_open_premium_cap")
                     _mark_stage4_reject(reason="total_open_premium_cap", ticker=ticker)
                     print(
@@ -4976,8 +5105,12 @@ def main():
                 expensive_symbols = set(str(s).upper() for s in getattr(config, "EXPENSIVE_PREMIUM_SYMBOLS", ()))
                 is_expensive_symbol = ticker in expensive_symbols
                 if _is_in_opening_strict_window(now_et):
-                    opening_premium_cap_base = float(getattr(config, "OPENING_MAX_FRESH_PREMIUM_USD", 300.0) or 300.0)
-                    opening_premium_cap = max(75.0, opening_premium_cap_base * volatility_opening_premium_mult)
+                    opening_premium_cap_base = float(getattr(config, "OPENING_MAX_FRESH_PREMIUM_USD", 0.0) or 0.0)
+                    opening_premium_cap = (
+                        max(75.0, opening_premium_cap_base * volatility_opening_premium_mult)
+                        if opening_premium_cap_base > 0
+                        else 0.0
+                    )
 
                     # In opening strict mode, expensive names are blocked unless
                     # they are core names or fit an extra-tight premium budget.
@@ -4987,7 +5120,11 @@ def main():
                             getattr(config, "OPENING_EXPENSIVE_MAX_PREMIUM_USD", max_trade_premium) or max_trade_premium
                         )
                         is_core_name = ticker in core_set
-                        if not is_core_name and trade_premium_usd > tight_opening_expensive_premium:
+                        if (
+                            tight_opening_expensive_premium > 0
+                            and not is_core_name
+                            and trade_premium_usd > tight_opening_expensive_premium
+                        ):
                             _mark_skip("opening_expensive_name_gate")
                             _mark_stage4_reject(reason="opening_expensive_name_gate", ticker=ticker)
                             print(
@@ -4996,7 +5133,7 @@ def main():
                             )
                             continue
 
-                    if (opening_fresh_premium_deployed_usd + trade_premium_usd) > opening_premium_cap:
+                    if opening_premium_cap > 0 and (opening_fresh_premium_deployed_usd + trade_premium_usd) > opening_premium_cap:
                         if not premium_override_ok:
                             _mark_skip("opening_fresh_premium_cap")
                             _mark_stage4_reject(reason="opening_fresh_premium_cap", ticker=ticker)
@@ -5033,7 +5170,8 @@ def main():
                         f"(score={int(volatility_profile.get('score', 0) or 0)}, "
                         f"atr={float(volatility_profile.get('atr_pct', 0.0) or 0.0):.2f}%, "
                         f"rvol={float(volatility_profile.get('rvol', 0.0) or 0.0):.2f}, ivr={iv_rank_text}) "
-                        f"-> stop=${signal_stop_loss_usd:.2f}, trade cap=${max_trade_premium:.2f}."
+                        f"-> stop=${signal_stop_loss_usd:.2f}, "
+                        f"trade cap={'unlimited' if max_trade_premium <= 0 else f'${max_trade_premium:.2f}'}."
                     )
 
                 initial_chain_ask = float(contract.get("ask_price", ask_price) or ask_price)
@@ -5122,7 +5260,7 @@ def main():
                             f"order={entry_result.get('order_id', '')})."
                         )
                         _save_runtime_state()
-                        break
+                        continue
                     _mark_skip("entry_not_filled_after_retry")
                     _set_signal_outcome(
                         ticker=ticker,
@@ -5138,14 +5276,14 @@ def main():
 
                 filled_avg_price = float(entry_result.get("filled_price") or 0.0)
                 filled_qty = position_qty_as_int(entry_result.get("filled_qty", qty)) or qty
-                if filled_qty > 1:
-                    extra_qty = filled_qty - 1
+                if filled_qty > qty:
+                    extra_qty = filled_qty - qty
                     try:
                         trim_order = broker.close_option_market(option_symbol, extra_qty)
-                        print(f"[{ts(now_et)}] {ticker}: trimmed fill to 1 contract (closed extra {extra_qty}).")
+                        print(f"[{ts(now_et)}] {ticker}: trimmed fill to requested {qty} contract(s) (closed extra {extra_qty}).")
                     except Exception as exc:  # noqa: BLE001
-                        print(f"[{ts(now_et)}] {ticker}: WARNING — failed to trim extra qty {extra_qty}: {exc}. Recording qty=1 anyway.")
-                    filled_qty = 1
+                        print(f"[{ts(now_et)}] {ticker}: WARNING - failed to trim extra qty {extra_qty}: {exc}. Recording qty={qty} anyway.")
+                    filled_qty = qty
                 fill_slippage = float(entry_result.get("fill_slippage_vs_ask_pct", 0.0) or 0.0)
                 if fill_slippage > config.MAX_FILL_SLIPPAGE_PCT:
                     _mark_skip("fill_slippage_too_high")
@@ -5171,6 +5309,7 @@ def main():
                     continue
 
                 pattern_signature, pattern_key, pattern_global_key = _signal_pattern_keys(signal, ticker, now_et=now_et)
+                existing_trade_meta = dict(open_trade_meta.get(option_symbol) or {})
                 open_trade_meta[option_symbol] = {
                     "timestamp": ts(now_et),
                     "entry_time_iso": now_et.isoformat(),
@@ -5222,6 +5361,26 @@ def main():
                     "max_plpc": 0.0,
                     "min_plpc": 0.0,
                 }
+                if existing_trade_meta:
+                    previous_qty = int(existing_trade_meta.get("qty", 0) or 0)
+                    previous_entry = float(existing_trade_meta.get("entry_price", 0.0) or 0.0)
+                    merged_qty = previous_qty + filled_qty
+                    merged_entry = filled_avg_price or ask_price
+                    if previous_qty > 0 and previous_entry > 0 and merged_entry > 0:
+                        merged_entry = (
+                            (previous_entry * previous_qty) + (merged_entry * filled_qty)
+                        ) / merged_qty
+                    open_trade_meta[option_symbol].update(
+                        {
+                            "entry_time_iso": existing_trade_meta.get("entry_time_iso", now_et.isoformat()),
+                            "qty": merged_qty,
+                            "entry_price": round(float(merged_entry), 4),
+                            "scale_in_count": int(existing_trade_meta.get("scale_in_count", 0) or 0) + 1,
+                            "last_scale_in_time_iso": now_et.isoformat(),
+                            "max_plpc": float(existing_trade_meta.get("max_plpc", 0.0) or 0.0),
+                            "min_plpc": float(existing_trade_meta.get("min_plpc", 0.0) or 0.0),
+                        }
+                    )
                 if prior_entries >= 1 and reentry_armed:
                     ticker_reentries_used[ticker] = reentries_used + 1
                     ticker_reentry_armed[ticker] = False
@@ -5352,12 +5511,20 @@ def main():
             if ticker_for_pos:
                 total_qty_for_ticker = int(ticker_total_qty.get(ticker_for_pos, qty))
                 keep_symbol = str(ticker_first_symbol.get(ticker_for_pos, symbol))
-                if total_qty_for_ticker > 1:
+                max_contracts_per_ticker = int(
+                    getattr(
+                        config,
+                        "MAX_CONTRACTS_PER_TICKER",
+                        getattr(config, "MAX_CONTRACTS_PER_ENTRY", 0),
+                    )
+                    or 0
+                )
+                if max_contracts_per_ticker > 0 and total_qty_for_ticker > max_contracts_per_ticker:
                     if symbol != keep_symbol:
                         exit_reason = "exposure_normalize"
                     elif qty > 1:
                         exit_reason = "exposure_normalize"
-                        close_qty = qty - 1
+                        close_qty = min(qty, total_qty_for_ticker - max_contracts_per_ticker)
             if exit_reason is None and should_force_same_day_exit(entry_time, now_et):
                 exit_reason = "overnight_forced_close"
             if exit_reason is None:
@@ -5909,11 +6076,12 @@ def main():
             entries_filled_this_loop = int(entry_debug.get("entries_filled", 0) or 0)
             orders_submitted_this_loop = int(entry_debug.get("entry_orders_submitted", 0) or 0)
             active_entry_orders = sum(int(v) for v in alpaca_active_buy_orders_by_ticker.values())
+            max_positions = int(getattr(config, "MAX_POSITIONS", 0) or 0)
             can_search_for_entry = (
                 entries_filled_this_loop <= 0
                 and orders_submitted_this_loop <= 0
                 and active_entry_orders <= 0
-                and open_count < int(getattr(config, "MAX_POSITIONS", 1) or 1)
+                and (max_positions <= 0 or open_count < max_positions)
                 and is_at_or_after(now_et, config.NO_NEW_TRADES_BEFORE)
                 and not is_at_or_after(now_et, config.NO_NEW_TRADES_AFTER)
             )

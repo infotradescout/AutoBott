@@ -246,8 +246,11 @@ def _profile_signals_for_candidate(
     )
     for profile in named_profiles:
         profile_symbols = set(profile.symbols)
-        # Symbol gate: empty symbols = universal; core names bypass symbol list.
-        if profile_symbols and symbol not in profile_symbols and not is_core:
+        # Symbol gate: empty symbols = universal; core names bypass most symbol
+        # lists, but snapback reversals stay limited to the names they were tuned
+        # for. Otherwise a weak continuation in a random core ticker can be
+        # re-labeled as a reversal entry.
+        if profile_symbols and symbol not in profile_symbols and (not is_core or profile.name == "reversal_snapback"):
             rejected.append(f"{profile.name}:symbol")
             continue
         # Time gate: hard-block non-core names outside window;
@@ -269,15 +272,22 @@ def _profile_signals_for_candidate(
             profile_ok = distance_from_vwap_pct <= 1.20 and rvol >= 0.55 and abs(roc) >= 0.03
             profile_reason = "vwap continuation"
         elif profile.name == "reversal_snapback":
-            if distance_from_vwap_pct >= 0.20 and abs(last2_roc) >= 0.10:
-                if price > vwap and last2_roc < 0:
+            snapback_min_distance = max(0.35, float(getattr(config, "REVERSAL_SNAPBACK_MIN_VWAP_DISTANCE_PCT", 0.35) or 0.35))
+            snapback_min_roc = max(0.18, float(getattr(config, "REVERSAL_SNAPBACK_MIN_LAST2_ROC_PCT", 0.18) or 0.18))
+            if distance_from_vwap_pct >= snapback_min_distance and abs(last2_roc) >= snapback_min_roc:
+                if price > vwap and last2_roc < -snapback_min_roc:
                     base_signal = dict(base_signal)
                     base_signal["direction"] = "put"
-                elif price < vwap and last2_roc > 0:
+                    base_signal["direction_score"] = -abs(float(base_signal.get("direction_score", 0.0) or 0.0))
+                elif price < vwap and last2_roc > snapback_min_roc:
                     base_signal = dict(base_signal)
                     base_signal["direction"] = "call"
+                    base_signal["direction_score"] = abs(float(base_signal.get("direction_score", 0.0) or 0.0))
                 profile_ok = base_signal.get("direction") in ("call", "put")
-            profile_reason = "reversal snapback"
+            profile_reason = (
+                f"reversal snapback | {str(base_signal.get('direction', '')).upper()} | "
+                f"last2 ROC {last2_roc:+.2f}% | VWAP dist {distance_from_vwap_pct:.2f}%"
+            )
         elif profile.name == "catalyst_impulse":
             profile_ok = (catalyst_mode_active and rvol >= 0.55) or (rvol >= 1.20 and abs(roc) >= 0.10)
             profile_reason = "catalyst impulse"
@@ -938,7 +948,7 @@ class IntradayScanner:
         )
         if any(token in text for token in medium_tokens):
             minutes = int(getattr(config, "REJECT_COOLDOWN_MEDIUM_MINUTES", 30) or 30)
-            return ("medium", now_et + timedelta(minutes=max(15, min(60, minutes))))
+            return ("medium", now_et + timedelta(minutes=max(1, min(60, minutes))))
 
         short_tokens = (
             "no premarket bars",

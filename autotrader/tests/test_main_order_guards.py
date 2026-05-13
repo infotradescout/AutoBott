@@ -114,6 +114,7 @@ class MainOrderGuardTests(unittest.TestCase):
             "MIN_HOLD_EXIT_BYPASS_REASONS": config.MIN_HOLD_EXIT_BYPASS_REASONS,
             "ENTRY_ORDER_STATUS_WAIT_SECONDS": config.ENTRY_ORDER_STATUS_WAIT_SECONDS,
             "ENTRY_LIMIT_ATTEMPTS": config.ENTRY_LIMIT_ATTEMPTS,
+            "CANCEL_UNFILLED_ENTRY_BEFORE_RETRY": config.CANCEL_UNFILLED_ENTRY_BEFORE_RETRY,
             "ENABLE_ENTRY_MARKET_FALLBACK": config.ENABLE_ENTRY_MARKET_FALLBACK,
             "ENTRY_RESTING_ORDER_MAX_MINUTES": config.ENTRY_RESTING_ORDER_MAX_MINUTES,
             "MIN_HOLD_EXIT_BYPASS_REASONS": config.MIN_HOLD_EXIT_BYPASS_REASONS,
@@ -121,12 +122,25 @@ class MainOrderGuardTests(unittest.TestCase):
             "AUTO_EXPAND_UNIVERSE_WITH_MOVERS": config.AUTO_EXPAND_UNIVERSE_WITH_MOVERS,
             "UNIVERSE_MAX_TICKERS": config.UNIVERSE_MAX_TICKERS,
             "UNIVERSE_MOVER_TOP": config.UNIVERSE_MOVER_TOP,
+            "POSITION_SIZE_USD": config.POSITION_SIZE_USD,
+            "RISK_PER_TRADE_PCT": config.RISK_PER_TRADE_PCT,
+            "MAX_POSITION_SIZE_USD": config.MAX_POSITION_SIZE_USD,
+            "MAX_CONTRACTS_PER_ENTRY": config.MAX_CONTRACTS_PER_ENTRY,
+            "MAX_CONTRACTS_PER_TICKER": config.MAX_CONTRACTS_PER_TICKER,
+            "DRAWDOWN_REDUCE_AFTER_CONSEC_LOSSES": config.DRAWDOWN_REDUCE_AFTER_CONSEC_LOSSES,
+            "DRAWDOWN_SIZE_MULTIPLIER": config.DRAWDOWN_SIZE_MULTIPLIER,
+            "EXECUTION_MIN_RVOL_AFTER_IGNORE": config.EXECUTION_MIN_RVOL_AFTER_IGNORE,
+            "FAST_START_MIN_SIGNAL_SCORE": config.FAST_START_MIN_SIGNAL_SCORE,
+            "FAST_START_MIN_DIRECTION_SCORE": config.FAST_START_MIN_DIRECTION_SCORE,
+            "FAST_START_MIN_ABS_ROC_PCT": config.FAST_START_MIN_ABS_ROC_PCT,
+            "FAST_START_MIN_VWAP_DISTANCE_PCT": config.FAST_START_MIN_VWAP_DISTANCE_PCT,
         }
         config.ALPACA_BUY_ORDER_CAP_COUNTS_CANCELED = False
         config.ALPACA_CANCELED_BUY_ORDER_COOLDOWN_MINUTES = 10
         config.ANTI_CHURN_HOLD_MINUTES = 30
         config.ENTRY_ORDER_STATUS_WAIT_SECONDS = 1
         config.ENTRY_LIMIT_ATTEMPTS = 1
+        config.CANCEL_UNFILLED_ENTRY_BEFORE_RETRY = True
         config.ENABLE_ENTRY_MARKET_FALLBACK = False
         config.ENTRY_RESTING_ORDER_MAX_MINUTES = 10
         config.MIN_HOLD_EXIT_BYPASS_REASONS = ("eod_close",)
@@ -134,6 +148,18 @@ class MainOrderGuardTests(unittest.TestCase):
         config.AUTO_EXPAND_UNIVERSE_WITH_MOVERS = True
         config.UNIVERSE_MAX_TICKERS = 15
         config.UNIVERSE_MOVER_TOP = 50
+        config.POSITION_SIZE_USD = 1200
+        config.RISK_PER_TRADE_PCT = 0.01
+        config.MAX_POSITION_SIZE_USD = 1500
+        config.MAX_CONTRACTS_PER_ENTRY = 8
+        config.MAX_CONTRACTS_PER_TICKER = 8
+        config.DRAWDOWN_REDUCE_AFTER_CONSEC_LOSSES = 1
+        config.DRAWDOWN_SIZE_MULTIPLIER = 0.5
+        config.EXECUTION_MIN_RVOL_AFTER_IGNORE = 0.20
+        config.FAST_START_MIN_SIGNAL_SCORE = 8.4
+        config.FAST_START_MIN_DIRECTION_SCORE = 0.75
+        config.FAST_START_MIN_ABS_ROC_PCT = 0.12
+        config.FAST_START_MIN_VWAP_DISTANCE_PCT = 0.08
         self.now = EASTERN.localize(datetime(2026, 5, 11, 9, 55, 0))
 
     def tearDown(self):
@@ -288,6 +314,88 @@ class MainOrderGuardTests(unittest.TestCase):
         self.assertEqual(broker.submitted, 1)
         self.assertEqual(broker.canceled, 0)
 
+    def test_unfilled_limit_entry_can_cancel_and_retry(self):
+        config.ENTRY_LIMIT_ATTEMPTS = 2
+        config.CANCEL_UNFILLED_ENTRY_BEFORE_RETRY = True
+        broker = FakeEntryBroker(status="new")
+
+        result = main._execute_limit_entry(
+            broker=broker,
+            data_client=FakeDataClient(),
+            option_symbol="ORCL260515C00195000",
+            qty=1,
+            now_et=self.now,
+            label="ENTRY ORCL",
+            initial_quote={"bid": 5.0, "ask": 5.04, "midpoint": 5.02, "spread_pct": 0.8},
+        )
+
+        self.assertTrue(result.get("pending_open"))
+        self.assertEqual(result.get("status"), "new")
+        self.assertEqual(broker.submitted, 2)
+        self.assertEqual(broker.canceled, 1)
+
+    def test_entry_qty_uses_budget_and_contract_cap(self):
+        qty = main._entry_qty_for_budget(
+            ask_price=0.52,
+            equity=150000.0,
+            consecutive_losses=0,
+            max_trade_premium=1500.0,
+        )
+
+        self.assertEqual(qty, 8)
+
+    def test_entry_qty_reduces_after_loss(self):
+        qty = main._entry_qty_for_budget(
+            ask_price=1.0,
+            equity=150000.0,
+            consecutive_losses=1,
+            max_trade_premium=1500.0,
+        )
+
+        self.assertEqual(qty, 7)
+
+    def test_fast_start_midday_still_rejects_dead_rvol(self):
+        now = EASTERN.localize(datetime(2026, 5, 13, 11, 31, 0))
+
+        ok, reason = main._fast_start_entry_quality_ok(
+            {
+                "signal_score": 18.0,
+                "direction_score": 1.0,
+                "rvol": 0.02,
+                "roc": -0.30,
+                "price": 99.0,
+                "vwap": 100.0,
+            },
+            now,
+        )
+
+        self.assertFalse(ok)
+        self.assertIn("RVOL too weak", reason)
+
+    def test_execution_sort_prefers_rvol_before_raw_score(self):
+        weak_high_score = {"symbol": "CRM", "signal_score": 17.26, "direction_score": 1.0, "rvol": 0.02, "roc": -0.30}
+        active_lower_score = {"symbol": "IWM", "signal_score": 22.29, "direction_score": 0.50, "rvol": 7.13, "roc": 0.01}
+        signals = [weak_high_score, active_lower_score]
+
+        signals.sort(key=main._execution_signal_sort_key, reverse=True)
+
+        self.assertEqual(signals[0]["symbol"], "IWM")
+
+    def test_ticker_open_qty_counts_live_positions_and_meta(self):
+        positions = [FakePosition("IWM260515C00282000", qty=3)]
+        meta = {
+            "IWM260515C00282000": {"ticker": "IWM", "qty": 3},
+            "IWM260515C00283000": {"ticker": "IWM", "qty": 2},
+            "QQQ260515P00450000": {"ticker": "QQQ", "qty": 4},
+        }
+
+        self.assertEqual(main._ticker_open_qty(positions, meta, "IWM"), 5)
+
+    def test_ticker_open_qty_uses_meta_when_live_position_not_seen_yet(self):
+        meta = {"IWM260515C00282000": {"ticker": "IWM", "qty": 4}}
+
+        self.assertEqual(main._ticker_open_qty([], meta, "IWM"), 4)
+
     def test_active_buy_order_counts_as_resting_entry(self):
         broker = FakeBroker(
             [
@@ -358,6 +466,7 @@ class MainOrderGuardTests(unittest.TestCase):
         self.assertEqual(canceled, 0)
 
     def test_active_entry_order_for_open_ticker_is_canceled(self):
+        config.MAX_CONTRACTS_PER_TICKER = 1
         order = FakeOrder(
             "ORCL260515C00195000",
             "buy",
@@ -371,6 +480,22 @@ class MainOrderGuardTests(unittest.TestCase):
 
         self.assertEqual(canceled, 1)
         self.assertEqual(broker.canceled_order_ids, [order.id])
+
+    def test_active_scale_in_order_for_open_ticker_is_kept_below_cap(self):
+        config.MAX_CONTRACTS_PER_TICKER = 8
+        order = FakeOrder(
+            "ORCL260515C00195000",
+            "buy",
+            "new",
+            self.now - timedelta(minutes=1),
+        )
+        broker = FakeBroker([order])
+        positions = [FakePosition("ORCL260515C00195000", qty=1)]
+
+        canceled = main._cancel_active_entry_buys_for_open_tickers(broker, positions, self.now)
+
+        self.assertEqual(canceled, 0)
+        self.assertEqual(broker.canceled_order_ids, [])
 
     def test_excess_active_entry_orders_for_same_ticker_are_canceled(self):
         older = FakeOrder(

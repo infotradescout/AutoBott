@@ -15,6 +15,8 @@ def is_at_or_after(now_et: datetime, hhmm: str) -> bool:
 
 
 def can_open_new_positions(open_count: int, max_positions: int) -> bool:
+    if int(max_positions or 0) <= 0:
+        return True
     return open_count < max_positions
 
 
@@ -37,7 +39,9 @@ def calculate_position_budget_usd(
 ) -> float:
     budget = float(base_position_size_usd)
     if equity is not None and equity > 0 and risk_per_trade_pct > 0:
-        budget = min(max_position_size_usd, equity * risk_per_trade_pct)
+        budget = equity * risk_per_trade_pct
+        if max_position_size_usd > 0:
+            budget = min(max_position_size_usd, budget)
     budget = max(100.0, budget)
 
     if consecutive_losses >= reduce_after_consecutive_losses:
