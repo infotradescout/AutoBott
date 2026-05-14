@@ -359,12 +359,26 @@ def select_atm_option_contract_with_reason(
         "bad_quote": 0,
         "nonpositive_mid": 0,
         "spread_too_wide": 0,
+        "premium_too_expensive": 0,
+        "strike_too_far": 0,
     }
     for contract in scored[:40]:
         symbol = _contract_symbol(contract)
         if not symbol:
             quote_fail_counts["bad_quote"] += 1
             continue
+        strike_val = _contract_strike(contract)
+        max_strike_distance_pct = float(getattr(config, "MAX_OPTION_STRIKE_DISTANCE_PCT", 0.0) or 0.0)
+        if (
+            (not config.EMERGENCY_EXECUTION_MODE)
+            and max_strike_distance_pct > 0
+            and underlying_price > 0
+            and strike_val is not None
+        ):
+            strike_distance_pct = abs(float(strike_val) - float(underlying_price)) / float(underlying_price) * 100.0
+            if strike_distance_pct > max_strike_distance_pct:
+                quote_fail_counts["strike_too_far"] += 1
+                continue
         quote = data_client.get_latest_option_quote(symbol)
         bid = _safe_float(quote.get("bid"))
         ask = _safe_float(quote.get("ask"))
@@ -377,6 +391,13 @@ def select_atm_option_contract_with_reason(
             quote_fail_counts["nonpositive_mid"] += 1
             time.sleep(config.RATE_LIMIT_SLEEP_SECONDS)
             continue
+        max_premium_pct = float(getattr(config, "MAX_OPTION_PREMIUM_TO_UNDERLYING_PCT", 0.0) or 0.0)
+        if (not config.EMERGENCY_EXECUTION_MODE) and max_premium_pct > 0 and underlying_price > 0:
+            premium_pct = (ask / float(underlying_price)) * 100.0
+            if premium_pct > max_premium_pct:
+                quote_fail_counts["premium_too_expensive"] += 1
+                time.sleep(config.RATE_LIMIT_SLEEP_SECONDS)
+                continue
         spread_pct = ((ask - bid) / mid) * 100
         if (not config.EMERGENCY_EXECUTION_MODE) and spread_pct >= config.MAX_OPTION_SPREAD_PCT:
             quote_fail_counts["spread_too_wide"] += 1
@@ -398,6 +419,10 @@ def select_atm_option_contract_with_reason(
     reason = (
         f"quotes rejected: bad_quote={quote_fail_counts['bad_quote']}, "
         f"nonpositive_mid={quote_fail_counts['nonpositive_mid']}, "
-        f"spread_too_wide={quote_fail_counts['spread_too_wide']}>=max({config.MAX_OPTION_SPREAD_PCT})"
+        f"spread_too_wide={quote_fail_counts['spread_too_wide']}>=max({config.MAX_OPTION_SPREAD_PCT}), "
+        f"premium_too_expensive={quote_fail_counts['premium_too_expensive']}>max("
+        f"{getattr(config, 'MAX_OPTION_PREMIUM_TO_UNDERLYING_PCT', 0.0)}% underlying), "
+        f"strike_too_far={quote_fail_counts['strike_too_far']}>max("
+        f"{getattr(config, 'MAX_OPTION_STRIKE_DISTANCE_PCT', 0.0)}% underlying)"
     )
     return None, reason

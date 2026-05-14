@@ -77,6 +77,8 @@ def test_growth_frequency_config_keeps_trading_through_day():
     assert config.MAX_PREMIUM_PER_TRADE_USD == 0.0
     assert config.MAX_TOTAL_OPEN_PREMIUM_USD == 0.0
     assert config.OPENING_MAX_FRESH_PREMIUM_USD == 0.0
+    assert config.MAX_OPTION_PREMIUM_TO_UNDERLYING_PCT == 8.0
+    assert config.MAX_OPTION_STRIKE_DISTANCE_PCT == 8.0
     assert config.EXECUTION_MIN_RVOL_AFTER_IGNORE == 0.50
     assert config.ENABLE_ENTRY_CONFIRMATION is True
     assert config.ENABLE_SIGNAL_PATTERN_MEMORY is True
@@ -86,6 +88,7 @@ def test_growth_frequency_config_keeps_trading_through_day():
     assert config.LOSS_THROTTLE_AFTER_CONSEC_LOSSES == 1
     assert config.EARLY_RED_GUARD_ENABLED is True
     assert config.EARLY_RED_GUARD_MAX_NET_PNL_USD == -150.0
+    assert config.INDEPENDENT_STOPLOSS_REQUIRE_STALE_LOOP is True
     assert config.UNIVERSE_MAX_TICKERS == 300
     assert config.UNIVERSE_MOVER_TOP == 120
     assert config.MOVER_SYMBOLS_PER_SIDE == 60
