@@ -829,6 +829,24 @@ def _await_order_fill(
     return 0, None, last_status, is_still_open
 
 
+def _confirmed_long_option_qty(broker: AlpacaBroker, option_symbol: str) -> int:
+    want = str(option_symbol or "").upper().strip()
+    if not want:
+        return 0
+    try:
+        positions = broker.get_open_option_positions()
+    except Exception as exc:  # noqa: BLE001
+        print(f"[main] position confirmation failed for {want}: {exc}")
+        return 0
+    total = 0
+    for pos in positions or []:
+        symbol = str(getattr(pos, "symbol", "") or "").upper().strip()
+        if symbol != want:
+            continue
+        total += max(0, position_qty_as_int(getattr(pos, "qty", 0)))
+    return total
+
+
 def _execute_limit_entry(
     *,
     broker: AlpacaBroker,
@@ -2027,7 +2045,13 @@ def _signal_sort_key(signal: dict) -> tuple[float, float]:
     return score, rvol
 
 
-def _append_entry_trigger_scan_log(now_et: datetime, signal: dict, *, detail: str = "") -> None:
+def _append_entry_trigger_scan_log(
+    now_et: datetime,
+    signal: dict,
+    *,
+    detail: str = "",
+    result: str = "pass",
+) -> None:
     try:
         path = config.SCAN_LOG_CSV_PATH
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -2036,7 +2060,7 @@ def _append_entry_trigger_scan_log(now_et: datetime, signal: dict, *, detail: st
             "timestamp": now_et.strftime("%Y-%m-%d %H:%M:%S %Z"),
             "symbol": str(signal.get("symbol", "") or ""),
             "strategy_profile": str(signal.get("strategy_profile", "") or ""),
-            "result": "pass",
+            "result": str(result or "pass"),
             "direction": signal.get("direction", ""),
             "rvol": signal.get("rvol", ""),
             "rsi": signal.get("rsi", ""),
@@ -5243,12 +5267,6 @@ def main():
                     initial_quote=entry_quote,
                 )
                 entry_debug["entry_orders_submitted"] = int(entry_debug.get("entry_orders_submitted", 0)) + int(entry_result.get("attempts", 0) or 0)
-                if int(entry_result.get("attempts", 0) or 0) > 0:
-                    _append_entry_trigger_scan_log(
-                        now_et,
-                        signal,
-                        detail=str(entry_result.get("status", "order_submitted") or "order_submitted"),
-                    )
                 _set_signal_outcome(
                     ticker=ticker,
                     disposition="order_submitted",
@@ -5287,6 +5305,51 @@ def main():
 
                 filled_avg_price = float(entry_result.get("filled_price") or 0.0)
                 filled_qty = position_qty_as_int(entry_result.get("filled_qty", qty)) or qty
+                confirmed_qty = _confirmed_long_option_qty(broker, option_symbol)
+                if confirmed_qty < filled_qty:
+                    time.sleep(1)
+                    confirmed_qty = _confirmed_long_option_qty(broker, option_symbol)
+                if confirmed_qty <= 0:
+                    _mark_skip("fill_not_confirmed_no_position")
+                    _set_signal_outcome(
+                        ticker=ticker,
+                        disposition="fill_not_confirmed_no_position",
+                        detail=(
+                            f"orderstatus:{entry_result.get('status', 'unknown')} "
+                            f"order={entry_result.get('order_id', '')}"
+                        ),
+                    )
+                    _append_entry_trigger_scan_log(
+                        now_et,
+                        signal,
+                        detail=(
+                            f"fill_not_confirmed_no_position "
+                            f"orderstatus:{entry_result.get('status', 'unknown')} "
+                            f"order={entry_result.get('order_id', '')}"
+                        ),
+                        result="fail",
+                    )
+                    print(
+                        f"[{ts(now_et)}] {ticker}: order reported filled but no long position "
+                        f"confirmed for {option_symbol} (order={entry_result.get('order_id', '')})."
+                    )
+                    _save_runtime_state()
+                    time.sleep(config.RATE_LIMIT_SLEEP_SECONDS)
+                    continue
+                if confirmed_qty < filled_qty:
+                    print(
+                        f"[{ts(now_et)}] {ticker}: confirmed {confirmed_qty}/{filled_qty} "
+                        f"filled contract(s) live for {option_symbol}; recording confirmed qty."
+                    )
+                    filled_qty = confirmed_qty
+                _append_entry_trigger_scan_log(
+                    now_et,
+                    signal,
+                    detail=(
+                        f"confirmed_fill orderstatus:{entry_result.get('status', 'unknown')} "
+                        f"order={entry_result.get('order_id', '')} qty={filled_qty}"
+                    ),
+                )
                 if filled_qty > qty:
                     extra_qty = filled_qty - qty
                     try:

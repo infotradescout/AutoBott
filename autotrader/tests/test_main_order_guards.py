@@ -407,6 +407,24 @@ class MainOrderGuardTests(unittest.TestCase):
 
         self.assertEqual(main._ticker_open_qty([], meta, "IWM"), 4)
 
+    def test_confirmed_long_option_qty_requires_live_position(self):
+        class PositionBroker:
+            def get_open_option_positions(self):
+                return [FakePosition("ORCL260515C00195000", qty=2)]
+
+        qty = main._confirmed_long_option_qty(PositionBroker(), "ORCL260515C00195000")
+
+        self.assertEqual(qty, 2)
+
+    def test_confirmed_long_option_qty_returns_zero_without_live_position(self):
+        class PositionBroker:
+            def get_open_option_positions(self):
+                return []
+
+        qty = main._confirmed_long_option_qty(PositionBroker(), "ORCL260515C00195000")
+
+        self.assertEqual(qty, 0)
+
     def test_active_buy_order_counts_as_resting_entry(self):
         broker = FakeBroker(
             [
