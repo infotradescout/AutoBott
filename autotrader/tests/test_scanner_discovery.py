@@ -97,6 +97,8 @@ def test_growth_frequency_config_keeps_trading_through_day():
     assert config.ALLOW_OPENING_REENTRIES is True
     assert config.ENABLE_FILL_SLIPPAGE_IMMEDIATE_CLOSE is False
     assert config.MAX_FILL_SLIPPAGE_PCT == 999.0
+    assert config.NO_NEW_TRADES_AFTER == "14:45"
+    assert config.AVOID_0DTE_ENTRY_WITHIN_CLOSE_MINUTES == 120
     assert config.INDEPENDENT_STOPLOSS_REQUIRE_STALE_LOOP is True
     assert config.UNIVERSE_MAX_TICKERS == 300
     assert config.UNIVERSE_MOVER_TOP == 120

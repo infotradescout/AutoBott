@@ -50,11 +50,19 @@ def _safe_date(value: Any) -> date | None:
         return None
 
 
-def _minutes_until_hard_close(now_et: datetime) -> int | None:
+def _minutes_until_entry_expiry_cutoff(now_et: datetime) -> int | None:
     try:
-        hour_text, minute_text = str(getattr(config, "HARD_CLOSE_TIME", "16:00")).split(":", 1)
-        close_dt = now_et.replace(hour=int(hour_text), minute=int(minute_text), second=0, microsecond=0)
-        return int((close_dt - now_et).total_seconds() // 60)
+        cutoff_times = []
+        for value in (
+            getattr(config, "OPTION_EXPIRY_EXIT_TIME", "15:55"),
+            getattr(config, "HARD_CLOSE_TIME", "16:00"),
+        ):
+            hour_text, minute_text = str(value).split(":", 1)
+            cutoff_times.append(
+                now_et.replace(hour=int(hour_text), minute=int(minute_text), second=0, microsecond=0)
+            )
+        cutoff_dt = min(cutoff_times)
+        return int((cutoff_dt - now_et).total_seconds() // 60)
     except Exception:
         return None
 
@@ -289,7 +297,7 @@ def select_atm_option_contract_with_reason(
 
     scored: list[dict[str, Any]] = []
     avoid_0dte_minutes = int(getattr(config, "AVOID_0DTE_ENTRY_WITHIN_CLOSE_MINUTES", 0) or 0)
-    minutes_to_close = _minutes_until_hard_close(now_et)
+    minutes_to_close = _minutes_until_entry_expiry_cutoff(now_et)
     avoid_0dte_now = (
         avoid_0dte_minutes > 0
         and minutes_to_close is not None

@@ -116,6 +116,34 @@ class OptionSelectionTests(unittest.TestCase):
         self.assertIsNone(contract)
         self.assertIn("strike_too_far=1", reason)
 
+    def test_rejects_same_day_contracts_near_option_expiry_cutoff(self):
+        data = FakeOptionData(
+            contracts=[
+                {
+                    "symbol": "AMD260514C00110000",
+                    "expiration_date": "2026-05-14",
+                    "strike_price": 110.0,
+                    "open_interest": 100,
+                    "volume": 50,
+                }
+            ],
+            quotes={
+                "AMD260514C00110000": {"bid": 1.95, "ask": 2.0},
+            },
+        )
+        near_cutoff = EASTERN.localize(datetime(2026, 5, 14, 14, 55, 0))
+
+        contract, reason = options.select_atm_option_contract_with_reason(
+            data_client=data,
+            underlying_symbol="AMD",
+            direction="call",
+            underlying_price=110.0,
+            now_et=near_cutoff,
+        )
+
+        self.assertIsNone(contract)
+        self.assertIn("no eligible non-0DTE contracts", reason)
+
 
 if __name__ == "__main__":  # pragma: no cover
     unittest.main()
