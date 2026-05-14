@@ -407,6 +407,22 @@ class MainOrderGuardTests(unittest.TestCase):
 
         self.assertEqual(main._ticker_open_qty([], meta, "IWM"), 4)
 
+    def test_same_direction_live_pnl_detects_red_scale_in(self):
+        class PnlPosition(FakePosition):
+            def __init__(self):
+                super().__init__("INTC260515P00116000", qty=4)
+                self.unrealized_pl = "-96.0"
+
+        qty, pnl = main._ticker_same_direction_live_pnl(
+            [PnlPosition()],
+            {"INTC260515P00116000": {"ticker": "INTC", "direction": "put"}},
+            "INTC",
+            "put",
+        )
+
+        self.assertEqual(qty, 4)
+        self.assertEqual(pnl, -96.0)
+
     def test_confirmed_long_option_qty_requires_live_position(self):
         class PositionBroker:
             def get_open_option_positions(self):

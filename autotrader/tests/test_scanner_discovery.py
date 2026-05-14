@@ -95,6 +95,8 @@ def test_growth_frequency_config_keeps_trading_through_day():
     assert config.MAX_ALPACA_BUY_ORDERS_PER_TICKER_PER_DAY == 0
     assert config.MAX_OPEN_ENTRY_BUY_ORDERS == 0
     assert config.ALLOW_OPENING_REENTRIES is True
+    assert config.ENABLE_FILL_SLIPPAGE_IMMEDIATE_CLOSE is False
+    assert config.MAX_FILL_SLIPPAGE_PCT == 999.0
     assert config.INDEPENDENT_STOPLOSS_REQUIRE_STALE_LOOP is True
     assert config.UNIVERSE_MAX_TICKERS == 300
     assert config.UNIVERSE_MOVER_TOP == 120

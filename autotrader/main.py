@@ -436,6 +436,46 @@ def _ticker_open_qty(option_positions: list, open_trade_meta: dict[str, dict], t
     return max(0, live_qty + meta_qty)
 
 
+def _ticker_same_direction_live_pnl(
+    option_positions: list,
+    open_trade_meta: dict[str, dict],
+    ticker: str,
+    direction: str,
+) -> tuple[int, float]:
+    want_ticker = str(ticker or "").upper()
+    want_direction = str(direction or "").lower()
+    if not want_ticker or want_direction not in {"call", "put"}:
+        return 0, 0.0
+
+    total_qty = 0
+    total_pnl = 0.0
+    for pos in option_positions or []:
+        symbol = str(getattr(pos, "symbol", "") or "")
+        parsed_ticker, parsed_direction = _parse_option_symbol(symbol)
+        meta = dict(open_trade_meta.get(symbol) or {})
+        pos_ticker = str(meta.get("ticker", "") or parsed_ticker).upper()
+        pos_direction = str(meta.get("direction", "") or parsed_direction).lower()
+        if pos_ticker != want_ticker or pos_direction != want_direction:
+            continue
+        qty = position_qty_as_int(getattr(pos, "qty", 0))
+        if qty <= 0:
+            continue
+        total_qty += qty
+        try:
+            total_pnl += float(getattr(pos, "unrealized_pl", 0) or 0.0)
+            continue
+        except (TypeError, ValueError):
+            pass
+        try:
+            current_price = float(getattr(pos, "current_price", 0) or 0)
+            entry_price = float(getattr(pos, "avg_entry_price", 0) or 0)
+            if current_price > 0 and entry_price > 0:
+                total_pnl += (current_price - entry_price) * qty * 100.0
+        except (TypeError, ValueError):
+            pass
+    return total_qty, total_pnl
+
+
 def _opening_entry_quality_ok(signal: dict[str, Any], now_et: datetime) -> tuple[bool, str]:
     if not _is_in_opening_strict_window(now_et):
         return True, ""
@@ -5018,6 +5058,21 @@ def main():
                 continue
 
             existing_qty_for_ticker = _ticker_open_qty(option_positions, open_trade_meta, ticker)
+            same_direction_qty, same_direction_pnl = _ticker_same_direction_live_pnl(
+                option_positions,
+                open_trade_meta,
+                ticker,
+                direction,
+            )
+            if same_direction_qty > 0 and same_direction_pnl < 0:
+                _mark_skip("same_direction_scale_in_red")
+                _mark_stage4_reject(reason="same_direction_scale_in_red", ticker=ticker)
+                print(
+                    f"[{ts(now_et)}] {ticker}: skip same-direction add "
+                    f"({same_direction_qty} {direction.upper()} contract(s), "
+                    f"unrealized=${same_direction_pnl:.2f})."
+                )
+                continue
             max_contracts_per_ticker = int(
                 getattr(
                     config,
@@ -5420,7 +5475,10 @@ def main():
                         print(f"[{ts(now_et)}] {ticker}: WARNING - failed to trim extra qty {extra_qty}: {exc}. Recording qty={qty} anyway.")
                     filled_qty = qty
                 fill_slippage = float(entry_result.get("fill_slippage_vs_ask_pct", 0.0) or 0.0)
-                if fill_slippage > config.MAX_FILL_SLIPPAGE_PCT:
+                if (
+                    bool(getattr(config, "ENABLE_FILL_SLIPPAGE_IMMEDIATE_CLOSE", False))
+                    and fill_slippage > config.MAX_FILL_SLIPPAGE_PCT
+                ):
                     _mark_skip("fill_slippage_too_high")
                     _record_bad_fill_event(ticker, now_et, fill_slippage)
                     print(
