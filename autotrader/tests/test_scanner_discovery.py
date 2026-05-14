@@ -63,9 +63,9 @@ def test_growth_frequency_config_keeps_trading_through_day():
     assert config.ENABLE_INDEX_BIAS_FILTER is False
     assert config.MAX_SAME_DIRECTION_POSITIONS == 0
     assert config.OPENING_MAX_SIGNAL_CANDIDATES == 10
-    assert config.MAX_ENTRIES_PER_TICKER_PER_DAY == 4
-    assert config.TICKER_ROUNDTRIP_COOLDOWN_MINUTES == 5
-    assert config.MAX_ALPACA_TRUTH_ROUNDTRIPS_PER_TICKER_PER_DAY == 4
+    assert config.MAX_ENTRIES_PER_TICKER_PER_DAY == 0
+    assert config.TICKER_ROUNDTRIP_COOLDOWN_MINUTES == 0
+    assert config.MAX_ALPACA_TRUTH_ROUNDTRIPS_PER_TICKER_PER_DAY == 0
     assert config.ENTRY_LIMIT_ATTEMPTS == 2
     assert config.CANCEL_UNFILLED_ENTRY_BEFORE_RETRY is True
     assert config.ENABLE_ENTRY_MARKET_FALLBACK is True
@@ -85,9 +85,16 @@ def test_growth_frequency_config_keeps_trading_through_day():
     assert config.ENABLE_PRE_EXECUTION_HISTORY_CHECK is False
     assert config.ADAPTIVE_BLOCK_LOSING_TICKERS is False
     assert config.ALPACA_TRUTH_ADAPT_AFTER_LOSS_USD == 0.0
-    assert config.LOSS_THROTTLE_AFTER_CONSEC_LOSSES == 1
-    assert config.EARLY_RED_GUARD_ENABLED is True
+    assert config.LOSS_THROTTLE_AFTER_CONSEC_LOSSES == 999
+    assert config.EARLY_RED_GUARD_ENABLED is False
     assert config.EARLY_RED_GUARD_MAX_NET_PNL_USD == -150.0
+    assert config.DAILY_LOSS_LIMIT_USD == 0.0
+    assert config.WEEKLY_LOSS_LIMIT_USD == 0.0
+    assert config.INTRADAY_NET_LOSS_LIMIT_USD == 0.0
+    assert config.ENABLE_ALPACA_TRUTH_LOSS_GUARD is False
+    assert config.MAX_ALPACA_BUY_ORDERS_PER_TICKER_PER_DAY == 0
+    assert config.MAX_OPEN_ENTRY_BUY_ORDERS == 0
+    assert config.ALLOW_OPENING_REENTRIES is True
     assert config.INDEPENDENT_STOPLOSS_REQUIRE_STALE_LOOP is True
     assert config.UNIVERSE_MAX_TICKERS == 300
     assert config.UNIVERSE_MOVER_TOP == 120

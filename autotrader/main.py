@@ -2484,6 +2484,13 @@ def main():
         return False
 
     def _active_ticker_loss_cooldown_until(ticker: str, now_et: datetime) -> datetime | None:
+        if (
+            int(getattr(config, "REENTRY_COOLDOWN_LOSS_MINUTES", 0) or 0) <= 0
+            and int(getattr(config, "STOP_LOSS_REENTRY_COOLDOWN_MINUTES", 0) or 0) <= 0
+            and int(getattr(config, "QUICK_LOSER_REENTRY_COOLDOWN_MINUTES", 0) or 0) <= 0
+        ):
+            ticker_loss_cooldown_until.clear()
+            return None
         key = str(ticker or "").upper()
         if not key:
             return None
@@ -2499,7 +2506,9 @@ def main():
         key = str(ticker or "").upper()
         if not key:
             return
-        cooldown_minutes = max(1, int(minutes))
+        cooldown_minutes = max(0, int(minutes))
+        if cooldown_minutes <= 0:
+            return
         until_dt = now_et + timedelta(minutes=cooldown_minutes)
         prior = ticker_loss_cooldown_until.get(key)
         if prior is None or until_dt > prior:
@@ -2510,6 +2519,9 @@ def main():
         )
 
     def _active_ticker_roundtrip_cooldown_until(ticker: str, now_et: datetime) -> datetime | None:
+        if int(getattr(config, "TICKER_ROUNDTRIP_COOLDOWN_MINUTES", 0) or 0) <= 0:
+            ticker_roundtrip_cooldown_until.clear()
+            return None
         key = str(ticker or "").upper()
         if not key:
             return None
@@ -4509,7 +4521,8 @@ def main():
             entry_debug["signals_considered"] = int(entry_debug.get("signals_considered", 0)) + 1
 
             # --- Daily loss limit ---
-            if daily_realized_loss_usd >= config.DAILY_LOSS_LIMIT_USD:
+            daily_loss_limit = float(getattr(config, "DAILY_LOSS_LIMIT_USD", 0.0) or 0.0)
+            if daily_loss_limit > 0 and daily_realized_loss_usd >= daily_loss_limit:
                 _mark_skip("daily_loss_limit")
                 print(
                     f"[{ts(now_et)}] DAILY LOSS LIMIT hit: "
@@ -4528,7 +4541,8 @@ def main():
                 break
 
             # --- Weekly loss limit ---
-            if weekly_realized_loss_usd >= config.WEEKLY_LOSS_LIMIT_USD:
+            weekly_loss_limit = float(getattr(config, "WEEKLY_LOSS_LIMIT_USD", 0.0) or 0.0)
+            if weekly_loss_limit > 0 and weekly_realized_loss_usd >= weekly_loss_limit:
                 _mark_skip("weekly_loss_limit")
                 print(
                     f"[{ts(now_et)}] WEEKLY LOSS LIMIT hit: "
@@ -4788,7 +4802,7 @@ def main():
             is_non_core = ticker not in preferred_core
             if is_non_core:
                 non_core_cap = max(0, int(getattr(config, "MAX_NON_CORE_ENTRIES_PER_DAY", 4)))
-                if non_core_entries_today_count >= non_core_cap:
+                if non_core_cap > 0 and non_core_entries_today_count >= non_core_cap:
                     _mark_skip("non_core_entry_cap")
                     _mark_stage4_reject(reason="non_core_entry_cap", ticker=ticker)
                     print(
@@ -4884,7 +4898,7 @@ def main():
                 continue
 
             prior_entries = int(ticker_entry_counts.get(ticker, 0))
-            max_entries_per_ticker = max(1, int(getattr(config, "MAX_ENTRIES_PER_TICKER_PER_DAY", 1) or 1))
+            max_entries_per_ticker = max(0, int(getattr(config, "MAX_ENTRIES_PER_TICKER_PER_DAY", 1) or 0))
             reentries_used = int(ticker_reentries_used.get(ticker, 0))
             reentry_armed = bool(ticker_reentry_armed.get(ticker, False))
             expected_direction = str(ticker_reentry_expected_direction.get(ticker, "") or "").lower()
@@ -4911,12 +4925,16 @@ def main():
                     "same-day buy order(s) for this ticker)."
                 )
                 continue
-            if _is_in_opening_strict_window(now_et) and prior_entries >= 1:
+            if (
+                _is_in_opening_strict_window(now_et)
+                and prior_entries >= 1
+                and not bool(getattr(config, "ALLOW_OPENING_REENTRIES", True))
+            ):
                 _mark_skip("opening_no_reentry")
                 _mark_stage4_reject(reason="opening_no_reentry", ticker=ticker)
                 print(f"[{ts(now_et)}] {ticker}: skip (opening window disallows re-entry).")
                 continue
-            if prior_entries >= max_entries_per_ticker:
+            if max_entries_per_ticker > 0 and prior_entries >= max_entries_per_ticker:
                 if not reentry_armed:
                     _mark_skip("max_entries_per_ticker_reached")
                     _mark_stage4_reject(reason="max_entries_per_ticker_reached", ticker=ticker)
@@ -4925,7 +4943,7 @@ def main():
                         f"{prior_entries}/{max_entries_per_ticker}; no stop-loss re-entry armed)."
                     )
                     continue
-            if reentry_armed and prior_entries >= max_entries_per_ticker:
+            if max_entries_per_ticker > 0 and reentry_armed and prior_entries >= max_entries_per_ticker:
                 if reentries_used >= int(config.MAX_REENTRIES_PER_TICKER):
                     _mark_skip("max_reentries_used")
                     _mark_stage4_reject(reason="max_reentries_used", ticker=ticker)
