@@ -425,6 +425,20 @@ class MainOrderGuardTests(unittest.TestCase):
 
         self.assertEqual(qty, 0)
 
+    def test_wait_confirmed_long_option_qty_returns_immediately_when_live(self):
+        class PositionBroker:
+            def get_open_option_positions(self):
+                return [FakePosition("ORCL260515C00195000", qty=3)]
+
+        qty = main._wait_confirmed_long_option_qty(
+            PositionBroker(),
+            "ORCL260515C00195000",
+            min_qty=2,
+            wait_seconds=0,
+        )
+
+        self.assertEqual(qty, 3)
+
     def test_active_buy_order_counts_as_resting_entry(self):
         broker = FakeBroker(
             [

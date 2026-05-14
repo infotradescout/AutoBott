@@ -68,7 +68,7 @@ def test_growth_frequency_config_keeps_trading_through_day():
     assert config.MAX_ALPACA_TRUTH_ROUNDTRIPS_PER_TICKER_PER_DAY == 4
     assert config.ENTRY_LIMIT_ATTEMPTS == 2
     assert config.CANCEL_UNFILLED_ENTRY_BEFORE_RETRY is True
-    assert config.ENABLE_ENTRY_MARKET_FALLBACK is False
+    assert config.ENABLE_ENTRY_MARKET_FALLBACK is True
     assert config.LOOP_INTERVAL_SECONDS == 5
     assert config.MAX_POSITIONS == 0
     assert config.MAX_POSITION_SIZE_USD == 0.0

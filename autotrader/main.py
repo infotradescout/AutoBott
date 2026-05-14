@@ -847,6 +847,24 @@ def _confirmed_long_option_qty(broker: AlpacaBroker, option_symbol: str) -> int:
     return total
 
 
+def _wait_confirmed_long_option_qty(
+    broker: AlpacaBroker,
+    option_symbol: str,
+    *,
+    min_qty: int,
+    wait_seconds: int = 10,
+) -> int:
+    deadline = time.time() + max(0, int(wait_seconds))
+    best_qty = 0
+    while True:
+        best_qty = max(best_qty, _confirmed_long_option_qty(broker, option_symbol))
+        if best_qty >= max(1, int(min_qty or 1)):
+            return best_qty
+        if time.time() >= deadline:
+            return best_qty
+        time.sleep(1)
+
+
 def _execute_limit_entry(
     *,
     broker: AlpacaBroker,
@@ -4374,6 +4392,7 @@ def main():
             "entry_stage4_eligible_symbols": [],
             "entry_stage4_rejected_symbols": [],
             "entry_orders_submitted": 0,
+            "entry_order_events": [],
             "entries_filled": 0,
             "signal_outcomes": {},
             "skips": {},
@@ -4460,6 +4479,26 @@ def main():
                 }
             )
             entry_debug["exceptions"] = exceptions
+
+        def _record_entry_order_event(ticker: str, option_symbol: str, entry_result: dict, *, confirmed_qty: int = 0) -> None:
+            events = entry_debug.get("entry_order_events", [])
+            if not isinstance(events, list):
+                events = []
+            events.append(
+                {
+                    "ts": ts(now_et),
+                    "ticker": str(ticker or "").upper(),
+                    "option_symbol": str(option_symbol or ""),
+                    "order_id": str(entry_result.get("order_id", "") or ""),
+                    "status": str(entry_result.get("status", "") or ""),
+                    "filled": bool(entry_result.get("filled", False)),
+                    "filled_qty": int(entry_result.get("filled_qty", 0) or 0),
+                    "confirmed_position_qty": int(confirmed_qty or 0),
+                    "attempts": int(entry_result.get("attempts", 0) or 0),
+                    "fallback": str(entry_result.get("fallback", "") or ""),
+                }
+            )
+            entry_debug["entry_order_events"] = events[-25:]
 
         opening_entry_attempts_loop = 0
         entry_attempts_loop = 0
@@ -5267,6 +5306,7 @@ def main():
                     initial_quote=entry_quote,
                 )
                 entry_debug["entry_orders_submitted"] = int(entry_debug.get("entry_orders_submitted", 0)) + int(entry_result.get("attempts", 0) or 0)
+                _record_entry_order_event(ticker, option_symbol, entry_result)
                 _set_signal_outcome(
                     ticker=ticker,
                     disposition="order_submitted",
@@ -5305,10 +5345,13 @@ def main():
 
                 filled_avg_price = float(entry_result.get("filled_price") or 0.0)
                 filled_qty = position_qty_as_int(entry_result.get("filled_qty", qty)) or qty
-                confirmed_qty = _confirmed_long_option_qty(broker, option_symbol)
-                if confirmed_qty < filled_qty:
-                    time.sleep(1)
-                    confirmed_qty = _confirmed_long_option_qty(broker, option_symbol)
+                confirmed_qty = _wait_confirmed_long_option_qty(
+                    broker,
+                    option_symbol,
+                    min_qty=min(filled_qty, qty),
+                    wait_seconds=10,
+                )
+                _record_entry_order_event(ticker, option_symbol, entry_result, confirmed_qty=confirmed_qty)
                 if confirmed_qty <= 0:
                     _mark_skip("fill_not_confirmed_no_position")
                     _set_signal_outcome(
