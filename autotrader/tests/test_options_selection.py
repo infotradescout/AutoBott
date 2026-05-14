@@ -44,8 +44,8 @@ class OptionSelectionTests(unittest.TestCase):
         config.MIN_OPTION_OPEN_INTEREST = 1
         config.MIN_OPTION_DAILY_VOLUME = 1
         config.MAX_OPTION_SPREAD_PCT = 5.0
-        config.MAX_OPTION_PREMIUM_TO_UNDERLYING_PCT = 8.0
-        config.MAX_OPTION_STRIKE_DISTANCE_PCT = 8.0
+        config.MAX_OPTION_PREMIUM_TO_UNDERLYING_PCT = 20.0
+        config.MAX_OPTION_STRIKE_DISTANCE_PCT = 15.0
         config.ENABLE_DELTA_TARGETING = False
         config.RATE_LIMIT_SLEEP_SECONDS = 0.0
         self.now = EASTERN.localize(datetime(2026, 5, 14, 9, 44, 0))
@@ -73,7 +73,7 @@ class OptionSelectionTests(unittest.TestCase):
                 },
             ],
             quotes={
-                "JPM260515C00300000": {"bid": 29.8, "ask": 30.0},
+                "JPM260515C00300000": {"bid": 74.8, "ask": 75.0},
                 "JPM260515C00301000": {"bid": 5.9, "ask": 6.0},
             },
         )
@@ -101,7 +101,7 @@ class OptionSelectionTests(unittest.TestCase):
                 }
             ],
             quotes={
-                "CRM260515P00230000": {"bid": 63.4, "ask": 63.6},
+                "CRM260515P00230000": {"bid": 70.4, "ask": 70.6},
             },
         )
 
