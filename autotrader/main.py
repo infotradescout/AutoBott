@@ -1918,6 +1918,68 @@ def _entry_confirmation_passes(
         return False
 
 
+def _fresh_tape_direction_guard(
+    data_client: AlpacaDataClient,
+    ticker: str,
+    direction: str,
+    now_et: datetime,
+) -> tuple[bool, str]:
+    if not bool(getattr(config, "ENABLE_FRESH_TAPE_DIRECTION_GUARD", True)):
+        return True, ""
+
+    direction_lc = str(direction or "").lower()
+    if direction_lc not in {"call", "put"}:
+        return False, f"fresh tape invalid direction {direction!r}"
+
+    fail_closed = bool(getattr(config, "FRESH_TAPE_FAIL_CLOSED", True))
+    lookback_bars = max(2, int(getattr(config, "FRESH_TAPE_LOOKBACK_BARS", 3) or 3))
+    min_move_pct = max(0.0, float(getattr(config, "FRESH_TAPE_MIN_MOVE_PCT", 0.04) or 0.04))
+
+    try:
+        bars = data_client.get_intraday_bars_since_open(
+            symbol=ticker,
+            now_et=now_et,
+            limit=max(lookback_bars, 3),
+        )
+        if bars is None or bars.empty or len(bars) < lookback_bars:
+            if fail_closed:
+                return False, f"fresh tape unavailable ({0 if bars is None or bars.empty else len(bars)}/{lookback_bars} bars)"
+            return True, "fresh tape unavailable; fail-open"
+
+        closes = bars["close"].astype(float)
+        last_close = float(closes.iloc[-1])
+        prev_close = float(closes.iloc[-2])
+        ref_close = float(closes.iloc[-lookback_bars])
+        if last_close <= 0 or prev_close <= 0 or ref_close <= 0:
+            if fail_closed:
+                return False, "fresh tape has invalid prices"
+            return True, "fresh tape invalid; fail-open"
+
+        one_bar_move_pct = ((last_close - prev_close) / prev_close) * 100.0
+        window_move_pct = ((last_close - ref_close) / ref_close) * 100.0
+
+        if direction_lc == "call":
+            if one_bar_move_pct < 0 or window_move_pct < min_move_pct:
+                return (
+                    False,
+                    f"fresh tape disagrees with CALL (1bar {one_bar_move_pct:+.2f}%, "
+                    f"{lookback_bars}bar {window_move_pct:+.2f}%<{min_move_pct:.2f}%)",
+                )
+        else:
+            if one_bar_move_pct > 0 or window_move_pct > -min_move_pct:
+                return (
+                    False,
+                    f"fresh tape disagrees with PUT (1bar {one_bar_move_pct:+.2f}%, "
+                    f"{lookback_bars}bar {window_move_pct:+.2f}%>-{min_move_pct:.2f}%)",
+                )
+
+        return True, f"fresh tape confirms {direction_lc.upper()} ({window_move_pct:+.2f}%)"
+    except Exception as exc:
+        if fail_closed:
+            return False, f"fresh tape check failed: {exc}"
+        return True, f"fresh tape check failed-open: {exc}"
+
+
 def _hydrate_missing_position_meta(open_trade_meta: dict[str, dict], option_positions: list, now_et: datetime) -> int:
     hydrated = 0
     for pos in option_positions:
@@ -3371,6 +3433,16 @@ def main():
             stock_price = data_client.get_latest_stock_price(ticker)
             if stock_price is None:
                 print(f"[{ts(now_et)}] {ticker}: reversal skipped (no stock quote).")
+                return False
+
+            fresh_tape_ok, fresh_tape_reason = _fresh_tape_direction_guard(
+                data_client=data_client,
+                ticker=ticker,
+                direction=direction,
+                now_et=now_et,
+            )
+            if not fresh_tape_ok:
+                print(f"[{ts(now_et)}] {ticker}: reversal skipped ({fresh_tape_reason}).")
                 return False
 
             contract, contract_reason = select_atm_option_contract_with_reason(
@@ -5136,6 +5208,19 @@ def main():
                     _mark_skip("no_stock_quote")
                     _mark_stage4_reject(reason="no_stock_quote", ticker=ticker)
                     print(f"[{ts(now_et)}] {ticker}: skip (no stock quote).")
+                    time.sleep(config.RATE_LIMIT_SLEEP_SECONDS)
+                    continue
+
+                fresh_tape_ok, fresh_tape_reason = _fresh_tape_direction_guard(
+                    data_client=data_client,
+                    ticker=ticker,
+                    direction=direction,
+                    now_et=now_et,
+                )
+                if not fresh_tape_ok:
+                    _mark_skip("fresh_tape_direction_mismatch")
+                    _mark_stage4_reject(reason="fresh_tape_direction_mismatch", ticker=ticker, detail=fresh_tape_reason)
+                    print(f"[{ts(now_et)}] {ticker}: skip ({fresh_tape_reason}).")
                     time.sleep(config.RATE_LIMIT_SLEEP_SECONDS)
                     continue
 

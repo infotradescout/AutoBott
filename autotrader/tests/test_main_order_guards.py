@@ -7,6 +7,7 @@ import unittest
 from datetime import datetime, timedelta
 from pathlib import Path
 
+import pandas as pd
 import pytz
 
 _PKG_DIR = Path(__file__).resolve().parent.parent
@@ -77,6 +78,14 @@ class FakeEntryBroker:
 
     def cancel_order(self, order_id: str):
         self.canceled += 1
+
+
+class FakeBarsDataClient:
+    def __init__(self, closes: list[float]):
+        self.closes = closes
+
+    def get_intraday_bars_since_open(self, **_kwargs):
+        return pd.DataFrame({"close": self.closes})
 
 
 class FakeDataClient:
@@ -371,6 +380,44 @@ class MainOrderGuardTests(unittest.TestCase):
 
         self.assertFalse(ok)
         self.assertIn("RVOL too weak", reason)
+
+    def test_fresh_tape_guard_rejects_call_when_latest_bars_roll_over(self):
+        now = EASTERN.localize(datetime(2026, 5, 15, 10, 46, 0))
+
+        ok, reason = main._fresh_tape_direction_guard(
+            FakeBarsDataClient([100.0, 100.2, 99.8]),
+            "CRM",
+            "call",
+            now,
+        )
+
+        self.assertFalse(ok)
+        self.assertIn("disagrees with CALL", reason)
+
+    def test_fresh_tape_guard_rejects_put_when_latest_bars_squeeze_up(self):
+        now = EASTERN.localize(datetime(2026, 5, 15, 10, 46, 0))
+
+        ok, reason = main._fresh_tape_direction_guard(
+            FakeBarsDataClient([100.0, 99.8, 100.3]),
+            "CRM",
+            "put",
+            now,
+        )
+
+        self.assertFalse(ok)
+        self.assertIn("disagrees with PUT", reason)
+
+    def test_fresh_tape_guard_accepts_aligned_call(self):
+        now = EASTERN.localize(datetime(2026, 5, 15, 10, 46, 0))
+
+        ok, reason = main._fresh_tape_direction_guard(
+            FakeBarsDataClient([100.0, 100.1, 100.2]),
+            "CRM",
+            "call",
+            now,
+        )
+
+        self.assertTrue(ok, reason)
 
     def test_normal_profit_exits_do_not_use_market_fallback(self):
         self.assertFalse(main._exit_reason_allows_market_fallback("profit_target"))
