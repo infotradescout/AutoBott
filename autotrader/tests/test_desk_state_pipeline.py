@@ -80,6 +80,28 @@ class DeskStatePipelineTests(unittest.TestCase):
         self.assertEqual(queue["candidates"][0]["symbol"], "SPY")
         self.assertGreater(queue["candidates"][0]["edge_score"], queue["candidates"][1]["edge_score"])
 
+    def test_candidate_queue_hard_blocks_regime_profile(self):
+        now = EASTERN.localize(datetime(2026, 5, 18, 10, 0, 0))
+        context = {
+            "timestamp_et": now.isoformat(),
+            "regime": "trend_up",
+            "preferred_direction": "call",
+            "allowed_profiles": ["vwap_continuation"],
+            "blocked_profiles": ["reversal_snapback"],
+            "source": "market_context_worker",
+        }
+        queue = candidate_queue.build_candidate_queue(
+            [
+                {"symbol": "QQQ", "direction": "call", "strategy_profile": "reversal_snapback", "signal_score": 9.5, "direction_score": 0.95, "rvol": 2.0},
+                {"symbol": "SPY", "direction": "call", "strategy_profile": "vwap_continuation", "signal_score": 9.0, "direction_score": 0.9, "rvol": 2.0},
+            ],
+            market_context=context,
+            now_et=now,
+        )
+
+        self.assertEqual(len(queue["candidates"]), 1)
+        self.assertEqual(queue["candidates"][0]["symbol"], "SPY")
+
 
 if __name__ == "__main__":
     unittest.main()

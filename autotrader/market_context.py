@@ -87,7 +87,7 @@ def build_market_context(data_client, now_et: datetime, *, vix_value: float | No
     allowed_profiles: list[str] = []
     if regime == "mixed_chop":
         blocked_profiles = ["open_drive_momentum"]
-        allowed_profiles = ["vwap_reclaim", "reversal_snapback"]
+        allowed_profiles = ["vwap_continuation", "reversal_snapback"]
     elif regime in {"trend_up", "trend_down"}:
         blocked_profiles = ["reversal_snapback"]
         allowed_profiles = ["open_drive_momentum", "vwap_continuation", "catalyst_impulse"]

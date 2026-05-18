@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import json
+import os
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -35,17 +37,56 @@ def _load_file(path: Path) -> dict[str, Any]:
 def _save_file(path: Path, payload: dict[str, Any]) -> None:
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
-        with path.open("w", encoding="utf-8") as f:
+        tmp_path = path.with_suffix(f".tmp.{int(time.time_ns())}")
+        with tmp_path.open("w", encoding="utf-8") as f:
             json.dump(payload, f, indent=2, sort_keys=True)
+            f.flush()
+            os.fsync(f.fileno())
+        tmp_path.replace(path)
     except Exception as exc:  # noqa: BLE001
         print(f"[desk_state] save failed for {path}: {exc}")
 
 
+def _parse_updated_at(payload: dict[str, Any]) -> datetime | None:
+    raw = str(payload.get("_updated_at_iso", "") or "").strip()
+    if not raw:
+        return None
+    try:
+        return datetime.fromisoformat(raw)
+    except Exception:
+        return None
+
+
+def _newer_payload(left: dict[str, Any], right: dict[str, Any]) -> dict[str, Any]:
+    if not isinstance(left, dict):
+        left = {}
+    if not isinstance(right, dict):
+        right = {}
+
+    if not left and right:
+        return right
+    if not right and left:
+        return left
+    if not left and not right:
+        return {}
+
+    left_ts = _parse_updated_at(left)
+    right_ts = _parse_updated_at(right)
+    if left_ts is None and right_ts is None:
+        return right if right else left
+    if left_ts is None:
+        return right
+    if right_ts is None:
+        return left
+    return right if right_ts >= left_ts else left
+
+
 def _load(key: str, path: Path) -> dict[str, Any]:
-    cached = load_json(key)
-    if isinstance(cached, dict):
-        return cached
-    return _load_file(path)
+    redis_payload = load_json(key)
+    file_payload = _load_file(path)
+    if not isinstance(redis_payload, dict):
+        redis_payload = {}
+    return _newer_payload(redis_payload, file_payload)
 
 
 def _save(key: str, path: Path, payload: dict[str, Any]) -> None:

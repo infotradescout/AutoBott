@@ -101,6 +101,7 @@ def test_growth_frequency_config_keeps_trading_through_day():
     assert config.EVIDENCE_GATE_MIN_LOSSES == 2
     assert config.ENABLE_MARKET_CONTEXT_WORKER is True
     assert config.MARKET_CONTEXT_SYMBOLS == ("SPY", "QQQ", "IWM")
+    assert config.MARKET_CONTEXT_ENFORCE_BLOCKED_PROFILES is True
     assert config.ENABLE_CANDIDATE_QUEUE is True
     assert config.ADAPTIVE_BLOCK_LOSING_TICKERS is False
     assert config.ALPACA_TRUTH_ADAPT_AFTER_LOSS_USD == 0.0

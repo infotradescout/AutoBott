@@ -8,6 +8,10 @@ from typing import Any
 import config
 
 
+def _is_hard_profile_block(market_context: dict) -> bool:
+    return bool(getattr(config, "MARKET_CONTEXT_ENFORCE_BLOCKED_PROFILES", False))
+
+
 def _safe_float(value, default: float = 0.0) -> float:
     try:
         return float(value)
@@ -32,6 +36,16 @@ def _profile_bonus(signal: dict, market_context: dict) -> float:
     if profile and profile in allowed:
         return 1.5
     return 0.0
+
+
+def _is_profile_blocked_for_regime(signal: dict, market_context: dict) -> bool:
+    if not _is_hard_profile_block(market_context):
+        return False
+    profile = str(signal.get("strategy_profile", "") or "").lower()
+    if not profile:
+        return False
+    blocked = {str(item).lower() for item in market_context.get("blocked_profiles", []) or []}
+    return profile in blocked
 
 
 def candidate_edge_score(signal: dict, market_context: dict) -> float:
@@ -61,6 +75,8 @@ def build_candidate_queue(
     candidates: list[dict[str, Any]] = []
     for idx, signal in enumerate(signals or []):
         payload = dict(signal)
+        if _is_profile_blocked_for_regime(payload, market_context):
+            continue
         payload["candidate_id"] = f"{now_et.strftime('%Y%m%d%H%M%S')}-{idx}-{payload.get('symbol', '')}"
         payload["edge_score"] = candidate_edge_score(payload, market_context)
         payload["regime"] = market_context.get("regime", "")

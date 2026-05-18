@@ -4594,22 +4594,7 @@ def main():
                     f"filtered signals {before}->{len(signals)} (profile={strategy_profile})."
                 )
 
-        if signals and _is_in_opening_strict_window(now_et):
-            opening_signal_cap = max(1, int(getattr(config, "OPENING_MAX_SIGNAL_CANDIDATES", len(signals)) or len(signals)))
-            if len(signals) > opening_signal_cap:
-                signals.sort(
-                    key=_execution_signal_sort_key,
-                    reverse=True,
-                )
-                before_opening = len(signals)
-                signals = signals[:opening_signal_cap]
-                print(
-                    f"[{ts(now_et)}] Opening strict shortlist capped signals "
-                    f"{before_opening}->{len(signals)} (cap={opening_signal_cap})."
-                )
-        elif signals:
-            signals.sort(key=_execution_signal_sort_key, reverse=True)
-
+        queue_ranked = False
         if bool(getattr(config, "ENABLE_CANDIDATE_QUEUE", True)):
             try:
                 queue_payload = candidate_queue.build_candidate_queue(
@@ -4622,6 +4607,7 @@ def main():
                 ranked_candidates = list(queue_payload.get("candidates") or [])
                 if ranked_candidates:
                     signals = ranked_candidates
+                    queue_ranked = True
                     print(
                         f"[{ts(now_et)}] Candidate queue ranked {len(ranked_candidates)} signal(s) "
                         f"for regime={queue_payload.get('regime', '')} "
@@ -4629,6 +4615,20 @@ def main():
                     )
             except Exception as exc:  # noqa: BLE001
                 print(f"[{ts(now_et)}] candidate queue publish failed: {exc}")
+                queue_ranked = False
+
+        if signals and not queue_ranked:
+            signals.sort(key=_execution_signal_sort_key, reverse=True)
+
+        if signals and _is_in_opening_strict_window(now_et):
+            opening_signal_cap = max(1, int(getattr(config, "OPENING_MAX_SIGNAL_CANDIDATES", len(signals)) or len(signals)))
+            if len(signals) > opening_signal_cap:
+                before_opening = len(signals)
+                signals = signals[:opening_signal_cap]
+                print(
+                    f"[{ts(now_et)}] Opening strict shortlist capped signals "
+                    f"{before_opening}->{len(signals)} (cap={opening_signal_cap})."
+                )
 
         if not pdt_allowed:
             print(

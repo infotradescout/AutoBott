@@ -11,6 +11,7 @@ import sys
 import threading
 import time
 import traceback
+import yfinance as yf
 from datetime import datetime
 from pathlib import Path
 import math
@@ -246,6 +247,23 @@ def _as_et_datetime(value) -> datetime | None:
         return parsed
     except Exception:
         return None
+
+
+def _fetch_vix_level() -> float | None:
+    try:
+        ticker = yf.Ticker("^VIX")
+        fast = getattr(ticker, "fast_info", None)
+        if fast is not None:
+            price = getattr(fast, "last_price", None)
+            if price is None and isinstance(fast, dict):
+                price = fast.get("last_price")
+            if price is not None:
+                value = float(price)
+                if value > 0:
+                    return value
+    except Exception as exc:  # noqa: BLE001
+        print(f"[render_service] VIX lookup failed: {exc}")
+    return None
 
 
 def _runtime_position_entry_time(runtime_state: dict, symbol: str) -> datetime | None:
@@ -1065,7 +1083,8 @@ def _run_market_context_worker() -> None:
     while True:
         try:
             now_et = _now_et_dt()
-            context = market_context.build_market_context(data_client, now_et)
+            vix_value = _fetch_vix_level()
+            context = market_context.build_market_context(data_client, now_et, vix_value=vix_value)
             desk_state.save_market_context(context)
         except Exception as exc:  # noqa: BLE001
             print(f"[render_service] market context worker error: {exc}")
