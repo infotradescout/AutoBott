@@ -140,6 +140,10 @@ MARKET_CONTEXT_LOOKBACK            = 40
 MARKET_CONTEXT_REFRESH_SECONDS     = 10
 MARKET_CONTEXT_STALE_SECONDS       = 30
 MARKET_CONTEXT_ENFORCE_BLOCKED_PROFILES = True
+MARKET_CONTEXT_BLOCKED_PROFILE_MODE = "hard"
+# "hard": skip blocked profiles before queueing
+# "soft": keep blocked profiles with penalty applied by scoring
+# "off": disable blocked-profile handling entirely
 MARKET_CONTEXT_VIX_LOW             = 14.0
 MARKET_CONTEXT_VIX_HIGH            = 25.0
 ENABLE_CANDIDATE_QUEUE             = True

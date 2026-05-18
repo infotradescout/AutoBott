@@ -8,8 +8,17 @@ from typing import Any
 import config
 
 
+def _blocked_profile_mode(market_context: dict) -> str:
+    if not bool(getattr(config, "MARKET_CONTEXT_ENFORCE_BLOCKED_PROFILES", False)):
+        return "off"
+    mode = str(getattr(config, "MARKET_CONTEXT_BLOCKED_PROFILE_MODE", "hard") or "hard").strip().lower()
+    if mode in {"hard", "soft", "off"}:
+        return mode
+    return "hard"
+
+
 def _is_hard_profile_block(market_context: dict) -> bool:
-    return bool(getattr(config, "MARKET_CONTEXT_ENFORCE_BLOCKED_PROFILES", False))
+    return _blocked_profile_mode(market_context) == "hard"
 
 
 def _safe_float(value, default: float = 0.0) -> float:
@@ -31,6 +40,8 @@ def _profile_bonus(signal: dict, market_context: dict) -> float:
     profile = str(signal.get("strategy_profile", "") or "").lower()
     blocked = {str(item).lower() for item in market_context.get("blocked_profiles", []) or []}
     allowed = {str(item).lower() for item in market_context.get("allowed_profiles", []) or []}
+    if _is_hard_profile_block(market_context):
+        return 0.0
     if profile and profile in blocked:
         return -4.0
     if profile and profile in allowed:
