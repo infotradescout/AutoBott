@@ -43,6 +43,30 @@ class FakeOrder:
         self.filled_avg_price = None
 
 
+class FakeRawSubmittedOrder:
+    def __init__(
+        self,
+        symbol: str,
+        side: str,
+        status: str,
+        submitted_at,
+        *,
+        qty: int = 1,
+        limit_price: float | None = None,
+        filled_qty: int = 0,
+        filled_avg_price: float | None = None,
+    ):
+        self.id = f"fake-{symbol}-{abs(hash(str(submitted_at)))}"
+        self.symbol = symbol
+        self.side = side
+        self.status = status
+        self.submitted_at = submitted_at
+        self.qty = qty
+        self.limit_price = limit_price
+        self.filled_qty = filled_qty
+        self.filled_avg_price = filled_avg_price
+
+
 class FakeBroker:
     def __init__(self, orders):
         self._orders = list(orders)
@@ -91,6 +115,73 @@ class FakeBarsDataClient:
 class FakeDataClient:
     def get_latest_option_quote(self, option_symbol: str):
         return {"bid": 5.0, "ask": 5.04}
+
+
+class FakeCloseDataClient(FakeDataClient):
+    def __init__(self, bid: float | None = 5.0, ask: float | None = 5.04):
+        self.bid = bid
+        self.ask = ask
+
+    def get_latest_option_quote(self, option_symbol: str):
+        return {"bid": self.bid, "ask": self.ask}
+
+
+class FakeExitBroker:
+    def __init__(self, open_orders: list[FakeOrder] | None = None):
+        self._open_orders = list(open_orders or [])
+        self._status_by_id: dict[str, object] = {order.id: order for order in self._open_orders}
+        self.canceled_order_ids: list[str] = []
+        self.actions: list[tuple] = []
+
+    def get_open_orders_for_symbol(self, symbol: str, side: str):
+        return [order for order in self._open_orders if str(getattr(order, "side", "")).lower() == str(side).lower()]
+
+    def get_order_status(self, order_id: str):
+        if order_id in self._status_by_id:
+            return self._status_by_id[order_id]
+        fallback_time = EASTERN.localize(datetime(2026, 5, 11, 9, 0, 0))
+        return FakeOrder(
+            "ORCL260515C00195000",
+            "sell",
+            "filled",
+            fallback_time.replace(tzinfo=None),
+            qty=1,
+        )
+
+    def cancel_order(self, order_id: str):
+        self.canceled_order_ids.append(order_id)
+        self.actions.append(("cancel", order_id))
+        self._open_orders = [order for order in self._open_orders if str(order.id) != str(order_id)]
+
+    def place_option_limit_sell(self, symbol: str, qty: int, limit_price: float):
+        order = FakeOrder(
+            symbol,
+            "sell",
+            "filled",
+            EASTERN.localize(datetime(2026, 5, 11, 9, 0, 1)),
+            qty=qty,
+            limit_price=limit_price,
+        )
+        order.filled_qty = 0
+        self.actions.append(("limit", order.id, symbol, qty, limit_price))
+        self._status_by_id[order.id] = order
+        self._open_orders.append(order)
+        return order
+
+    def close_option_market(self, symbol: str, qty: int):
+        order = FakeOrder(
+            symbol,
+            "sell",
+            "filled",
+            EASTERN.localize(datetime(2026, 5, 11, 9, 0, 2)),
+            qty=qty,
+            limit_price=None,
+        )
+        order.filled_qty = qty
+        order.filled_avg_price = 10.0
+        self.actions.append(("market", order.id, symbol, qty))
+        self._status_by_id[order.id] = order
+        return order
 
 
 class FakeUniverseDataClient:
@@ -143,6 +234,9 @@ class MainOrderGuardTests(unittest.TestCase):
             "FAST_START_MIN_DIRECTION_SCORE": config.FAST_START_MIN_DIRECTION_SCORE,
             "FAST_START_MIN_ABS_ROC_PCT": config.FAST_START_MIN_ABS_ROC_PCT,
             "FAST_START_MIN_VWAP_DISTANCE_PCT": config.FAST_START_MIN_VWAP_DISTANCE_PCT,
+            "NORMAL_EXIT_ORDER_MIN_HOLD_SECONDS": getattr(config, "NORMAL_EXIT_ORDER_MIN_HOLD_SECONDS", 30),
+            "NORMAL_EXIT_ORDER_STALE_SECONDS": getattr(config, "NORMAL_EXIT_ORDER_STALE_SECONDS", 180),
+            "NORMAL_EXIT_REPRICE_DRIFT_PCT": getattr(config, "NORMAL_EXIT_REPRICE_DRIFT_PCT", 0.06),
         }
         config.ALPACA_BUY_ORDER_CAP_COUNTS_CANCELED = False
         config.ALPACA_CANCELED_BUY_ORDER_COOLDOWN_MINUTES = 10
@@ -169,6 +263,9 @@ class MainOrderGuardTests(unittest.TestCase):
         config.FAST_START_MIN_DIRECTION_SCORE = 0.75
         config.FAST_START_MIN_ABS_ROC_PCT = 0.12
         config.FAST_START_MIN_VWAP_DISTANCE_PCT = 0.08
+        config.NORMAL_EXIT_ORDER_MIN_HOLD_SECONDS = 30
+        config.NORMAL_EXIT_ORDER_STALE_SECONDS = 180
+        config.NORMAL_EXIT_REPRICE_DRIFT_PCT = 0.06
         self.now = EASTERN.localize(datetime(2026, 5, 11, 9, 55, 0))
 
     def tearDown(self):
@@ -667,6 +764,312 @@ class MainOrderGuardTests(unittest.TestCase):
         self.assertIn("NVDA", universe)
         self.assertIn("TSLA", universe)
         self.assertGreater(len(universe), len(config.TICKERS))
+
+    def test_select_matching_exit_order_prefers_exact_qty_match(self):
+        now = self.now
+        exact = FakeOrder(
+            "ORCL260515C00195000",
+            "sell",
+            "new",
+            now - timedelta(seconds=5),
+            qty=2,
+            limit_price=2.10,
+        )
+        partial = FakeOrder(
+            "ORCL260515C00195000",
+            "sell",
+            "new",
+            now - timedelta(seconds=3),
+            qty=4,
+            limit_price=2.20,
+        )
+        partial.filled_qty = 1
+
+        selected, selected_qty, selection_mode = main._select_matching_exit_order(
+            [partial, exact],
+            2,
+            now_et=now,
+            tz=EASTERN,
+            symbol="ORCL260515C00195000",
+            label="TEST",
+            execution_meta={},
+        )
+
+        self.assertEqual(selected, exact)
+        self.assertEqual(selected_qty, 2)
+        self.assertEqual(selection_mode, "exact_match")
+
+    def test_select_matching_exit_order_falls_back_to_largest_partial(self):
+        now = self.now
+        first = FakeOrder(
+            "ORCL260515C00195000",
+            "sell",
+            "new",
+            now - timedelta(seconds=2),
+            qty=2,
+            limit_price=2.10,
+        )
+        first.filled_qty = 1
+        second = FakeOrder(
+            "ORCL260515C00195000",
+            "sell",
+            "new",
+            now - timedelta(seconds=3),
+            qty=4,
+            limit_price=2.15,
+        )
+        second.filled_qty = 2
+
+        selected, selected_qty, selection_mode = main._select_matching_exit_order(
+            [first, second],
+            3,
+            now_et=now,
+            tz=EASTERN,
+            symbol="ORCL260515C00195000",
+            label="TEST",
+            execution_meta={},
+        )
+
+        self.assertEqual(selected, second)
+        self.assertEqual(selected_qty, 2)
+        self.assertEqual(selection_mode, "partial_match")
+
+    def test_exit_order_age_seconds_flags_invalid_timestamp(self):
+        bad_order = FakeRawSubmittedOrder(
+            "ORCL260515C00195000",
+            "sell",
+            "new",
+            "not-a-real-time",
+            qty=1,
+        )
+
+        age_seconds, age_error = main._exit_order_age_seconds(self.now, order=bad_order, tz=EASTERN)
+
+        self.assertIsNone(age_seconds)
+        self.assertIn("invalid_submitted_at", age_error or "")
+
+    def test_normal_exit_with_full_active_close_coverage_skips_new_limit_order(self):
+        coverage_order = FakeOrder(
+            "ORCL260515C00195000",
+            "sell",
+            "new",
+            self.now - timedelta(seconds=5),
+            qty=100,
+            limit_price=5.04,
+        )
+        broker = FakeExitBroker([coverage_order])
+        config.NORMAL_EXIT_ORDER_MIN_HOLD_SECONDS = 0
+        config.NORMAL_EXIT_ORDER_STALE_SECONDS = 999
+
+        filled_qty, fill_price, close_meta = main._close_position_with_confirmation(
+            broker=broker,
+            data_client=FakeCloseDataClient(),
+            symbol="ORCL260515C00195000",
+            qty=100,
+            now_et=self.now,
+            label="TEST CLOSE",
+            exit_reason="profit_target",
+            poll_seconds_override=1,
+            max_wait_seconds_override=1,
+        )
+
+        self.assertEqual(filled_qty, 0)
+        self.assertIsNone(fill_price)
+        self.assertEqual(close_meta.get("reason"), "normal_exit_skipped_new_close_due_to_active_coverage")
+        self.assertEqual(close_meta.get("active_close_qty"), 100)
+        self.assertEqual(close_meta.get("uncovered_close_qty"), 0)
+        self.assertEqual(close_meta.get("selected_order_id"), coverage_order.id)
+        self.assertEqual(len(broker.actions), 0)
+
+    def test_normal_exit_with_partially_filled_active_close_coverage_skips_new_order(self):
+        coverage_order = FakeOrder(
+            "ORCL260515C00195000",
+            "sell",
+            "partially_filled",
+            self.now - timedelta(seconds=5),
+            qty=80,
+            limit_price=5.04,
+        )
+        coverage_order.filled_qty = 40
+        broker = FakeExitBroker([coverage_order])
+        config.NORMAL_EXIT_ORDER_MIN_HOLD_SECONDS = 0
+        config.NORMAL_EXIT_ORDER_STALE_SECONDS = 999
+
+        filled_qty, fill_price, close_meta = main._close_position_with_confirmation(
+            broker=broker,
+            data_client=FakeCloseDataClient(),
+            symbol="ORCL260515C00195000",
+            qty=40,
+            now_et=self.now,
+            label="TEST CLOSE",
+            exit_reason="profit_target",
+            poll_seconds_override=1,
+            max_wait_seconds_override=1,
+        )
+
+        self.assertEqual(filled_qty, 0)
+        self.assertIsNone(fill_price)
+        self.assertEqual(close_meta.get("reason"), "normal_exit_skipped_new_close_due_to_active_coverage")
+        self.assertEqual(close_meta.get("active_close_qty"), 40)
+        self.assertEqual(close_meta.get("uncovered_close_qty"), 0)
+        self.assertEqual(close_meta.get("selected_order_id"), coverage_order.id)
+        self.assertEqual(len(broker.actions), 0)
+
+    def test_normal_exit_with_partial_active_coverage_uses_uncovered_qty_only(self):
+        coverage_order = FakeOrder(
+            "ORCL260515C00195000",
+            "sell",
+            "partially_filled",
+            self.now - timedelta(seconds=5),
+            qty=50,
+            limit_price=5.04,
+        )
+        coverage_order.filled_qty = 20
+        broker = FakeExitBroker([coverage_order])
+        config.NORMAL_EXIT_ORDER_MIN_HOLD_SECONDS = 0
+        config.NORMAL_EXIT_ORDER_STALE_SECONDS = 999
+
+        filled_qty, fill_price, close_meta = main._close_position_with_confirmation(
+            broker=broker,
+            data_client=FakeCloseDataClient(),
+            symbol="ORCL260515C00195000",
+            qty=100,
+            now_et=self.now,
+            label="TEST CLOSE",
+            exit_reason="profit_target",
+            poll_seconds_override=1,
+            max_wait_seconds_override=1,
+        )
+
+        self.assertEqual(filled_qty, 0)
+        self.assertIsNone(fill_price)
+        self.assertEqual(close_meta.get("reason"), "normal_exit_additional_close_needed")
+        self.assertEqual(close_meta.get("active_close_qty"), 30)
+        self.assertEqual(close_meta.get("uncovered_close_qty"), 70)
+        self.assertEqual(close_meta.get("selected_order_id"), coverage_order.id)
+        self.assertEqual(broker.actions[0][0], "limit")
+        self.assertEqual(broker.actions[0][2], "ORCL260515C00195000")
+        self.assertEqual(broker.actions[0][3], 70)
+        self.assertEqual(len(broker.actions), 1)
+
+    def test_urgent_exit_cancels_existing_close_orders_before_market(self):
+        sell_one = FakeOrder(
+            "ORCL260515C00195000",
+            "sell",
+            "new",
+            self.now - timedelta(minutes=2),
+        )
+        sell_one.filled_qty = 1
+        sell_two = FakeOrder(
+            "ORCL260515C00195000",
+            "sell",
+            "new",
+            self.now - timedelta(minutes=1),
+        )
+        sell_two.filled_qty = 0
+        broker = FakeExitBroker([sell_one, sell_two])
+        data_client = FakeCloseDataClient(bid=None, ask=None)
+
+        filled_qty, fill_price, close_meta = main._close_position_with_confirmation(
+            broker=broker,
+            data_client=data_client,
+            symbol="ORCL260515C00195000",
+            qty=2,
+            now_et=self.now,
+            label="TEST CLOSE",
+            exit_reason="stop_loss",
+            poll_seconds_override=1,
+            max_wait_seconds_override=1,
+        )
+
+        self.assertEqual(filled_qty, 2)
+        self.assertEqual(fill_price, 10.0)
+        self.assertEqual(close_meta.get("reused_existing_exit_order"), False)
+        self.assertEqual(len(broker.canceled_order_ids), 2)
+        self.assertEqual(close_meta.get("cancellation_count_by_reason", {}).get("urgent_exit_force_cancel", 0), 2)
+        self.assertEqual(len(broker.actions), 3)
+        self.assertEqual(broker.actions[0][0], "cancel")
+        self.assertEqual(broker.actions[2][0], "market")
+
+    def test_position_zero_with_orphan_active_close_orders_canceled(self):
+        orphan_order = FakeOrder(
+            "ORCL260515C00195000",
+            "sell",
+            "new",
+            self.now - timedelta(minutes=1),
+            qty=30,
+            limit_price=4.98,
+        )
+        orphan_order.filled_qty = 10
+        broker = FakeExitBroker([orphan_order])
+
+        filled_qty, fill_price, close_meta = main._close_position_with_confirmation(
+            broker=broker,
+            data_client=FakeCloseDataClient(),
+            symbol="ORCL260515C00195000",
+            qty=0,
+            now_et=self.now,
+            label="TEST CLOSE",
+            exit_reason="profit_target",
+            poll_seconds_override=1,
+            max_wait_seconds_override=1,
+        )
+
+        self.assertEqual(filled_qty, 0)
+        self.assertIsNone(fill_price)
+        self.assertEqual(close_meta.get("reason"), "normal_exit_canceling_orphan_close_order")
+        self.assertEqual(close_meta.get("position_qty"), 0)
+        self.assertEqual(close_meta.get("active_close_qty"), 20)
+        self.assertEqual(close_meta.get("selected_order_id"), orphan_order.id)
+        self.assertEqual(close_meta.get("order_status"), "new")
+        self.assertEqual(close_meta.get("remaining_qty"), 20)
+        self.assertEqual(close_meta.get("uncovered_close_qty"), 0)
+        self.assertTrue(any(
+            reason.startswith("normal_exit_canceling_orphan_close_order")
+            for reason in close_meta.get("cancellation_reasons", [])
+        ))
+        self.assertEqual(close_meta.get("cancellation_count_by_reason", {}).get("normal_exit_canceling_orphan_close_order", 0), 1)
+        self.assertEqual(len(broker.actions), 1)
+        self.assertEqual(broker.actions[0][0], "cancel")
+        self.assertEqual(broker.actions[0][1], orphan_order.id)
+        self.assertEqual(len(broker.canceled_order_ids), 1)
+        self.assertEqual(broker.canceled_order_ids[0], orphan_order.id)
+
+    def test_position_zero_with_orphan_active_close_orders_detected_and_not_canceled_when_zero_remaining(self):
+        orphan_order = FakeOrder(
+            "ORCL260515C00195000",
+            "sell",
+            "new",
+            self.now - timedelta(minutes=1),
+            qty=30,
+            limit_price=4.98,
+        )
+        orphan_order.filled_qty = 30
+        broker = FakeExitBroker([orphan_order])
+
+        filled_qty, fill_price, close_meta = main._close_position_with_confirmation(
+            broker=broker,
+            data_client=FakeCloseDataClient(),
+            symbol="ORCL260515C00195000",
+            qty=0,
+            now_et=self.now,
+            label="TEST CLOSE",
+            exit_reason="profit_target",
+            poll_seconds_override=1,
+            max_wait_seconds_override=1,
+        )
+
+        self.assertEqual(filled_qty, 0)
+        self.assertIsNone(fill_price)
+        self.assertEqual(close_meta.get("position_qty"), 0)
+        self.assertEqual(close_meta.get("active_close_qty"), 0)
+        self.assertEqual(close_meta.get("reason"), "")
+        self.assertEqual(len(close_meta.get("cancellation_reasons", [])), 0)
+        self.assertEqual(len(broker.actions), 0)
+
+    def test_exit_reprice_drift_normalizes_percent_like_inputs(self):
+        self.assertAlmostEqual(main._normalize_exit_reprice_drift_pct(0.06), 0.06)
+        self.assertAlmostEqual(main._normalize_exit_reprice_drift_pct(6.0), 0.06)
 
 
 if __name__ == "__main__":  # pragma: no cover

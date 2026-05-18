@@ -602,6 +602,143 @@ def _exit_reason_allows_market_fallback(exit_reason: str | None) -> bool:
     }
 
 
+def _normalize_exit_reprice_drift_pct(raw_value: float | int | str | None) -> float:
+    """Normalize config drift into a safe fractional value.
+
+    Supports both 0.06 and 6.0 (treated as 6%).
+    """
+    try:
+        raw = float(raw_value or 0.0)
+    except (TypeError, ValueError):
+        raw = 0.0
+
+    if raw <= 0.0:
+        return 0.001
+
+    if raw > 1.0:
+        raw = raw / 100.0
+
+    return max(0.001, raw)
+
+
+def _exit_order_qty(order) -> int:
+    return position_qty_as_int(getattr(order, "qty", 0))
+
+
+def _exit_order_filled_qty(order) -> int:
+    return position_qty_as_int(getattr(order, "filled_qty", 0))
+
+
+def _exit_order_remaining_qty(order) -> int:
+    total_qty = _exit_order_qty(order)
+    filled_qty = _exit_order_filled_qty(order)
+    return max(0, total_qty - filled_qty)
+
+
+def _exit_order_limit_price(order) -> float:
+    try:
+        return float(getattr(order, "limit_price", 0.0) or 0.0)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _exit_order_age_seconds(
+    now_et: datetime,
+    *,
+    order,
+    tz,
+) -> tuple[float | None, str | None]:
+    submitted_raw = getattr(order, "submitted_at", None) or getattr(order, "created_at", None)
+    if submitted_raw is None:
+        symbol = str(getattr(order, "symbol", "") or "")
+        order_id = str(getattr(order, "id", "") or "")
+        print(f"[{ts(now_et)}] {symbol} {order_id}: cannot parse exit order timestamp (missing).")
+        return None, "missing_submitted_at"
+
+    submitted_at = _as_et_datetime(submitted_raw, tz)
+    if submitted_at is None:
+        symbol = str(getattr(order, "symbol", "") or "")
+        order_id = str(getattr(order, "id", "") or "")
+        print(
+            f"[{ts(now_et)}] {symbol} {order_id}: cannot parse exit order timestamp "
+            f"(invalid submitted_at={submitted_raw!r})."
+        )
+        return None, f"invalid_submitted_at:{submitted_raw!r}"
+
+    return max(0.0, (now_et - submitted_at).total_seconds()), None
+
+
+def _record_exit_cancel_reason(
+    execution_meta: dict[str, object],
+    *,
+    reason: str,
+    order_id: str | None = None,
+) -> None:
+    reason = str(reason or "unknown")
+    by_reason = execution_meta.setdefault("cancellation_count_by_reason", {})
+    by_reason[reason] = int(by_reason.get(reason, 0)) + 1
+    reason_events = execution_meta.setdefault("cancellation_reasons", [])
+    if order_id:
+        reason_events.append(f"{reason}:{order_id}")
+    else:
+        reason_events.append(reason)
+
+
+def _select_matching_exit_order(
+    orders: list,
+    request_qty: int,
+    *,
+    now_et: datetime,
+    tz,
+    symbol: str,
+    label: str,
+    execution_meta: dict[str, object],
+) -> tuple[object | None, int, str]:
+    """
+    Select one close order to reuse.
+
+    Priority:
+    1) exact remaining quantity match
+    2) partial remaining match (reuse to avoid unnecessary cancel/repost churn)
+    3) no match (caller should cancel/refresh)
+    """
+    request_qty = max(0, int(request_qty))
+    if request_qty <= 0:
+        return None, 0, "invalid_request_qty"
+
+    candidates: list[tuple[object, int]] = []
+    for order in orders:
+        remaining_qty = _exit_order_remaining_qty(order)
+        if remaining_qty <= 0:
+            _record_exit_cancel_reason(
+                execution_meta,
+                reason="qty_zero_remaining",
+                order_id=str(getattr(order, "id", "") or ""),
+            )
+            continue
+        candidates.append((order, remaining_qty))
+
+    if not candidates:
+        return None, 0, "no_matchable_orders"
+
+    exact = [(order, remaining) for order, remaining in candidates if remaining == request_qty]
+    if exact:
+        exact_order = exact[0][0]
+        return exact_order, request_qty, "exact_match"
+
+    partials = [(order, remaining) for order, remaining in candidates if remaining < request_qty]
+    if partials:
+        # Pick the largest partial remaining so we close the most on reuse.
+        partial_order, partial_remaining = sorted(
+            partials,
+            key=lambda item: item[1],
+            reverse=True,
+        )[0]
+        return partial_order, partial_remaining, "partial_match"
+
+    return None, 0, "qty_exceeds_request"
+
+
 def _premium_cap_quality_override_ok(
     *,
     signal: dict[str, Any],
@@ -871,6 +1008,445 @@ def _await_order_fill(
         return min(max(0, int(requested_qty)), observed_filled), observed_avg_price, last_status, False
     is_still_open = last_status not in non_fill_terminal and last_status not in ("", "filled", "partially_filled")
     return 0, None, last_status, is_still_open
+
+
+def _cancel_open_exit_orders(
+    broker: AlpacaBroker,
+    *,
+    orders: list,
+    reason: str,
+    reason_overrides: dict[str, str] | None = None,
+    symbol: str,
+    now_et: datetime,
+    label: str,
+    request_qty: int,
+    execution_meta: dict[str, object],
+) -> None:
+    for open_order in orders:
+        order_id = str(getattr(open_order, "id", "") or "")
+        if not order_id:
+            continue
+        cancel_reason = reason
+        if reason_overrides:
+            cancel_reason = str(reason_overrides.get(order_id, reason))
+        _record_exit_cancel_reason(
+            execution_meta,
+            reason=cancel_reason,
+            order_id=order_id,
+        )
+        try:
+            broker.cancel_order(order_id)
+        except Exception as exc:  # noqa: BLE001
+            print(
+                f"[{ts(now_et)}] {label} {symbol} qty={request_qty}: "
+                f"{cancel_reason} existing close order {order_id} failed: {exc}"
+            )
+
+
+def _close_position_with_confirmation(
+    *,
+    broker: AlpacaBroker,
+    data_client: AlpacaDataClient,
+    symbol: str,
+    qty: int,
+    now_et: datetime,
+    label: str,
+    exit_reason: str | None = None,
+    poll_seconds_override: int | None = None,
+    max_wait_seconds_override: int | None = None,
+    retry_attempts_override: int | None = None,
+) -> tuple[int, float | None, dict[str, object]]:
+    request_qty = max(0, int(qty))
+    request_position_qty = request_qty
+
+    execution_meta: dict[str, object] = {
+        "attempts": 0,
+        "submit_mode": "",
+        "submit_bid": None,
+        "submit_ask": None,
+        "submit_midpoint": None,
+        "submit_spread_pct": 0.0,
+        "intended_limit": None,
+        "fill_seconds": 0.0,
+        "fill_slippage_vs_bid_pct": 0.0,
+        "used_market_fallback": False,
+        "status": "",
+        "reused_existing_exit_order": False,
+        "cancellation_count_by_reason": {},
+        "cancellation_reasons": [],
+        "position_qty": request_position_qty,
+        "active_close_qty": 0,
+        "uncovered_close_qty": request_position_qty,
+        "selected_order_id": "",
+        "order_status": "",
+        "remaining_qty": 0,
+        "reason": "",
+    }
+
+    if request_position_qty <= 0:
+        try:
+            existing_orphan_orders = [
+                o
+                for o in broker.get_open_orders_for_symbol(symbol=symbol, side="sell")
+                if _exit_order_qty(o) > 0
+            ]
+            if existing_orphan_orders:
+                def _order_status(order: object) -> str:
+                    return str(getattr(order, "status", "") or "").lower()
+
+                eligible_orphan_statuses = {"new", "open", "accepted", "partially_filled"}
+                active_orphan_orders = [
+                    o for o in existing_orphan_orders if _order_status(o) in eligible_orphan_statuses
+                ]
+                if active_orphan_orders:
+                    active_close_qty = sum(_exit_order_remaining_qty(order) for order in active_orphan_orders)
+                    execution_meta["active_close_qty"] = active_close_qty
+                    if active_close_qty > 0:
+                        selected_orphan = max(
+                            active_orphan_orders,
+                            key=_exit_order_remaining_qty,
+                        )
+                        execution_meta["selected_order_id"] = str(getattr(selected_orphan, "id", "") or "")
+                        execution_meta["order_status"] = _order_status(selected_orphan)
+                        execution_meta["remaining_qty"] = _exit_order_remaining_qty(selected_orphan)
+                        execution_meta["reason"] = "normal_exit_orphan_close_orders_detected"
+                        execution_meta["uncovered_close_qty"] = 0
+                        print(
+                            f"[{ts(now_et)}] {symbol} position=0: orphan active close order detected "
+                            f"(qty={execution_meta['active_close_qty']})."
+                        )
+                        _cancel_open_exit_orders(
+                            broker,
+                            orders=active_orphan_orders,
+                            reason="normal_exit_canceling_orphan_close_order",
+                            symbol=symbol,
+                            now_et=now_et,
+                            label=label,
+                            request_qty=request_position_qty,
+                            execution_meta=execution_meta,
+                        )
+                        execution_meta["reason"] = "normal_exit_canceling_orphan_close_order"
+        except Exception as exc:  # noqa: BLE001
+            print(f"[{ts(now_et)}] {label} {symbol}: orphan close order scan failed: {exc}")
+        return 0, None, execution_meta
+
+    if poll_seconds_override is None:
+        poll_seconds = max(1, int(config.EXIT_ORDER_STATUS_POLL_SECONDS))
+    else:
+        poll_seconds = max(1, int(poll_seconds_override))
+    if max_wait_seconds_override is None:
+        max_wait_seconds = max(poll_seconds, int(config.EXIT_ORDER_MAX_WAIT_SECONDS))
+    else:
+        max_wait_seconds = max(poll_seconds, int(max_wait_seconds_override))
+
+    is_critical = _exit_reason_allows_market_fallback(exit_reason)
+    wait_seconds = max_wait_seconds
+    if poll_seconds_override is None and max_wait_seconds_override is None:
+        if is_critical:
+            wait_seconds = max(poll_seconds, int(getattr(config, "SMART_EXIT_CRITICAL_WAIT_SECONDS", 3) or 3))
+        else:
+            wait_seconds = max(poll_seconds, int(getattr(config, "SMART_EXIT_NORMAL_WAIT_SECONDS", 6) or 6))
+
+    raw_min_hold = getattr(config, "NORMAL_EXIT_ORDER_MIN_HOLD_SECONDS", 30)
+    try:
+        normal_exit_min_hold_seconds = max(0, int(raw_min_hold))
+    except (TypeError, ValueError):
+        normal_exit_min_hold_seconds = 30
+
+    raw_stale_seconds = getattr(config, "NORMAL_EXIT_ORDER_STALE_SECONDS", 180)
+    try:
+        normal_exit_stale_seconds = max(1, int(raw_stale_seconds))
+    except (TypeError, ValueError):
+        normal_exit_stale_seconds = 180
+    normal_exit_reprice_drift_pct = _normalize_exit_reprice_drift_pct(
+        getattr(config, "NORMAL_EXIT_REPRICE_DRIFT_PCT", 0.06),
+    )
+    tz = pytz.timezone(config.EASTERN_TZ)
+
+    try:
+        quote_snapshot = _option_quote_snapshot(data_client, symbol)
+        bid_price = float(quote_snapshot.get("bid") or 0.0)
+        ask_price = float(quote_snapshot.get("ask") or 0.0)
+        execution_meta["submit_bid"] = quote_snapshot.get("bid")
+        execution_meta["submit_ask"] = quote_snapshot.get("ask")
+        execution_meta["submit_midpoint"] = quote_snapshot.get("midpoint")
+        execution_meta["submit_spread_pct"] = quote_snapshot.get("spread_pct")
+
+        has_valid_quote = bid_price > 0
+        if has_valid_quote:
+            spread = max(0.0, ask_price - bid_price) if ask_price > 0 else 0.0
+            reprice_pct = float(
+                getattr(
+                    config,
+                    "SMART_EXIT_CRITICAL_REPRICE_PCT" if is_critical else "SMART_EXIT_NORMAL_REPRICE_PCT",
+                    0.10 if is_critical else 0.35,
+                )
+                or (0.10 if is_critical else 0.35)
+            )
+            limit_price = round(bid_price + (spread * max(0.0, reprice_pct)), 2)
+            execution_meta["intended_limit"] = limit_price
+        else:
+            limit_price = 0.0
+
+        existing_sells = [
+            o for o in broker.get_open_orders_for_symbol(symbol=symbol, side="sell")
+            if _exit_order_qty(o) > 0
+        ]
+
+        def _order_status(order: object) -> str:
+            return str(getattr(order, "status", "") or "").lower()
+
+        def _is_coverage_order(status: str) -> bool:
+            return str(status or "").lower() in {"new", "open", "accepted", "partially_filled"}
+
+        coverage_orders = [
+            o for o in existing_sells if _is_coverage_order(_order_status(o))
+        ]
+
+        active_close_qty = sum(_exit_order_remaining_qty(o) for o in coverage_orders)
+        execution_meta["active_close_qty"] = active_close_qty
+        execution_meta["uncovered_close_qty"] = max(request_position_qty - active_close_qty, 0)
+
+        selected_order, selected_qty, selection_mode = _select_matching_exit_order(
+            coverage_orders,
+            request_position_qty,
+            now_et=now_et,
+            tz=tz,
+            symbol=symbol,
+            label=label,
+            execution_meta=execution_meta,
+        )
+        if selected_order is None and coverage_orders:
+            selected_order = max(coverage_orders, key=_exit_order_remaining_qty)
+            selected_qty = _exit_order_remaining_qty(selected_order)
+            selection_mode = "coverage_order_best_remaining"
+
+        if selected_order is not None:
+            execution_meta["selected_order_id"] = str(getattr(selected_order, "id", "") or "")
+            execution_meta["order_status"] = _order_status(selected_order)
+            execution_meta["remaining_qty"] = _exit_order_remaining_qty(selected_order)
+        execution_meta["reason"] = execution_meta.get("reason") or ""
+
+        skip_reuse_normal_exit_flow = request_position_qty > 0 and active_close_qty > 0
+        if not is_critical:
+            if skip_reuse_normal_exit_flow and request_position_qty > 0 and active_close_qty >= request_position_qty:
+                execution_meta["reason"] = "normal_exit_skipped_new_close_due_to_active_coverage"
+                execution_meta["uncovered_close_qty"] = 0
+                execution_meta["reused_existing_exit_order"] = True
+                print(
+                    f"[{ts(now_et)}] {label} {symbol}: "
+                    f"position={request_position_qty} already covered by active close qty={active_close_qty}; "
+                    f"skipping new normal limit close."
+                )
+                return 0, None, execution_meta
+
+            if skip_reuse_normal_exit_flow and active_close_qty < request_position_qty:
+                execution_meta["reason"] = "normal_exit_additional_close_needed"
+                request_qty = max(0, request_position_qty - active_close_qty)
+                execution_meta["uncovered_close_qty"] = request_qty
+                execution_meta["reused_existing_exit_order"] = True
+                skip_reuse_normal_exit_flow = True
+
+        if execution_meta.get("reason") == "":
+            execution_meta["reason"] = "normal_exit_no_existing_close_coverage"
+
+        if is_critical:
+            # Urgent exits keep the order queue clean and avoid stale conflict.
+            if existing_sells:
+                # Record urgent force-cancel once per order when canceled below.
+                _cancel_open_exit_orders(
+                    broker,
+                    orders=existing_sells,
+                    reason="urgent_exit_force_cancel",
+                    symbol=symbol,
+                    now_et=now_et,
+                    label=label,
+                    request_qty=request_qty,
+                    execution_meta=execution_meta,
+                )
+        else:
+            # In normal exit flow we prefer a single valid match and avoid touching
+            # unrelated sell orders unless they block a clean replacement.
+            if not skip_reuse_normal_exit_flow:
+                cancel_candidates: list = []
+                cancel_reason_overrides: dict[str, str] = {}
+
+                if selected_order is None:
+                    cancel_candidates = list(existing_sells)
+                    for order in cancel_candidates:
+                        cancel_reason_overrides[str(getattr(order, "id", "") or "")] = "canceled_due_to_qty_mismatch"
+                    print(
+                        f"[{ts(now_et)}] {label} {symbol} qty={request_qty}: "
+                        f"no reusable close order ({selection_mode}), reprice/rebuild."
+                    )
+                else:
+                    execution_meta["reused_existing_exit_order"] = True
+                    selected_order_limit = _exit_order_limit_price(selected_order)
+                    selected_order_id = str(getattr(selected_order, "id", "") or "")
+                    selected_order_age, age_error = _exit_order_age_seconds(
+                        now_et,
+                        order=selected_order,
+                        tz=tz,
+                    )
+
+                    if age_error:
+                        cancel_candidates = [selected_order]
+                        cancel_reason_overrides[selected_order_id] = "canceled_due_to_invalid_age"
+                    else:
+                        if selected_order_age is not None and selected_order_age >= 0:
+                            selected_order_drift = False
+                            if has_valid_quote and selected_order_limit > 0.0 and limit_price > 0.0:
+                                drift = abs(selected_order_limit - limit_price)
+                                selected_order_drift = (
+                                    drift / min(selected_order_limit, limit_price)
+                                ) > normal_exit_reprice_drift_pct
+
+                            if (
+                                selected_order_limit == 0.0
+                                and has_valid_quote
+                            ):
+                                # Defensive fallback for malformed order objects.
+                                selected_order_limit = 0.0
+
+                            can_reuse_order = (
+                                selected_order_id
+                                and selected_order_age >= 0
+                                and selected_order_age < normal_exit_stale_seconds
+                                and not selected_order_drift
+                            )
+                            if can_reuse_order and selected_order_age >= 0:
+                                if selected_order_age < normal_exit_min_hold_seconds:
+                                    print(
+                                        f"[{ts(now_et)}] {label} {symbol} qty={selected_qty}: "
+                                        f"resting existing close order."
+                                    )
+                                    return 0, None, execution_meta
+
+                                execution_meta["submit_mode"] = "reuse_limit"
+                                execution_meta["attempts"] = 1
+                                submit_ts = time.time()
+                                filled_qty, filled_avg_price, status, still_open = _await_order_fill(
+                                    broker,
+                                    order_id=selected_order_id,
+                                    requested_qty=selected_qty,
+                                    now_et=now_et,
+                                    label=f"{label} {symbol}",
+                                    poll_seconds=poll_seconds,
+                                    max_wait_seconds=wait_seconds,
+                                )
+                                execution_meta["fill_seconds"] = round(max(0.0, time.time() - submit_ts), 3)
+                                execution_meta["status"] = status
+                                if filled_qty > 0:
+                                    execution_meta["fill_slippage_vs_bid_pct"] = round(
+                                        _sell_fill_slippage_vs_bid_pct(bid_price, filled_avg_price),
+                                        4,
+                                    )
+                                    return filled_qty, filled_avg_price, execution_meta
+                                if still_open:
+                                    return 0, None, execution_meta
+                            else:
+                                if selected_order_age >= normal_exit_stale_seconds:
+                                    cancel_candidates = [selected_order]
+                                    cancel_reason_overrides[selected_order_id] = "canceled_due_to_stale"
+                                elif selected_order_drift:
+                                    cancel_candidates = [selected_order]
+                                    cancel_reason_overrides[selected_order_id] = "canceled_due_to_limit_drift"
+                                else:
+                                    cancel_candidates = [selected_order]
+                                    cancel_reason_overrides[selected_order_id] = "canceled_due_to_qty_mismatch"
+
+                if cancel_candidates:
+                    _cancel_open_exit_orders(
+                        broker,
+                        orders=cancel_candidates,
+                        reason="canceled_due_to_qty_mismatch",
+                        symbol=symbol,
+                        now_et=now_et,
+                        label=label,
+                        request_qty=request_qty,
+                        execution_meta=execution_meta,
+                        reason_overrides=cancel_reason_overrides,
+                    )
+
+        if has_valid_quote:
+            execution_meta["submit_mode"] = "limit"
+            execution_meta["attempts"] = 1
+            submit_ts = time.time()
+            order = broker.place_option_limit_sell(symbol, request_qty, limit_price)
+            order_id = str(getattr(order, "id", "") or "")
+            if not order_id:
+                print(
+                    f"[{ts(now_et)}] {label} {symbol} qty={request_qty}: "
+                    f"limit close submitted without order id."
+                )
+                return 0, None, execution_meta
+            filled_qty, filled_avg_price, status, still_open = _await_order_fill(
+                broker,
+                order_id=order_id,
+                requested_qty=request_qty,
+                now_et=now_et,
+                label=f"{label} {symbol}",
+                poll_seconds=poll_seconds,
+                max_wait_seconds=wait_seconds,
+            )
+            execution_meta["fill_seconds"] = round(max(0.0, time.time() - submit_ts), 3)
+            execution_meta["status"] = status
+            if filled_qty > 0:
+                execution_meta["fill_slippage_vs_bid_pct"] = round(
+                    _sell_fill_slippage_vs_bid_pct(bid_price, filled_avg_price),
+                    4,
+                )
+                return filled_qty, filled_avg_price, execution_meta
+            if is_critical and still_open:
+                try:
+                    broker.cancel_order(order_id)
+                except Exception as exc:  # noqa: BLE001
+                    print(f"[{ts(now_et)}] {label} {symbol}: cancel close order {order_id} failed: {exc}")
+
+            if not is_critical:
+                _record_exit_cancel_reason(
+                    execution_meta,
+                    reason="canceled_due_to_limit_not_filled",
+                )
+                print(
+                    f"[{ts(now_et)}] {label} {symbol} qty={request_qty}: "
+                    f"executable limit exit not filled; will retry next loop."
+                )
+                return 0, None, execution_meta
+
+        if is_critical:
+            execution_meta["submit_mode"] = "market"
+            execution_meta["attempts"] = int(execution_meta.get("attempts", 0) or 0) + 1
+            execution_meta["used_market_fallback"] = True
+            submit_ts = time.time()
+            order = broker.close_option_market(symbol, request_qty)
+            order_id = str(getattr(order, "id", "") or "")
+            if not order_id:
+                print(f"[{ts(now_et)}] {label} {symbol} qty={request_qty}: market close submitted without order id.")
+                return 0, None, execution_meta
+            filled_qty, filled_avg_price, status, _still_open = _await_order_fill(
+                broker,
+                order_id=order_id,
+                requested_qty=request_qty,
+                now_et=now_et,
+                label=f"{label} {symbol} market",
+                poll_seconds=poll_seconds,
+                max_wait_seconds=max_wait_seconds,
+            )
+            execution_meta["fill_seconds"] = round(max(0.0, time.time() - submit_ts), 3)
+            execution_meta["status"] = status
+            if filled_qty > 0:
+                execution_meta["fill_slippage_vs_bid_pct"] = round(
+                    _sell_fill_slippage_vs_bid_pct(bid_price if bid_price > 0 else None, filled_avg_price),
+                    4,
+                )
+                return filled_qty, filled_avg_price, execution_meta
+            print(f"[{ts(now_et)}] {label} {symbol} qty={request_qty}: critical exit not filled.")
+
+        return 0, None, execution_meta
+    except Exception as exc:  # noqa: BLE001
+        print(f"[{ts(now_et)}] {label} {symbol} qty={request_qty}: close error: {exc}")
+        return 0, None, execution_meta
 
 
 def _confirmed_long_option_qty(broker: AlpacaBroker, option_symbol: str) -> int:
@@ -3752,153 +4328,6 @@ def main():
             print(f"[{ts(now_et)}] {ticker}: reversal entry error ({type(exc).__name__}): {exc!r}")
             return False
 
-    def _close_position_with_confirmation(
-        *,
-        symbol: str,
-        qty: int,
-        now_et: datetime,
-        label: str,
-        exit_reason: str | None = None,
-        poll_seconds_override: int | None = None,
-        max_wait_seconds_override: int | None = None,
-        retry_attempts_override: int | None = None,
-    ) -> tuple[int, float | None, dict[str, object]]:
-        request_qty = max(0, int(qty))
-        if request_qty <= 0:
-            return 0, None, {}
-
-        if poll_seconds_override is None:
-            poll_seconds = max(1, int(config.EXIT_ORDER_STATUS_POLL_SECONDS))
-        else:
-            poll_seconds = max(1, int(poll_seconds_override))
-        if max_wait_seconds_override is None:
-            max_wait_seconds = max(poll_seconds, int(config.EXIT_ORDER_MAX_WAIT_SECONDS))
-        else:
-            max_wait_seconds = max(poll_seconds, int(max_wait_seconds_override))
-
-        is_critical = _exit_reason_allows_market_fallback(exit_reason)
-        wait_seconds = max_wait_seconds
-        if poll_seconds_override is None and max_wait_seconds_override is None:
-            if is_critical:
-                wait_seconds = max(poll_seconds, int(getattr(config, "SMART_EXIT_CRITICAL_WAIT_SECONDS", 3) or 3))
-            else:
-                wait_seconds = max(poll_seconds, int(getattr(config, "SMART_EXIT_NORMAL_WAIT_SECONDS", 6) or 6))
-
-        execution_meta: dict[str, object] = {
-            "attempts": 0,
-            "submit_mode": "",
-            "submit_bid": None,
-            "submit_ask": None,
-            "submit_midpoint": None,
-            "submit_spread_pct": 0.0,
-            "intended_limit": None,
-            "fill_seconds": 0.0,
-            "fill_slippage_vs_bid_pct": 0.0,
-            "used_market_fallback": False,
-            "status": "",
-        }
-
-        try:
-            existing_sells = broker.get_open_orders_for_symbol(symbol=symbol, side="sell")
-            for existing in existing_sells:
-                existing_order_id = str(getattr(existing, "id", "") or "")
-                if not existing_order_id:
-                    continue
-                try:
-                    broker.cancel_order(existing_order_id)
-                except Exception as exc:  # noqa: BLE001
-                    print(
-                        f"[{ts(now_et)}] {label} {symbol} qty={request_qty}: "
-                        f"cancel existing close order {existing_order_id} failed: {exc}"
-                    )
-
-            quote_snapshot = _option_quote_snapshot(data_client, symbol)
-            bid_price = float(quote_snapshot.get("bid") or 0.0)
-            ask_price = float(quote_snapshot.get("ask") or 0.0)
-            execution_meta["submit_bid"] = quote_snapshot.get("bid")
-            execution_meta["submit_ask"] = quote_snapshot.get("ask")
-            execution_meta["submit_midpoint"] = quote_snapshot.get("midpoint")
-            execution_meta["submit_spread_pct"] = quote_snapshot.get("spread_pct")
-
-            if bid_price > 0:
-                spread = max(0.0, ask_price - bid_price) if ask_price > 0 else 0.0
-                reprice_pct = float(
-                    getattr(
-                        config,
-                        "SMART_EXIT_CRITICAL_REPRICE_PCT" if is_critical else "SMART_EXIT_NORMAL_REPRICE_PCT",
-                        0.10 if is_critical else 0.35,
-                    )
-                    or (0.10 if is_critical else 0.35)
-                )
-                limit_price = round(bid_price + (spread * max(0.0, reprice_pct)), 2)
-                execution_meta["intended_limit"] = limit_price
-                execution_meta["submit_mode"] = "limit"
-                execution_meta["attempts"] = 1
-                submit_ts = time.time()
-                order = broker.place_option_limit_sell(symbol, request_qty, limit_price)
-                order_id = str(getattr(order, "id", "") or "")
-                if not order_id:
-                    print(f"[{ts(now_et)}] {label} {symbol} qty={request_qty}: limit close submitted without order id.")
-                    return 0, None, execution_meta
-                filled_qty, filled_avg_price, status, still_open = _await_order_fill(
-                    broker,
-                    order_id=order_id,
-                    requested_qty=request_qty,
-                    now_et=now_et,
-                    label=f"{label} {symbol}",
-                    poll_seconds=poll_seconds,
-                    max_wait_seconds=wait_seconds,
-                )
-                execution_meta["fill_seconds"] = round(max(0.0, time.time() - submit_ts), 3)
-                execution_meta["status"] = status
-                if filled_qty > 0:
-                    execution_meta["fill_slippage_vs_bid_pct"] = round(
-                        _sell_fill_slippage_vs_bid_pct(bid_price, filled_avg_price),
-                        4,
-                    )
-                    return filled_qty, filled_avg_price, execution_meta
-                if still_open:
-                    try:
-                        broker.cancel_order(order_id)
-                    except Exception as exc:  # noqa: BLE001
-                        print(f"[{ts(now_et)}] {label} {symbol}: cancel close order {order_id} failed: {exc}")
-
-            if not is_critical:
-                print(f"[{ts(now_et)}] {label} {symbol} qty={request_qty}: executable limit exit not filled; will retry next loop.")
-                return 0, None, execution_meta
-
-            execution_meta["submit_mode"] = "market"
-            execution_meta["attempts"] = int(execution_meta.get("attempts", 0) or 0) + 1
-            execution_meta["used_market_fallback"] = True
-            submit_ts = time.time()
-            order = broker.close_option_market(symbol, request_qty)
-            order_id = str(getattr(order, "id", "") or "")
-            if not order_id:
-                print(f"[{ts(now_et)}] {label} {symbol} qty={request_qty}: market close submitted without order id.")
-                return 0, None, execution_meta
-            filled_qty, filled_avg_price, status, _still_open = _await_order_fill(
-                broker,
-                order_id=order_id,
-                requested_qty=request_qty,
-                now_et=now_et,
-                label=f"{label} {symbol} market",
-                poll_seconds=poll_seconds,
-                max_wait_seconds=max_wait_seconds,
-            )
-            execution_meta["fill_seconds"] = round(max(0.0, time.time() - submit_ts), 3)
-            execution_meta["status"] = status
-            if filled_qty > 0:
-                execution_meta["fill_slippage_vs_bid_pct"] = round(
-                    _sell_fill_slippage_vs_bid_pct(bid_price if bid_price > 0 else None, filled_avg_price),
-                    4,
-                )
-                return filled_qty, filled_avg_price, execution_meta
-            print(f"[{ts(now_et)}] {label} {symbol} qty={request_qty}: critical exit not filled.")
-            return 0, None, execution_meta
-        except Exception as exc:  # noqa: BLE001
-            print(f"[{ts(now_et)}] {label} {symbol} qty={request_qty}: close error: {exc}")
-            return 0, None, execution_meta
-
     def _force_normalize_ticker_exposure(option_positions: list, now_et: datetime) -> int:
         ticker_positions: dict[str, list[tuple[str, int]]] = {}
         total_filled = 0
@@ -3993,6 +4422,8 @@ def main():
                 )
                 continue
             filled_qty, _fill_price, _close_meta = _close_position_with_confirmation(
+                broker=broker,
+                data_client=data_client,
                 symbol=symbol,
                 qty=close_qty,
                 now_et=now_et,
@@ -6393,6 +6824,8 @@ def main():
                             getattr(config, "STOPLOSS_EXIT_CLOSE_RETRY_ATTEMPTS", 1) or 1
                         )
                     filled_close_qty, close_fill_price, close_execution = _close_position_with_confirmation(
+                        broker=broker,
+                        data_client=data_client,
                         symbol=symbol,
                         qty=close_qty,
                         now_et=now_et,
@@ -6677,6 +7110,8 @@ def main():
                 if qty > 0:
                     try:
                         filled_qty, _fill_price, _close_meta = _close_position_with_confirmation(
+                            broker=broker,
+                            data_client=data_client,
                             symbol=symbol,
                             qty=qty,
                             now_et=now_et,
