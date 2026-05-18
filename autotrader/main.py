@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import csv
 import time
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timezone, timedelta
 import re
 import math
 
@@ -14,7 +14,11 @@ import yfinance as yf
 from env_config import get_required_env, load_runtime_env
 load_runtime_env()
 
+import candidate_queue
 import config
+import desk_state
+import evidence_gate
+import market_context
 from alerts import AlertManager
 from broker import AlpacaBroker
 from data import AlpacaDataClient
@@ -1380,6 +1384,18 @@ def _as_et_datetime(value, tz) -> datetime | None:
         return None
 
 
+def _market_context_is_fresh(payload: dict, now_et: datetime) -> bool:
+    raw = str(payload.get("_updated_at_iso") or payload.get("timestamp_et") or "").strip()
+    parsed = _parse_iso_datetime(raw)
+    if parsed is None:
+        return False
+    if parsed.tzinfo is None:
+        parsed = pytz.utc.localize(parsed)
+    now_utc = now_et.astimezone(timezone.utc) if now_et.tzinfo else pytz.utc.localize(now_et)
+    age = abs((now_utc - parsed.astimezone(timezone.utc)).total_seconds())
+    return age <= max(5, int(getattr(config, "MARKET_CONTEXT_STALE_SECONDS", 30) or 30))
+
+
 def _order_fill_price(order) -> float:
     for field in ("filled_avg_price", "average_fill_price", "limit_price"):
         try:
@@ -1790,6 +1806,88 @@ def _parse_option_expiry_from_symbol(option_symbol: str) -> date | None:
         return date(2000 + yy, mm, dd)
     except Exception:
         return None
+
+
+def _configured_symbol_set(name: str, default: tuple[str, ...]) -> set[str]:
+    raw = getattr(config, name, default)
+    if not isinstance(raw, (list, tuple, set)):
+        raw = default
+    return {str(item).upper().strip() for item in raw if str(item).strip()}
+
+
+def _option_exposure_bucket(ticker: str, expiry: date | None, now_et: datetime | date) -> str:
+    symbol = str(ticker or "").upper().strip()
+    day = now_et if isinstance(now_et, date) and not isinstance(now_et, datetime) else now_et.date()
+    zero_dte_symbols = _configured_symbol_set("ZERO_DTE_SCALP_SYMBOLS", ("SPY", "QQQ", "IWM", "AAPL"))
+    weekly_symbols = _configured_symbol_set("WEEKLY_SINGLE_NAME_SYMBOLS", ("AMD", "INTC", "ORCL", "XOM"))
+    if expiry == day and symbol in zero_dte_symbols:
+        return "0dte_index_etf"
+    if expiry is not None and expiry > day and symbol in weekly_symbols:
+        return "weekly_single_name"
+    if expiry == day:
+        return "0dte_other"
+    if expiry is not None and expiry > day:
+        return "non_0dte_other"
+    return "unknown"
+
+
+def _option_trade_premium_usd(*, qty: int, price: float) -> float:
+    return max(0.0, float(qty or 0) * float(price or 0.0) * 100.0)
+
+
+def _open_premium_by_exposure_bucket(
+    option_positions: list,
+    open_trade_meta: dict[str, dict],
+    now_et: datetime,
+) -> tuple[dict[str, float], dict[str, float]]:
+    bucket_totals: dict[str, float] = {}
+    ticker_totals: dict[str, float] = {}
+    seen_symbols: set[str] = set()
+
+    def _add(symbol: str, meta: dict, qty: int, price: float) -> None:
+        parsed_ticker, _parsed_direction = _parse_option_symbol(symbol)
+        ticker = str(meta.get("ticker", "") or parsed_ticker).upper()
+        expiry = _option_expiry_date(meta, symbol)
+        premium = _option_trade_premium_usd(qty=qty, price=price)
+        if premium <= 0:
+            return
+        bucket = _option_exposure_bucket(ticker, expiry, now_et)
+        bucket_totals[bucket] = round(bucket_totals.get(bucket, 0.0) + premium, 4)
+        if ticker:
+            ticker_totals[ticker] = round(ticker_totals.get(ticker, 0.0) + premium, 4)
+
+    for pos in option_positions or []:
+        symbol = str(getattr(pos, "symbol", "") or "").upper()
+        if not symbol:
+            continue
+        qty = position_qty_as_int(getattr(pos, "qty", 0))
+        if qty <= 0:
+            continue
+        seen_symbols.add(symbol)
+        meta = dict(open_trade_meta.get(symbol) or {})
+        price = float(meta.get("entry_price", getattr(pos, "avg_entry_price", 0) or 0) or 0)
+        _add(symbol, meta, qty, price)
+
+    for symbol, meta in open_trade_meta.items():
+        symbol_upper = str(symbol or "").upper()
+        if not symbol_upper or symbol_upper in seen_symbols:
+            continue
+        qty = int(meta.get("qty", 0) or 0)
+        price = float(meta.get("entry_price", 0) or 0)
+        _add(symbol_upper, dict(meta), qty, price)
+
+    return bucket_totals, ticker_totals
+
+
+def _equity_pct_cap_usd(equity: float | None, pct: float) -> float:
+    try:
+        equity_value = float(equity or 0.0)
+        pct_value = float(pct or 0.0)
+    except (TypeError, ValueError):
+        return 0.0
+    if equity_value <= 0 or pct_value <= 0:
+        return 0.0
+    return round(equity_value * pct_value, 2)
 
 
 def _option_expiry_date(meta: dict, option_symbol: str) -> date | None:
@@ -2353,6 +2451,8 @@ def main():
     trade_telemetry_total_pnl_usd = float(state.get("trade_telemetry_total_pnl_usd", 0.0) or 0.0)
     trade_telemetry_last_close_iso = str(state.get("trade_telemetry_last_close_iso", "") or "")
     trade_telemetry_last_log_error = str(state.get("trade_telemetry_last_log_error", "") or "")
+    zero_dte_loss_lockout_day = str(state.get("zero_dte_loss_lockout_day", "") or "")
+    zero_dte_realized_loss_count = int(state.get("zero_dte_realized_loss_count", 0) or 0)
     broker_truth_day_pnl_usd = float(state.get("broker_truth_day_pnl_usd", 0.0) or 0.0)
     broker_truth_closed_count = int(state.get("broker_truth_closed_count", 0) or 0)
     broker_truth_last_error = str(state.get("broker_truth_last_error", "") or "")
@@ -2375,6 +2475,18 @@ def main():
     strategy_profile = normalize_profile_name(str(control_state.get("strategy_profile", "balanced") or "balanced"))
     dry_run_enabled = bool(control_state.get("dry_run", False)) or is_enabled("FEATURE_DRY_RUN_MODE", False)
     option_expiry_cache: dict[str, date | None] = {}
+
+    def _current_market_context(now_et: datetime, vix_value: float | None = None) -> dict:
+        context = desk_state.load_market_context()
+        if _market_context_is_fresh(context, now_et):
+            return context
+        try:
+            context = market_context.build_market_context(data_client, now_et, vix_value=vix_value)
+            desk_state.save_market_context(context)
+            return context
+        except Exception as exc:  # noqa: BLE001
+            print(f"[{ts(now_et)}] market context build failed: {exc}")
+            return context if isinstance(context, dict) else {}
 
     def _resolve_option_expiry(symbol: str, meta: dict) -> date | None:
         from_meta = _option_expiry_date(meta, symbol)
@@ -2505,6 +2617,8 @@ def main():
                 "trade_telemetry_total_pnl_usd": round(trade_telemetry_total_pnl_usd, 6),
                 "trade_telemetry_last_close_iso": trade_telemetry_last_close_iso,
                 "trade_telemetry_last_log_error": trade_telemetry_last_log_error,
+                "zero_dte_loss_lockout_day": zero_dte_loss_lockout_day,
+                "zero_dte_realized_loss_count": zero_dte_realized_loss_count,
                 "broker_truth_day_pnl_usd": round(broker_truth_day_pnl_usd, 6),
                 "broker_truth_closed_count": broker_truth_closed_count,
                 "broker_truth_last_error": broker_truth_last_error,
@@ -4170,6 +4284,8 @@ def main():
             trade_telemetry_total_pnl_usd = 0.0
             trade_telemetry_last_close_iso = ""
             trade_telemetry_last_log_error = ""
+            zero_dte_loss_lockout_day = now_et.date().isoformat()
+            zero_dte_realized_loss_count = 0
             broker_truth_day_pnl_usd = 0.0
             broker_truth_closed_count = 0
             broker_truth_last_error = ""
@@ -4381,6 +4497,7 @@ def main():
 
         blocked_day = _is_news_block_day(now_et)
         vix_value = _fetch_vix_level() if config.ENABLE_VIX_GUARD else None
+        active_market_context = _current_market_context(now_et, vix_value=vix_value)
         vix_blocked = False
         if config.ENABLE_VIX_GUARD:
             if vix_value is None:
@@ -4492,6 +4609,26 @@ def main():
                 )
         elif signals:
             signals.sort(key=_execution_signal_sort_key, reverse=True)
+
+        if bool(getattr(config, "ENABLE_CANDIDATE_QUEUE", True)):
+            try:
+                queue_payload = candidate_queue.build_candidate_queue(
+                    list(signals),
+                    market_context=active_market_context,
+                    now_et=now_et,
+                    source="main_loop",
+                )
+                desk_state.save_candidate_queue(queue_payload)
+                ranked_candidates = list(queue_payload.get("candidates") or [])
+                if ranked_candidates:
+                    signals = ranked_candidates
+                    print(
+                        f"[{ts(now_et)}] Candidate queue ranked {len(ranked_candidates)} signal(s) "
+                        f"for regime={queue_payload.get('regime', '')} "
+                        f"preferred={queue_payload.get('preferred_direction', 'both')}."
+                    )
+            except Exception as exc:  # noqa: BLE001
+                print(f"[{ts(now_et)}] candidate queue publish failed: {exc}")
 
         if not pdt_allowed:
             print(
@@ -4626,6 +4763,7 @@ def main():
 
         opening_entry_attempts_loop = 0
         entry_attempts_loop = 0
+        evidence_rows = evidence_gate.load_recent_trade_rows()
 
         for signal in signals:
             now_et = datetime.now(tz)
@@ -4674,6 +4812,34 @@ def main():
 
             # --- Consecutive loss recovery brake ---
             if _consecutive_loss_cooldown_active(now_et):
+                break
+
+            if zero_dte_loss_lockout_day != now_et.date().isoformat():
+                zero_dte_loss_lockout_day = now_et.date().isoformat()
+                zero_dte_realized_loss_count = 0
+                _save_runtime_state()
+
+            zero_dte_loss_limit = max(0, int(getattr(config, "ZERO_DTE_MAX_REALIZED_LOSSES", 0) or 0))
+            if (
+                bool(getattr(config, "ENABLE_EXPOSURE_BUCKET_GUARDS", False))
+                and zero_dte_loss_limit > 0
+                and zero_dte_realized_loss_count >= zero_dte_loss_limit
+            ):
+                _mark_skip("zero_dte_loss_lockout")
+                print(
+                    f"[{ts(now_et)}] 0DTE loss lockout active: "
+                    f"{zero_dte_realized_loss_count}/{zero_dte_loss_limit} realized red 0DTE ETF exit(s). "
+                    "Managing existing positions only."
+                )
+                alerts.send(
+                    "zero_dte_loss_lockout",
+                    (
+                        f"0DTE loss lockout active after {zero_dte_realized_loss_count} "
+                        "realized red ETF scalp exits. New entries paused."
+                    ),
+                    level="warning",
+                    dedupe_key=f"zero-dte-lockout-{now_et.date().isoformat()}",
+                )
                 break
 
             # --- Net P&L circuit breaker ---
@@ -4749,6 +4915,19 @@ def main():
                 print(
                     f"[{ts(now_et)}] {ticker}: {pattern_explanation}"
                 )
+
+            evidence_decision = evidence_gate.evaluate_signal(
+                signal=signal,
+                ticker=ticker,
+                direction=direction,
+                now_et=now_et,
+                rows=evidence_rows,
+            )
+            if not evidence_decision.allowed:
+                _mark_skip("execution_evidence_gate")
+                _mark_stage4_reject(reason="execution_evidence_gate", ticker=ticker, detail=evidence_decision.reason)
+                print(f"[{ts(now_et)}] {ticker}: skip ({evidence_decision.reason}).")
+                continue
 
             if adaptive_loss_active:
                 profile = adaptive_loss_profile if isinstance(adaptive_loss_profile, dict) else {}
@@ -5295,6 +5474,152 @@ def main():
                     f"premium=${trade_premium_usd:.2f} open_qty={existing_qty_for_ticker}/"
                     f"{contract_cap_text}."
                 )
+                if bool(getattr(config, "ENABLE_EXPOSURE_BUCKET_GUARDS", False)):
+                    candidate_expiry = _parse_expiration_text(contract.get("expiration_date"))
+                    candidate_bucket = _option_exposure_bucket(ticker, candidate_expiry, now_et)
+                    contract_evidence_decision = evidence_gate.evaluate_contract(
+                        signal=signal,
+                        ticker=ticker,
+                        direction=direction,
+                        now_et=now_et,
+                        exposure_bucket=candidate_bucket,
+                        spread_pct=entry_quote.get("spread_pct"),
+                        rows=evidence_rows,
+                    )
+                    if not contract_evidence_decision.allowed:
+                        _mark_skip("execution_evidence_gate")
+                        _mark_stage4_reject(
+                            reason="execution_evidence_gate",
+                            ticker=ticker,
+                            detail=contract_evidence_decision.reason,
+                        )
+                        print(f"[{ts(now_et)}] {ticker}: skip ({contract_evidence_decision.reason}).")
+                        continue
+                    if (
+                        candidate_bucket == "0dte_other"
+                        and bool(getattr(config, "BLOCK_NON_SCALP_0DTE_ENTRIES", True))
+                    ):
+                        _mark_skip("non_scalp_0dte_block")
+                        _mark_stage4_reject(
+                            reason="non_scalp_0dte_block",
+                            ticker=ticker,
+                            detail="0DTE entries are restricted to configured scalp symbols",
+                        )
+                        print(
+                            f"[{ts(now_et)}] {ticker}: skip "
+                            "(0DTE entries are restricted to configured scalp symbols)."
+                        )
+                        continue
+                    if candidate_bucket == "0dte_index_etf":
+                        zero_dte_max_attempts = max(
+                            0,
+                            int(getattr(config, "ZERO_DTE_MAX_ENTRY_ATTEMPTS", 0) or 0),
+                        )
+                        zero_dte_symbols = _configured_symbol_set("ZERO_DTE_SCALP_SYMBOLS", ("SPY", "QQQ", "IWM"))
+                        zero_dte_attempts_today = sum(
+                            int(alpaca_buy_orders_by_ticker.get(sym, 0) or 0)
+                            for sym in zero_dte_symbols
+                        )
+                        if zero_dte_max_attempts > 0 and zero_dte_attempts_today >= zero_dte_max_attempts:
+                            _mark_skip("zero_dte_attempt_limit")
+                            _mark_stage4_reject(
+                                reason="zero_dte_attempt_limit",
+                                ticker=ticker,
+                                detail=f"0DTE attempts {zero_dte_attempts_today}/{zero_dte_max_attempts}",
+                            )
+                            print(
+                                f"[{ts(now_et)}] {ticker}: skip "
+                                f"(0DTE scalp attempt limit {zero_dte_attempts_today}/{zero_dte_max_attempts})."
+                            )
+                            continue
+                        zero_dte_max_hold = max(1, int(getattr(config, "ZERO_DTE_MAX_HOLD_MINUTES", 5) or 5))
+                        signal_max_hold_minutes = min(signal_max_hold_minutes, zero_dte_max_hold)
+                    bucket_premium, ticker_premium = _open_premium_by_exposure_bucket(
+                        option_positions,
+                        open_trade_meta,
+                        now_et,
+                    )
+                    zero_dte_open = float(bucket_premium.get("0dte_index_etf", 0.0) or 0.0)
+                    weekly_open = float(bucket_premium.get("weekly_single_name", 0.0) or 0.0)
+                    if bool(getattr(config, "EXPOSURE_BUCKET_SEPARATE_0DTE_AND_WEEKLY", True)):
+                        if candidate_bucket == "0dte_index_etf" and weekly_open > 0:
+                            _mark_skip("bucket_mixing_block")
+                            _mark_stage4_reject(
+                                reason="bucket_mixing_block",
+                                ticker=ticker,
+                                detail=f"weekly single-name premium already open ${weekly_open:.2f}",
+                            )
+                            print(
+                                f"[{ts(now_et)}] {ticker}: skip 0DTE scalp "
+                                f"(weekly single-name exposure already open ${weekly_open:.2f})."
+                            )
+                            continue
+                        if candidate_bucket == "weekly_single_name" and zero_dte_open > 0:
+                            _mark_skip("bucket_mixing_block")
+                            _mark_stage4_reject(
+                                reason="bucket_mixing_block",
+                                ticker=ticker,
+                                detail=f"0DTE ETF premium already open ${zero_dte_open:.2f}",
+                            )
+                            print(
+                                f"[{ts(now_et)}] {ticker}: skip weekly single-name entry "
+                                f"(0DTE ETF scalp exposure already open ${zero_dte_open:.2f})."
+                            )
+                            continue
+
+                    bucket_cap_pct = 0.0
+                    bucket_cap_label = ""
+                    if candidate_bucket == "0dte_index_etf":
+                        bucket_cap_pct = float(getattr(config, "MAX_0DTE_PREMIUM_PCT_EQUITY", 0.0) or 0.0)
+                        bucket_cap_label = "0DTE ETF"
+                    elif candidate_bucket == "weekly_single_name":
+                        bucket_cap_pct = float(
+                            getattr(config, "MAX_WEEKLY_SINGLE_NAME_PREMIUM_PCT_EQUITY", 0.0) or 0.0
+                        )
+                        bucket_cap_label = "weekly single-name"
+                    bucket_cap_usd = _equity_pct_cap_usd(float(equity) if equity is not None else None, bucket_cap_pct)
+                    if bucket_cap_usd > 0:
+                        current_bucket_premium = float(bucket_premium.get(candidate_bucket, 0.0) or 0.0)
+                        if current_bucket_premium + trade_premium_usd > bucket_cap_usd:
+                            _mark_skip("bucket_premium_cap")
+                            _mark_stage4_reject(
+                                reason="bucket_premium_cap",
+                                ticker=ticker,
+                                detail=(
+                                    f"{bucket_cap_label} premium ${current_bucket_premium + trade_premium_usd:.2f} "
+                                    f"> cap ${bucket_cap_usd:.2f}"
+                                ),
+                            )
+                            print(
+                                f"[{ts(now_et)}] {ticker}: skip ({bucket_cap_label} premium "
+                                f"${current_bucket_premium:.2f} + new ${trade_premium_usd:.2f} "
+                                f"> cap ${bucket_cap_usd:.2f})."
+                            )
+                            continue
+
+                    ticker_cap_usd = _equity_pct_cap_usd(
+                        float(equity) if equity is not None else None,
+                        float(getattr(config, "MAX_SINGLE_TICKER_PREMIUM_PCT_EQUITY", 0.0) or 0.0),
+                    )
+                    if ticker_cap_usd > 0:
+                        current_ticker_premium = float(ticker_premium.get(ticker, 0.0) or 0.0)
+                        if current_ticker_premium + trade_premium_usd > ticker_cap_usd:
+                            _mark_skip("ticker_premium_cap")
+                            _mark_stage4_reject(
+                                reason="ticker_premium_cap",
+                                ticker=ticker,
+                                detail=(
+                                    f"{ticker} premium ${current_ticker_premium + trade_premium_usd:.2f} "
+                                    f"> cap ${ticker_cap_usd:.2f}"
+                                ),
+                            )
+                            print(
+                                f"[{ts(now_et)}] {ticker}: skip (ticker premium "
+                                f"${current_ticker_premium:.2f} + new ${trade_premium_usd:.2f} "
+                                f"> cap ${ticker_cap_usd:.2f})."
+                            )
+                            continue
+
                 premium_override_ok = False
                 premium_override_reason = ""
                 if max_trade_premium > 0 and trade_premium_usd > max_trade_premium:
@@ -5594,6 +5919,11 @@ def main():
                     "strategy_profile": signal_strategy_profile,
                     "ticker": ticker,
                     "direction": direction,
+                    "exposure_bucket": _option_exposure_bucket(
+                        ticker,
+                        _parse_expiration_text(contract.get("expiration_date")),
+                        now_et,
+                    ),
                     "option_symbol": option_symbol,
                     "strike": contract.get("strike_price", ""),
                     "expiry": contract.get("expiration_date", ""),
@@ -6103,6 +6433,8 @@ def main():
                         trade_telemetry_total_pnl_usd = 0.0
                         trade_telemetry_last_close_iso = ""
                         trade_telemetry_last_log_error = ""
+                        zero_dte_loss_lockout_day = now_et.date().isoformat()
+                        zero_dte_realized_loss_count = 0
 
                     trade_row = {
                         "timestamp": ts(now_et),
@@ -6110,6 +6442,7 @@ def main():
                         "ticker": meta.get("ticker", ""),
                         "direction": meta.get("direction", ""),
                         "strategy_profile": meta.get("strategy_profile", ""),
+                        "exposure_bucket": meta.get("exposure_bucket", ""),
                         "option_symbol": symbol,
                         "strike": meta.get("strike", ""),
                         "expiry": meta.get("expiry", ""),
@@ -6191,6 +6524,28 @@ def main():
                         daily_realized_loss_usd += abs(trade_pnl_usd)
                         weekly_realized_loss_usd += abs(trade_pnl_usd)
                         consecutive_losses += 1
+                        trade_bucket = _option_exposure_bucket(
+                            str(meta.get("ticker", "") or ""),
+                            _option_expiry_date(meta, symbol),
+                            now_et,
+                        )
+                        if (
+                            bool(getattr(config, "ENABLE_EXPOSURE_BUCKET_GUARDS", False))
+                            and trade_bucket == "0dte_index_etf"
+                        ):
+                            if zero_dte_loss_lockout_day != now_et.date().isoformat():
+                                zero_dte_loss_lockout_day = now_et.date().isoformat()
+                                zero_dte_realized_loss_count = 0
+                            zero_dte_realized_loss_count += 1
+                            zero_dte_loss_limit = max(
+                                0,
+                                int(getattr(config, "ZERO_DTE_MAX_REALIZED_LOSSES", 0) or 0),
+                            )
+                            if zero_dte_loss_limit > 0:
+                                print(
+                                    f"[{ts(now_et)}] 0DTE ETF red exit count "
+                                    f"{zero_dte_realized_loss_count}/{zero_dte_loss_limit}."
+                                )
                     else:
                         consecutive_losses = 0
 

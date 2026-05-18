@@ -15,6 +15,7 @@ class TradeLogger:
         "ticker",
         "direction",
         "strategy_profile",
+        "exposure_bucket",
         "option_symbol",
         "strike",
         "expiry",

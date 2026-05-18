@@ -77,6 +77,16 @@ def test_growth_frequency_config_keeps_trading_through_day():
     assert config.MAX_PREMIUM_PER_TRADE_USD == 0.0
     assert config.MAX_TOTAL_OPEN_PREMIUM_USD == 0.0
     assert config.OPENING_MAX_FRESH_PREMIUM_USD == 0.0
+    assert config.ENABLE_EXPOSURE_BUCKET_GUARDS is True
+    assert config.EXPOSURE_BUCKET_SEPARATE_0DTE_AND_WEEKLY is True
+    assert config.ZERO_DTE_SCALP_SYMBOLS == ("SPY", "QQQ", "IWM")
+    assert config.BLOCK_NON_SCALP_0DTE_ENTRIES is True
+    assert config.ZERO_DTE_MAX_ENTRY_ATTEMPTS == 3
+    assert config.ZERO_DTE_MAX_HOLD_MINUTES == 5
+    assert config.ZERO_DTE_MAX_REALIZED_LOSSES == 3
+    assert config.MAX_0DTE_PREMIUM_PCT_EQUITY == 0.02
+    assert config.MAX_WEEKLY_SINGLE_NAME_PREMIUM_PCT_EQUITY == 0.05
+    assert config.MAX_SINGLE_TICKER_PREMIUM_PCT_EQUITY == 0.02
     assert config.MAX_OPTION_PREMIUM_TO_UNDERLYING_PCT == 20.0
     assert config.MAX_OPTION_STRIKE_DISTANCE_PCT == 15.0
     assert config.EXECUTION_MIN_RVOL_AFTER_IGNORE == 0.50
@@ -86,6 +96,12 @@ def test_growth_frequency_config_keeps_trading_through_day():
     assert config.FRESH_TAPE_FAIL_CLOSED is True
     assert config.ENABLE_SIGNAL_PATTERN_MEMORY is False
     assert config.ENABLE_PRE_EXECUTION_HISTORY_CHECK is False
+    assert config.ENABLE_EXECUTION_EVIDENCE_GATE is True
+    assert config.EVIDENCE_GATE_MIN_SAMPLES == 3
+    assert config.EVIDENCE_GATE_MIN_LOSSES == 2
+    assert config.ENABLE_MARKET_CONTEXT_WORKER is True
+    assert config.MARKET_CONTEXT_SYMBOLS == ("SPY", "QQQ", "IWM")
+    assert config.ENABLE_CANDIDATE_QUEUE is True
     assert config.ADAPTIVE_BLOCK_LOSING_TICKERS is False
     assert config.ALPACA_TRUTH_ADAPT_AFTER_LOSS_USD == 0.0
     assert config.LOSS_THROTTLE_AFTER_CONSEC_LOSSES == 999

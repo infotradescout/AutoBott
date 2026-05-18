@@ -77,6 +77,8 @@ def _migrate_runtime_files_to_active_data_dir() -> None:
         "watchlist_control.json",
         "observation_log.csv",
         "feature_flags.json",
+        "market_context.json",
+        "candidate_queue.json",
     )
 
     legacy_candidates = [
@@ -110,8 +112,11 @@ import config
 
 from alerts import AlertManager
 from broker import AlpacaBroker
+from data import AlpacaDataClient
 from dashboard import app
+import desk_state
 from main import main as trader_main
+import market_context
 import replay_farm
 from replay_promotion import build_promotion_snapshot
 from state_store import load_bot_state, save_bot_state
@@ -1046,6 +1051,27 @@ def _run_trader_watchdog(trader_thread: threading.Thread) -> None:
         time.sleep(check_seconds)
 
 
+def _run_market_context_worker() -> None:
+    print("[render_service] Market context worker enabled.")
+    try:
+        api_key = get_required_env("ALPACA_API_KEY")
+        secret_key = get_required_env("ALPACA_SECRET_KEY")
+        data_client = AlpacaDataClient(api_key, secret_key, paper=config.PAPER)
+    except Exception as exc:  # noqa: BLE001
+        print(f"[render_service] Market context worker unavailable: {exc}")
+        return
+
+    sleep_seconds = max(5, int(getattr(config, "MARKET_CONTEXT_REFRESH_SECONDS", 10) or 10))
+    while True:
+        try:
+            now_et = _now_et_dt()
+            context = market_context.build_market_context(data_client, now_et)
+            desk_state.save_market_context(context)
+        except Exception as exc:  # noqa: BLE001
+            print(f"[render_service] market context worker error: {exc}")
+        time.sleep(sleep_seconds)
+
+
 if __name__ == "__main__":
     _apply_boot_auto_resume()
     _print_startup_readiness()
@@ -1060,6 +1086,15 @@ if __name__ == "__main__":
         name="autobott-trader-watchdog",
     )
     watchdog_thread.start()
+    if bool(getattr(config, "ENABLE_MARKET_CONTEXT_WORKER", True)):
+        market_context_thread = threading.Thread(
+            target=_run_market_context_worker,
+            daemon=True,
+            name="autobott-market-context",
+        )
+        market_context_thread.start()
+    else:
+        print("[render_service] Market context worker disabled by ENABLE_MARKET_CONTEXT_WORKER=false.")
     if _historical_learning_enabled():
         historical_learning_thread = threading.Thread(
             target=_run_historical_learning_supervisor,

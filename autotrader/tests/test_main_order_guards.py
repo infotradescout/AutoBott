@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import sys
 import unittest
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 from pathlib import Path
 
 import pandas as pd
@@ -453,6 +453,28 @@ class MainOrderGuardTests(unittest.TestCase):
         meta = {"IWM260515C00282000": {"ticker": "IWM", "qty": 4}}
 
         self.assertEqual(main._ticker_open_qty([], meta, "IWM"), 4)
+
+    def test_option_exposure_bucket_classifies_0dte_etf_and_weekly_single_name(self):
+        now = EASTERN.localize(datetime(2026, 5, 18, 10, 0, 0))
+
+        self.assertEqual(main._option_exposure_bucket("SPY", date(2026, 5, 18), now), "0dte_index_etf")
+        self.assertEqual(main._option_exposure_bucket("AAPL", date(2026, 5, 18), now), "0dte_other")
+        self.assertEqual(main._option_exposure_bucket("AMD", date(2026, 5, 22), now), "weekly_single_name")
+
+    def test_open_premium_by_exposure_bucket_uses_live_and_meta_positions(self):
+        now = EASTERN.localize(datetime(2026, 5, 18, 10, 0, 0))
+        positions = [FakePosition("SPY260518C00741000", qty=2)]
+        meta = {
+            "SPY260518C00741000": {"ticker": "SPY", "qty": 2, "entry_price": 1.25, "expiry": "2026-05-18"},
+            "AMD260522P00432500": {"ticker": "AMD", "qty": 1, "entry_price": 19.80, "expiry": "2026-05-22"},
+        }
+
+        bucket_premium, ticker_premium = main._open_premium_by_exposure_bucket(positions, meta, now)
+
+        self.assertEqual(bucket_premium["0dte_index_etf"], 250.0)
+        self.assertEqual(bucket_premium["weekly_single_name"], 1980.0)
+        self.assertEqual(ticker_premium["SPY"], 250.0)
+        self.assertEqual(ticker_premium["AMD"], 1980.0)
 
     def test_same_direction_live_pnl_detects_red_scale_in(self):
         class PnlPosition(FakePosition):
