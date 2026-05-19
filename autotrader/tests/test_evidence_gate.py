@@ -27,11 +27,19 @@ class EvidenceGateTests(unittest.TestCase):
             "EVIDENCE_GATE_MIN_SAMPLES": config.EVIDENCE_GATE_MIN_SAMPLES,
             "EVIDENCE_GATE_MIN_LOSSES": config.EVIDENCE_GATE_MIN_LOSSES,
             "EVIDENCE_GATE_MAX_CONSERVATIVE_EXPECTANCY_USD": config.EVIDENCE_GATE_MAX_CONSERVATIVE_EXPECTANCY_USD,
+            "ENABLE_PROVEN_EDGE_GATE": config.ENABLE_PROVEN_EDGE_GATE,
+            "PROVEN_EDGE_MIN_SAMPLES": config.PROVEN_EDGE_MIN_SAMPLES,
+            "PROVEN_EDGE_MIN_WIN_RATE": config.PROVEN_EDGE_MIN_WIN_RATE,
+            "PROVEN_EDGE_MIN_CONSERVATIVE_EXPECTANCY_USD": config.PROVEN_EDGE_MIN_CONSERVATIVE_EXPECTANCY_USD,
         }
         config.ENABLE_EXECUTION_EVIDENCE_GATE = True
         config.EVIDENCE_GATE_MIN_SAMPLES = 3
         config.EVIDENCE_GATE_MIN_LOSSES = 2
         config.EVIDENCE_GATE_MAX_CONSERVATIVE_EXPECTANCY_USD = -0.01
+        config.ENABLE_PROVEN_EDGE_GATE = True
+        config.PROVEN_EDGE_MIN_SAMPLES = 5
+        config.PROVEN_EDGE_MIN_WIN_RATE = 0.55
+        config.PROVEN_EDGE_MIN_CONSERVATIVE_EXPECTANCY_USD = 1.0
         self.now = EASTERN.localize(datetime(2026, 5, 18, 10, 15, 0))
 
     def tearDown(self):
@@ -145,6 +153,39 @@ class EvidenceGateTests(unittest.TestCase):
         )
 
         self.assertTrue(decision.allowed)
+
+    def test_proven_edge_gate_blocks_bad_directional_bucket(self):
+        rows = [
+            {
+                "ticker": f"T{i}",
+                "direction": "call",
+                "strategy_profile": "generic",
+                "entry_hour": "10",
+                "score_bucket": "[7+)",
+                "direction_bucket": "strong",
+                "rvol_bucket": "active",
+                "roc_bucket": "trend",
+                "conservative_pnl": pnl,
+            }
+            for i, pnl in enumerate([-10.0, -8.0, -5.0, 4.0, 3.0], start=1)
+        ]
+
+        decision = evidence_gate.evaluate_signal(
+            signal={
+                "signal_score": 9.0,
+                "direction_score": 0.75,
+                "rvol": 1.8,
+                "roc": 0.25,
+                "strategy_profile": "generic",
+            },
+            ticker="AAPL",
+            direction="call",
+            now_et=self.now,
+            rows=rows,
+        )
+
+        self.assertFalse(decision.allowed)
+        self.assertIn("proven edge rejected", decision.reason)
 
 
 if __name__ == "__main__":

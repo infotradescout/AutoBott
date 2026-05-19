@@ -39,6 +39,54 @@ def _score_bucket(value) -> str:
     return "[7+)"
 
 
+def _direction_bucket(value) -> str:
+    score = abs(_safe_float(value, 0.0) or 0.0)
+    if score < 0.4:
+        return "weak"
+    if score < 0.65:
+        return "mixed"
+    if score < 0.85:
+        return "strong"
+    return "elite"
+
+
+def _rvol_bucket(value) -> str:
+    rvol = _safe_float(value)
+    if rvol is None:
+        return ""
+    if rvol < 0.75:
+        return "dead"
+    if rvol < 1.25:
+        return "normal"
+    if rvol < 2.5:
+        return "active"
+    return "surge"
+
+
+def _roc_bucket(value) -> str:
+    roc = abs(_safe_float(value, 0.0) or 0.0)
+    if roc < 0.08:
+        return "flat"
+    if roc < 0.20:
+        return "moving"
+    if roc < 0.50:
+        return "trend"
+    return "impulse"
+
+
+def _volatility_bucket(value) -> str:
+    vol = _safe_float(value)
+    if vol is None:
+        return ""
+    if vol < 3:
+        return "low"
+    if vol < 5:
+        return "medium"
+    if vol < 7:
+        return "high"
+    return "extreme"
+
+
 def _spread_bucket(value) -> str:
     spread = _safe_float(value)
     if spread is None:
@@ -74,6 +122,10 @@ def _normalize_row(row: dict) -> dict:
     normalized["strategy_profile"] = str(normalized.get("strategy_profile", "") or "").lower()
     normalized["entry_hour"] = _entry_hour(normalized)
     normalized["score_bucket"] = _score_bucket(normalized.get("signal_score"))
+    normalized["direction_bucket"] = _direction_bucket(normalized.get("direction_score"))
+    normalized["rvol_bucket"] = _rvol_bucket(normalized.get("rvol"))
+    normalized["roc_bucket"] = _roc_bucket(normalized.get("roc"))
+    normalized["volatility_bucket"] = _volatility_bucket(normalized.get("volatility_score"))
     normalized["spread_bucket"] = _spread_bucket(
         normalized.get("entry_spread_pct") or normalized.get("contract_spread_pct")
     )
@@ -114,6 +166,10 @@ def _candidate_from_signal(
         "strategy_profile": str(signal.get("strategy_profile", "generic") or "generic").lower(),
         "entry_hour": str(int(now_et.hour)),
         "score_bucket": _score_bucket(signal.get("signal_score")),
+        "direction_bucket": _direction_bucket(signal.get("direction_score")),
+        "rvol_bucket": _rvol_bucket(signal.get("rvol")),
+        "roc_bucket": _roc_bucket(signal.get("roc")),
+        "volatility_bucket": _volatility_bucket(signal.get("volatility_score")),
         "spread_bucket": _spread_bucket(spread_pct),
         "exposure_bucket": str(exposure_bucket or "").lower(),
     }
@@ -151,6 +207,42 @@ def _block_reason(rows: list[dict], keys: tuple[str, ...], label: str) -> str:
     )
 
 
+def _proven_edge_reject_reason(rows: list[dict], keys: tuple[str, ...], label: str) -> str:
+    if not bool(getattr(config, "ENABLE_PROVEN_EDGE_GATE", False)):
+        return ""
+    pnls = [float(row["conservative_pnl"]) for row in rows if _safe_float(row.get("conservative_pnl")) is not None]
+    if not pnls:
+        return ""
+    min_samples = max(1, int(getattr(config, "PROVEN_EDGE_MIN_SAMPLES", 5) or 5))
+    if len(pnls) < min_samples:
+        return ""
+    min_win_rate = float(getattr(config, "PROVEN_EDGE_MIN_WIN_RATE", 0.55) or 0.55)
+    min_expectancy = float(getattr(config, "PROVEN_EDGE_MIN_CONSERVATIVE_EXPECTANCY_USD", 1.0) or 1.0)
+    wins = sum(1 for value in pnls if value > 0)
+    win_rate = wins / len(pnls)
+    expectancy = sum(pnls) / len(pnls)
+    if win_rate >= min_win_rate and expectancy >= min_expectancy:
+        return ""
+    key_text = ",".join(keys)
+    return (
+        f"proven edge rejected {label} bucket ({key_text}): "
+        f"n={len(pnls)} winrate={win_rate:.0%} conservative_exp=${expectancy:.2f} "
+        f"required winrate>={min_win_rate:.0%} exp>=${min_expectancy:.2f}"
+    )
+
+
+def _evaluate_groups(candidate: dict, rows: list[dict], groups: tuple[tuple[str, ...], ...], label: str) -> EvidenceDecision:
+    for keys in groups:
+        matches = _matching_rows(rows, candidate, keys)
+        reason = _block_reason(matches, keys, label)
+        if reason:
+            return EvidenceDecision(False, reason)
+        reason = _proven_edge_reject_reason(matches, keys, label)
+        if reason:
+            return EvidenceDecision(False, reason)
+    return EvidenceDecision(True, "")
+
+
 def evaluate_signal(
     *,
     signal: dict,
@@ -166,16 +258,14 @@ def evaluate_signal(
         return EvidenceDecision(True, "")
     candidate = _candidate_from_signal(signal=signal, ticker=ticker, direction=direction, now_et=now_et)
     groups = (
+        ("direction_bucket", "rvol_bucket", "roc_bucket", "direction"),
+        ("strategy_profile", "direction_bucket", "direction"),
         ("ticker", "entry_hour", "direction"),
         ("ticker", "direction"),
         ("strategy_profile", "entry_hour", "direction"),
         ("score_bucket", "direction"),
     )
-    for keys in groups:
-        reason = _block_reason(_matching_rows(history, candidate, keys), keys, "pre-contract")
-        if reason:
-            return EvidenceDecision(False, reason)
-    return EvidenceDecision(True, "")
+    return _evaluate_groups(candidate, history, groups, "pre-contract")
 
 
 def evaluate_contract(
@@ -202,12 +292,9 @@ def evaluate_contract(
         spread_pct=spread_pct,
     )
     groups = (
+        ("spread_bucket", "direction_bucket", "rvol_bucket", "direction"),
         ("exposure_bucket", "direction"),
         ("ticker", "spread_bucket", "direction"),
         ("spread_bucket", "score_bucket", "direction"),
     )
-    for keys in groups:
-        reason = _block_reason(_matching_rows(history, candidate, keys), keys, "contract")
-        if reason:
-            return EvidenceDecision(False, reason)
-    return EvidenceDecision(True, "")
+    return _evaluate_groups(candidate, history, groups, "contract")
