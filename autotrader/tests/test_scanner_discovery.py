@@ -87,12 +87,17 @@ def test_growth_frequency_config_keeps_trading_through_day():
     assert config.MAX_0DTE_PREMIUM_PCT_EQUITY == 0.02
     assert config.MAX_WEEKLY_SINGLE_NAME_PREMIUM_PCT_EQUITY == 0.05
     assert config.MAX_SINGLE_TICKER_PREMIUM_PCT_EQUITY == 0.02
+    assert config.SCAN_MIN_BARS == 2
+    assert config.SCAN_MIN_DAILY_BARS == 3
+    assert config.RVOL_AVG_DAILY_BARS == 3
+    assert config.ATR_PERIOD == 3
+    assert config.ATR_MIN_PERIOD == 2
     assert config.MAX_OPTION_PREMIUM_TO_UNDERLYING_PCT == 20.0
     assert config.MAX_OPTION_STRIKE_DISTANCE_PCT == 15.0
     assert config.EXECUTION_MIN_RVOL_AFTER_IGNORE == 0.50
     assert config.ENABLE_ENTRY_CONFIRMATION is True
     assert config.ENTRY_CONFIRM_BYPASS_MIN_SIGNAL_SCORE == 12.0
-    assert config.ENABLE_FRESH_TAPE_DIRECTION_GUARD is True
+    assert config.ENABLE_FRESH_TAPE_DIRECTION_GUARD is False
     assert config.FRESH_TAPE_FAIL_CLOSED is True
     assert config.ENABLE_SIGNAL_PATTERN_MEMORY is False
     assert config.ENABLE_PRE_EXECUTION_HISTORY_CHECK is False
