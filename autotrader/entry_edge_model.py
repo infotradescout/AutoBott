@@ -212,10 +212,13 @@ def evaluate_signal(
 ) -> tuple[bool, str]:
     if not bool(getattr(config, "ENABLE_REPLAY_EDGE_MODEL_GATE", False)):
         return True, ""
+    fail_open = bool(getattr(config, "REPLAY_EDGE_MODEL_FAIL_OPEN", False))
     payload = model if isinstance(model, dict) else _load_model()
     groups = payload.get("groups", {}) if isinstance(payload, dict) else {}
     if not isinstance(groups, dict) or not groups:
-        return True, ""
+        if fail_open:
+            return True, "replay edge model unavailable; fail-open"
+        return False, "replay edge rejected: no trained edge model available"
     min_samples = max(1, int(getattr(config, "REPLAY_EDGE_MODEL_MIN_SAMPLES", 20) or 20))
     min_win_rate = float(getattr(config, "REPLAY_EDGE_MODEL_MIN_WIN_RATE", 0.56) or 0.56)
     min_avg_move = float(getattr(config, "REPLAY_EDGE_MODEL_MIN_AVG_MOVE_PCT", 0.03) or 0.03)
@@ -236,4 +239,6 @@ def evaluate_signal(
             f"replay edge rejected {key}: n={n} winrate={win_rate:.0%} avg_move={avg_move:.3f}% "
             f"required winrate>={min_win_rate:.0%} avg_move>={min_avg_move:.3f}%",
         )
-    return True, "replay edge model has no mature bucket; fail-open"
+    if fail_open:
+        return True, "replay edge model has no mature bucket; fail-open"
+    return False, "replay edge rejected: no mature historical bucket for this setup"
