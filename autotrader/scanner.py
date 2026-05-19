@@ -793,6 +793,62 @@ def _scan_ticker_details(
         if not ema_aligned:
             return _scan_failure("continuation reject: put EMA not aligned")
 
+    if bool(getattr(config, "ENABLE_SUSTAINED_CONTINUATION_GATE", True)):
+        lookback_bars = max(4, int(getattr(config, "SUSTAINED_CONTINUATION_LOOKBACK_BARS", 6) or 6))
+        min_net_move_pct = float(getattr(config, "SUSTAINED_CONTINUATION_MIN_NET_MOVE_PCT", 0.12) or 0.12)
+        min_aligned_ratio = float(getattr(config, "SUSTAINED_CONTINUATION_MIN_ALIGNED_BAR_RATIO", 0.60) or 0.60)
+        max_retrace_pct = float(getattr(config, "SUSTAINED_CONTINUATION_MAX_RETRACE_PCT", 0.12) or 0.12)
+
+        recent = closes.tail(lookback_bars).astype(float)
+        if len(recent) < lookback_bars:
+            return _scan_failure(
+                f"continuation reject: insufficient persistence bars ({len(recent)}/{lookback_bars})"
+            )
+        recent_start = float(recent.iloc[0])
+        recent_end = float(recent.iloc[-1])
+        if recent_start <= 0:
+            return _scan_failure("continuation reject: invalid persistence baseline")
+
+        returns = recent.pct_change().dropna() * 100.0
+        if returns.empty:
+            return _scan_failure("continuation reject: no persistence returns")
+        if direction == "call":
+            aligned_bars = int((returns > 0).sum())
+            aligned_ratio = aligned_bars / max(1, len(returns))
+            net_move_pct = ((recent_end - recent_start) / recent_start) * 100.0
+            peak = float(recent.max())
+            retrace_pct = 0.0 if peak <= 0 else ((peak - recent_end) / peak) * 100.0
+            if net_move_pct < min_net_move_pct:
+                return _scan_failure(
+                    f"continuation reject: call net move {net_move_pct:+.2f}% < {min_net_move_pct:.2f}%"
+                )
+            if aligned_ratio < min_aligned_ratio:
+                return _scan_failure(
+                    f"continuation reject: call bar alignment {aligned_ratio:.0%} < {min_aligned_ratio:.0%}"
+                )
+            if retrace_pct > max_retrace_pct:
+                return _scan_failure(
+                    f"continuation reject: call retrace {retrace_pct:.2f}% > {max_retrace_pct:.2f}%"
+                )
+        else:
+            aligned_bars = int((returns < 0).sum())
+            aligned_ratio = aligned_bars / max(1, len(returns))
+            net_move_pct = ((recent_start - recent_end) / recent_start) * 100.0
+            trough = float(recent.min())
+            retrace_pct = 0.0 if recent_end <= 0 else ((recent_end - trough) / recent_end) * 100.0
+            if net_move_pct < min_net_move_pct:
+                return _scan_failure(
+                    f"continuation reject: put net move {net_move_pct:+.2f}% < {min_net_move_pct:.2f}%"
+                )
+            if aligned_ratio < min_aligned_ratio:
+                return _scan_failure(
+                    f"continuation reject: put bar alignment {aligned_ratio:.0%} < {min_aligned_ratio:.0%}"
+                )
+            if retrace_pct > max_retrace_pct:
+                return _scan_failure(
+                    f"continuation reject: put retrace {retrace_pct:.2f}% > {max_retrace_pct:.2f}%"
+                )
+
     rsi_period = 14
     rsi = calculate_rsi(closes, period=rsi_period)
     if math.isnan(rsi):
