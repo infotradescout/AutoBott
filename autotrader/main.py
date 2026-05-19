@@ -4886,7 +4886,7 @@ def main():
                     hard_stop_reasons.append(
                         f"loss_count {truth_loss_count} >= {stop_after_losses}"
                     )
-                if hard_stop_reasons:
+                if hard_stop_reasons and bool(getattr(config, "ALLOW_AUTOMATIC_TRADING_PAUSES", False)):
                     reason = "alpaca_truth_hard_stop " + "; ".join(hard_stop_reasons)
                     set_manual_stop(True, reason=reason[:240])
                     print(f"[{ts(now_et)}] ALPACA TRUTH LOSS GUARD hit: {reason}. Flattening and pausing.")
@@ -4903,6 +4903,15 @@ def main():
                     _save_runtime_state()
                     time.sleep(config.LOOP_INTERVAL_SECONDS)
                     continue
+                if hard_stop_reasons:
+                    reason = "alpaca_truth_hard_stop_suppressed " + "; ".join(hard_stop_reasons)
+                    print(f"[{ts(now_et)}] {reason}; automatic trading pause disabled.")
+                    alerts.send(
+                        "alpaca_truth_daily_loss_guard_suppressed",
+                        f"Alpaca truth loss guard observed but did not pause trading: {reason}.",
+                        level="warning",
+                        dedupe_key=f"alpaca-truth-loss-suppressed-{now_et.date().isoformat()}",
+                    )
             except Exception as exc:  # noqa: BLE001
                 broker_truth_last_error = str(exc)[:300]
                 print(f"[{ts(now_et)}] Alpaca truth loss guard unavailable: {type(exc).__name__}: {exc!r}")
@@ -4992,7 +5001,8 @@ def main():
         vix_value = _fetch_vix_level() if config.ENABLE_VIX_GUARD else None
         active_market_context = _current_market_context(now_et, vix_value=vix_value)
         vix_blocked = False
-        if config.ENABLE_VIX_GUARD:
+        auto_pauses_allowed = bool(getattr(config, "ALLOW_AUTOMATIC_TRADING_PAUSES", False))
+        if config.ENABLE_VIX_GUARD and auto_pauses_allowed:
             if vix_value is None:
                 vix_blocked = False
                 if vix_block_notice != now_et.date().isoformat():
@@ -5000,7 +5010,7 @@ def main():
                     print(f"[{ts(now_et)}] VIX data unavailable; guard fail-open (trading not blocked).")
             else:
                 vix_blocked = vix_value < float(config.VIX_MIN) or vix_value > float(config.VIX_MAX)
-        if blocked_day:
+        if blocked_day and auto_pauses_allowed:
             if blocked_day_notice != now_et.date().isoformat():
                 blocked_day_notice = now_et.date().isoformat()
                 notice = (
@@ -5265,7 +5275,11 @@ def main():
 
             # --- Daily loss limit ---
             daily_loss_limit = float(getattr(config, "DAILY_LOSS_LIMIT_USD", 0.0) or 0.0)
-            if daily_loss_limit > 0 and daily_realized_loss_usd >= daily_loss_limit:
+            if (
+                bool(getattr(config, "ALLOW_AUTOMATIC_TRADING_PAUSES", False))
+                and daily_loss_limit > 0
+                and daily_realized_loss_usd >= daily_loss_limit
+            ):
                 _mark_skip("daily_loss_limit")
                 print(
                     f"[{ts(now_et)}] DAILY LOSS LIMIT hit: "
@@ -5285,7 +5299,11 @@ def main():
 
             # --- Weekly loss limit ---
             weekly_loss_limit = float(getattr(config, "WEEKLY_LOSS_LIMIT_USD", 0.0) or 0.0)
-            if weekly_loss_limit > 0 and weekly_realized_loss_usd >= weekly_loss_limit:
+            if (
+                bool(getattr(config, "ALLOW_AUTOMATIC_TRADING_PAUSES", False))
+                and weekly_loss_limit > 0
+                and weekly_realized_loss_usd >= weekly_loss_limit
+            ):
                 _mark_skip("weekly_loss_limit")
                 print(
                     f"[{ts(now_et)}] WEEKLY LOSS LIMIT hit: "
@@ -5304,7 +5322,10 @@ def main():
                 break
 
             # --- Consecutive loss recovery brake ---
-            if _consecutive_loss_cooldown_active(now_et):
+            if (
+                bool(getattr(config, "ALLOW_AUTOMATIC_TRADING_PAUSES", False))
+                and _consecutive_loss_cooldown_active(now_et)
+            ):
                 break
 
             if zero_dte_loss_lockout_day != now_et.date().isoformat():
@@ -5314,6 +5335,8 @@ def main():
 
             zero_dte_loss_limit = max(0, int(getattr(config, "ZERO_DTE_MAX_REALIZED_LOSSES", 0) or 0))
             if (
+                bool(getattr(config, "ALLOW_AUTOMATIC_TRADING_PAUSES", False))
+                and
                 bool(getattr(config, "ENABLE_EXPOSURE_BUCKET_GUARDS", False))
                 and zero_dte_loss_limit > 0
                 and zero_dte_realized_loss_count >= zero_dte_loss_limit
@@ -5337,7 +5360,11 @@ def main():
 
             # --- Net P&L circuit breaker ---
             intraday_net_loss_limit = abs(float(getattr(config, "INTRADAY_NET_LOSS_LIMIT_USD", 0.0) or 0.0))
-            if intraday_net_loss_limit > 0 and trade_telemetry_total_pnl_usd <= -intraday_net_loss_limit:
+            if (
+                bool(getattr(config, "ALLOW_AUTOMATIC_TRADING_PAUSES", False))
+                and intraday_net_loss_limit > 0
+                and trade_telemetry_total_pnl_usd <= -intraday_net_loss_limit
+            ):
                 _mark_skip("intraday_net_loss_limit")
                 print(
                     f"[{ts(now_et)}] INTRADAY NET LOSS LIMIT hit: "
@@ -5356,7 +5383,10 @@ def main():
                 break
 
             # --- Early-red guard ---
-            if bool(getattr(config, "EARLY_RED_GUARD_ENABLED", False)):
+            if (
+                bool(getattr(config, "ALLOW_AUTOMATIC_TRADING_PAUSES", False))
+                and bool(getattr(config, "EARLY_RED_GUARD_ENABLED", False))
+            ):
                 early_red_min_closed = max(1, int(getattr(config, "EARLY_RED_GUARD_MIN_CLOSED_TRADES", 4) or 4))
                 early_red_max_net_pnl = float(getattr(config, "EARLY_RED_GUARD_MAX_NET_PNL_USD", -0.01) or -0.01)
                 if (
