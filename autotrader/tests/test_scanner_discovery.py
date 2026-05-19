@@ -91,7 +91,7 @@ def test_growth_frequency_config_keeps_trading_through_day():
     assert config.MAX_OPTION_STRIKE_DISTANCE_PCT == 15.0
     assert config.EXECUTION_MIN_RVOL_AFTER_IGNORE == 0.50
     assert config.ENABLE_ENTRY_CONFIRMATION is True
-    assert config.ENTRY_CONFIRM_BYPASS_MIN_SIGNAL_SCORE == 999.0
+    assert config.ENTRY_CONFIRM_BYPASS_MIN_SIGNAL_SCORE == 12.0
     assert config.ENABLE_FRESH_TAPE_DIRECTION_GUARD is True
     assert config.FRESH_TAPE_FAIL_CLOSED is True
     assert config.ENABLE_SIGNAL_PATTERN_MEMORY is False
