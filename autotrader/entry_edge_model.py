@@ -202,6 +202,21 @@ def _load_model(path: Path | None = None) -> dict[str, Any]:
         return {}
 
 
+def _elite_live_continuation(signal: dict) -> tuple[bool, str]:
+    direction_score = abs(_safe_float(signal.get("direction_score")))
+    rvol = _safe_float(signal.get("rvol"))
+    roc = abs(_safe_float(signal.get("roc")))
+    min_direction = float(getattr(config, "REPLAY_EDGE_MODEL_ELITE_DIRECTION_MIN", 0.90) or 0.90)
+    min_rvol = float(getattr(config, "REPLAY_EDGE_MODEL_ELITE_RVOL_MIN", 1.50) or 1.50)
+    min_roc = float(getattr(config, "REPLAY_EDGE_MODEL_ELITE_ABS_ROC_MIN", 0.20) or 0.20)
+    ok = direction_score >= min_direction and rvol >= min_rvol and roc >= min_roc
+    detail = (
+        f"elite fallback direction={direction_score:.2f}/{min_direction:.2f} "
+        f"rvol={rvol:.2f}/{min_rvol:.2f} abs_roc={roc:.2f}/{min_roc:.2f}"
+    )
+    return ok, detail
+
+
 def evaluate_signal(
     *,
     signal: dict,
@@ -213,11 +228,16 @@ def evaluate_signal(
     if not bool(getattr(config, "ENABLE_REPLAY_EDGE_MODEL_GATE", False)):
         return True, ""
     fail_open = bool(getattr(config, "REPLAY_EDGE_MODEL_FAIL_OPEN", False))
+    allow_elite_immature = bool(getattr(config, "REPLAY_EDGE_MODEL_IMMATURE_ALLOW_ELITE", True))
     payload = model if isinstance(model, dict) else _load_model()
     groups = payload.get("groups", {}) if isinstance(payload, dict) else {}
     if not isinstance(groups, dict) or not groups:
         if fail_open:
             return True, "replay edge model unavailable; fail-open"
+        if allow_elite_immature:
+            elite_ok, elite_reason = _elite_live_continuation(signal)
+            if elite_ok:
+                return True, f"replay edge model unavailable; allowed by {elite_reason}"
         return False, "replay edge rejected: no trained edge model available"
     min_samples = max(1, int(getattr(config, "REPLAY_EDGE_MODEL_MIN_SAMPLES", 20) or 20))
     min_win_rate = float(getattr(config, "REPLAY_EDGE_MODEL_MIN_WIN_RATE", 0.56) or 0.56)
@@ -241,4 +261,8 @@ def evaluate_signal(
         )
     if fail_open:
         return True, "replay edge model has no mature bucket; fail-open"
+    if allow_elite_immature:
+        elite_ok, elite_reason = _elite_live_continuation(signal)
+        if elite_ok:
+            return True, f"replay edge model immature; allowed by {elite_reason}"
     return False, "replay edge rejected: no mature historical bucket for this setup"
