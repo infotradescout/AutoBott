@@ -64,13 +64,21 @@ def candidate_edge_score(signal: dict, market_context: dict) -> float:
     direction_score = abs(_safe_float(signal.get("direction_score")))
     rvol = min(5.0, max(0.0, _safe_float(signal.get("rvol"))))
     roc = min(3.0, abs(_safe_float(signal.get("roc"))))
+    volatility_score = min(8.0, max(0.0, _safe_float(signal.get("volatility_score"))))
+    rvol_penalty = 6.0 if rvol < 0.75 else 2.5 if rvol < 1.0 else 0.0
+    direction_penalty = 0.0 if direction_score >= 0.65 else 5.0
+    chop_penalty = 2.0 if roc < 0.12 else 0.0
     return round(
         signal_score
-        + (direction_score * 2.0)
-        + (rvol * 0.35)
-        + (roc * 0.25)
+        + (direction_score * 4.0)
+        + (rvol * 0.90)
+        + (roc * 0.60)
+        + (volatility_score * 0.35)
         + _alignment_bonus(signal, market_context)
-        + _profile_bonus(signal, market_context),
+        + _profile_bonus(signal, market_context)
+        - rvol_penalty
+        - direction_penalty
+        - chop_penalty,
         4,
     )
 

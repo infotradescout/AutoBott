@@ -5,21 +5,21 @@ from __future__ import annotations
 PROFILE_PRESETS: dict[str, dict[str, float]] = {
     # Highest selectivity + tightest stop.
     "conservative": {
-        "entry_min_signal_score": 7.2,
+        "entry_min_signal_score": 9.2,
         "stop_loss_usd": 120.0,
-        "entry_max_quote_spread_pct": 10.0,
+        "entry_max_quote_spread_pct": 4.0,
     },
     # Baseline behavior.
     "balanced": {
-        "entry_min_signal_score": 6.0,
+        "entry_min_signal_score": 8.6,
         "stop_loss_usd": 150.0,
-        "entry_max_quote_spread_pct": 12.0,
+        "entry_max_quote_spread_pct": 6.0,
     },
     # Looser selectivity + wider stop.
     "aggressive": {
-        "entry_min_signal_score": 5.0,
+        "entry_min_signal_score": 8.0,
         "stop_loss_usd": 180.0,
-        "entry_max_quote_spread_pct": 15.0,
+        "entry_max_quote_spread_pct": 8.0,
     },
 }
 
