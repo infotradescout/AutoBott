@@ -101,13 +101,13 @@ def test_growth_frequency_config_keeps_trading_through_day():
     assert config.FRESH_TAPE_FAIL_CLOSED is True
     assert config.ENABLE_SIGNAL_PATTERN_MEMORY is False
     assert config.ENABLE_PRE_EXECUTION_HISTORY_CHECK is False
-    assert config.ENABLE_EXECUTION_EVIDENCE_GATE is True
+    assert config.ENABLE_EXECUTION_EVIDENCE_GATE is False
     assert config.EVIDENCE_GATE_MIN_SAMPLES == 3
     assert config.EVIDENCE_GATE_MIN_LOSSES == 2
     assert config.ENABLE_MARKET_CONTEXT_WORKER is True
     assert config.MARKET_CONTEXT_SYMBOLS == ("SPY", "QQQ", "IWM")
     assert config.MARKET_CONTEXT_ENFORCE_BLOCKED_PROFILES is True
-    assert config.MARKET_CONTEXT_BLOCKED_PROFILE_MODE == "hard"
+    assert config.MARKET_CONTEXT_BLOCKED_PROFILE_MODE == "off"
     assert config.ENABLE_CANDIDATE_QUEUE is True
     assert config.ADAPTIVE_BLOCK_LOSING_TICKERS is False
     assert config.ALPACA_TRUTH_ADAPT_AFTER_LOSS_USD == 0.0
