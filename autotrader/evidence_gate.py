@@ -10,6 +10,11 @@ from typing import Iterable
 
 import config
 
+try:
+    import entry_edge_model
+except ImportError:  # pragma: no cover
+    from autotrader import entry_edge_model  # type: ignore
+
 
 @dataclass(frozen=True)
 class EvidenceDecision:
@@ -253,6 +258,14 @@ def evaluate_signal(
 ) -> EvidenceDecision:
     if not bool(getattr(config, "ENABLE_EXECUTION_EVIDENCE_GATE", False)):
         return EvidenceDecision(True, "")
+    replay_allowed, replay_reason = entry_edge_model.evaluate_signal(
+        signal=signal,
+        ticker=ticker,
+        direction=direction,
+        now_et=now_et,
+    )
+    if not replay_allowed:
+        return EvidenceDecision(False, replay_reason)
     history = rows if rows is not None else load_recent_trade_rows()
     if not history:
         return EvidenceDecision(True, "")

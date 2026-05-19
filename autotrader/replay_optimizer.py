@@ -20,6 +20,7 @@ from pathlib import Path
 from typing import Any, Iterator
 
 import config
+import entry_edge_model
 from data import AlpacaDataClient
 from env_config import load_runtime_env
 from historical_replay import ReplayConfig, run_replay
@@ -695,6 +696,10 @@ def run_optimizer(args: argparse.Namespace) -> dict[str, Any]:
                 _append_csv(results_csv, row)
 
         all_rows = _read_rows(results_csv)
+        edge_model = entry_edge_model.build_model_from_optimizer_rows(
+            optimizer_rows=all_rows,
+            output_path=Path(getattr(config, "ENTRY_EDGE_MODEL_PATH", Path(config.DATA_DIR) / "entry_edge_model.json")),
+        )
         board = _leaderboard(
             all_rows,
             min_trades=int(args.min_trades),
@@ -714,6 +719,8 @@ def run_optimizer(args: argparse.Namespace) -> dict[str, Any]:
                     "results_csv": str(results_csv),
                     "ratio_history_csv": str(ratio_history_csv),
                     "best_json": str(best_json),
+                    "edge_model_path": str(getattr(config, "ENTRY_EDGE_MODEL_PATH", "")),
+                    "edge_model_rows_used": int(edge_model.get("rows_used", 0) or 0),
                     "best": board[0] if board else None,
                 },
                 indent=2,
@@ -723,6 +730,10 @@ def run_optimizer(args: argparse.Namespace) -> dict[str, Any]:
             time.sleep(max(1, int(args.sleep_seconds)))
 
     all_rows = _read_rows(results_csv)
+    edge_model = entry_edge_model.build_model_from_optimizer_rows(
+        optimizer_rows=all_rows,
+        output_path=Path(getattr(config, "ENTRY_EDGE_MODEL_PATH", Path(config.DATA_DIR) / "entry_edge_model.json")),
+    )
     board = _leaderboard(
         all_rows,
         min_trades=int(args.min_trades),
@@ -731,7 +742,13 @@ def run_optimizer(args: argparse.Namespace) -> dict[str, Any]:
         min_consistency_pct=float(args.min_consistency_pct),
         min_win_loss_ratio=float(args.min_win_loss_ratio),
     )
-    return {"results_csv": str(results_csv), "best_json": str(best_json), "leaderboard": board[:5]}
+    return {
+        "results_csv": str(results_csv),
+        "best_json": str(best_json),
+        "edge_model_path": str(getattr(config, "ENTRY_EDGE_MODEL_PATH", "")),
+        "edge_model_rows_used": int(edge_model.get("rows_used", 0) or 0),
+        "leaderboard": board[:5],
+    }
 
 
 def _parse_args() -> argparse.Namespace:
