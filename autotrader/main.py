@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import csv
+import json
 import time
 from datetime import date, datetime, timezone, timedelta
 import re
@@ -52,6 +53,66 @@ def ts(now_et: datetime | None = None) -> str:
 def ts_ct(now_ct: datetime | None = None) -> str:
     now_ct = now_ct or datetime.now(pytz.timezone(config.CENTRAL_TZ))
     return now_ct.strftime("%Y-%m-%d %H:%M:%S %Z")
+
+
+_REPLAY_OVERRIDE_KEYS = {
+    "MIN_SIGNAL_SCORE",
+    "DIRECTION_CONVICTION_MIN",
+    "DIRECTION_MIN_ALIGNED_VOTES",
+    "RVOL_MIN",
+    "OPENING_RVOL_MIN",
+    "RVOL_RELAXED_MIN",
+    "EXECUTION_MIN_RVOL_AFTER_IGNORE",
+    "ATR_PCT_MIN",
+    "MOVEMENT_FORCE_MIN_PCT",
+    "FAST_START_MIN_DIRECTION_SCORE",
+    "FAST_START_MIN_RVOL",
+    "FAST_START_MIN_ABS_ROC_PCT",
+    "FAST_START_MIN_VWAP_DISTANCE_PCT",
+    "OPENING_FAST_START_MIN_DIRECTION_SCORE",
+    "OPENING_FAST_START_MIN_RVOL",
+    "OPENING_FAST_START_MIN_ABS_ROC_PCT",
+    "OPENING_FAST_START_MIN_VWAP_DISTANCE_PCT",
+}
+_REPLAY_OVERRIDE_LAST_MTIME = 0.0
+_REPLAY_OVERRIDE_LAST_VALUES: dict[str, float] = {}
+
+
+def _apply_replay_promoted_overrides_if_changed() -> None:
+    global _REPLAY_OVERRIDE_LAST_MTIME, _REPLAY_OVERRIDE_LAST_VALUES
+    path = getattr(config, "REPLAY_PROMOTED_OVERRIDES_PATH", None)
+    if path is None:
+        return
+    try:
+        if not path.exists():
+            return
+        mtime = float(path.stat().st_mtime)
+        if mtime <= _REPLAY_OVERRIDE_LAST_MTIME:
+            return
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except Exception as exc:  # noqa: BLE001
+        print(f"[{ts()}] replay promoted overrides unavailable: {type(exc).__name__}: {exc}")
+        return
+    raw_overrides = payload.get("overrides", {}) if isinstance(payload, dict) else {}
+    if not isinstance(raw_overrides, dict):
+        return
+    applied: dict[str, float] = {}
+    for key, value in raw_overrides.items():
+        normalized = str(key or "").strip().upper()
+        if normalized not in _REPLAY_OVERRIDE_KEYS:
+            continue
+        try:
+            numeric = float(value)
+        except (TypeError, ValueError):
+            continue
+        if not math.isfinite(numeric):
+            continue
+        setattr(config, normalized, numeric)
+        applied[normalized] = numeric
+    _REPLAY_OVERRIDE_LAST_MTIME = mtime
+    if applied != _REPLAY_OVERRIDE_LAST_VALUES:
+        _REPLAY_OVERRIDE_LAST_VALUES = applied
+        print(f"[{ts()}] Applied replay-promoted live overrides: {applied}")
 
 
 def position_qty_as_int(qty_value) -> int:
@@ -4482,6 +4543,7 @@ def main():
         now_ct = datetime.now(pytz.timezone(config.CENTRAL_TZ))
         last_trader_heartbeat_et = datetime.now(tz).isoformat()
         control_state = load_trading_control()
+        _apply_replay_promoted_overrides_if_changed()
         strategy_profile = normalize_profile_name(str(control_state.get("strategy_profile", "balanced") or "balanced"))
         dry_run_enabled = bool(control_state.get("dry_run", False)) or is_enabled("FEATURE_DRY_RUN_MODE", False)
         manual_stop = bool(control_state.get("manual_stop", False))

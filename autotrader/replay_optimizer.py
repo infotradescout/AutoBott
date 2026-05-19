@@ -223,6 +223,7 @@ def _candidate_grid() -> list[OptimizerCandidate]:
     base_direction = float(getattr(config, "DIRECTION_CONVICTION_MIN", 0.65) or 0.65)
     base_rvol = float(getattr(config, "RVOL_MIN", 0.9) or 0.9)
     base_atr = float(getattr(config, "ATR_PCT_MIN", 1.0) or 1.0)
+    base_move = float(getattr(config, "MOVEMENT_FORCE_MIN_PCT", 0.08) or 0.08)
     return [
         OptimizerCandidate(
             name="baseline",
@@ -246,7 +247,10 @@ def _candidate_grid() -> list[OptimizerCandidate]:
         ),
         OptimizerCandidate(
             name="direction_strict",
-            overrides={"DIRECTION_CONVICTION_MIN": round(min(0.95, base_direction + 0.10), 2)},
+            overrides={
+                "DIRECTION_CONVICTION_MIN": round(min(0.95, base_direction + 0.10), 2),
+                "DIRECTION_MIN_ALIGNED_VOTES": 5,
+            },
             horizon_minutes=45,
             take_profit_pct=0.35,
             stop_loss_pct=0.20,
@@ -259,6 +263,8 @@ def _candidate_grid() -> list[OptimizerCandidate]:
             overrides={
                 "MIN_SIGNAL_SCORE": round(base_score + 0.55, 2),
                 "DIRECTION_CONVICTION_MIN": round(min(0.95, base_direction + 0.10), 2),
+                "DIRECTION_MIN_ALIGNED_VOTES": 5,
+                "MOVEMENT_FORCE_MIN_PCT": round(max(0.10, base_move + 0.04), 2),
             },
             horizon_minutes=60,
             take_profit_pct=0.45,
@@ -293,6 +299,45 @@ def _candidate_grid() -> list[OptimizerCandidate]:
             scan_every_minutes=5,
             max_signals_per_scan=2,
             min_daily_bars=5,
+        ),
+        OptimizerCandidate(
+            name="continuation_confirmed",
+            overrides={
+                "MIN_SIGNAL_SCORE": round(max(8.4, base_score), 2),
+                "DIRECTION_CONVICTION_MIN": round(max(0.80, base_direction), 2),
+                "DIRECTION_MIN_ALIGNED_VOTES": 5,
+                "RVOL_MIN": round(max(0.85, base_rvol), 2),
+                "MOVEMENT_FORCE_MIN_PCT": round(max(0.08, base_move), 2),
+                "FAST_START_MIN_DIRECTION_SCORE": 0.70,
+                "FAST_START_MIN_RVOL": 1.00,
+                "FAST_START_MIN_ABS_ROC_PCT": 0.16,
+                "FAST_START_MIN_VWAP_DISTANCE_PCT": 0.08,
+            },
+            horizon_minutes=30,
+            take_profit_pct=0.28,
+            stop_loss_pct=0.18,
+            scan_every_minutes=5,
+            max_signals_per_scan=2,
+            min_daily_bars=8,
+        ),
+        OptimizerCandidate(
+            name="opening_continuation",
+            overrides={
+                "MIN_SIGNAL_SCORE": round(max(8.8, base_score), 2),
+                "DIRECTION_CONVICTION_MIN": 0.85,
+                "DIRECTION_MIN_ALIGNED_VOTES": 5,
+                "OPENING_RVOL_MIN": 1.35,
+                "OPENING_FAST_START_MIN_DIRECTION_SCORE": 0.75,
+                "OPENING_FAST_START_MIN_RVOL": 1.25,
+                "OPENING_FAST_START_MIN_ABS_ROC_PCT": 0.20,
+                "OPENING_FAST_START_MIN_VWAP_DISTANCE_PCT": 0.10,
+            },
+            horizon_minutes=25,
+            take_profit_pct=0.25,
+            stop_loss_pct=0.16,
+            scan_every_minutes=5,
+            max_signals_per_scan=2,
+            min_daily_bars=8,
         ),
     ]
 

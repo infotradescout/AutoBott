@@ -499,6 +499,7 @@ SCAN_LOG_CSV_PATH        = _DATA_DIR / "scan_log.csv"
 OBSERVATION_LOG_CSV_PATH = _DATA_DIR / "observation_log.csv"
 MARKET_CONTEXT_JSON_PATH = _DATA_DIR / "market_context.json"
 CANDIDATE_QUEUE_JSON_PATH = _DATA_DIR / "candidate_queue.json"
+REPLAY_PROMOTED_OVERRIDES_PATH = _DATA_DIR / "replay_promoted_overrides.json"
 TRADING_CONTROL_PATH     = _DATA_DIR / "trading_control.json"
 WATCHLIST_CONTROL_PATH   = _DATA_DIR / "watchlist_control.json"
 

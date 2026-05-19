@@ -436,8 +436,21 @@ def _historical_learning_workers_file() -> Path | None:
 _REPLAY_AUTO_PROMOTE_OVERRIDE_KEYS = (
     "MIN_SIGNAL_SCORE",
     "DIRECTION_CONVICTION_MIN",
+    "DIRECTION_MIN_ALIGNED_VOTES",
     "RVOL_MIN",
+    "OPENING_RVOL_MIN",
+    "RVOL_RELAXED_MIN",
+    "EXECUTION_MIN_RVOL_AFTER_IGNORE",
     "ATR_PCT_MIN",
+    "MOVEMENT_FORCE_MIN_PCT",
+    "FAST_START_MIN_DIRECTION_SCORE",
+    "FAST_START_MIN_RVOL",
+    "FAST_START_MIN_ABS_ROC_PCT",
+    "FAST_START_MIN_VWAP_DISTANCE_PCT",
+    "OPENING_FAST_START_MIN_DIRECTION_SCORE",
+    "OPENING_FAST_START_MIN_RVOL",
+    "OPENING_FAST_START_MIN_ABS_ROC_PCT",
+    "OPENING_FAST_START_MIN_VWAP_DISTANCE_PCT",
 )
 _REPLAY_AUTO_PROMOTE_BASELINE: dict[str, float] = {
     key: float(getattr(config, key, 0.0) or 0.0)
@@ -508,13 +521,28 @@ def _apply_replay_auto_promote_overrides(overrides: dict[str, Any]) -> dict[str,
             continue
         setattr(config, key, value)
         applied[key] = float(value)
+    if applied:
+        _write_replay_promoted_overrides(applied)
     return applied
 
 
 def _apply_replay_auto_promote_baseline() -> dict[str, float]:
     for key, value in _REPLAY_AUTO_PROMOTE_BASELINE.items():
         setattr(config, key, float(value))
+    _write_replay_promoted_overrides({})
     return dict(_REPLAY_AUTO_PROMOTE_BASELINE)
+
+
+def _write_replay_promoted_overrides(overrides: dict[str, float]) -> None:
+    path = Path(getattr(config, "REPLAY_PROMOTED_OVERRIDES_PATH", Path(config.DATA_DIR) / "replay_promoted_overrides.json"))
+    path.parent.mkdir(parents=True, exist_ok=True)
+    payload = {
+        "updated_at_et": _now_et_iso(),
+        "source": "replay_auto_promote",
+        "allowed_keys": list(_REPLAY_AUTO_PROMOTE_OVERRIDE_KEYS),
+        "overrides": dict(overrides),
+    }
+    path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
 
 
 def _replay_auto_promote_signature(candidate: str, overrides: dict[str, Any]) -> str:
