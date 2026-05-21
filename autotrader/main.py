@@ -8,6 +8,7 @@ import time
 from datetime import date, datetime, timezone, timedelta
 import re
 import math
+from pathlib import Path
 
 import pytz
 import yfinance as yf
@@ -73,25 +74,27 @@ _REPLAY_OVERRIDE_KEYS = {
     "OPENING_FAST_START_MIN_RVOL",
     "OPENING_FAST_START_MIN_ABS_ROC_PCT",
     "OPENING_FAST_START_MIN_VWAP_DISTANCE_PCT",
+    "STOP_LOSS_PCT",
+    "IMMEDIATE_TAKE_PROFIT_PCT",
+    "TRAIL_PULLBACK_PCT",
 }
-_REPLAY_OVERRIDE_LAST_MTIME = 0.0
-_REPLAY_OVERRIDE_LAST_VALUES: dict[str, float] = {}
+_RUNTIME_OVERRIDE_MTIMES: dict[str, float] = {}
+_RUNTIME_OVERRIDE_VALUES: dict[str, dict[str, float]] = {}
 
 
-def _apply_replay_promoted_overrides_if_changed() -> None:
-    global _REPLAY_OVERRIDE_LAST_MTIME, _REPLAY_OVERRIDE_LAST_VALUES
-    path = getattr(config, "REPLAY_PROMOTED_OVERRIDES_PATH", None)
+def _apply_runtime_overrides_from_path(path: Path | None, label: str) -> None:
     if path is None:
         return
+    key = f"{label}:{str(path)}"
     try:
         if not path.exists():
             return
         mtime = float(path.stat().st_mtime)
-        if mtime <= _REPLAY_OVERRIDE_LAST_MTIME:
+        if mtime <= float(_RUNTIME_OVERRIDE_MTIMES.get(key, 0.0) or 0.0):
             return
         payload = json.loads(path.read_text(encoding="utf-8"))
     except Exception as exc:  # noqa: BLE001
-        print(f"[{ts()}] replay promoted overrides unavailable: {type(exc).__name__}: {exc}")
+        print(f"[{ts()}] {label} overrides unavailable: {type(exc).__name__}: {exc}")
         return
     raw_overrides = payload.get("overrides", {}) if isinstance(payload, dict) else {}
     if not isinstance(raw_overrides, dict):
@@ -109,10 +112,17 @@ def _apply_replay_promoted_overrides_if_changed() -> None:
             continue
         setattr(config, normalized, numeric)
         applied[normalized] = numeric
-    _REPLAY_OVERRIDE_LAST_MTIME = mtime
-    if applied != _REPLAY_OVERRIDE_LAST_VALUES:
-        _REPLAY_OVERRIDE_LAST_VALUES = applied
-        print(f"[{ts()}] Applied replay-promoted live overrides: {applied}")
+    _RUNTIME_OVERRIDE_MTIMES[key] = mtime
+    if applied != _RUNTIME_OVERRIDE_VALUES.get(key, {}):
+        _RUNTIME_OVERRIDE_VALUES[key] = applied
+        print(f"[{ts()}] Applied {label} overrides: {applied}")
+
+
+def _apply_replay_promoted_overrides_if_changed() -> None:
+    replay_path = getattr(config, "REPLAY_PROMOTED_OVERRIDES_PATH", None)
+    tuner_path = getattr(config, "SYNTHETIC_TUNER_OVERRIDES_PATH", None)
+    _apply_runtime_overrides_from_path(replay_path, "replay-promote")
+    _apply_runtime_overrides_from_path(tuner_path, "synthetic-tuner")
 
 
 def position_qty_as_int(qty_value) -> int:
