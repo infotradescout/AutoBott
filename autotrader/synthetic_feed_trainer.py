@@ -144,6 +144,34 @@ def _simulate_outcome(
     }
 
 
+def _fallback_signal_from_bars(symbol: str, bars: pd.DataFrame, now_et: datetime) -> dict[str, Any] | None:
+    row_idx = bars.index[bars["timestamp"] == now_et]
+    if len(row_idx) == 0:
+        return None
+    idx = int(row_idx[0])
+    if idx < 3:
+        return None
+    recent = bars.iloc[max(0, idx - 3) : idx + 1]["close"].astype(float)
+    if len(recent) < 2:
+        return None
+    start = float(recent.iloc[0])
+    end = float(recent.iloc[-1])
+    if start <= 0:
+        return None
+    roc = ((end - start) / start) * 100.0
+    direction = "call" if roc >= 0 else "put"
+    direction_score = min(1.0, max(0.0, abs(roc) / 0.25))
+    return {
+        "symbol": symbol,
+        "direction": direction,
+        "signal_score": 5.0 + (direction_score * 5.0),
+        "direction_score": direction_score if direction == "call" else -direction_score,
+        "rvol": 1.0,
+        "roc": roc,
+        "reason": "synthetic fallback direction signal",
+    }
+
+
 def _write_rows(path: Path, rows: list[dict[str, Any]]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     write_header = not path.exists()
@@ -208,7 +236,16 @@ def _one_pass(cfg: SyntheticConfig) -> tuple[list[dict[str, Any]], dict[str, pd.
         if idx % max(1, cfg.scan_every_bars) != 0:
             continue
         signals = scanner.run_scan(cfg.symbols, now_et=now_et)
-        for signal in signals:
+        selected_signals = list(signals)
+        if not selected_signals:
+            for symbol in cfg.symbols:
+                bars = bars_by_symbol.get(symbol)
+                if bars is None or bars.empty:
+                    continue
+                fallback = _fallback_signal_from_bars(symbol, bars, now_et)
+                if fallback:
+                    selected_signals.append(fallback)
+        for signal in selected_signals:
             symbol = str(signal.get("symbol", "") or "").upper()
             direction = str(signal.get("direction", "") or "").lower()
             if direction not in {"call", "put"}:
