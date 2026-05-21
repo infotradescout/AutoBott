@@ -11,7 +11,7 @@ QUICK_LINKS = [
     ("Outcomes 15m", "/api/decision-outcomes?horizon=15"),
     ("Outcomes 30m", "/api/decision-outcomes?horizon=30"),
     ("Outcomes 60m", "/api/decision-outcomes?horizon=60"),
-    ("Learning", "/api/decision-learning"),
+    ("Learning", "/decision-learning"),
     ("Health", "/healthz"),
 ]
 
@@ -30,7 +30,7 @@ BAR = STYLE + """
   <a href="/api/decision-outcomes?horizon=15" target="_blank" rel="noopener">Outcomes 15m</a>
   <a href="/api/decision-outcomes?horizon=30" target="_blank" rel="noopener">30m</a>
   <a href="/api/decision-outcomes?horizon=60" target="_blank" rel="noopener">60m</a>
-  <a href="/api/decision-learning" target="_blank" rel="noopener">Learning</a>
+  <a href="/decision-learning" target="_blank" rel="noopener">Learning</a>
   <a href="/healthz" target="_blank" rel="noopener">Health</a>
   <a href="/quick-links" target="_blank" rel="noopener">All Links</a>
 </div>
