@@ -5726,6 +5726,17 @@ def main():
             reentries_used = int(ticker_reentries_used.get(ticker, 0))
             reentry_armed = bool(ticker_reentry_armed.get(ticker, False))
             expected_direction = str(ticker_reentry_expected_direction.get(ticker, "") or "").lower()
+            if reentry_armed and expected_direction in ("call", "put") and direction != expected_direction:
+                prior_direction = str(direction or "").lower()
+                direction = expected_direction
+                signal["direction"] = expected_direction
+                signal["direction_flip_forced"] = True
+                signal["direction_flip_from"] = prior_direction
+                signal["direction_flip_to"] = expected_direction
+                print(
+                    f"[{ts(now_et)}] {ticker}: forced loss-direction flip "
+                    f"{prior_direction.upper()} -> {expected_direction.upper()}."
+                )
             alpaca_buy_order_cap = max(
                 0,
                 int(getattr(config, "MAX_ALPACA_BUY_ORDERS_PER_TICKER_PER_DAY", 1) or 0),
