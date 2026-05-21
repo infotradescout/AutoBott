@@ -15,6 +15,7 @@ from dataclasses import dataclass
 from datetime import datetime, time as dtime, timedelta
 from pathlib import Path
 from typing import Any
+import json
 
 import pandas as pd
 import pytz
@@ -41,6 +42,7 @@ class SyntheticConfig:
     vol_pct_per_bar: float
     output: Path
     summary: Path
+    status: Path
     sleep_seconds: float
     loop_forever: bool
 
@@ -214,6 +216,70 @@ def _summarize(path: Path, rows: list[dict[str, Any]]) -> None:
     path.write_text(pd.Series(payload).to_json(indent=2), encoding="utf-8")
 
 
+def _load_previous_totals(path: Path) -> tuple[int, int, int, int]:
+    if not path.exists():
+        return 0, 0, 0, 0
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        return (
+            int(payload.get("total_rows", 0) or 0),
+            int(payload.get("total_evaluated", 0) or 0),
+            int(payload.get("total_wins", 0) or 0),
+            int(payload.get("total_losses", 0) or 0),
+        )
+    except Exception:
+        return 0, 0, 0, 0
+
+
+def _write_status(
+    *,
+    path: Path,
+    output_path: Path,
+    summary_path: Path,
+    pass_rows: list[dict[str, Any]],
+    total_rows: int,
+    total_evaluated: int,
+    total_wins: int,
+    total_losses: int,
+) -> None:
+    pass_evaluated = [r for r in pass_rows if bool(r.get("evaluated"))]
+    pass_wins = [r for r in pass_evaluated if str(r.get("verdict", "")).lower() == "win"]
+    pass_losses = [r for r in pass_evaluated if str(r.get("verdict", "")).lower() == "loss"]
+    recent = pass_rows[-20:]
+    payload = {
+        "running": True,
+        "updated_at_et": datetime.now(EASTERN).isoformat(),
+        "output_csv": str(output_path),
+        "summary_json": str(summary_path),
+        "pass_rows": len(pass_rows),
+        "pass_evaluated": len(pass_evaluated),
+        "pass_wins": len(pass_wins),
+        "pass_losses": len(pass_losses),
+        "pass_win_rate_pct": round((len(pass_wins) / max(1, len(pass_evaluated))) * 100.0, 2),
+        "total_rows": total_rows,
+        "total_evaluated": total_evaluated,
+        "total_wins": total_wins,
+        "total_losses": total_losses,
+        "total_win_rate_pct": round((total_wins / max(1, total_evaluated)) * 100.0, 2),
+        "recent_trades": [
+            {
+                "timestamp": str(item.get("timestamp", "") or ""),
+                "symbol": str(item.get("symbol", "") or ""),
+                "direction": str(item.get("direction", "") or ""),
+                "verdict": str(item.get("verdict", "") or ""),
+                "directional_move_pct": _safe_float(item.get("directional_move_pct")),
+                "signal_score": _safe_float(item.get("signal_score")),
+                "direction_score": _safe_float(item.get("direction_score")),
+                "rvol": _safe_float(item.get("rvol")),
+                "roc": _safe_float(item.get("roc")),
+            }
+            for item in recent
+        ],
+    }
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+
+
 def _one_pass(cfg: SyntheticConfig) -> tuple[list[dict[str, Any]], dict[str, pd.DataFrame]]:
     bars_by_symbol = {symbol: _generate_symbol_bars(symbol, cfg) for symbol in cfg.symbols}
     daily_bars = {}
@@ -286,11 +352,29 @@ def _one_pass(cfg: SyntheticConfig) -> tuple[list[dict[str, Any]], dict[str, pd.
 
 
 def run(cfg: SyntheticConfig) -> None:
+    total_rows, total_evaluated, total_wins, total_losses = _load_previous_totals(cfg.status)
     while True:
         rows, _ = _one_pass(cfg)
         if rows:
             _write_rows(cfg.output, rows)
             _summarize(cfg.summary, rows)
+            evaluated = [r for r in rows if bool(r.get("evaluated"))]
+            wins = [r for r in evaluated if str(r.get("verdict", "")).lower() == "win"]
+            losses = [r for r in evaluated if str(r.get("verdict", "")).lower() == "loss"]
+            total_rows += len(rows)
+            total_evaluated += len(evaluated)
+            total_wins += len(wins)
+            total_losses += len(losses)
+            _write_status(
+                path=cfg.status,
+                output_path=cfg.output,
+                summary_path=cfg.summary,
+                pass_rows=rows,
+                total_rows=total_rows,
+                total_evaluated=total_evaluated,
+                total_wins=total_wins,
+                total_losses=total_losses,
+            )
             print(
                 f"[synthetic_feed] wrote {len(rows)} row(s) to {cfg.output} "
                 f"(summary: {cfg.summary})"
@@ -317,6 +401,7 @@ def _parse_args() -> SyntheticConfig:
     parser.add_argument("--vol-pct-per-bar", type=float, default=0.22)
     parser.add_argument("--output", default=str(Path(config.DATA_DIR) / "synthetic_trades.csv"))
     parser.add_argument("--summary", default=str(Path(config.DATA_DIR) / "synthetic_trades_summary.json"))
+    parser.add_argument("--status", default=str(Path(config.DATA_DIR) / "synthetic_trainer_status.json"))
     parser.add_argument("--sleep-seconds", type=float, default=15.0)
     parser.add_argument("--loop-forever", action=argparse.BooleanOptionalAction, default=True)
     args = parser.parse_args()
@@ -335,6 +420,7 @@ def _parse_args() -> SyntheticConfig:
         vol_pct_per_bar=max(0.01, float(args.vol_pct_per_bar)),
         output=Path(args.output),
         summary=Path(args.summary),
+        status=Path(args.status),
         sleep_seconds=max(1.0, float(args.sleep_seconds)),
         loop_forever=bool(args.loop_forever),
     )
