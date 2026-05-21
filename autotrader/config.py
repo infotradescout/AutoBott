@@ -53,7 +53,10 @@ def _resolve_data_dir() -> Path:
     return cwd
 
 
-_DEFAULT_DATA_DIR = Path(__file__).resolve().parent
+if os.name == "nt":
+    _DEFAULT_DATA_DIR = Path.home() / "AutoBottData"
+else:
+    _DEFAULT_DATA_DIR = Path(__file__).resolve().parent
 _DATA_DIR = _resolve_data_dir()
 DATA_DIR = _DATA_DIR
 
