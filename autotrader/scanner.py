@@ -631,6 +631,8 @@ def _scan_ticker_details(
     )
     if math.isnan(rvol):
         return _scan_failure("rvol unavailable")
+    if rvol <= 0 and bool(getattr(config, "ALLOW_RVOL_ZERO_FAIL_OPEN", True)):
+        rvol = max(float(getattr(config, "RVOL_MIN", 0.05) or 0.05), 0.05)
     if not is_at_or_after(now_et, config.RVOL_IGNORE_AFTER):
         effective_rvol_min = float(config.CATALYST_RELAXED_RVOL_MIN) if _CATALYST_MODE_ACTIVE else float(config.RVOL_MIN)
         if opening_relax:
@@ -713,7 +715,7 @@ def _scan_ticker_details(
         for vote in vote_values
         if vote != 0.0 and ((direction == "call" and vote > 0.0) or (direction == "put" and vote < 0.0))
     )
-    min_aligned_votes = max(2, int(getattr(config, "DIRECTION_MIN_ALIGNED_VOTES", 3) or 3))
+    min_aligned_votes = max(1, int(getattr(config, "DIRECTION_MIN_ALIGNED_VOTES", 2) or 2))
     if aligned_votes < min_aligned_votes:
         return _scan_failure(
             f"direction vote alignment weak ({aligned_votes}/{len(vote_values)}<{min_aligned_votes})"
@@ -766,32 +768,33 @@ def _scan_ticker_details(
             ema_aligned = ema_bear
             ema_note = "EMA bearish" if ema_bear else "EMA not yet crossed (scored)"
 
-    continuation_min_roc = max(
-        float(getattr(config, "MOVEMENT_FORCE_MIN_PCT", 0.08) or 0.08),
-        abs(float(getattr(config, "ROC_BULL_MIN", 0.05) or 0.05)),
-    )
-    if direction == "call":
-        if vwap_vote <= 0 or roc_vote <= 0 or roc_fast_vote <= 0:
-            return _scan_failure(
-                "continuation reject: call requires VWAP, ROC, and fast ROC pointing up"
-            )
-        if roc <= continuation_min_roc:
-            return _scan_failure(
-                f"continuation reject: call ROC {roc:+.2f}% <= {continuation_min_roc:.2f}%"
-            )
-        if not ema_aligned:
-            return _scan_failure("continuation reject: call EMA not aligned")
-    else:
-        if vwap_vote >= 0 or roc_vote >= 0 or roc_fast_vote >= 0:
-            return _scan_failure(
-                "continuation reject: put requires VWAP, ROC, and fast ROC pointing down"
-            )
-        if roc >= -continuation_min_roc:
-            return _scan_failure(
-                f"continuation reject: put ROC {roc:+.2f}% >= -{continuation_min_roc:.2f}%"
-            )
-        if not ema_aligned:
-            return _scan_failure("continuation reject: put EMA not aligned")
+    if bool(getattr(config, "ENABLE_STRICT_CONTINUATION_DIRECTION_GATE", False)):
+        continuation_min_roc = max(
+            float(getattr(config, "MOVEMENT_FORCE_MIN_PCT", 0.08) or 0.08),
+            abs(float(getattr(config, "ROC_BULL_MIN", 0.05) or 0.05)),
+        )
+        if direction == "call":
+            if vwap_vote <= 0 or roc_vote <= 0 or roc_fast_vote <= 0:
+                return _scan_failure(
+                    "continuation reject: call requires VWAP, ROC, and fast ROC pointing up"
+                )
+            if roc <= continuation_min_roc:
+                return _scan_failure(
+                    f"continuation reject: call ROC {roc:+.2f}% <= {continuation_min_roc:.2f}%"
+                )
+            if not ema_aligned:
+                return _scan_failure("continuation reject: call EMA not aligned")
+        else:
+            if vwap_vote >= 0 or roc_vote >= 0 or roc_fast_vote >= 0:
+                return _scan_failure(
+                    "continuation reject: put requires VWAP, ROC, and fast ROC pointing down"
+                )
+            if roc >= -continuation_min_roc:
+                return _scan_failure(
+                    f"continuation reject: put ROC {roc:+.2f}% >= -{continuation_min_roc:.2f}%"
+                )
+            if not ema_aligned:
+                return _scan_failure("continuation reject: put EMA not aligned")
 
     if bool(getattr(config, "ENABLE_SUSTAINED_CONTINUATION_GATE", True)):
         lookback_bars = max(4, int(getattr(config, "SUSTAINED_CONTINUATION_LOOKBACK_BARS", 6) or 6))
