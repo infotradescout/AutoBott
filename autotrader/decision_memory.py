@@ -328,6 +328,69 @@ def _recommendations(rows: list[dict[str, Any]], aggregates: dict[str, list[dict
     return recs
 
 
+def _learning_quality(
+    rows: list[dict[str, Any]],
+    verdict_counts: Counter[str],
+    score_total: int,
+    aggregates: dict[str, list[dict[str, Any]]],
+) -> dict[str, Any]:
+    total = max(1, len(rows))
+    good = (
+        int(verdict_counts.get("good_go", 0))
+        + int(verdict_counts.get("acceptable_go", 0))
+        + int(verdict_counts.get("good_block", 0))
+    )
+    bad = (
+        int(verdict_counts.get("bad_go", 0))
+        + int(verdict_counts.get("bad_block", 0))
+        + int(verdict_counts.get("questionable_block", 0))
+    )
+    neutral = max(0, total - good - bad)
+    good_rate = good / total
+    bad_rate = bad / total
+    neutral_rate = neutral / total
+
+    worst_rvol = None
+    for item in aggregates.get("by_rvol_bucket", []):
+        if int(item.get("count", 0)) < 100:
+            continue
+        if worst_rvol is None or int(item.get("score", 0)) < int(worst_rvol.get("score", 0)):
+            worst_rvol = item
+
+    flags: list[str] = []
+    if len(rows) < 300:
+        flags.append("sample_size_low")
+    if score_total < 0:
+        flags.append("net_score_negative")
+    if bad_rate > good_rate:
+        flags.append("bad_rate_above_good_rate")
+    if neutral_rate > 0.55:
+        flags.append("too_many_neutral_outcomes")
+    if isinstance(worst_rvol, dict) and int(worst_rvol.get("score", 0)) < -50:
+        flags.append(f"weak_rvol_bucket:{worst_rvol.get('key')}")
+
+    if len(flags) >= 3:
+        verdict = "bad"
+    elif len(flags) >= 1:
+        verdict = "warning"
+    else:
+        verdict = "good"
+
+    return {
+        "verdict": verdict,
+        "flags": flags,
+        "sample_size": len(rows),
+        "score_total": int(score_total),
+        "good_rate": round(good_rate, 4),
+        "bad_rate": round(bad_rate, 4),
+        "neutral_rate": round(neutral_rate, 4),
+        "good_count": int(good),
+        "bad_count": int(bad),
+        "neutral_count": int(neutral),
+        "worst_rvol_bucket": worst_rvol or {},
+    }
+
+
 def build_learning_summary() -> dict[str, Any]:
     path = Path(memory_paths()["memory_csv"])
     rows_by_id = _read_memory(path)
@@ -358,6 +421,7 @@ def build_learning_summary() -> dict[str, Any]:
             "score_total": score_total,
             "verdict_counts": dict(verdict_counts),
         },
+        "learning_quality": _learning_quality(rows, verdict_counts, score_total, aggregates),
         "aggregates": aggregates,
         "recommendations": _recommendations(rows, aggregates),
     }
