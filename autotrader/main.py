@@ -2208,6 +2208,42 @@ def _alpaca_option_buy_order_counts_by_ticker_today(
     return counts
 
 
+def _alpaca_filled_buy_contract_counts_by_ticker_recent(
+    broker: AlpacaBroker,
+    now_et: datetime,
+    *,
+    lookback_minutes: int = 60,
+    limit: int = 500,
+) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    minutes = max(1, int(lookback_minutes))
+    window_seconds = minutes * 60
+    for order in broker.get_recent_orders(limit=max(1, int(limit))):
+        if _normalize_order_side(getattr(order, "side", "")) != "buy":
+            continue
+        if not _is_option_symbol(str(getattr(order, "symbol", "") or "")):
+            continue
+        if _normalize_order_status(getattr(order, "status", "")) != "filled":
+            continue
+        filled_at = _as_et_datetime(
+            getattr(order, "filled_at", None) or getattr(order, "submitted_at", None),
+            now_et.tzinfo,
+        )
+        if filled_at is None:
+            continue
+        age_seconds = (now_et - filled_at).total_seconds()
+        if age_seconds < 0 or age_seconds > window_seconds:
+            continue
+        ticker = _underlying_from_option_symbol(str(getattr(order, "symbol", "") or ""))
+        if not ticker:
+            continue
+        qty = position_qty_as_int(getattr(order, "filled_qty", None) or getattr(order, "qty", 0))
+        if qty <= 0:
+            continue
+        counts[ticker] = int(counts.get(ticker, 0)) + int(qty)
+    return counts
+
+
 def _alpaca_active_option_buy_order_counts_by_ticker_today(
     broker: AlpacaBroker,
     now_et: datetime,
@@ -4821,6 +4857,7 @@ def main():
         alpaca_truth_ticker_roundtrips: dict[str, int] = {}
         alpaca_buy_orders_by_ticker: dict[str, int] = {}
         alpaca_active_buy_orders_by_ticker: dict[str, int] = {}
+        alpaca_filled_buy_contracts_by_ticker_hour: dict[str, int] = {}
         active_entry_order_premium_usd = 0.0
         try:
             duplicate_entry_cancels = _cancel_active_entry_buys_for_open_tickers(broker, option_positions, now_et)
@@ -4834,6 +4871,11 @@ def main():
                 time.sleep(config.RATE_LIMIT_SLEEP_SECONDS)
             alpaca_buy_orders_by_ticker = _alpaca_option_buy_order_counts_by_ticker_today(broker, now_et)
             alpaca_active_buy_orders_by_ticker = _alpaca_active_option_buy_order_counts_by_ticker_today(broker, now_et)
+            alpaca_filled_buy_contracts_by_ticker_hour = _alpaca_filled_buy_contract_counts_by_ticker_recent(
+                broker,
+                now_et,
+                lookback_minutes=60,
+            )
             active_entry_order_premium_usd = _alpaca_active_option_buy_order_premium_usd_today(broker, now_et)
         except Exception as exc:  # noqa: BLE001
             print(f"[{ts(now_et)}] Alpaca buy-order cap lookup unavailable: {type(exc).__name__}: {exc!r}")
@@ -5776,6 +5818,19 @@ def main():
                     f"[{ts(now_et)}] {ticker}: skip "
                     f"(Alpaca has {alpaca_buy_order_count}/{alpaca_buy_order_cap} "
                     "same-day buy order(s) for this ticker)."
+                )
+                continue
+            hourly_contract_cap = max(
+                0,
+                int(getattr(config, "MAX_CONTRACTS_PER_TICKER_PER_HOUR", 1) or 0),
+            )
+            hourly_filled_contracts = int(alpaca_filled_buy_contracts_by_ticker_hour.get(ticker, 0))
+            if hourly_contract_cap > 0 and hourly_filled_contracts >= hourly_contract_cap:
+                _mark_skip("alpaca_filled_buy_contract_hour_cap")
+                _mark_stage4_reject(reason="alpaca_filled_buy_contract_hour_cap", ticker=ticker)
+                print(
+                    f"[{ts(now_et)}] {ticker}: skip "
+                    f"(filled buy contracts in last 60m {hourly_filled_contracts}/{hourly_contract_cap})."
                 )
                 continue
             if (
