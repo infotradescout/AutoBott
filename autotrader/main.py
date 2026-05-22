@@ -4875,12 +4875,30 @@ def main():
                     )
                 )
                 truth_closed_trades = list(truth_snapshot.get("closed_trades") or [])
+                truth_roundtrip_cooldown_minutes = max(
+                    0,
+                    int(getattr(config, "TICKER_ROUNDTRIP_COOLDOWN_MINUTES", 0) or 0),
+                )
+                truth_roundtrip_cooldown_changed = False
                 for item in truth_closed_trades:
                     truth_ticker = str(item.get("ticker", "") or "").upper()
                     if truth_ticker:
                         alpaca_truth_ticker_roundtrips[truth_ticker] = (
                             int(alpaca_truth_ticker_roundtrips.get(truth_ticker, 0)) + 1
                         )
+                        if truth_roundtrip_cooldown_minutes > 0:
+                            closed_at = _parse_state_datetime(
+                                item.get("filled_at")
+                                or item.get("exit_time")
+                                or item.get("closed_at")
+                            ) or now_et
+                            until_dt = closed_at + timedelta(minutes=truth_roundtrip_cooldown_minutes)
+                            prior_until = ticker_roundtrip_cooldown_until.get(truth_ticker)
+                            if prior_until is None or until_dt > prior_until:
+                                ticker_roundtrip_cooldown_until[truth_ticker] = until_dt
+                                truth_roundtrip_cooldown_changed = True
+                if truth_roundtrip_cooldown_changed:
+                    _save_runtime_state()
                 truth_loss_count = sum(
                     1
                     for item in truth_closed_trades
