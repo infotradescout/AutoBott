@@ -7458,7 +7458,7 @@ def main():
                 "Hard close completed. Positions flattened and open orders canceled.",
                 dedupe_key=f"session-close-{now_et.date().isoformat()}",
             )
-            break
+            return
 
         _save_runtime_state()
         loop_sleep_seconds = max(1, int(config.LOOP_INTERVAL_SECONDS))
