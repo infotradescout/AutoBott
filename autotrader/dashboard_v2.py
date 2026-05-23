@@ -589,8 +589,10 @@ def _runtime() -> dict[str, Any]:
     replay_events_path = Path(getattr(config, "DATA_DIR")) / "replay_auto_promote_events.csv"
     trainer_status_path = Path(str(getattr(config, "SYNTHETIC_TRAINER_STATUS_PATH", Path(getattr(config, "DATA_DIR")) / "synthetic_trainer_status.json")))
     tuner_status_path = Path(str(getattr(config, "SYNTHETIC_TUNER_STATUS_PATH", Path(getattr(config, "DATA_DIR")) / "synthetic_tuner_status.json")))
+    learning_summary_path = Path(getattr(config, "DATA_DIR")) / "decision_learning_summary.json"
     trainer_status = _read_json_file(trainer_status_path)
     tuner_status = _read_json_file(tuner_status_path)
+    learning_summary = _read_json_file(learning_summary_path)
     age = _heartbeat_age_seconds(state)
     stale = bool(age is None or age >= TRADER_HEARTBEAT_STALE_SECONDS)
     return {
@@ -622,6 +624,23 @@ def _runtime() -> dict[str, Any]:
         "replay_auto_promote_events_path": str(replay_events_path),
         "replay_auto_promote_last_event": _read_csv_last_row(replay_events_path),
         "entry_debug": _entry_debug_summary(state),
+        "learning": {
+            "summary_path": str(learning_summary_path),
+            "summary_exists": learning_summary_path.exists(),
+            "quality_verdict": str(_as_dict(learning_summary.get("learning_quality")).get("verdict", "") or ""),
+            "recent_quality": _as_dict(learning_summary.get("recent_quality")),
+            "rollback_signal": _as_dict(learning_summary.get("rollback_signal")),
+            "persisted_decisions": _int_value(_as_dict(learning_summary.get("totals")).get("persisted_decisions")),
+            "score_total": _int_value(_as_dict(learning_summary.get("totals")).get("score_total")),
+        },
+        "pattern_guard": {
+            "override_disabled_until_iso": str(state.get("pattern_override_disabled_until_iso", "") or ""),
+            "override_disable_reason": str(state.get("pattern_override_disable_reason", "") or ""),
+            "shadow_stats": _as_dict(state.get("shadow_pattern_stats")),
+            "suppressed_symbols": list(state.get("learning_suppressed_symbols") or []),
+            "suppression_reason": str(state.get("learning_suppressed_symbols_reason", "") or ""),
+            "suppression_refreshed_at_iso": str(state.get("learning_suppressed_symbols_refreshed_at_iso", "") or ""),
+        },
         "synthetic_trainer": {
             "path": str(trainer_status_path),
             "exists": trainer_status_path.exists(),
