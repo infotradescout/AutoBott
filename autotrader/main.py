@@ -4656,7 +4656,7 @@ def main():
         if clock.is_open or (
             seconds_until_open is not None and 0 < seconds_until_open <= preopen_window_seconds
         ):
-            break
+            return
         sleep_seconds = _closed_market_sleep_seconds(clock, preopen_ready_minutes=closed_market_lead_minutes)
         next_open = getattr(clock, "next_open", None)
         next_open_ct = ""
