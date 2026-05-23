@@ -3147,6 +3147,9 @@ def main():
     )
     adaptive_loss_profile: dict = dict(state.get("adaptive_loss_profile") or {})
     signal_pattern_memory: dict[str, dict] = dict(state.get("signal_pattern_memory") or {})
+    shadow_pattern_stats: dict[str, Any] = dict(state.get("shadow_pattern_stats") or {})
+    pattern_override_disabled_until = _parse_state_datetime(state.get("pattern_override_disabled_until_iso"))
+    pattern_override_disable_reason = str(state.get("pattern_override_disable_reason", "") or "")
     opening_entries_today_count = int(state.get("opening_entries_today_count", 0) or 0)
     opening_fresh_premium_deployed_usd = float(state.get("opening_fresh_premium_deployed_usd", 0.0) or 0.0)
     opening_expensive_entries_today_count = int(state.get("opening_expensive_entries_today_count", 0) or 0)
@@ -3309,6 +3312,13 @@ def main():
                 "adaptive_loss_blocked_tickers": sorted(adaptive_loss_blocked_tickers),
                 "adaptive_loss_profile": adaptive_loss_profile,
                 "signal_pattern_memory": signal_pattern_memory,
+                "shadow_pattern_stats": shadow_pattern_stats,
+                "pattern_override_disabled_until_iso": (
+                    pattern_override_disabled_until.isoformat()
+                    if isinstance(pattern_override_disabled_until, datetime)
+                    else ""
+                ),
+                "pattern_override_disable_reason": pattern_override_disable_reason,
                 "opening_entries_today_count": opening_entries_today_count,
                 "opening_fresh_premium_deployed_usd": round(opening_fresh_premium_deployed_usd, 6),
                 "opening_expensive_entries_today_count": opening_expensive_entries_today_count,
@@ -4318,12 +4328,19 @@ def main():
                 "atr_pct": 0.0,
                 "volatility_score": 0.0,
             }
-            history_ok, history_reason = _pre_execution_history_check(
-                reversal_signal,
-                ticker,
-                direction,
-                now_et,
-            )
+            rollback_active, _rollback_reason = _update_pattern_override_rollback(now_et)
+            shadow_mode = bool(getattr(config, "ENABLE_SHADOW_PATTERN_DIRECTION_MODEL", True))
+            shadow_apply = bool(getattr(config, "SHADOW_PATTERN_DIRECTION_APPLY", False))
+            pattern_override_enabled = (not rollback_active) and ((not shadow_mode) or shadow_apply)
+            if pattern_override_enabled:
+                history_ok, history_reason = _pre_execution_history_check(
+                    reversal_signal,
+                    ticker,
+                    direction,
+                    now_et,
+                )
+            else:
+                history_ok, history_reason = True, "reversal history check bypassed (rollback/shadow)."
             if not history_ok:
                 print(f"[{ts(now_et)}] {ticker}: reversal skipped ({history_reason}).")
                 return False
@@ -5132,6 +5149,33 @@ def main():
             premarket_opening_signals = []
             _save_runtime_state()
 
+    def _update_pattern_override_rollback(now_et: datetime) -> tuple[bool, str]:
+        nonlocal pattern_override_disabled_until, pattern_override_disable_reason
+        if isinstance(pattern_override_disabled_until, datetime) and pattern_override_disabled_until > now_et:
+            return True, str(pattern_override_disable_reason or "rollback_active")
+        if not bool(getattr(config, "ENABLE_AUTO_ROLLBACK_ON_BAD_LEARNING", True)):
+            return False, ""
+        try:
+            summary_path = Path(getattr(config, "DATA_DIR")) / "decision_learning_summary.json"
+            if not summary_path.exists():
+                return False, ""
+            summary = json.loads(summary_path.read_text(encoding="utf-8"))
+            rollback = summary.get("rollback_signal", {}) if isinstance(summary, dict) else {}
+            if not isinstance(rollback, dict) or not bool(rollback.get("triggered", False)):
+                return False, ""
+            disable_minutes = max(15, int(getattr(config, "ROLLBACK_DISABLE_PATTERN_MINUTES", 120) or 120))
+            pattern_override_disabled_until = now_et + timedelta(minutes=disable_minutes)
+            pattern_override_disable_reason = str(rollback.get("reason", "") or "learning_rollback_signal")
+            print(
+                f"[{ts(now_et)}] Pattern override rollback active for {disable_minutes}m "
+                f"(until {ts(pattern_override_disabled_until)}; reason={pattern_override_disable_reason})."
+            )
+            _save_runtime_state()
+            return True, pattern_override_disable_reason
+        except Exception as exc:  # noqa: BLE001
+            print(f"[{ts(now_et)}] Pattern override rollback check failed: {exc}")
+            return False, ""
+
         index_bias = _index_regime_bias(data_client, now_et)
         if index_bias in ("call", "put") and signals:
             before = len(signals)
@@ -5492,8 +5536,21 @@ def main():
             ticker = str(signal["symbol"]).upper()
             direction = str(signal["direction"]).lower()
             _set_signal_outcome(ticker=ticker, disposition="setup_pass")
+            rollback_active, rollback_reason = _update_pattern_override_rollback(now_et)
+            shadow_mode = bool(getattr(config, "ENABLE_SHADOW_PATTERN_DIRECTION_MODEL", True))
+            shadow_apply = bool(getattr(config, "SHADOW_PATTERN_DIRECTION_APPLY", False))
+            pattern_override_enabled = (not rollback_active) and ((not shadow_mode) or shadow_apply)
+
             pattern_direction, pattern_key, pattern_explanation = _pattern_direction_override(signal, ticker, direction, now_et)
-            if pattern_direction != direction:
+            if pattern_direction != direction and shadow_mode:
+                shadow_pattern_stats["would_flip_count"] = int(shadow_pattern_stats.get("would_flip_count", 0) or 0) + 1
+                shadow_pattern_stats["last_would_flip_ticker"] = ticker
+                shadow_pattern_stats["last_would_flip_from"] = direction
+                shadow_pattern_stats["last_would_flip_to"] = pattern_direction
+                shadow_pattern_stats["last_would_flip_reason"] = pattern_explanation
+                shadow_pattern_stats["last_would_flip_at_et"] = now_et.isoformat()
+                _save_runtime_state()
+            if pattern_override_enabled and pattern_direction != direction:
                 previous_direction = direction
                 direction = pattern_direction
                 signal = dict(signal)
@@ -5508,6 +5565,17 @@ def main():
                 print(
                     f"[{ts(now_et)}] {ticker}: {pattern_explanation}"
                 )
+            elif (not pattern_override_enabled) and pattern_direction != direction:
+                if rollback_active:
+                    print(
+                        f"[{ts(now_et)}] {ticker}: pattern override suppressed by rollback "
+                        f"({rollback_reason})."
+                    )
+                elif shadow_mode and not shadow_apply:
+                    print(
+                        f"[{ts(now_et)}] {ticker}: shadow-only pattern model would flip "
+                        f"{direction.upper()} -> {pattern_direction.upper()} ({pattern_explanation})."
+                    )
 
             evidence_decision = evidence_gate.evaluate_signal(
                 signal=signal,
@@ -6381,7 +6449,10 @@ def main():
                     time.sleep(config.RATE_LIMIT_SLEEP_SECONDS)
                     continue
 
-                history_ok, history_reason = _pre_execution_history_check(signal, ticker, direction, now_et)
+                if pattern_override_enabled:
+                    history_ok, history_reason = _pre_execution_history_check(signal, ticker, direction, now_et)
+                else:
+                    history_ok, history_reason = True, "pre-execution history check bypassed (rollback/shadow)."
                 if not history_ok:
                     _mark_skip("pre_execution_history_check")
                     _mark_stage4_reject(reason="pre_execution_history_check", ticker=ticker, detail=history_reason)

@@ -391,6 +391,85 @@ def _learning_quality(
     }
 
 
+def _recent_quality(rows: list[dict[str, Any]]) -> dict[str, Any]:
+    window = max(20, int(getattr(config, "LEARNING_RECENT_WINDOW_ROWS", 400) or 400))
+    recent = rows[-window:]
+    if not recent:
+        return {
+            "rows": 0,
+            "score_total": 0,
+            "good_rate": 0.0,
+            "bad_rate": 0.0,
+            "neutral_rate": 0.0,
+        }
+    verdict_counts = Counter(str(row.get("verdict", "")) for row in recent)
+    score_total = sum(_safe_int(row.get("score_delta"), 0) for row in recent)
+    total = len(recent)
+    good = (
+        int(verdict_counts.get("good_go", 0))
+        + int(verdict_counts.get("acceptable_go", 0))
+        + int(verdict_counts.get("good_block", 0))
+    )
+    bad = (
+        int(verdict_counts.get("bad_go", 0))
+        + int(verdict_counts.get("bad_block", 0))
+        + int(verdict_counts.get("questionable_block", 0))
+    )
+    neutral = max(0, total - good - bad)
+    return {
+        "rows": int(total),
+        "score_total": int(score_total),
+        "good_rate": round(good / total, 4),
+        "bad_rate": round(bad / total, 4),
+        "neutral_rate": round(neutral / total, 4),
+    }
+
+
+def _rollback_signal(recent_quality: dict[str, Any]) -> dict[str, Any]:
+    rows = int(recent_quality.get("rows", 0) or 0)
+    bad_rate = _safe_float(recent_quality.get("bad_rate"), 0.0)
+    score_total = _safe_int(recent_quality.get("score_total"), 0)
+    min_samples = max(1, int(getattr(config, "ROLLBACK_MIN_RECENT_SAMPLES", 60) or 60))
+    bad_rate_threshold = float(getattr(config, "ROLLBACK_BAD_RATE_THRESHOLD", 0.55) or 0.55)
+    score_threshold = int(getattr(config, "ROLLBACK_SCORE_TOTAL_THRESHOLD", -20) or -20)
+    triggered = (
+        rows >= min_samples
+        and (bad_rate >= bad_rate_threshold or score_total <= score_threshold)
+    )
+    reason = ""
+    if triggered:
+        reason = (
+            f"recent rows={rows}, bad_rate={bad_rate:.3f} (>= {bad_rate_threshold:.3f}) "
+            f"or score_total={score_total} (<= {score_threshold})"
+        )
+    return {
+        "triggered": bool(triggered),
+        "reason": reason,
+        "min_samples": min_samples,
+        "bad_rate_threshold": round(bad_rate_threshold, 4),
+        "score_total_threshold": score_threshold,
+    }
+
+
+def _eligible_outcome_for_learning(outcome: dict[str, Any]) -> tuple[bool, str]:
+    if not bool(getattr(config, "ENABLE_LEARNING_ELIGIBILITY_FILTER", True)):
+        return True, ""
+    horizon = _safe_int(outcome.get("horizon_minutes"), 0)
+    min_horizon = max(1, int(getattr(config, "LEARNING_MIN_HORIZON_MINUTES", 15) or 15))
+    if horizon < min_horizon:
+        return False, "horizon_too_short"
+    bars_used = _safe_int(outcome.get("bars_used"), 0)
+    min_bars = max(1, int(getattr(config, "LEARNING_MIN_BARS_USED", 3) or 3))
+    if bars_used < min_bars:
+        return False, "bars_used_too_low"
+    if bool(getattr(config, "LEARNING_REQUIRE_VALID_PRICES", True)):
+        entry_price = _safe_float(outcome.get("entry_price"), 0.0)
+        end_price = _safe_float(outcome.get("end_price"), 0.0)
+        if entry_price <= 0 or end_price <= 0:
+            return False, "invalid_prices"
+    return True, ""
+
+
 def build_learning_summary() -> dict[str, Any]:
     path = Path(memory_paths()["memory_csv"])
     rows_by_id = _read_memory(path)
@@ -408,6 +487,7 @@ def build_learning_summary() -> dict[str, Any]:
         "by_roc_bucket": _aggregate(rows, lambda row: _roc_bucket(row.get("roc"))),
     }
 
+    recent_quality = _recent_quality(rows)
     summary = {
         "generated_at_et": _now_et().isoformat(),
         "ok": True,
@@ -422,6 +502,8 @@ def build_learning_summary() -> dict[str, Any]:
             "verdict_counts": dict(verdict_counts),
         },
         "learning_quality": _learning_quality(rows, verdict_counts, score_total, aggregates),
+        "recent_quality": recent_quality,
+        "rollback_signal": _rollback_signal(recent_quality),
         "aggregates": aggregates,
         "recommendations": _recommendations(rows, aggregates),
     }
@@ -434,6 +516,7 @@ def update_decision_memory(*, journal_limit: int = 300, horizons: tuple[int, ...
     before = len(rows_by_id)
     now = _now_et().isoformat()
     evaluated_count = 0
+    skipped_by_eligibility = 0
 
     for horizon in horizons:
         try:
@@ -443,6 +526,10 @@ def update_decision_memory(*, journal_limit: int = 300, horizons: tuple[int, ...
             continue
         for outcome in payload.get("outcomes", []):
             if not isinstance(outcome, dict) or not bool(outcome.get("evaluated", False)):
+                continue
+            eligible, _reason = _eligible_outcome_for_learning(outcome)
+            if not eligible:
+                skipped_by_eligibility += 1
                 continue
             evaluated_count += 1
             flat = _flatten_outcome(outcome)
@@ -476,6 +563,7 @@ def update_decision_memory(*, journal_limit: int = 300, horizons: tuple[int, ...
         "generated_at_et": now,
         "ok": True,
         "evaluated_rows_seen_this_run": evaluated_count,
+        "skipped_by_eligibility": skipped_by_eligibility,
         "new_rows_added": after - before,
         "persisted_rows_total": after,
         "paths": memory_paths(),
