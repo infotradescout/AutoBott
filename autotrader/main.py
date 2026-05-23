@@ -3150,6 +3150,9 @@ def main():
     shadow_pattern_stats: dict[str, Any] = dict(state.get("shadow_pattern_stats") or {})
     pattern_override_disabled_until = _parse_state_datetime(state.get("pattern_override_disabled_until_iso"))
     pattern_override_disable_reason = str(state.get("pattern_override_disable_reason", "") or "")
+    learning_suppressed_symbols: set[str] = set(str(s).upper() for s in (state.get("learning_suppressed_symbols") or []) if str(s).strip())
+    learning_suppressed_symbols_reason = str(state.get("learning_suppressed_symbols_reason", "") or "")
+    learning_suppressed_symbols_refreshed_at = _parse_state_datetime(state.get("learning_suppressed_symbols_refreshed_at_iso"))
     opening_entries_today_count = int(state.get("opening_entries_today_count", 0) or 0)
     opening_fresh_premium_deployed_usd = float(state.get("opening_fresh_premium_deployed_usd", 0.0) or 0.0)
     opening_expensive_entries_today_count = int(state.get("opening_expensive_entries_today_count", 0) or 0)
@@ -3319,6 +3322,13 @@ def main():
                     else ""
                 ),
                 "pattern_override_disable_reason": pattern_override_disable_reason,
+                "learning_suppressed_symbols": sorted(learning_suppressed_symbols),
+                "learning_suppressed_symbols_reason": learning_suppressed_symbols_reason,
+                "learning_suppressed_symbols_refreshed_at_iso": (
+                    learning_suppressed_symbols_refreshed_at.isoformat()
+                    if isinstance(learning_suppressed_symbols_refreshed_at, datetime)
+                    else ""
+                ),
                 "opening_entries_today_count": opening_entries_today_count,
                 "opening_fresh_premium_deployed_usd": round(opening_fresh_premium_deployed_usd, 6),
                 "opening_expensive_entries_today_count": opening_expensive_entries_today_count,
@@ -5176,6 +5186,55 @@ def main():
             print(f"[{ts(now_et)}] Pattern override rollback check failed: {exc}")
             return False, ""
 
+    def _refresh_learning_symbol_suppression(now_et: datetime) -> None:
+        nonlocal learning_suppressed_symbols, learning_suppressed_symbols_reason, learning_suppressed_symbols_refreshed_at
+        if not bool(getattr(config, "ENABLE_AUTO_SYMBOL_SUPPRESSION_FROM_LEARNING", True)):
+            return
+        refresh_seconds = max(30, int(getattr(config, "LEARNING_SYMBOL_SUPPRESSION_REFRESH_SECONDS", 120) or 120))
+        if (
+            isinstance(learning_suppressed_symbols_refreshed_at, datetime)
+            and (now_et - learning_suppressed_symbols_refreshed_at).total_seconds() < refresh_seconds
+        ):
+            return
+        try:
+            summary_path = Path(getattr(config, "DATA_DIR")) / "decision_learning_summary.json"
+            if not summary_path.exists():
+                learning_suppressed_symbols_refreshed_at = now_et
+                return
+            summary = json.loads(summary_path.read_text(encoding="utf-8"))
+            quality = dict(summary.get("learning_quality") or {}) if isinstance(summary, dict) else {}
+            verdict = str(quality.get("verdict", "") or "").lower()
+            by_symbol = list((summary.get("aggregates") or {}).get("by_symbol") or []) if isinstance(summary, dict) else []
+            min_count = max(20, int(getattr(config, "LEARNING_SYMBOL_SUPPRESSION_MIN_COUNT", 120) or 120))
+            top_n = max(1, int(getattr(config, "LEARNING_SYMBOL_SUPPRESSION_TOP_N", 3) or 3))
+            suppressed: list[str] = []
+            if verdict in {"bad", "warning"}:
+                for item in by_symbol:
+                    if not isinstance(item, dict):
+                        continue
+                    key = str(item.get("key", "") or "").upper()
+                    score = int(float(item.get("score", 0) or 0))
+                    count = int(float(item.get("count", 0) or 0))
+                    if key and count >= min_count and score < 0:
+                        suppressed.append(key)
+                suppressed = suppressed[:top_n]
+            new_set = set(suppressed)
+            if new_set != learning_suppressed_symbols:
+                learning_suppressed_symbols = new_set
+                learning_suppressed_symbols_reason = (
+                    f"learning verdict={verdict or 'unknown'}, min_count={min_count}, top_n={top_n}"
+                )
+                print(
+                    f"[{ts(now_et)}] Learning symbol suppression updated: "
+                    f"{','.join(sorted(learning_suppressed_symbols)) or 'none'} "
+                    f"({learning_suppressed_symbols_reason})."
+                )
+                _save_runtime_state()
+            learning_suppressed_symbols_refreshed_at = now_et
+        except Exception as exc:  # noqa: BLE001
+            print(f"[{ts(now_et)}] Learning symbol suppression refresh failed: {exc}")
+            learning_suppressed_symbols_refreshed_at = now_et
+
         index_bias = _index_regime_bias(data_client, now_et)
         if index_bias in ("call", "put") and signals:
             before = len(signals)
@@ -5535,6 +5594,12 @@ def main():
 
             ticker = str(signal["symbol"]).upper()
             direction = str(signal["direction"]).lower()
+            _refresh_learning_symbol_suppression(now_et)
+            if ticker in learning_suppressed_symbols:
+                _mark_skip("learning_symbol_suppressed")
+                _mark_stage4_reject(reason="learning_symbol_suppressed", ticker=ticker, detail=learning_suppressed_symbols_reason)
+                print(f"[{ts(now_et)}] {ticker}: skip (learning-symbol suppression active).")
+                continue
             _set_signal_outcome(ticker=ticker, disposition="setup_pass")
             rollback_active, rollback_reason = _update_pattern_override_rollback(now_et)
             shadow_mode = bool(getattr(config, "ENABLE_SHADOW_PATTERN_DIRECTION_MODEL", True))
