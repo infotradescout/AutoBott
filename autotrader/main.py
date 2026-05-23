@@ -1072,7 +1072,7 @@ def _await_order_fill(
         if observed_filled > 0 and last_status in ("filled", "partially_filled"):
             return min(max(0, int(requested_qty)), observed_filled), observed_avg_price, last_status, False
         if last_status in non_fill_terminal:
-            break
+            return
         time.sleep(poll_seconds)
 
     if observed_filled > 0:
