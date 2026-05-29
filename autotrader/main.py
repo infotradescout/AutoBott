@@ -5448,6 +5448,78 @@ def main():
             )
             entry_debug["entry_order_events"] = events[-25:]
 
+        def _today_trade_truth_snapshot(now_et: datetime) -> dict[str, object]:
+            wins = 0
+            losses = 0
+            correct = 0
+            causes: dict[str, int] = {}
+            try:
+                with config.TRADES_CSV_PATH.open("r", newline="", encoding="utf-8") as handle:
+                    for row in csv.DictReader(handle):
+                        if str(row.get("date", "") or "") != now_et.date().isoformat():
+                            continue
+                        pnl_usd = _safe_signal_float(row.get("realized_pnl_usd"), 0.0)
+                        if pnl_usd > 0:
+                            wins += 1
+                        elif pnl_usd < 0:
+                            losses += 1
+                        correct_raw = str(row.get("was_direction_correct", "") or "").strip()
+                        if correct_raw in {"1", "true", "True"}:
+                            correct += 1
+                        cause = str(
+                            row.get("loss_cause_bucket", "") or row.get("loss_cause", "") or ""
+                        ).strip().lower()
+                        if cause:
+                            causes[cause] = int(causes.get(cause, 0)) + 1
+            except Exception:
+                return {"closed": 0, "accuracy_pct": 0.0, "causes": {}}
+            closed = wins + losses
+            accuracy_pct = (correct / closed * 100.0) if closed > 0 else 0.0
+            return {"closed": closed, "accuracy_pct": round(accuracy_pct, 2), "causes": causes}
+
+        def _finalize_trade_through_cycle(now_et: datetime) -> None:
+            outcomes = entry_debug.get("signal_outcomes", {})
+            if not isinstance(outcomes, dict):
+                outcomes = {}
+            reject_reasons = entry_debug.get("entry_stage4_reject_reasons", {})
+            if not isinstance(reject_reasons, dict):
+                reject_reasons = {}
+
+            for signal in signals:
+                symbol = str(signal.get("symbol", "") or "").upper()
+                if not symbol:
+                    continue
+                payload = outcomes.get(symbol, {}) if isinstance(outcomes.get(symbol), dict) else {}
+                disposition = str(payload.get("disposition", "") or "").strip().lower()
+                if disposition in {"", "scanner_candidate", "entry_eligible"}:
+                    detail = str(payload.get("detail", "") or "").strip() or "candidate ended loop without terminal decision"
+                    outcomes[symbol] = {"disposition": "blocked_unclassified", "detail": detail}
+                    reject_reasons["blocked_unclassified"] = int(reject_reasons.get("blocked_unclassified", 0)) + 1
+
+            entry_debug["signal_outcomes"] = outcomes
+            entry_debug["entry_stage4_reject_reasons"] = reject_reasons
+
+            candidates = int(entry_debug.get("signals_considered", 0) or 0)
+            attempts = int(entry_debug.get("entry_orders_submitted", 0) or 0)
+            fills = int(entry_debug.get("entries_filled", 0) or 0)
+            truth = _today_trade_truth_snapshot(now_et)
+            entry_debug["trade_through_kpi"] = {
+                "scanner_candidates": candidates,
+                "trade_attempts": attempts,
+                "rejection_reasons": dict(sorted(reject_reasons.items())),
+                "fills": fills,
+                "day_pnl_usd": round(float(trade_telemetry_total_pnl_usd), 2),
+                "direction_accuracy_pct": float(truth.get("accuracy_pct", 0.0) or 0.0),
+                "loss_cause_breakdown": dict(truth.get("causes", {}) or {}),
+            }
+            print(
+                f"[{ts(now_et)}] TRADE-THROUGH KPI candidates={candidates} attempts={attempts} "
+                f"fills={fills} day_pnl=${trade_telemetry_total_pnl_usd:.2f} "
+                f"direction_accuracy={float(truth.get('accuracy_pct', 0.0) or 0.0):.2f}% "
+                f"rejections={dict(sorted(reject_reasons.items()))} "
+                f"loss_causes={dict(truth.get('causes', {}) or {})}"
+            )
+
         opening_entry_attempts_loop = 0
         entry_attempts_loop = 0
         evidence_rows = evidence_gate.load_recent_trade_rows()
@@ -5456,6 +5528,11 @@ def main():
             now_et = datetime.now(tz)
             _touch_heartbeat()
             entry_debug["signals_considered"] = int(entry_debug.get("signals_considered", 0)) + 1
+            _set_signal_outcome(
+                ticker=str(signal.get("symbol", "") or ""),
+                disposition="scanner_candidate",
+                detail="candidate queued for execution filters",
+            )
 
             # --- Daily loss limit ---
             daily_loss_limit = float(getattr(config, "DAILY_LOSS_LIMIT_USD", 0.0) or 0.0)
@@ -6783,6 +6860,7 @@ def main():
                 )
                 time.sleep(config.RATE_LIMIT_SLEEP_SECONDS)
 
+        _finalize_trade_through_cycle(datetime.now(tz))
         last_entry_debug = entry_debug
         _save_runtime_state()
 

@@ -122,7 +122,7 @@ def _classify_scan(row: dict[str, str]) -> dict[str, Any]:
     symbol = str(row.get("symbol", "") or row.get("ticker", "") or "").upper()
     direction = str(row.get("direction", "") or "").upper()
     reason = str(row.get("reason", "") or "")
-    passed = result == "pass"
+    passed = result in {"pass", "submitted"}
     if passed:
         summary = f"{symbol} {direction or 'SETUP'} passed scanner: {reason}"
         action = "candidate sent to entry filters"
