@@ -2961,7 +2961,7 @@ def _append_entry_trigger_scan_log(
     signal: dict,
     *,
     detail: str = "",
-    result: str = "pass",
+    result: str = "submitted",
 ) -> None:
     try:
         path = config.SCAN_LOG_CSV_PATH
@@ -2971,7 +2971,7 @@ def _append_entry_trigger_scan_log(
             "timestamp": now_et.strftime("%Y-%m-%d %H:%M:%S %Z"),
             "symbol": str(signal.get("symbol", "") or ""),
             "strategy_profile": str(signal.get("strategy_profile", "") or ""),
-            "result": str(result or "pass"),
+            "result": str(result or "submitted"),
             "direction": signal.get("direction", ""),
             "rvol": signal.get("rvol", ""),
             "rsi": signal.get("rsi", ""),
@@ -2982,7 +2982,7 @@ def _append_entry_trigger_scan_log(
             "signal_score": signal.get("signal_score", ""),
             "flow_score": signal.get("flow_score", ""),
             "htf_reason": signal.get("htf_reason", ""),
-            "reason": f"entry_trigger: {detail}".strip(),
+            "reason": f"entry_execution: {detail}".strip(),
         }
         with path.open("a", newline="", encoding="utf-8") as f:
             writer = csv.DictWriter(f, fieldnames=SCAN_LOG_COLUMNS)
@@ -5331,7 +5331,7 @@ def main():
             "watchlist_mode": watchlist_mode,
             "watchlist_tickers": list(watchlist_control_state.get("tickers") or []),
             "signal_detected_count": len(signals),
-            "scan_pass_count": len(signals),
+            "scan_pass_count": 0,
             "signals_considered": 0,
             "entry_eligible_count": 0,
             "entry_stage4_eligible_count": 0,
@@ -5611,7 +5611,7 @@ def main():
                 _mark_stage4_reject(reason="learning_symbol_suppressed", ticker=ticker, detail=learning_suppressed_symbols_reason)
                 print(f"[{ts(now_et)}] {ticker}: skip (learning-symbol suppression active).")
                 continue
-            _set_signal_outcome(ticker=ticker, disposition="setup_pass")
+            _set_signal_outcome(ticker=ticker, disposition="scanner_candidate")
             rollback_active, rollback_reason = _update_pattern_override_rollback(now_et)
             shadow_mode = bool(getattr(config, "ENABLE_SHADOW_PATTERN_DIRECTION_MODEL", True))
             shadow_apply = bool(getattr(config, "SHADOW_PATTERN_DIRECTION_APPLY", False))
@@ -6553,6 +6553,7 @@ def main():
                     initial_quote=entry_quote,
                 )
                 entry_debug["entry_orders_submitted"] = int(entry_debug.get("entry_orders_submitted", 0)) + int(entry_result.get("attempts", 0) or 0)
+                entry_debug["scan_pass_count"] = int(entry_debug.get("scan_pass_count", 0) or 0) + int(entry_result.get("attempts", 0) or 0)
                 _record_entry_order_event(ticker, option_symbol, entry_result)
                 _set_signal_outcome(
                     ticker=ticker,
@@ -7237,8 +7238,15 @@ def main():
                         "hold_seconds": hold_seconds,
                         "entry_price": entry_price,
                         "exit_price": exit_price,
+                        "entry_underlying_price": meta.get("price", ""),
+                        "exit_underlying_price": data_client.get_latest_stock_price(str(meta.get("ticker", "") or "")) or "",
                         "realized_pnl_usd": round(trade_pnl_usd, 2),
                         "pnl_pct": round(realized_plpc, 4),
+                        "hold_minutes": round(hold_seconds / 60.0, 2) if hold_seconds > 0 else 0.0,
+                        "result_usd": round(trade_pnl_usd, 2),
+                        "result_pct": round(realized_plpc * 100.0, 4),
+                        "was_direction_correct": "",
+                        "loss_cause_bucket": "",
                         "paper_reported_pnl_usd": paper_reported_pnl_usd,
                         "paper_reported_pnl_pct": paper_reported_pnl_pct,
                         "conservative_executable_pnl_usd": conservative_pnl_usd,
@@ -7271,9 +7279,21 @@ def main():
                     if trade_pnl_usd < 0:
                         loss_diagnosis = _record_local_loss_diagnosis(trade_row, now_et)
                         trade_row["loss_cause"] = loss_diagnosis.get("cause", "")
+                        cause_raw = str(loss_diagnosis.get("cause", "") or "").strip().lower()
+                        cause_map = {
+                            "wrong_direction": "wrong_direction",
+                            "execution_slippage": "spread",
+                            "rapid_stopout": "bad_timing",
+                            "chop_no_followthrough": "no_followthrough",
+                            "timing_or_decay": "theta",
+                        }
+                        trade_row["loss_cause_bucket"] = cause_map.get(cause_raw, cause_raw or "")
+                        trade_row["was_direction_correct"] = "0" if cause_raw == "wrong_direction" else "1"
                         trade_row["loss_adaptation_action"] = loss_diagnosis.get("action", "")
                         trade_row["loss_underlying_move_pct"] = loss_diagnosis.get("underlying_move_pct", "")
                         last_exit_debug["loss_diagnosis"] = loss_diagnosis
+                    else:
+                        trade_row["was_direction_correct"] = "1"
                     _record_signal_pattern_outcome(trade_row, now_et)
                     try:
                         trade_logger.log_trade(trade_row)
