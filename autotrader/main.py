@@ -5685,1383 +5685,1389 @@ def main():
                 f"loss_causes={dict(truth.get('causes', {}) or {})}"
             )
 
-        opening_entry_attempts_loop = 0
-        entry_attempts_loop = 0
-        evidence_rows = evidence_gate.load_recent_trade_rows()
-
-        for signal in signals:
-            now_et = datetime.now(tz)
-            _touch_heartbeat()
-            entry_debug["signals_considered"] = int(entry_debug.get("signals_considered", 0)) + 1
-            _set_signal_outcome(
-                ticker=str(signal.get("symbol", "") or ""),
-                disposition="scanner_candidate",
-                detail="candidate queued for execution filters",
-            )
-
-            # --- Daily loss limit ---
-            daily_loss_limit = float(getattr(config, "DAILY_LOSS_LIMIT_USD", 0.0) or 0.0)
-            if (
-                bool(getattr(config, "ALLOW_AUTOMATIC_TRADING_PAUSES", False))
-                and daily_loss_limit > 0
-                and daily_realized_loss_usd >= daily_loss_limit
-            ):
-                _mark_skip("daily_loss_limit")
-                print(
-                    f"[{ts(now_et)}] DAILY LOSS LIMIT hit: "
-                    f"${daily_realized_loss_usd:.2f} >= ${config.DAILY_LOSS_LIMIT_USD:.2f}. "
-                    f"No new entries today."
+        cycle_finalizer_now_et = datetime.now(tz)
+        try:
+            opening_entry_attempts_loop = 0
+            entry_attempts_loop = 0
+            evidence_rows = evidence_gate.load_recent_trade_rows()
+    
+            for signal in signals:
+                now_et = datetime.now(tz)
+                _touch_heartbeat()
+                entry_debug["signals_considered"] = int(entry_debug.get("signals_considered", 0)) + 1
+                _set_signal_outcome(
+                    ticker=str(signal.get("symbol", "") or ""),
+                    disposition="scanner_candidate",
+                    detail="candidate queued for execution filters",
                 )
-                alerts.send(
-                    "daily_loss_limit",
-                    (
-                        f"Daily loss limit hit: ${daily_realized_loss_usd:.2f} "
-                        f"(limit ${config.DAILY_LOSS_LIMIT_USD:.2f}). New entries paused."
-                    ),
-                    level="warning",
-                    dedupe_key=f"daily-loss-{now_et.date().isoformat()}",
-                )
-                break
-
-            # --- Weekly loss limit ---
-            weekly_loss_limit = float(getattr(config, "WEEKLY_LOSS_LIMIT_USD", 0.0) or 0.0)
-            if (
-                bool(getattr(config, "ALLOW_AUTOMATIC_TRADING_PAUSES", False))
-                and weekly_loss_limit > 0
-                and weekly_realized_loss_usd >= weekly_loss_limit
-            ):
-                _mark_skip("weekly_loss_limit")
-                print(
-                    f"[{ts(now_et)}] WEEKLY LOSS LIMIT hit: "
-                    f"${weekly_realized_loss_usd:.2f} >= ${config.WEEKLY_LOSS_LIMIT_USD:.2f}. "
-                    f"No new entries this week."
-                )
-                alerts.send(
-                    "weekly_loss_limit",
-                    (
-                        f"Weekly loss limit hit: ${weekly_realized_loss_usd:.2f} "
-                        f"(limit ${config.WEEKLY_LOSS_LIMIT_USD:.2f}). New entries paused."
-                    ),
-                    level="warning",
-                    dedupe_key=f"weekly-loss-{weekly_loss_key}",
-                )
-                break
-
-            # --- Consecutive loss recovery brake ---
-            if (
-                bool(getattr(config, "ALLOW_AUTOMATIC_TRADING_PAUSES", False))
-                and _consecutive_loss_cooldown_active(now_et)
-            ):
-                break
-
-            if zero_dte_loss_lockout_day != now_et.date().isoformat():
-                zero_dte_loss_lockout_day = now_et.date().isoformat()
-                zero_dte_realized_loss_count = 0
-                _save_runtime_state()
-
-            zero_dte_loss_limit = max(0, int(getattr(config, "ZERO_DTE_MAX_REALIZED_LOSSES", 0) or 0))
-            if (
-                bool(getattr(config, "ALLOW_AUTOMATIC_TRADING_PAUSES", False))
-                and
-                bool(getattr(config, "ENABLE_EXPOSURE_BUCKET_GUARDS", False))
-                and zero_dte_loss_limit > 0
-                and zero_dte_realized_loss_count >= zero_dte_loss_limit
-            ):
-                _mark_skip("zero_dte_loss_lockout")
-                print(
-                    f"[{ts(now_et)}] 0DTE loss lockout active: "
-                    f"{zero_dte_realized_loss_count}/{zero_dte_loss_limit} realized red 0DTE ETF exit(s). "
-                    "Managing existing positions only."
-                )
-                alerts.send(
-                    "zero_dte_loss_lockout",
-                    (
-                        f"0DTE loss lockout active after {zero_dte_realized_loss_count} "
-                        "realized red ETF scalp exits. New entries paused."
-                    ),
-                    level="warning",
-                    dedupe_key=f"zero-dte-lockout-{now_et.date().isoformat()}",
-                )
-                break
-
-            # --- Net P&L circuit breaker ---
-            intraday_net_loss_limit = abs(float(getattr(config, "INTRADAY_NET_LOSS_LIMIT_USD", 0.0) or 0.0))
-            if (
-                bool(getattr(config, "ALLOW_AUTOMATIC_TRADING_PAUSES", False))
-                and intraday_net_loss_limit > 0
-                and trade_telemetry_total_pnl_usd <= -intraday_net_loss_limit
-            ):
-                _mark_skip("intraday_net_loss_limit")
-                print(
-                    f"[{ts(now_et)}] INTRADAY NET LOSS LIMIT hit: "
-                    f"net=${trade_telemetry_total_pnl_usd:.2f} <= -${intraday_net_loss_limit:.2f}. "
-                    "Pausing new entries for the rest of the day."
-                )
-                alerts.send(
-                    "intraday_net_loss_limit",
-                    (
-                        f"Intraday net loss limit hit: net=${trade_telemetry_total_pnl_usd:.2f} "
-                        f"(limit -${intraday_net_loss_limit:.2f}). New entries paused."
-                    ),
-                    level="warning",
-                    dedupe_key=f"intraday-net-loss-{now_et.date().isoformat()}",
-                )
-                break
-
-            # --- Early-red guard ---
-            if (
-                bool(getattr(config, "ALLOW_AUTOMATIC_TRADING_PAUSES", False))
-                and bool(getattr(config, "EARLY_RED_GUARD_ENABLED", False))
-            ):
-                early_red_min_closed = max(1, int(getattr(config, "EARLY_RED_GUARD_MIN_CLOSED_TRADES", 4) or 4))
-                early_red_max_net_pnl = float(getattr(config, "EARLY_RED_GUARD_MAX_NET_PNL_USD", -0.01) or -0.01)
+    
+                # --- Daily loss limit ---
+                daily_loss_limit = float(getattr(config, "DAILY_LOSS_LIMIT_USD", 0.0) or 0.0)
                 if (
-                    trade_telemetry_closed_count >= early_red_min_closed
-                    and trade_telemetry_total_pnl_usd <= early_red_max_net_pnl
+                    bool(getattr(config, "ALLOW_AUTOMATIC_TRADING_PAUSES", False))
+                    and daily_loss_limit > 0
+                    and daily_realized_loss_usd >= daily_loss_limit
                 ):
-                    _mark_skip("early_red_guard")
+                    _mark_skip("daily_loss_limit")
                     print(
-                        f"[{ts(now_et)}] EARLY RED GUARD hit: "
-                        f"closed={trade_telemetry_closed_count} net=${trade_telemetry_total_pnl_usd:.2f} "
-                        f"(threshold <= ${early_red_max_net_pnl:.2f}). "
+                        f"[{ts(now_et)}] DAILY LOSS LIMIT hit: "
+                        f"${daily_realized_loss_usd:.2f} >= ${config.DAILY_LOSS_LIMIT_USD:.2f}. "
+                        f"No new entries today."
+                    )
+                    alerts.send(
+                        "daily_loss_limit",
+                        (
+                            f"Daily loss limit hit: ${daily_realized_loss_usd:.2f} "
+                            f"(limit ${config.DAILY_LOSS_LIMIT_USD:.2f}). New entries paused."
+                        ),
+                        level="warning",
+                        dedupe_key=f"daily-loss-{now_et.date().isoformat()}",
+                    )
+                    break
+    
+                # --- Weekly loss limit ---
+                weekly_loss_limit = float(getattr(config, "WEEKLY_LOSS_LIMIT_USD", 0.0) or 0.0)
+                if (
+                    bool(getattr(config, "ALLOW_AUTOMATIC_TRADING_PAUSES", False))
+                    and weekly_loss_limit > 0
+                    and weekly_realized_loss_usd >= weekly_loss_limit
+                ):
+                    _mark_skip("weekly_loss_limit")
+                    print(
+                        f"[{ts(now_et)}] WEEKLY LOSS LIMIT hit: "
+                        f"${weekly_realized_loss_usd:.2f} >= ${config.WEEKLY_LOSS_LIMIT_USD:.2f}. "
+                        f"No new entries this week."
+                    )
+                    alerts.send(
+                        "weekly_loss_limit",
+                        (
+                            f"Weekly loss limit hit: ${weekly_realized_loss_usd:.2f} "
+                            f"(limit ${config.WEEKLY_LOSS_LIMIT_USD:.2f}). New entries paused."
+                        ),
+                        level="warning",
+                        dedupe_key=f"weekly-loss-{weekly_loss_key}",
+                    )
+                    break
+    
+                # --- Consecutive loss recovery brake ---
+                if (
+                    bool(getattr(config, "ALLOW_AUTOMATIC_TRADING_PAUSES", False))
+                    and _consecutive_loss_cooldown_active(now_et)
+                ):
+                    break
+    
+                if zero_dte_loss_lockout_day != now_et.date().isoformat():
+                    zero_dte_loss_lockout_day = now_et.date().isoformat()
+                    zero_dte_realized_loss_count = 0
+                    _save_runtime_state()
+    
+                zero_dte_loss_limit = max(0, int(getattr(config, "ZERO_DTE_MAX_REALIZED_LOSSES", 0) or 0))
+                if (
+                    bool(getattr(config, "ALLOW_AUTOMATIC_TRADING_PAUSES", False))
+                    and
+                    bool(getattr(config, "ENABLE_EXPOSURE_BUCKET_GUARDS", False))
+                    and zero_dte_loss_limit > 0
+                    and zero_dte_realized_loss_count >= zero_dte_loss_limit
+                ):
+                    _mark_skip("zero_dte_loss_lockout")
+                    print(
+                        f"[{ts(now_et)}] 0DTE loss lockout active: "
+                        f"{zero_dte_realized_loss_count}/{zero_dte_loss_limit} realized red 0DTE ETF exit(s). "
+                        "Managing existing positions only."
+                    )
+                    alerts.send(
+                        "zero_dte_loss_lockout",
+                        (
+                            f"0DTE loss lockout active after {zero_dte_realized_loss_count} "
+                            "realized red ETF scalp exits. New entries paused."
+                        ),
+                        level="warning",
+                        dedupe_key=f"zero-dte-lockout-{now_et.date().isoformat()}",
+                    )
+                    break
+    
+                # --- Net P&L circuit breaker ---
+                intraday_net_loss_limit = abs(float(getattr(config, "INTRADAY_NET_LOSS_LIMIT_USD", 0.0) or 0.0))
+                if (
+                    bool(getattr(config, "ALLOW_AUTOMATIC_TRADING_PAUSES", False))
+                    and intraday_net_loss_limit > 0
+                    and trade_telemetry_total_pnl_usd <= -intraday_net_loss_limit
+                ):
+                    _mark_skip("intraday_net_loss_limit")
+                    print(
+                        f"[{ts(now_et)}] INTRADAY NET LOSS LIMIT hit: "
+                        f"net=${trade_telemetry_total_pnl_usd:.2f} <= -${intraday_net_loss_limit:.2f}. "
                         "Pausing new entries for the rest of the day."
                     )
                     alerts.send(
-                        "early_red_guard",
+                        "intraday_net_loss_limit",
                         (
-                            f"Early red guard paused entries: {trade_telemetry_closed_count} closed trades, "
-                            f"net=${trade_telemetry_total_pnl_usd:.2f} (threshold ${early_red_max_net_pnl:.2f})."
+                            f"Intraday net loss limit hit: net=${trade_telemetry_total_pnl_usd:.2f} "
+                            f"(limit -${intraday_net_loss_limit:.2f}). New entries paused."
                         ),
                         level="warning",
-                        dedupe_key=f"early-red-{now_et.date().isoformat()}",
+                        dedupe_key=f"intraday-net-loss-{now_et.date().isoformat()}",
                     )
                     break
-
-            # --- PDT guard (only blocks if ENFORCE_PDT_GUARD=True) ---
-            if local_trade_budget_hit:
-                _mark_skip("pdt_local_budget_hit")
-                break
-            if config.ENFORCE_PDT_GUARD and not pdt_allowed:
-                _mark_skip("pdt_broker_block")
-                break
-
-            ticker = str(signal["symbol"]).upper()
-            direction = str(signal["direction"]).lower()
-            _refresh_learning_symbol_suppression(now_et)
-            if ticker in learning_suppressed_symbols:
-                _mark_skip("learning_symbol_suppressed")
-                _mark_stage4_reject(reason="learning_symbol_suppressed", ticker=ticker, detail=learning_suppressed_symbols_reason)
-                print(f"[{ts(now_et)}] {ticker}: skip (learning-symbol suppression active).")
-                continue
-            _set_signal_outcome(ticker=ticker, disposition="scanner_candidate")
-            rollback_active, rollback_reason = _update_pattern_override_rollback(now_et)
-            shadow_mode = bool(getattr(config, "ENABLE_SHADOW_PATTERN_DIRECTION_MODEL", True))
-            shadow_apply = bool(getattr(config, "SHADOW_PATTERN_DIRECTION_APPLY", False))
-            pattern_override_enabled = (not rollback_active) and ((not shadow_mode) or shadow_apply)
-
-            pattern_direction, pattern_key, pattern_explanation = _pattern_direction_override(signal, ticker, direction, now_et)
-            if pattern_direction != direction and shadow_mode:
-                shadow_pattern_stats["would_flip_count"] = int(shadow_pattern_stats.get("would_flip_count", 0) or 0) + 1
-                shadow_pattern_stats["last_would_flip_ticker"] = ticker
-                shadow_pattern_stats["last_would_flip_from"] = direction
-                shadow_pattern_stats["last_would_flip_to"] = pattern_direction
-                shadow_pattern_stats["last_would_flip_reason"] = pattern_explanation
-                shadow_pattern_stats["last_would_flip_at_et"] = now_et.isoformat()
-                _save_runtime_state()
-            if pattern_override_enabled and pattern_direction != direction:
-                previous_direction = direction
-                direction = pattern_direction
-                signal = dict(signal)
-                signal["direction"] = direction
-                signal["pattern_direction_override"] = pattern_key
-                signal["pattern_direction_override_reason"] = pattern_explanation
-                _set_signal_outcome(
+    
+                # --- Early-red guard ---
+                if (
+                    bool(getattr(config, "ALLOW_AUTOMATIC_TRADING_PAUSES", False))
+                    and bool(getattr(config, "EARLY_RED_GUARD_ENABLED", False))
+                ):
+                    early_red_min_closed = max(1, int(getattr(config, "EARLY_RED_GUARD_MIN_CLOSED_TRADES", 4) or 4))
+                    early_red_max_net_pnl = float(getattr(config, "EARLY_RED_GUARD_MAX_NET_PNL_USD", -0.01) or -0.01)
+                    if (
+                        trade_telemetry_closed_count >= early_red_min_closed
+                        and trade_telemetry_total_pnl_usd <= early_red_max_net_pnl
+                    ):
+                        _mark_skip("early_red_guard")
+                        print(
+                            f"[{ts(now_et)}] EARLY RED GUARD hit: "
+                            f"closed={trade_telemetry_closed_count} net=${trade_telemetry_total_pnl_usd:.2f} "
+                            f"(threshold <= ${early_red_max_net_pnl:.2f}). "
+                            "Pausing new entries for the rest of the day."
+                        )
+                        alerts.send(
+                            "early_red_guard",
+                            (
+                                f"Early red guard paused entries: {trade_telemetry_closed_count} closed trades, "
+                                f"net=${trade_telemetry_total_pnl_usd:.2f} (threshold ${early_red_max_net_pnl:.2f})."
+                            ),
+                            level="warning",
+                            dedupe_key=f"early-red-{now_et.date().isoformat()}",
+                        )
+                        break
+    
+                # --- PDT guard (only blocks if ENFORCE_PDT_GUARD=True) ---
+                if local_trade_budget_hit:
+                    _mark_skip("pdt_local_budget_hit")
+                    break
+                if config.ENFORCE_PDT_GUARD and not pdt_allowed:
+                    _mark_skip("pdt_broker_block")
+                    break
+    
+                ticker = str(signal["symbol"]).upper()
+                direction = str(signal["direction"]).lower()
+                _refresh_learning_symbol_suppression(now_et)
+                if ticker in learning_suppressed_symbols:
+                    _mark_skip("learning_symbol_suppressed")
+                    _mark_stage4_reject(reason="learning_symbol_suppressed", ticker=ticker, detail=learning_suppressed_symbols_reason)
+                    print(f"[{ts(now_et)}] {ticker}: skip (learning-symbol suppression active).")
+                    continue
+                _set_signal_outcome(ticker=ticker, disposition="scanner_candidate")
+                rollback_active, rollback_reason = _update_pattern_override_rollback(now_et)
+                shadow_mode = bool(getattr(config, "ENABLE_SHADOW_PATTERN_DIRECTION_MODEL", True))
+                shadow_apply = bool(getattr(config, "SHADOW_PATTERN_DIRECTION_APPLY", False))
+                pattern_override_enabled = (not rollback_active) and ((not shadow_mode) or shadow_apply)
+    
+                pattern_direction, pattern_key, pattern_explanation = _pattern_direction_override(signal, ticker, direction, now_et)
+                if pattern_direction != direction and shadow_mode:
+                    shadow_pattern_stats["would_flip_count"] = int(shadow_pattern_stats.get("would_flip_count", 0) or 0) + 1
+                    shadow_pattern_stats["last_would_flip_ticker"] = ticker
+                    shadow_pattern_stats["last_would_flip_from"] = direction
+                    shadow_pattern_stats["last_would_flip_to"] = pattern_direction
+                    shadow_pattern_stats["last_would_flip_reason"] = pattern_explanation
+                    shadow_pattern_stats["last_would_flip_at_et"] = now_et.isoformat()
+                    _save_runtime_state()
+                if pattern_override_enabled and pattern_direction != direction:
+                    previous_direction = direction
+                    direction = pattern_direction
+                    signal = dict(signal)
+                    signal["direction"] = direction
+                    signal["pattern_direction_override"] = pattern_key
+                    signal["pattern_direction_override_reason"] = pattern_explanation
+                    _set_signal_outcome(
+                        ticker=ticker,
+                        disposition="pattern_direction_override",
+                        detail=pattern_explanation or f"{previous_direction}->{direction}",
+                    )
+                    print(
+                        f"[{ts(now_et)}] {ticker}: {pattern_explanation}"
+                    )
+                elif (not pattern_override_enabled) and pattern_direction != direction:
+                    if rollback_active:
+                        print(
+                            f"[{ts(now_et)}] {ticker}: pattern override suppressed by rollback "
+                            f"({rollback_reason})."
+                        )
+                    elif shadow_mode and not shadow_apply:
+                        print(
+                            f"[{ts(now_et)}] {ticker}: shadow-only pattern model would flip "
+                            f"{direction.upper()} -> {pattern_direction.upper()} ({pattern_explanation})."
+                        )
+    
+                evidence_decision = evidence_gate.evaluate_signal(
+                    signal=signal,
                     ticker=ticker,
-                    disposition="pattern_direction_override",
-                    detail=pattern_explanation or f"{previous_direction}->{direction}",
+                    direction=direction,
+                    now_et=now_et,
+                    rows=evidence_rows,
                 )
-                print(
-                    f"[{ts(now_et)}] {ticker}: {pattern_explanation}"
+                if not evidence_decision.allowed:
+                    _mark_skip("execution_evidence_gate")
+                    _mark_stage4_reject(reason="execution_evidence_gate", ticker=ticker, detail=evidence_decision.reason)
+                    print(f"[{ts(now_et)}] {ticker}: skip ({evidence_decision.reason}).")
+                    continue
+    
+                if adaptive_loss_active:
+                    profile = adaptive_loss_profile if isinstance(adaptive_loss_profile, dict) else {}
+                    ticker_losses = dict(profile.get("ticker_losses") or {})
+                    block_after = max(1, int(getattr(config, "ADAPTIVE_LOSS_BLOCK_TICKER_AFTER_LOSSES", 1)))
+                    ticker_loss_count = int(ticker_losses.get(ticker, 0) or 0)
+                    if ticker in adaptive_loss_blocked_tickers and ticker_loss_count >= block_after:
+                        expected_after_loss = str(ticker_reentry_expected_direction.get(ticker, "") or "").lower()
+                        allow_direction_flip = (
+                            bool(getattr(config, "ENABLE_LOSS_DIRECTION_FLIP", True))
+                            and bool(ticker_reentry_armed.get(ticker, False))
+                            and expected_after_loss in {"call", "put"}
+                            and str(direction or "").lower() == expected_after_loss
+                        )
+                        if not allow_direction_flip:
+                            _mark_skip("adaptive_losing_ticker_block")
+                            _mark_stage4_reject(reason="adaptive_losing_ticker_block", ticker=ticker)
+                            print(
+                                f"[{ts(now_et)}] {ticker}: skip "
+                                f"(adaptive loss mode blocked ticker after {ticker_loss_count} same-day loss(es))."
+                            )
+                            continue
+                        print(
+                            f"[{ts(now_et)}] {ticker}: adaptive loss block bypassed for "
+                            f"direction flip ({expected_after_loss.upper()})."
+                        )
+                    signal_score_now = float(signal.get("signal_score", 0.0) or 0.0)
+                    direction_score_now = abs(float(signal.get("direction_score", 0.0) or 0.0))
+                    adaptive_min_signal = max(
+                        float(getattr(config, "ADAPTIVE_LOSS_MIN_SIGNAL_SCORE", 7.8)),
+                        float(profile.get("min_signal_score", 0.0) or 0.0),
+                    )
+                    adaptive_min_signal = min(
+                        adaptive_min_signal,
+                        float(getattr(config, "ADAPTIVE_LOSS_MAX_SIGNAL_SCORE", adaptive_min_signal)),
+                    )
+                    adaptive_min_direction = max(
+                        float(getattr(config, "ADAPTIVE_LOSS_MIN_DIRECTION_SCORE", 0.65)),
+                        float(profile.get("min_direction_score", 0.0) or 0.0),
+                    )
+                    adaptive_min_direction = min(
+                        adaptive_min_direction,
+                        float(getattr(config, "ADAPTIVE_LOSS_MAX_DIRECTION_SCORE", adaptive_min_direction)),
+                    )
+                    if signal_score_now < adaptive_min_signal or direction_score_now < adaptive_min_direction:
+                        _mark_skip("adaptive_loss_quality_gate")
+                        _mark_stage4_reject(reason="adaptive_loss_quality_gate", ticker=ticker)
+                        print(
+                            f"[{ts(now_et)}] {ticker}: skip (adaptive loss quality gate; "
+                            f"score {signal_score_now:.2f}/{adaptive_min_signal:.2f}, "
+                            f"direction {direction_score_now:.2f}/{adaptive_min_direction:.2f})."
+                        )
+                        continue
+                    adaptive_min_roc = float(profile.get("min_abs_roc_pct", 0.0) or 0.0)
+                    adaptive_min_rvol = float(profile.get("min_rvol", 0.0) or 0.0)
+                    if adaptive_min_roc > 0:
+                        adaptive_min_roc = min(
+                            adaptive_min_roc,
+                            float(getattr(config, "ADAPTIVE_LOSS_MIN_ABS_ROC_PCT", adaptive_min_roc)),
+                        )
+                    if adaptive_min_rvol > 0:
+                        adaptive_min_rvol = min(
+                            adaptive_min_rvol,
+                            float(getattr(config, "ADAPTIVE_LOSS_MIN_RVOL", adaptive_min_rvol)),
+                        )
+                    signal_abs_roc = abs(float(signal.get("roc", 0.0) or 0.0))
+                    signal_rvol = float(signal.get("rvol", 0.0) or 0.0)
+                    if (
+                        adaptive_min_roc > 0
+                        and signal_abs_roc < adaptive_min_roc
+                    ) or (
+                        adaptive_min_rvol > 0
+                        and signal_rvol < adaptive_min_rvol
+                    ):
+                        _mark_skip("adaptive_loss_momentum_gate")
+                        _mark_stage4_reject(reason="adaptive_loss_momentum_gate", ticker=ticker)
+                        print(
+                            f"[{ts(now_et)}] {ticker}: skip (adaptive momentum gate; "
+                            f"roc {signal_abs_roc:.2f}/{adaptive_min_roc:.2f}, "
+                            f"rvol {signal_rvol:.2f}/{adaptive_min_rvol:.2f})."
+                        )
+                        continue
+    
+                # --- Loss throttle (keep trading, but demand stronger setups after losses) ---
+                throttle_after_losses = max(1, int(getattr(config, "LOSS_THROTTLE_AFTER_CONSEC_LOSSES", 1) or 1))
+                if consecutive_losses >= throttle_after_losses:
+                    signal_score_now = float(signal.get("signal_score", 0.0) or 0.0)
+                    volatility_score_now = float(signal.get("volatility_score", 0.0) or 0.0)
+                    min_signal_add = float(getattr(config, "LOSS_THROTTLE_SIGNAL_SCORE_ADD", 1.0) or 1.0)
+                    min_volatility_score = float(getattr(config, "LOSS_THROTTLE_MIN_VOLATILITY_SCORE", 6.0) or 6.0)
+                    throttle_min_signal = _runtime_entry_min_signal_score() + min_signal_add
+                    if signal_score_now < throttle_min_signal or volatility_score_now < min_volatility_score:
+                        _mark_skip("loss_throttle_quality_gate")
+                        _mark_stage4_reject(reason="loss_throttle_quality_gate", ticker=ticker)
+                        print(
+                            f"[{ts(now_et)}] {ticker}: skip (loss throttle active after {consecutive_losses} losses; "
+                            f"score {signal_score_now:.2f}/{throttle_min_signal:.2f}, "
+                            f"vol {volatility_score_now:.2f}/{min_volatility_score:.2f})."
+                        )
+                        continue
+    
+                active_buy_order_count = sum(int(v) for v in alpaca_active_buy_orders_by_ticker.values())
+                max_open_entry_orders = max(0, int(getattr(config, "MAX_OPEN_ENTRY_BUY_ORDERS", 1) or 0))
+                if max_open_entry_orders > 0 and active_buy_order_count >= max_open_entry_orders:
+                    _mark_skip("open_entry_order_cap")
+                    print(
+                        f"[{ts(now_et)}] Open entry-order cap reached "
+                        f"({active_buy_order_count}/{max_open_entry_orders}); letting limit buy rest."
+                    )
+                    break
+    
+                loop_attempt_cap = max(1, int(getattr(config, "MAX_NEW_ENTRY_ATTEMPTS_PER_LOOP", 1) or 1))
+                if entry_attempts_loop >= loop_attempt_cap:
+                    _mark_skip("entry_attempt_cap")
+                    print(
+                        f"[{ts(now_et)}] Entry-attempt cap reached ({entry_attempts_loop}/{loop_attempt_cap}) for this loop."
+                    )
+                    break
+    
+                if _is_in_opening_strict_window(now_et):
+                    opening_attempt_cap = max(1, int(getattr(config, "OPENING_MAX_NEW_ENTRY_ATTEMPTS_PER_LOOP", 2) or 2))
+                    if opening_entry_attempts_loop >= opening_attempt_cap:
+                        _mark_skip("opening_entry_attempt_cap")
+                        _mark_stage4_reject(reason="opening_entry_attempt_cap", ticker=ticker)
+                        print(
+                            f"[{ts(now_et)}] Opening entry-attempt cap reached "
+                            f"({opening_entry_attempts_loop}/{opening_attempt_cap})."
+                        )
+                        break
+    
+                    opening_max_fresh_entries = max(1, int(getattr(config, "OPENING_MAX_FRESH_ENTRIES", 3) or 3))
+                    if opening_entries_today_count >= opening_max_fresh_entries:
+                        _mark_skip("opening_fresh_entry_cap")
+                        _mark_stage4_reject(reason="opening_fresh_entry_cap", ticker=ticker)
+                        print(
+                            f"[{ts(now_et)}] Opening fresh-entry cap reached "
+                            f"({opening_entries_today_count}/{opening_max_fresh_entries})."
+                        )
+                        break
+    
+                opening_quality_ok, opening_quality_reason = _opening_entry_quality_ok(signal, now_et)
+                if not opening_quality_ok:
+                    _mark_skip("opening_quality_gate")
+                    _mark_stage4_reject(reason="opening_quality_gate", ticker=ticker)
+                    print(f"[{ts(now_et)}] {ticker}: skip ({opening_quality_reason}).")
+                    continue
+    
+                if bool(getattr(config, "ENABLE_FAST_START_ENTRY_QUALITY", True)):
+                    fast_start_ok, fast_start_reason = _fast_start_entry_quality_ok(signal, now_et)
+                    if not fast_start_ok:
+                        _mark_skip("fast_start_quality_gate")
+                        _mark_stage4_reject(reason="fast_start_quality_gate", ticker=ticker, detail=fast_start_reason)
+                        print(f"[{ts(now_et)}] {ticker}: skip ({fast_start_reason}).")
+                        continue
+    
+                if not _is_valid_long_direction(direction):
+                    _mark_skip("invalid_strategy_direction")
+                    _mark_stage4_reject(reason="invalid_strategy_direction", ticker=ticker)
+                    print(f"[{ts(now_et)}] {ticker}: skip (invalid direction={direction!r}; only CALL/PUT allowed).")
+                    continue
+    
+                preferred_core = set(str(s).upper() for s in getattr(config, "PREFERRED_CORE_TICKERS", ()))
+                is_non_core = ticker not in preferred_core
+                if is_non_core:
+                    non_core_cap = max(0, int(getattr(config, "MAX_NON_CORE_ENTRIES_PER_DAY", 4)))
+                    if non_core_cap > 0 and non_core_entries_today_count >= non_core_cap:
+                        _mark_skip("non_core_entry_cap")
+                        _mark_stage4_reject(reason="non_core_entry_cap", ticker=ticker)
+                        print(
+                            f"[{ts(now_et)}] {ticker}: skip (non-core entry cap "
+                            f"{non_core_entries_today_count}/{non_core_cap})."
+                        )
+                        continue
+                    try:
+                        signal_score = float(signal.get("signal_score", 0.0) or 0.0)
+                    except (TypeError, ValueError):
+                        signal_score = 0.0
+                    non_core_min_signal = float(getattr(config, "NON_CORE_MIN_SIGNAL_SCORE", 9.0) or 9.0)
+                    if signal_score < non_core_min_signal:
+                        _mark_skip("non_core_quality_gate")
+                        _mark_stage4_reject(reason="non_core_quality_gate", ticker=ticker)
+                        print(
+                            f"[{ts(now_et)}] {ticker}: skip (non-core signal score {signal_score:.2f} "
+                            f"< {non_core_min_signal:.2f})."
+                        )
+                        continue
+    
+                if _is_bad_fill_blocked(ticker, now_et):
+                    _mark_skip("bad_fill_cooldown")
+                    _mark_stage4_reject(reason="bad_fill_cooldown", ticker=ticker)
+                    print(f"[{ts(now_et)}] {ticker}: skip (bad-fill cooldown active).")
+                    continue
+                roundtrip_cooldown_until = _active_ticker_roundtrip_cooldown_until(ticker, now_et)
+                if roundtrip_cooldown_until is not None:
+                    _mark_skip("ticker_roundtrip_cooldown")
+                    _mark_stage4_reject(reason="ticker_roundtrip_cooldown", ticker=ticker)
+                    print(
+                        f"[{ts(now_et)}] {ticker}: skip "
+                        f"(round-trip diversification cooldown until {ts(roundtrip_cooldown_until)})."
+                    )
+                    continue
+                truth_roundtrip_cap = max(
+                    0,
+                    int(getattr(config, "MAX_ALPACA_TRUTH_ROUNDTRIPS_PER_TICKER_PER_DAY", 1) or 0),
                 )
-            elif (not pattern_override_enabled) and pattern_direction != direction:
-                if rollback_active:
+                truth_roundtrip_count = int(alpaca_truth_ticker_roundtrips.get(ticker, 0))
+                if truth_roundtrip_cap > 0 and truth_roundtrip_count >= truth_roundtrip_cap:
+                    _mark_skip("alpaca_truth_ticker_roundtrip_cap")
+                    _mark_stage4_reject(reason="alpaca_truth_ticker_roundtrip_cap", ticker=ticker)
                     print(
-                        f"[{ts(now_et)}] {ticker}: pattern override suppressed by rollback "
-                        f"({rollback_reason})."
+                        f"[{ts(now_et)}] {ticker}: skip "
+                        f"(Alpaca truth has {truth_roundtrip_count}/{truth_roundtrip_cap} "
+                        "closed round-trip(s) today)."
                     )
-                elif shadow_mode and not shadow_apply:
-                    print(
-                        f"[{ts(now_et)}] {ticker}: shadow-only pattern model would flip "
-                        f"{direction.upper()} -> {pattern_direction.upper()} ({pattern_explanation})."
-                    )
-
-            evidence_decision = evidence_gate.evaluate_signal(
-                signal=signal,
-                ticker=ticker,
-                direction=direction,
-                now_et=now_et,
-                rows=evidence_rows,
-            )
-            if not evidence_decision.allowed:
-                _mark_skip("execution_evidence_gate")
-                _mark_stage4_reject(reason="execution_evidence_gate", ticker=ticker, detail=evidence_decision.reason)
-                print(f"[{ts(now_et)}] {ticker}: skip ({evidence_decision.reason}).")
-                continue
-
-            if adaptive_loss_active:
-                profile = adaptive_loss_profile if isinstance(adaptive_loss_profile, dict) else {}
-                ticker_losses = dict(profile.get("ticker_losses") or {})
-                block_after = max(1, int(getattr(config, "ADAPTIVE_LOSS_BLOCK_TICKER_AFTER_LOSSES", 1)))
-                ticker_loss_count = int(ticker_losses.get(ticker, 0) or 0)
-                if ticker in adaptive_loss_blocked_tickers and ticker_loss_count >= block_after:
+                    continue
+                loss_cooldown_until = _active_ticker_loss_cooldown_until(ticker, now_et)
+                if loss_cooldown_until is not None:
                     expected_after_loss = str(ticker_reentry_expected_direction.get(ticker, "") or "").lower()
                     allow_direction_flip = (
-                        bool(getattr(config, "ENABLE_LOSS_DIRECTION_FLIP", True))
+                        bool(getattr(config, "LOSS_DIRECTION_FLIP_ALLOWS_COOLDOWN_BYPASS", True))
                         and bool(ticker_reentry_armed.get(ticker, False))
                         and expected_after_loss in {"call", "put"}
                         and str(direction or "").lower() == expected_after_loss
                     )
                     if not allow_direction_flip:
-                        _mark_skip("adaptive_losing_ticker_block")
-                        _mark_stage4_reject(reason="adaptive_losing_ticker_block", ticker=ticker)
+                        _mark_skip("ticker_loss_cooldown")
+                        _mark_stage4_reject(reason="ticker_loss_cooldown", ticker=ticker)
                         print(
-                            f"[{ts(now_et)}] {ticker}: skip "
-                            f"(adaptive loss mode blocked ticker after {ticker_loss_count} same-day loss(es))."
+                            f"[{ts(now_et)}] {ticker}: skip (loss cooldown until {ts(loss_cooldown_until)})."
                         )
                         continue
                     print(
-                        f"[{ts(now_et)}] {ticker}: adaptive loss block bypassed for "
-                        f"direction flip ({expected_after_loss.upper()})."
+                        f"[{ts(now_et)}] {ticker}: loss cooldown bypassed for direction flip "
+                        f"({expected_after_loss.upper()})."
                     )
-                signal_score_now = float(signal.get("signal_score", 0.0) or 0.0)
-                direction_score_now = abs(float(signal.get("direction_score", 0.0) or 0.0))
-                adaptive_min_signal = max(
-                    float(getattr(config, "ADAPTIVE_LOSS_MIN_SIGNAL_SCORE", 7.8)),
-                    float(profile.get("min_signal_score", 0.0) or 0.0),
-                )
-                adaptive_min_signal = min(
-                    adaptive_min_signal,
-                    float(getattr(config, "ADAPTIVE_LOSS_MAX_SIGNAL_SCORE", adaptive_min_signal)),
-                )
-                adaptive_min_direction = max(
-                    float(getattr(config, "ADAPTIVE_LOSS_MIN_DIRECTION_SCORE", 0.65)),
-                    float(profile.get("min_direction_score", 0.0) or 0.0),
-                )
-                adaptive_min_direction = min(
-                    adaptive_min_direction,
-                    float(getattr(config, "ADAPTIVE_LOSS_MAX_DIRECTION_SCORE", adaptive_min_direction)),
-                )
-                if signal_score_now < adaptive_min_signal or direction_score_now < adaptive_min_direction:
-                    _mark_skip("adaptive_loss_quality_gate")
-                    _mark_stage4_reject(reason="adaptive_loss_quality_gate", ticker=ticker)
+                if not is_at_or_after(now_et, config.NO_NEW_TRADES_BEFORE):
+                    _mark_skip("before_entry_window")
+                    _mark_stage4_reject(reason="before_entry_window", ticker=ticker)
+                    print(f"[{ts(now_et)}] Entry window not open yet (before {config.NO_NEW_TRADES_BEFORE} ET).")
+                    break
+                if is_at_or_after(now_et, config.NO_NEW_TRADES_AFTER):
+                    _mark_skip("after_entry_window")
+                    _mark_stage4_reject(reason="after_entry_window", ticker=ticker)
+                    print(f"[{ts(now_et)}] Entry window closed (past {config.NO_NEW_TRADES_AFTER} ET).")
+                    break
+                if _is_entry_hour_blocked(now_et, strategy_profile=strategy_profile):
+                    _mark_skip("blocked_entry_hour")
+                    _mark_stage4_reject(reason="blocked_entry_hour", ticker=ticker)
+                    print(f"[{ts(now_et)}] {ticker}: skip (hour {now_et.hour:02d}:00 ET blocked by config).")
+                    continue
+    
+                if dry_run_enabled:
+                    _mark_skip("dry_run_mode")
+                    _mark_stage4_reject(reason="dry_run_mode", ticker=ticker)
                     print(
-                        f"[{ts(now_et)}] {ticker}: skip (adaptive loss quality gate; "
-                        f"score {signal_score_now:.2f}/{adaptive_min_signal:.2f}, "
-                        f"direction {direction_score_now:.2f}/{adaptive_min_direction:.2f})."
+                        f"[{ts(now_et)}] DRY-RUN entry candidate: {ticker} {str(direction).upper()} "
+                        f"score={float(signal.get('signal_score', 0) or 0):.2f} (no order submitted)."
                     )
                     continue
-                adaptive_min_roc = float(profile.get("min_abs_roc_pct", 0.0) or 0.0)
-                adaptive_min_rvol = float(profile.get("min_rvol", 0.0) or 0.0)
-                if adaptive_min_roc > 0:
-                    adaptive_min_roc = min(
-                        adaptive_min_roc,
-                        float(getattr(config, "ADAPTIVE_LOSS_MIN_ABS_ROC_PCT", adaptive_min_roc)),
+    
+                prior_entries = int(ticker_entry_counts.get(ticker, 0))
+                max_entries_per_ticker = max(0, int(getattr(config, "MAX_ENTRIES_PER_TICKER_PER_DAY", 1) or 0))
+                reentries_used = int(ticker_reentries_used.get(ticker, 0))
+                reentry_armed = bool(ticker_reentry_armed.get(ticker, False))
+                expected_direction = str(ticker_reentry_expected_direction.get(ticker, "") or "").lower()
+                if reentry_armed and expected_direction in ("call", "put") and direction != expected_direction:
+                    prior_direction = str(direction or "").lower()
+                    direction = expected_direction
+                    signal["direction"] = expected_direction
+                    signal["direction_flip_forced"] = True
+                    signal["direction_flip_from"] = prior_direction
+                    signal["direction_flip_to"] = expected_direction
+                    print(
+                        f"[{ts(now_et)}] {ticker}: forced loss-direction flip "
+                        f"{prior_direction.upper()} -> {expected_direction.upper()}."
                     )
-                if adaptive_min_rvol > 0:
-                    adaptive_min_rvol = min(
-                        adaptive_min_rvol,
-                        float(getattr(config, "ADAPTIVE_LOSS_MIN_RVOL", adaptive_min_rvol)),
+                alpaca_buy_order_cap = max(
+                    0,
+                    int(getattr(config, "MAX_ALPACA_BUY_ORDERS_PER_TICKER_PER_DAY", 1) or 0),
+                )
+                active_buy_orders_for_ticker = int(alpaca_active_buy_orders_by_ticker.get(ticker, 0))
+                if active_buy_orders_for_ticker > 0:
+                    _mark_skip("ticker_entry_order_open")
+                    _mark_stage4_reject(reason="ticker_entry_order_open", ticker=ticker)
+                    print(
+                        f"[{ts(now_et)}] {ticker}: skip "
+                        f"({active_buy_orders_for_ticker} open buy order(s) already resting)."
                     )
-                signal_abs_roc = abs(float(signal.get("roc", 0.0) or 0.0))
-                signal_rvol = float(signal.get("rvol", 0.0) or 0.0)
+                    continue
+                alpaca_buy_order_count = int(alpaca_buy_orders_by_ticker.get(ticker, 0))
+                if alpaca_buy_order_cap > 0 and alpaca_buy_order_count >= alpaca_buy_order_cap:
+                    _mark_skip("alpaca_buy_order_ticker_cap")
+                    _mark_stage4_reject(reason="alpaca_buy_order_ticker_cap", ticker=ticker)
+                    print(
+                        f"[{ts(now_et)}] {ticker}: skip "
+                        f"(Alpaca has {alpaca_buy_order_count}/{alpaca_buy_order_cap} "
+                        "same-day buy order(s) for this ticker)."
+                    )
+                    continue
+                hourly_contract_cap = max(
+                    0,
+                    int(getattr(config, "MAX_CONTRACTS_PER_TICKER_PER_HOUR", 1) or 0),
+                )
+                hourly_filled_contracts = int(alpaca_filled_buy_contracts_by_ticker_hour.get(ticker, 0))
+                if hourly_contract_cap > 0 and hourly_filled_contracts >= hourly_contract_cap:
+                    _mark_skip("alpaca_filled_buy_contract_hour_cap")
+                    _mark_stage4_reject(reason="alpaca_filled_buy_contract_hour_cap", ticker=ticker)
+                    print(
+                        f"[{ts(now_et)}] {ticker}: skip "
+                        f"(filled buy contracts in last 60m {hourly_filled_contracts}/{hourly_contract_cap})."
+                    )
+                    continue
                 if (
-                    adaptive_min_roc > 0
-                    and signal_abs_roc < adaptive_min_roc
-                ) or (
-                    adaptive_min_rvol > 0
-                    and signal_rvol < adaptive_min_rvol
+                    _is_in_opening_strict_window(now_et)
+                    and prior_entries >= 1
+                    and not bool(getattr(config, "ALLOW_OPENING_REENTRIES", True))
                 ):
-                    _mark_skip("adaptive_loss_momentum_gate")
-                    _mark_stage4_reject(reason="adaptive_loss_momentum_gate", ticker=ticker)
-                    print(
-                        f"[{ts(now_et)}] {ticker}: skip (adaptive momentum gate; "
-                        f"roc {signal_abs_roc:.2f}/{adaptive_min_roc:.2f}, "
-                        f"rvol {signal_rvol:.2f}/{adaptive_min_rvol:.2f})."
-                    )
+                    _mark_skip("opening_no_reentry")
+                    _mark_stage4_reject(reason="opening_no_reentry", ticker=ticker)
+                    print(f"[{ts(now_et)}] {ticker}: skip (opening window disallows re-entry).")
                     continue
-
-            # --- Loss throttle (keep trading, but demand stronger setups after losses) ---
-            throttle_after_losses = max(1, int(getattr(config, "LOSS_THROTTLE_AFTER_CONSEC_LOSSES", 1) or 1))
-            if consecutive_losses >= throttle_after_losses:
-                signal_score_now = float(signal.get("signal_score", 0.0) or 0.0)
-                volatility_score_now = float(signal.get("volatility_score", 0.0) or 0.0)
-                min_signal_add = float(getattr(config, "LOSS_THROTTLE_SIGNAL_SCORE_ADD", 1.0) or 1.0)
-                min_volatility_score = float(getattr(config, "LOSS_THROTTLE_MIN_VOLATILITY_SCORE", 6.0) or 6.0)
-                throttle_min_signal = _runtime_entry_min_signal_score() + min_signal_add
-                if signal_score_now < throttle_min_signal or volatility_score_now < min_volatility_score:
-                    _mark_skip("loss_throttle_quality_gate")
-                    _mark_stage4_reject(reason="loss_throttle_quality_gate", ticker=ticker)
-                    print(
-                        f"[{ts(now_et)}] {ticker}: skip (loss throttle active after {consecutive_losses} losses; "
-                        f"score {signal_score_now:.2f}/{throttle_min_signal:.2f}, "
-                        f"vol {volatility_score_now:.2f}/{min_volatility_score:.2f})."
-                    )
-                    continue
-
-            active_buy_order_count = sum(int(v) for v in alpaca_active_buy_orders_by_ticker.values())
-            max_open_entry_orders = max(0, int(getattr(config, "MAX_OPEN_ENTRY_BUY_ORDERS", 1) or 0))
-            if max_open_entry_orders > 0 and active_buy_order_count >= max_open_entry_orders:
-                _mark_skip("open_entry_order_cap")
-                print(
-                    f"[{ts(now_et)}] Open entry-order cap reached "
-                    f"({active_buy_order_count}/{max_open_entry_orders}); letting limit buy rest."
-                )
-                break
-
-            loop_attempt_cap = max(1, int(getattr(config, "MAX_NEW_ENTRY_ATTEMPTS_PER_LOOP", 1) or 1))
-            if entry_attempts_loop >= loop_attempt_cap:
-                _mark_skip("entry_attempt_cap")
-                print(
-                    f"[{ts(now_et)}] Entry-attempt cap reached ({entry_attempts_loop}/{loop_attempt_cap}) for this loop."
-                )
-                break
-
-            if _is_in_opening_strict_window(now_et):
-                opening_attempt_cap = max(1, int(getattr(config, "OPENING_MAX_NEW_ENTRY_ATTEMPTS_PER_LOOP", 2) or 2))
-                if opening_entry_attempts_loop >= opening_attempt_cap:
-                    _mark_skip("opening_entry_attempt_cap")
-                    _mark_stage4_reject(reason="opening_entry_attempt_cap", ticker=ticker)
-                    print(
-                        f"[{ts(now_et)}] Opening entry-attempt cap reached "
-                        f"({opening_entry_attempts_loop}/{opening_attempt_cap})."
-                    )
-                    break
-
-                opening_max_fresh_entries = max(1, int(getattr(config, "OPENING_MAX_FRESH_ENTRIES", 3) or 3))
-                if opening_entries_today_count >= opening_max_fresh_entries:
-                    _mark_skip("opening_fresh_entry_cap")
-                    _mark_stage4_reject(reason="opening_fresh_entry_cap", ticker=ticker)
-                    print(
-                        f"[{ts(now_et)}] Opening fresh-entry cap reached "
-                        f"({opening_entries_today_count}/{opening_max_fresh_entries})."
-                    )
-                    break
-
-            opening_quality_ok, opening_quality_reason = _opening_entry_quality_ok(signal, now_et)
-            if not opening_quality_ok:
-                _mark_skip("opening_quality_gate")
-                _mark_stage4_reject(reason="opening_quality_gate", ticker=ticker)
-                print(f"[{ts(now_et)}] {ticker}: skip ({opening_quality_reason}).")
-                continue
-
-            if bool(getattr(config, "ENABLE_FAST_START_ENTRY_QUALITY", True)):
-                fast_start_ok, fast_start_reason = _fast_start_entry_quality_ok(signal, now_et)
-                if not fast_start_ok:
-                    _mark_skip("fast_start_quality_gate")
-                    _mark_stage4_reject(reason="fast_start_quality_gate", ticker=ticker, detail=fast_start_reason)
-                    print(f"[{ts(now_et)}] {ticker}: skip ({fast_start_reason}).")
-                    continue
-
-            if not _is_valid_long_direction(direction):
-                _mark_skip("invalid_strategy_direction")
-                _mark_stage4_reject(reason="invalid_strategy_direction", ticker=ticker)
-                print(f"[{ts(now_et)}] {ticker}: skip (invalid direction={direction!r}; only CALL/PUT allowed).")
-                continue
-
-            preferred_core = set(str(s).upper() for s in getattr(config, "PREFERRED_CORE_TICKERS", ()))
-            is_non_core = ticker not in preferred_core
-            if is_non_core:
-                non_core_cap = max(0, int(getattr(config, "MAX_NON_CORE_ENTRIES_PER_DAY", 4)))
-                if non_core_cap > 0 and non_core_entries_today_count >= non_core_cap:
-                    _mark_skip("non_core_entry_cap")
-                    _mark_stage4_reject(reason="non_core_entry_cap", ticker=ticker)
-                    print(
-                        f"[{ts(now_et)}] {ticker}: skip (non-core entry cap "
-                        f"{non_core_entries_today_count}/{non_core_cap})."
-                    )
-                    continue
-                try:
-                    signal_score = float(signal.get("signal_score", 0.0) or 0.0)
-                except (TypeError, ValueError):
+                if max_entries_per_ticker > 0 and prior_entries >= max_entries_per_ticker:
+                    if not reentry_armed:
+                        _mark_skip("max_entries_per_ticker_reached")
+                        _mark_stage4_reject(reason="max_entries_per_ticker_reached", ticker=ticker)
+                        print(
+                            f"[{ts(now_et)}] {ticker}: skip (max entries reached "
+                            f"{prior_entries}/{max_entries_per_ticker}; no stop-loss re-entry armed)."
+                        )
+                        continue
+                if max_entries_per_ticker > 0 and reentry_armed and prior_entries >= max_entries_per_ticker:
+                    if reentries_used >= int(config.MAX_REENTRIES_PER_TICKER):
+                        _mark_skip("max_reentries_used")
+                        _mark_stage4_reject(reason="max_reentries_used", ticker=ticker)
+                        print(
+                            f"[{ts(now_et)}] {ticker}: skip (max re-entries used "
+                            f"{reentries_used}/{int(config.MAX_REENTRIES_PER_TICKER)})."
+                        )
+                        continue
+                    if expected_direction in ("call", "put") and direction != expected_direction:
+                        _mark_skip("waiting_for_reversal_signal")
+                        _mark_stage4_reject(reason="waiting_for_reversal_signal", ticker=ticker)
+                        print(
+                            f"[{ts(now_et)}] {ticker}: waiting for reversal signal "
+                            f"({expected_direction.upper()}); got {direction.upper()}."
+                        )
+                        continue
+    
+                if not _entry_confirmation_passes(data_client, ticker, direction, now_et):
                     signal_score = 0.0
-                non_core_min_signal = float(getattr(config, "NON_CORE_MIN_SIGNAL_SCORE", 9.0) or 9.0)
-                if signal_score < non_core_min_signal:
-                    _mark_skip("non_core_quality_gate")
-                    _mark_stage4_reject(reason="non_core_quality_gate", ticker=ticker)
-                    print(
-                        f"[{ts(now_et)}] {ticker}: skip (non-core signal score {signal_score:.2f} "
-                        f"< {non_core_min_signal:.2f})."
+                    try:
+                        signal_score = float(signal.get("signal_score", 0) or 0)
+                    except (TypeError, ValueError):
+                        signal_score = 0.0
+                    if signal_score >= float(getattr(config, "ENTRY_CONFIRM_BYPASS_MIN_SIGNAL_SCORE", 0.0) or 0.0):
+                        print(
+                            f"[{ts(now_et)}] {ticker}: entry confirmation bypassed "
+                            f"(signal_score={signal_score:.2f} >= {float(config.ENTRY_CONFIRM_BYPASS_MIN_SIGNAL_SCORE):.2f})."
+                        )
+                    else:
+                        _mark_skip("entry_confirmation_mismatch")
+                        _mark_stage4_reject(reason="entry_confirmation_mismatch", ticker=ticker)
+                        print(f"[{ts(now_et)}] {ticker}: skip (entry confirmation candle not aligned).")
+                        continue
+    
+                # Re-check live position count right before placing a new order.
+                option_positions = broker.get_open_option_positions()
+                open_count = len(option_positions)
+                pending_entry_count = sum(int(v) for v in alpaca_active_buy_orders_by_ticker.values())
+                effective_open_count = open_count + pending_entry_count
+                concurrent_cap = int(getattr(config, "MAX_CONCURRENT_TRADES", 0) or 0)
+                max_positions_cap = int(getattr(config, "MAX_POSITIONS", 0) or 0)
+                effective_max_positions = max_positions_cap
+                if concurrent_cap > 0:
+                    effective_max_positions = (
+                        concurrent_cap if effective_max_positions <= 0 else min(effective_max_positions, concurrent_cap)
                     )
-                    continue
-
-            if _is_bad_fill_blocked(ticker, now_et):
-                _mark_skip("bad_fill_cooldown")
-                _mark_stage4_reject(reason="bad_fill_cooldown", ticker=ticker)
-                print(f"[{ts(now_et)}] {ticker}: skip (bad-fill cooldown active).")
-                continue
-            roundtrip_cooldown_until = _active_ticker_roundtrip_cooldown_until(ticker, now_et)
-            if roundtrip_cooldown_until is not None:
-                _mark_skip("ticker_roundtrip_cooldown")
-                _mark_stage4_reject(reason="ticker_roundtrip_cooldown", ticker=ticker)
-                print(
-                    f"[{ts(now_et)}] {ticker}: skip "
-                    f"(round-trip diversification cooldown until {ts(roundtrip_cooldown_until)})."
-                )
-                continue
-            truth_roundtrip_cap = max(
-                0,
-                int(getattr(config, "MAX_ALPACA_TRUTH_ROUNDTRIPS_PER_TICKER_PER_DAY", 1) or 0),
-            )
-            truth_roundtrip_count = int(alpaca_truth_ticker_roundtrips.get(ticker, 0))
-            if truth_roundtrip_cap > 0 and truth_roundtrip_count >= truth_roundtrip_cap:
-                _mark_skip("alpaca_truth_ticker_roundtrip_cap")
-                _mark_stage4_reject(reason="alpaca_truth_ticker_roundtrip_cap", ticker=ticker)
-                print(
-                    f"[{ts(now_et)}] {ticker}: skip "
-                    f"(Alpaca truth has {truth_roundtrip_count}/{truth_roundtrip_cap} "
-                    "closed round-trip(s) today)."
-                )
-                continue
-            loss_cooldown_until = _active_ticker_loss_cooldown_until(ticker, now_et)
-            if loss_cooldown_until is not None:
-                expected_after_loss = str(ticker_reentry_expected_direction.get(ticker, "") or "").lower()
-                allow_direction_flip = (
-                    bool(getattr(config, "LOSS_DIRECTION_FLIP_ALLOWS_COOLDOWN_BYPASS", True))
-                    and bool(ticker_reentry_armed.get(ticker, False))
-                    and expected_after_loss in {"call", "put"}
-                    and str(direction or "").lower() == expected_after_loss
-                )
-                if not allow_direction_flip:
-                    _mark_skip("ticker_loss_cooldown")
-                    _mark_stage4_reject(reason="ticker_loss_cooldown", ticker=ticker)
+                if _is_in_opening_strict_window(now_et):
+                    opening_max_concurrent = max(1, int(getattr(config, "OPENING_MAX_CONCURRENT_POSITIONS", 3) or 3))
+                    if effective_open_count >= opening_max_concurrent:
+                        _mark_skip("opening_concurrent_position_cap")
+                        _mark_stage4_reject(reason="opening_concurrent_position_cap", ticker=ticker)
+                        print(
+                            f"[{ts(now_et)}] Opening concurrent-position cap reached "
+                            f"({open_count} open + {pending_entry_count} pending/{opening_max_concurrent})."
+                        )
+                        break
+                if not can_open_new_positions(effective_open_count, effective_max_positions):
+                    _mark_skip("max_positions_reached")
+                    _mark_stage4_reject(reason="max_positions_reached", ticker=ticker)
                     print(
-                        f"[{ts(now_et)}] {ticker}: skip (loss cooldown until {ts(loss_cooldown_until)})."
-                    )
-                    continue
-                print(
-                    f"[{ts(now_et)}] {ticker}: loss cooldown bypassed for direction flip "
-                    f"({expected_after_loss.upper()})."
-                )
-            if not is_at_or_after(now_et, config.NO_NEW_TRADES_BEFORE):
-                _mark_skip("before_entry_window")
-                _mark_stage4_reject(reason="before_entry_window", ticker=ticker)
-                print(f"[{ts(now_et)}] Entry window not open yet (before {config.NO_NEW_TRADES_BEFORE} ET).")
-                break
-            if is_at_or_after(now_et, config.NO_NEW_TRADES_AFTER):
-                _mark_skip("after_entry_window")
-                _mark_stage4_reject(reason="after_entry_window", ticker=ticker)
-                print(f"[{ts(now_et)}] Entry window closed (past {config.NO_NEW_TRADES_AFTER} ET).")
-                break
-            if _is_entry_hour_blocked(now_et, strategy_profile=strategy_profile):
-                _mark_skip("blocked_entry_hour")
-                _mark_stage4_reject(reason="blocked_entry_hour", ticker=ticker)
-                print(f"[{ts(now_et)}] {ticker}: skip (hour {now_et.hour:02d}:00 ET blocked by config).")
-                continue
-
-            if dry_run_enabled:
-                _mark_skip("dry_run_mode")
-                _mark_stage4_reject(reason="dry_run_mode", ticker=ticker)
-                print(
-                    f"[{ts(now_et)}] DRY-RUN entry candidate: {ticker} {str(direction).upper()} "
-                    f"score={float(signal.get('signal_score', 0) or 0):.2f} (no order submitted)."
-                )
-                continue
-
-            prior_entries = int(ticker_entry_counts.get(ticker, 0))
-            max_entries_per_ticker = max(0, int(getattr(config, "MAX_ENTRIES_PER_TICKER_PER_DAY", 1) or 0))
-            reentries_used = int(ticker_reentries_used.get(ticker, 0))
-            reentry_armed = bool(ticker_reentry_armed.get(ticker, False))
-            expected_direction = str(ticker_reentry_expected_direction.get(ticker, "") or "").lower()
-            if reentry_armed and expected_direction in ("call", "put") and direction != expected_direction:
-                prior_direction = str(direction or "").lower()
-                direction = expected_direction
-                signal["direction"] = expected_direction
-                signal["direction_flip_forced"] = True
-                signal["direction_flip_from"] = prior_direction
-                signal["direction_flip_to"] = expected_direction
-                print(
-                    f"[{ts(now_et)}] {ticker}: forced loss-direction flip "
-                    f"{prior_direction.upper()} -> {expected_direction.upper()}."
-                )
-            alpaca_buy_order_cap = max(
-                0,
-                int(getattr(config, "MAX_ALPACA_BUY_ORDERS_PER_TICKER_PER_DAY", 1) or 0),
-            )
-            active_buy_orders_for_ticker = int(alpaca_active_buy_orders_by_ticker.get(ticker, 0))
-            if active_buy_orders_for_ticker > 0:
-                _mark_skip("ticker_entry_order_open")
-                _mark_stage4_reject(reason="ticker_entry_order_open", ticker=ticker)
-                print(
-                    f"[{ts(now_et)}] {ticker}: skip "
-                    f"({active_buy_orders_for_ticker} open buy order(s) already resting)."
-                )
-                continue
-            alpaca_buy_order_count = int(alpaca_buy_orders_by_ticker.get(ticker, 0))
-            if alpaca_buy_order_cap > 0 and alpaca_buy_order_count >= alpaca_buy_order_cap:
-                _mark_skip("alpaca_buy_order_ticker_cap")
-                _mark_stage4_reject(reason="alpaca_buy_order_ticker_cap", ticker=ticker)
-                print(
-                    f"[{ts(now_et)}] {ticker}: skip "
-                    f"(Alpaca has {alpaca_buy_order_count}/{alpaca_buy_order_cap} "
-                    "same-day buy order(s) for this ticker)."
-                )
-                continue
-            hourly_contract_cap = max(
-                0,
-                int(getattr(config, "MAX_CONTRACTS_PER_TICKER_PER_HOUR", 1) or 0),
-            )
-            hourly_filled_contracts = int(alpaca_filled_buy_contracts_by_ticker_hour.get(ticker, 0))
-            if hourly_contract_cap > 0 and hourly_filled_contracts >= hourly_contract_cap:
-                _mark_skip("alpaca_filled_buy_contract_hour_cap")
-                _mark_stage4_reject(reason="alpaca_filled_buy_contract_hour_cap", ticker=ticker)
-                print(
-                    f"[{ts(now_et)}] {ticker}: skip "
-                    f"(filled buy contracts in last 60m {hourly_filled_contracts}/{hourly_contract_cap})."
-                )
-                continue
-            if (
-                _is_in_opening_strict_window(now_et)
-                and prior_entries >= 1
-                and not bool(getattr(config, "ALLOW_OPENING_REENTRIES", True))
-            ):
-                _mark_skip("opening_no_reentry")
-                _mark_stage4_reject(reason="opening_no_reentry", ticker=ticker)
-                print(f"[{ts(now_et)}] {ticker}: skip (opening window disallows re-entry).")
-                continue
-            if max_entries_per_ticker > 0 and prior_entries >= max_entries_per_ticker:
-                if not reentry_armed:
-                    _mark_skip("max_entries_per_ticker_reached")
-                    _mark_stage4_reject(reason="max_entries_per_ticker_reached", ticker=ticker)
-                    print(
-                        f"[{ts(now_et)}] {ticker}: skip (max entries reached "
-                        f"{prior_entries}/{max_entries_per_ticker}; no stop-loss re-entry armed)."
-                    )
-                    continue
-            if max_entries_per_ticker > 0 and reentry_armed and prior_entries >= max_entries_per_ticker:
-                if reentries_used >= int(config.MAX_REENTRIES_PER_TICKER):
-                    _mark_skip("max_reentries_used")
-                    _mark_stage4_reject(reason="max_reentries_used", ticker=ticker)
-                    print(
-                        f"[{ts(now_et)}] {ticker}: skip (max re-entries used "
-                        f"{reentries_used}/{int(config.MAX_REENTRIES_PER_TICKER)})."
-                    )
-                    continue
-                if expected_direction in ("call", "put") and direction != expected_direction:
-                    _mark_skip("waiting_for_reversal_signal")
-                    _mark_stage4_reject(reason="waiting_for_reversal_signal", ticker=ticker)
-                    print(
-                        f"[{ts(now_et)}] {ticker}: waiting for reversal signal "
-                        f"({expected_direction.upper()}); got {direction.upper()}."
-                    )
-                    continue
-
-            if not _entry_confirmation_passes(data_client, ticker, direction, now_et):
-                signal_score = 0.0
-                try:
-                    signal_score = float(signal.get("signal_score", 0) or 0)
-                except (TypeError, ValueError):
-                    signal_score = 0.0
-                if signal_score >= float(getattr(config, "ENTRY_CONFIRM_BYPASS_MIN_SIGNAL_SCORE", 0.0) or 0.0):
-                    print(
-                        f"[{ts(now_et)}] {ticker}: entry confirmation bypassed "
-                        f"(signal_score={signal_score:.2f} >= {float(config.ENTRY_CONFIRM_BYPASS_MIN_SIGNAL_SCORE):.2f})."
-                    )
-                else:
-                    _mark_skip("entry_confirmation_mismatch")
-                    _mark_stage4_reject(reason="entry_confirmation_mismatch", ticker=ticker)
-                    print(f"[{ts(now_et)}] {ticker}: skip (entry confirmation candle not aligned).")
-                    continue
-
-            # Re-check live position count right before placing a new order.
-            option_positions = broker.get_open_option_positions()
-            open_count = len(option_positions)
-            pending_entry_count = sum(int(v) for v in alpaca_active_buy_orders_by_ticker.values())
-            effective_open_count = open_count + pending_entry_count
-            concurrent_cap = int(getattr(config, "MAX_CONCURRENT_TRADES", 0) or 0)
-            max_positions_cap = int(getattr(config, "MAX_POSITIONS", 0) or 0)
-            effective_max_positions = max_positions_cap
-            if concurrent_cap > 0:
-                effective_max_positions = (
-                    concurrent_cap if effective_max_positions <= 0 else min(effective_max_positions, concurrent_cap)
-                )
-            if _is_in_opening_strict_window(now_et):
-                opening_max_concurrent = max(1, int(getattr(config, "OPENING_MAX_CONCURRENT_POSITIONS", 3) or 3))
-                if effective_open_count >= opening_max_concurrent:
-                    _mark_skip("opening_concurrent_position_cap")
-                    _mark_stage4_reject(reason="opening_concurrent_position_cap", ticker=ticker)
-                    print(
-                        f"[{ts(now_et)}] Opening concurrent-position cap reached "
-                        f"({open_count} open + {pending_entry_count} pending/{opening_max_concurrent})."
+                        f"[{ts(now_et)}] Max positions reached "
+                        f"({open_count} open + {pending_entry_count} pending/{effective_max_positions}). "
+                        "Stopping new entries this loop."
                     )
                     break
-            if not can_open_new_positions(effective_open_count, effective_max_positions):
-                _mark_skip("max_positions_reached")
-                _mark_stage4_reject(reason="max_positions_reached", ticker=ticker)
-                print(
-                    f"[{ts(now_et)}] Max positions reached "
-                    f"({open_count} open + {pending_entry_count} pending/{effective_max_positions}). "
-                    "Stopping new entries this loop."
-                )
-                break
-
-            direction_lc = str(direction or "").lower()
-            same_dir_cap = int(getattr(config, "MAX_SAME_DIRECTION_POSITIONS", 0) or 0)
-            call_exposure, put_exposure = _direction_exposure_counts(option_positions, open_trade_meta)
-            if same_dir_cap > 0 and direction_lc == "call" and call_exposure >= same_dir_cap:
-                _mark_skip("same_direction_exposure_cap")
-                _mark_stage4_reject(reason="same_direction_exposure_cap", ticker=ticker)
-                print(f"[{ts(now_et)}] {ticker}: skip (call exposure cap {call_exposure}/{same_dir_cap}).")
-                continue
-            if same_dir_cap > 0 and direction_lc == "put" and put_exposure >= same_dir_cap:
-                _mark_skip("same_direction_exposure_cap")
-                _mark_stage4_reject(reason="same_direction_exposure_cap", ticker=ticker)
-                print(f"[{ts(now_et)}] {ticker}: skip (put exposure cap {put_exposure}/{same_dir_cap}).")
-                continue
-
-            existing_qty_for_ticker = _ticker_open_qty(option_positions, open_trade_meta, ticker)
-            same_direction_qty, same_direction_pnl = _ticker_same_direction_live_pnl(
-                option_positions,
-                open_trade_meta,
-                ticker,
-                direction,
-            )
-            if same_direction_qty > 0 and same_direction_pnl < 0:
-                _mark_skip("same_direction_scale_in_red")
-                _mark_stage4_reject(reason="same_direction_scale_in_red", ticker=ticker)
-                print(
-                    f"[{ts(now_et)}] {ticker}: skip same-direction add "
-                    f"({same_direction_qty} {direction.upper()} contract(s), "
-                    f"unrealized=${same_direction_pnl:.2f})."
-                )
-                continue
-            max_contracts_per_ticker = int(
-                getattr(
-                    config,
-                    "MAX_CONTRACTS_PER_TICKER",
-                    getattr(config, "MAX_CONTRACTS_PER_ENTRY", 0),
-                )
-                or 0
-            )
-            if max_contracts_per_ticker > 0 and existing_qty_for_ticker >= max_contracts_per_ticker:
-                _mark_skip("ticker_contract_cap")
-                _mark_stage4_reject(reason="ticker_contract_cap", ticker=ticker)
-                print(
-                    f"[{ts(now_et)}] {ticker}: skip (ticker contract cap "
-                    f"{existing_qty_for_ticker}/{max_contracts_per_ticker})."
-                )
-                continue
-            if existing_qty_for_ticker > 0:
-                cap_text = str(max_contracts_per_ticker) if max_contracts_per_ticker > 0 else "unlimited"
-                print(
-                    f"[{ts(now_et)}] {ticker}: scale-in allowed "
-                    f"({existing_qty_for_ticker}/{cap_text} contracts open)."
-                )
-
-            try:
-                print(
-                    f"[{ts(now_et)}] {ticker}: scanner signal={direction} "
-                    f"profile={str(signal.get('strategy_profile', 'generic') or 'generic')}. "
-                    f"{signal.get('reason', '')}"
-                )
-                signal_strategy_profile = str(signal.get("strategy_profile", "") or "generic")
-                signal_entry_max_spread = signal.get("entry_max_quote_spread_pct")
-                if adaptive_loss_active:
-                    adaptive_spread = float(getattr(config, "ADAPTIVE_LOSS_MAX_SPREAD_PCT", 0.0) or 0.0)
-                    if isinstance(adaptive_loss_profile, dict):
-                        profile_spread = float(adaptive_loss_profile.get("max_spread_pct", 0.0) or 0.0)
-                        if profile_spread > 0:
-                            adaptive_spread = min(adaptive_spread or profile_spread, profile_spread)
-                    if adaptive_spread > 0:
-                        try:
-                            current_spread_cap = float(signal_entry_max_spread or adaptive_spread)
-                        except (TypeError, ValueError):
-                            current_spread_cap = adaptive_spread
-                        signal_entry_max_spread = min(current_spread_cap, adaptive_spread)
-                volatility_profile = _signal_volatility_profile(signal)
-                base_signal_stop_loss_usd = float(signal.get("stop_loss_usd", _runtime_stop_loss_usd()) or _runtime_stop_loss_usd())
-                signal_stop_loss_usd = round(
-                    max(1.0, base_signal_stop_loss_usd * float(volatility_profile["stop_loss_mult"])),
-                    2,
-                )
-                signal_take_profit_pct = float(
-                    signal.get("immediate_take_profit_pct", getattr(config, "IMMEDIATE_TAKE_PROFIT_PCT", 1.0))
-                    or getattr(config, "IMMEDIATE_TAKE_PROFIT_PCT", 1.0)
-                )
-                signal_max_hold_minutes = int(
-                    signal.get("max_hold_minutes", getattr(config, "MAX_HOLD_MINUTES", 90))
-                    or getattr(config, "MAX_HOLD_MINUTES", 90)
-                )
-
-                stock_price = data_client.get_latest_stock_price(ticker)
-                if stock_price is None:
-                    _mark_skip("no_stock_quote")
-                    _mark_stage4_reject(reason="no_stock_quote", ticker=ticker)
-                    print(f"[{ts(now_et)}] {ticker}: skip (no stock quote).")
-                    time.sleep(config.RATE_LIMIT_SLEEP_SECONDS)
+    
+                direction_lc = str(direction or "").lower()
+                same_dir_cap = int(getattr(config, "MAX_SAME_DIRECTION_POSITIONS", 0) or 0)
+                call_exposure, put_exposure = _direction_exposure_counts(option_positions, open_trade_meta)
+                if same_dir_cap > 0 and direction_lc == "call" and call_exposure >= same_dir_cap:
+                    _mark_skip("same_direction_exposure_cap")
+                    _mark_stage4_reject(reason="same_direction_exposure_cap", ticker=ticker)
+                    print(f"[{ts(now_et)}] {ticker}: skip (call exposure cap {call_exposure}/{same_dir_cap}).")
                     continue
-
-                fresh_tape_ok, fresh_tape_reason = _fresh_tape_direction_guard(
-                    data_client=data_client,
-                    ticker=ticker,
-                    direction=direction,
-                    now_et=now_et,
-                )
-                if not fresh_tape_ok:
-                    _mark_skip("fresh_tape_direction_mismatch")
-                    _mark_stage4_reject(reason="fresh_tape_direction_mismatch", ticker=ticker, detail=fresh_tape_reason)
-                    print(f"[{ts(now_et)}] {ticker}: skip ({fresh_tape_reason}).")
-                    time.sleep(config.RATE_LIMIT_SLEEP_SECONDS)
+                if same_dir_cap > 0 and direction_lc == "put" and put_exposure >= same_dir_cap:
+                    _mark_skip("same_direction_exposure_cap")
+                    _mark_stage4_reject(reason="same_direction_exposure_cap", ticker=ticker)
+                    print(f"[{ts(now_et)}] {ticker}: skip (put exposure cap {put_exposure}/{same_dir_cap}).")
                     continue
-
-                contract, contract_reason = select_atm_option_contract_with_reason(
-                    data_client=data_client,
-                    underlying_symbol=ticker,
-                    direction=direction,
-                    underlying_price=stock_price,
-                    now_et=now_et,
+    
+                existing_qty_for_ticker = _ticker_open_qty(option_positions, open_trade_meta, ticker)
+                same_direction_qty, same_direction_pnl = _ticker_same_direction_live_pnl(
+                    option_positions,
+                    open_trade_meta,
+                    ticker,
+                    direction,
                 )
-                if not contract:
-                    _mark_skip("no_eligible_option_contract")
-                    _mark_stage4_reject(reason="no_eligible_option_contract", ticker=ticker)
-                    _bump_counter_bucket(
-                        "contract_rejected_count_by_reason",
-                        f"no_eligible_option_contract:{str(contract_reason or 'unknown')}",
-                    )
-                    print(f"[{ts(now_et)}] {ticker}: skip (no eligible option contract: {contract_reason}).")
-                    time.sleep(config.RATE_LIMIT_SLEEP_SECONDS)
-                    continue
-
-                entry_debug["contract_selected_count"] = int(entry_debug.get("contract_selected_count", 0) or 0) + 1
-                option_symbol = contract["symbol"]
-                if not _option_symbol_matches_direction(option_symbol, direction):
-                    _mark_skip("contract_direction_mismatch")
-                    _mark_stage4_reject(reason="contract_direction_mismatch", ticker=ticker)
-                    _bump_counter_bucket("contract_rejected_count_by_reason", "contract_direction_mismatch")
+                if same_direction_qty > 0 and same_direction_pnl < 0:
+                    _mark_skip("same_direction_scale_in_red")
+                    _mark_stage4_reject(reason="same_direction_scale_in_red", ticker=ticker)
                     print(
-                        f"[{ts(now_et)}] {ticker}: skip (contract direction mismatch "
-                        f"{option_symbol} vs {direction.upper()})."
+                        f"[{ts(now_et)}] {ticker}: skip same-direction add "
+                        f"({same_direction_qty} {direction.upper()} contract(s), "
+                        f"unrealized=${same_direction_pnl:.2f})."
                     )
                     continue
-                entry_quote = _option_quote_snapshot(data_client, option_symbol)
-                spread_ok, spread_reason = _entry_quote_spread_gate(
-                    option_symbol=option_symbol,
-                    entry_quote=entry_quote,
-                    now_et=now_et,
-                    strategy_profile=strategy_profile,
-                    spread_override_pct=signal_entry_max_spread,
-                )
-                if not spread_ok:
-                    reject_reason = "quote_spread_too_wide" if "spread" in spread_reason else "no_option_ask"
-                    _mark_skip(reject_reason)
-                    _mark_stage4_reject(reason=reject_reason, ticker=ticker)
-                    print(f"[{ts(now_et)}] {ticker}: skip ({spread_reason}).")
-                    time.sleep(config.RATE_LIMIT_SLEEP_SECONDS)
-                    continue
-                ask_price = float(entry_quote.get("ask") or 0.0)
-
-                volatility_premium_mult = max(0.1, float(volatility_profile["premium_cap_mult"]))
-                volatility_opening_premium_mult = max(0.1, float(volatility_profile["opening_premium_cap_mult"]))
-                max_trade_premium_base = float(getattr(config, "MAX_PREMIUM_PER_TRADE_USD", 0.0) or 0.0)
-                allocation_pct = max(0.0, float(getattr(config, "PORTFOLIO_ALLOCATION_PCT", 15.0) or 15.0)) / 100.0
-                allocation_cap_usd = _equity_pct_cap_usd(float(equity) if equity is not None else None, allocation_pct)
-                pct_per_trade = max(
-                    0.0,
-                    float(getattr(config, "MAX_PREMIUM_PER_TRADE_PCT_OF_ALLOCATION", 10.0) or 10.0),
-                ) / 100.0
-                allocation_trade_cap_usd = (
-                    round(allocation_cap_usd * pct_per_trade, 2) if allocation_cap_usd > 0 and pct_per_trade > 0 else 0.0
-                )
-                if allocation_trade_cap_usd > 0:
-                    max_trade_premium_base = (
-                        min(max_trade_premium_base, allocation_trade_cap_usd)
-                        if max_trade_premium_base > 0
-                        else allocation_trade_cap_usd
+                max_contracts_per_ticker = int(
+                    getattr(
+                        config,
+                        "MAX_CONTRACTS_PER_TICKER",
+                        getattr(config, "MAX_CONTRACTS_PER_ENTRY", 0),
                     )
-                max_trade_premium = (
-                    max(25.0, max_trade_premium_base * volatility_premium_mult)
-                    if max_trade_premium_base > 0
-                    else 0.0
+                    or 0
                 )
-                qty = _entry_qty_for_budget(
-                    ask_price=ask_price,
-                    equity=float(equity) if equity is not None else None,
-                    consecutive_losses=consecutive_losses,
-                    max_trade_premium=max_trade_premium,
-                )
-                if max_contracts_per_ticker > 0 and existing_qty_for_ticker > 0:
-                    qty = min(qty, max_contracts_per_ticker - existing_qty_for_ticker)
-                if max_contracts_per_ticker > 0 and qty <= 0:
+                if max_contracts_per_ticker > 0 and existing_qty_for_ticker >= max_contracts_per_ticker:
                     _mark_skip("ticker_contract_cap")
                     _mark_stage4_reject(reason="ticker_contract_cap", ticker=ticker)
                     print(
-                        f"[{ts(now_et)}] {ticker}: skip (no remaining contract capacity "
+                        f"[{ts(now_et)}] {ticker}: skip (ticker contract cap "
                         f"{existing_qty_for_ticker}/{max_contracts_per_ticker})."
                     )
                     continue
-                trade_premium_usd = ask_price * qty * 100.0
-                contract_cap_text = str(max_contracts_per_ticker) if max_contracts_per_ticker > 0 else "unlimited"
-                print(
-                    f"[{ts(now_et)}] {ticker}: entry plan qty={qty} ask=${ask_price:.2f} "
-                    f"premium=${trade_premium_usd:.2f} open_qty={existing_qty_for_ticker}/"
-                    f"{contract_cap_text}."
-                )
-                if bool(getattr(config, "ENABLE_EXPOSURE_BUCKET_GUARDS", False)):
-                    candidate_expiry = _parse_expiration_text(contract.get("expiration_date"))
-                    candidate_bucket = _option_exposure_bucket(ticker, candidate_expiry, now_et)
-                    contract_evidence_decision = evidence_gate.evaluate_contract(
-                        signal=signal,
+                if existing_qty_for_ticker > 0:
+                    cap_text = str(max_contracts_per_ticker) if max_contracts_per_ticker > 0 else "unlimited"
+                    print(
+                        f"[{ts(now_et)}] {ticker}: scale-in allowed "
+                        f"({existing_qty_for_ticker}/{cap_text} contracts open)."
+                    )
+    
+                try:
+                    print(
+                        f"[{ts(now_et)}] {ticker}: scanner signal={direction} "
+                        f"profile={str(signal.get('strategy_profile', 'generic') or 'generic')}. "
+                        f"{signal.get('reason', '')}"
+                    )
+                    signal_strategy_profile = str(signal.get("strategy_profile", "") or "generic")
+                    signal_entry_max_spread = signal.get("entry_max_quote_spread_pct")
+                    if adaptive_loss_active:
+                        adaptive_spread = float(getattr(config, "ADAPTIVE_LOSS_MAX_SPREAD_PCT", 0.0) or 0.0)
+                        if isinstance(adaptive_loss_profile, dict):
+                            profile_spread = float(adaptive_loss_profile.get("max_spread_pct", 0.0) or 0.0)
+                            if profile_spread > 0:
+                                adaptive_spread = min(adaptive_spread or profile_spread, profile_spread)
+                        if adaptive_spread > 0:
+                            try:
+                                current_spread_cap = float(signal_entry_max_spread or adaptive_spread)
+                            except (TypeError, ValueError):
+                                current_spread_cap = adaptive_spread
+                            signal_entry_max_spread = min(current_spread_cap, adaptive_spread)
+                    volatility_profile = _signal_volatility_profile(signal)
+                    base_signal_stop_loss_usd = float(signal.get("stop_loss_usd", _runtime_stop_loss_usd()) or _runtime_stop_loss_usd())
+                    signal_stop_loss_usd = round(
+                        max(1.0, base_signal_stop_loss_usd * float(volatility_profile["stop_loss_mult"])),
+                        2,
+                    )
+                    signal_take_profit_pct = float(
+                        signal.get("immediate_take_profit_pct", getattr(config, "IMMEDIATE_TAKE_PROFIT_PCT", 1.0))
+                        or getattr(config, "IMMEDIATE_TAKE_PROFIT_PCT", 1.0)
+                    )
+                    signal_max_hold_minutes = int(
+                        signal.get("max_hold_minutes", getattr(config, "MAX_HOLD_MINUTES", 90))
+                        or getattr(config, "MAX_HOLD_MINUTES", 90)
+                    )
+    
+                    stock_price = data_client.get_latest_stock_price(ticker)
+                    if stock_price is None:
+                        _mark_skip("no_stock_quote")
+                        _mark_stage4_reject(reason="no_stock_quote", ticker=ticker)
+                        print(f"[{ts(now_et)}] {ticker}: skip (no stock quote).")
+                        time.sleep(config.RATE_LIMIT_SLEEP_SECONDS)
+                        continue
+    
+                    fresh_tape_ok, fresh_tape_reason = _fresh_tape_direction_guard(
+                        data_client=data_client,
                         ticker=ticker,
                         direction=direction,
                         now_et=now_et,
-                        exposure_bucket=candidate_bucket,
-                        spread_pct=entry_quote.get("spread_pct"),
-                        rows=evidence_rows,
                     )
-                    if not contract_evidence_decision.allowed:
-                        _mark_skip("execution_evidence_gate")
-                        _mark_stage4_reject(
-                            reason="execution_evidence_gate",
-                            ticker=ticker,
-                            detail=contract_evidence_decision.reason,
-                        )
-                        print(f"[{ts(now_et)}] {ticker}: skip ({contract_evidence_decision.reason}).")
+                    if not fresh_tape_ok:
+                        _mark_skip("fresh_tape_direction_mismatch")
+                        _mark_stage4_reject(reason="fresh_tape_direction_mismatch", ticker=ticker, detail=fresh_tape_reason)
+                        print(f"[{ts(now_et)}] {ticker}: skip ({fresh_tape_reason}).")
+                        time.sleep(config.RATE_LIMIT_SLEEP_SECONDS)
                         continue
-                    if (
-                        candidate_bucket == "0dte_other"
-                        and bool(getattr(config, "BLOCK_NON_SCALP_0DTE_ENTRIES", True))
-                    ):
-                        _mark_skip("non_scalp_0dte_block")
-                        _mark_stage4_reject(
-                            reason="non_scalp_0dte_block",
-                            ticker=ticker,
-                            detail="0DTE entries are restricted to configured scalp symbols",
-                        )
-                        print(
-                            f"[{ts(now_et)}] {ticker}: skip "
-                            "(0DTE entries are restricted to configured scalp symbols)."
-                        )
-                        continue
-                    if candidate_bucket == "0dte_index_etf":
-                        zero_dte_max_attempts = max(
-                            0,
-                            int(getattr(config, "ZERO_DTE_MAX_ENTRY_ATTEMPTS", 0) or 0),
-                        )
-                        zero_dte_symbols = _configured_symbol_set("ZERO_DTE_SCALP_SYMBOLS", ("SPY", "QQQ", "IWM"))
-                        zero_dte_attempts_today = sum(
-                            int(alpaca_buy_orders_by_ticker.get(sym, 0) or 0)
-                            for sym in zero_dte_symbols
-                        )
-                        if zero_dte_max_attempts > 0 and zero_dte_attempts_today >= zero_dte_max_attempts:
-                            _mark_skip("zero_dte_attempt_limit")
-                            _mark_stage4_reject(
-                                reason="zero_dte_attempt_limit",
-                                ticker=ticker,
-                                detail=f"0DTE attempts {zero_dte_attempts_today}/{zero_dte_max_attempts}",
-                            )
-                            print(
-                                f"[{ts(now_et)}] {ticker}: skip "
-                                f"(0DTE scalp attempt limit {zero_dte_attempts_today}/{zero_dte_max_attempts})."
-                            )
-                            continue
-                        zero_dte_max_hold = max(1, int(getattr(config, "ZERO_DTE_MAX_HOLD_MINUTES", 5) or 5))
-                        signal_max_hold_minutes = min(signal_max_hold_minutes, zero_dte_max_hold)
-                    bucket_premium, ticker_premium = _open_premium_by_exposure_bucket(
-                        option_positions,
-                        open_trade_meta,
-                        now_et,
-                    )
-                    zero_dte_open = float(bucket_premium.get("0dte_index_etf", 0.0) or 0.0)
-                    weekly_open = float(bucket_premium.get("weekly_single_name", 0.0) or 0.0)
-                    if bool(getattr(config, "EXPOSURE_BUCKET_SEPARATE_0DTE_AND_WEEKLY", True)):
-                        if candidate_bucket == "0dte_index_etf" and weekly_open > 0:
-                            _mark_skip("bucket_mixing_block")
-                            _mark_stage4_reject(
-                                reason="bucket_mixing_block",
-                                ticker=ticker,
-                                detail=f"weekly single-name premium already open ${weekly_open:.2f}",
-                            )
-                            print(
-                                f"[{ts(now_et)}] {ticker}: skip 0DTE scalp "
-                                f"(weekly single-name exposure already open ${weekly_open:.2f})."
-                            )
-                            continue
-                        if candidate_bucket == "weekly_single_name" and zero_dte_open > 0:
-                            _mark_skip("bucket_mixing_block")
-                            _mark_stage4_reject(
-                                reason="bucket_mixing_block",
-                                ticker=ticker,
-                                detail=f"0DTE ETF premium already open ${zero_dte_open:.2f}",
-                            )
-                            print(
-                                f"[{ts(now_et)}] {ticker}: skip weekly single-name entry "
-                                f"(0DTE ETF scalp exposure already open ${zero_dte_open:.2f})."
-                            )
-                            continue
-
-                    bucket_cap_pct = 0.0
-                    bucket_cap_label = ""
-                    if candidate_bucket == "0dte_index_etf":
-                        bucket_cap_pct = float(getattr(config, "MAX_0DTE_PREMIUM_PCT_EQUITY", 0.0) or 0.0)
-                        bucket_cap_label = "0DTE ETF"
-                    elif candidate_bucket == "weekly_single_name":
-                        bucket_cap_pct = float(
-                            getattr(config, "MAX_WEEKLY_SINGLE_NAME_PREMIUM_PCT_EQUITY", 0.0) or 0.0
-                        )
-                        bucket_cap_label = "weekly single-name"
-                    bucket_cap_usd = _equity_pct_cap_usd(float(equity) if equity is not None else None, bucket_cap_pct)
-                    if bucket_cap_usd > 0:
-                        current_bucket_premium = float(bucket_premium.get(candidate_bucket, 0.0) or 0.0)
-                        if current_bucket_premium + trade_premium_usd > bucket_cap_usd:
-                            _mark_skip("bucket_premium_cap")
-                            _mark_stage4_reject(
-                                reason="bucket_premium_cap",
-                                ticker=ticker,
-                                detail=(
-                                    f"{bucket_cap_label} premium ${current_bucket_premium + trade_premium_usd:.2f} "
-                                    f"> cap ${bucket_cap_usd:.2f}"
-                                ),
-                            )
-                            print(
-                                f"[{ts(now_et)}] {ticker}: skip ({bucket_cap_label} premium "
-                                f"${current_bucket_premium:.2f} + new ${trade_premium_usd:.2f} "
-                                f"> cap ${bucket_cap_usd:.2f})."
-                            )
-                            continue
-
-                    ticker_cap_usd = _equity_pct_cap_usd(
-                        float(equity) if equity is not None else None,
-                        float(getattr(config, "MAX_SINGLE_TICKER_PREMIUM_PCT_EQUITY", 0.0) or 0.0),
-                    )
-                    if ticker_cap_usd > 0:
-                        current_ticker_premium = float(ticker_premium.get(ticker, 0.0) or 0.0)
-                        if current_ticker_premium + trade_premium_usd > ticker_cap_usd:
-                            _mark_skip("ticker_premium_cap")
-                            _mark_stage4_reject(
-                                reason="ticker_premium_cap",
-                                ticker=ticker,
-                                detail=(
-                                    f"{ticker} premium ${current_ticker_premium + trade_premium_usd:.2f} "
-                                    f"> cap ${ticker_cap_usd:.2f}"
-                                ),
-                            )
-                            print(
-                                f"[{ts(now_et)}] {ticker}: skip (ticker premium "
-                                f"${current_ticker_premium:.2f} + new ${trade_premium_usd:.2f} "
-                                f"> cap ${ticker_cap_usd:.2f})."
-                            )
-                            continue
-
-                premium_override_ok = False
-                premium_override_reason = ""
-                if max_trade_premium > 0 and trade_premium_usd > max_trade_premium:
-                    premium_override_ok, premium_override_reason = _premium_cap_quality_override_ok(
-                        signal=signal,
-                        entry_quote=entry_quote,
+    
+                    contract, contract_reason = select_atm_option_contract_with_reason(
+                        data_client=data_client,
+                        underlying_symbol=ticker,
+                        direction=direction,
+                        underlying_price=stock_price,
                         now_et=now_et,
                     )
-                    if not premium_override_ok:
-                        _mark_skip("premium_per_trade_cap")
-                        _mark_stage4_reject(reason="premium_per_trade_cap", ticker=ticker)
+                    if not contract:
+                        _mark_skip("no_eligible_option_contract")
+                        _mark_stage4_reject(reason="no_eligible_option_contract", ticker=ticker)
+                        _bump_counter_bucket(
+                            "contract_rejected_count_by_reason",
+                            f"no_eligible_option_contract:{str(contract_reason or 'unknown')}",
+                        )
+                        print(f"[{ts(now_et)}] {ticker}: skip (no eligible option contract: {contract_reason}).")
+                        time.sleep(config.RATE_LIMIT_SLEEP_SECONDS)
+                        continue
+    
+                    entry_debug["contract_selected_count"] = int(entry_debug.get("contract_selected_count", 0) or 0) + 1
+                    option_symbol = contract["symbol"]
+                    if not _option_symbol_matches_direction(option_symbol, direction):
+                        _mark_skip("contract_direction_mismatch")
+                        _mark_stage4_reject(reason="contract_direction_mismatch", ticker=ticker)
+                        _bump_counter_bucket("contract_rejected_count_by_reason", "contract_direction_mismatch")
                         print(
-                            f"[{ts(now_et)}] {ticker}: skip (premium ${trade_premium_usd:.2f} > "
-                            f"per-trade cap ${max_trade_premium:.2f}; {premium_override_reason})."
+                            f"[{ts(now_et)}] {ticker}: skip (contract direction mismatch "
+                            f"{option_symbol} vs {direction.upper()})."
                         )
                         continue
-                    print(
-                        f"[{ts(now_et)}] {ticker}: premium override accepted "
-                        f"(${trade_premium_usd:.2f} > ${max_trade_premium:.2f}; {premium_override_reason})."
-                    )
-
-                total_open_premium = _current_open_premium_usd(option_positions, open_trade_meta)
-                committed_open_premium = total_open_premium + float(active_entry_order_premium_usd or 0.0)
-                max_total_open_premium_base = float(getattr(config, "MAX_TOTAL_OPEN_PREMIUM_USD", 0.0) or 0.0)
-                max_total_open_premium = (
-                    max(75.0, max_total_open_premium_base * volatility_premium_mult)
-                    if max_total_open_premium_base > 0
-                    else 0.0
-                )
-                if max_total_open_premium > 0 and (committed_open_premium + trade_premium_usd) > max_total_open_premium:
-                    _mark_skip("total_open_premium_cap")
-                    _mark_stage4_reject(reason="total_open_premium_cap", ticker=ticker)
-                    print(
-                        f"[{ts(now_et)}] {ticker}: skip (open premium ${total_open_premium:.2f} + "
-                        f"pending ${active_entry_order_premium_usd:.2f} + "
-                        f"new ${trade_premium_usd:.2f} > cap ${max_total_open_premium:.2f})."
-                    )
-                    continue
-
-                expensive_symbols = set(str(s).upper() for s in getattr(config, "EXPENSIVE_PREMIUM_SYMBOLS", ()))
-                is_expensive_symbol = ticker in expensive_symbols
-                if _is_in_opening_strict_window(now_et):
-                    opening_premium_cap_base = float(getattr(config, "OPENING_MAX_FRESH_PREMIUM_USD", 0.0) or 0.0)
-                    opening_premium_cap = (
-                        max(75.0, opening_premium_cap_base * volatility_opening_premium_mult)
-                        if opening_premium_cap_base > 0
-                        else 0.0
-                    )
-
-                    # In opening strict mode, expensive names are blocked unless
-                    # they are core names or fit an extra-tight premium budget.
-                    if is_expensive_symbol:
-                        core_set = set(str(s).upper() for s in getattr(config, "PREFERRED_CORE_TICKERS", ()))
-                        tight_opening_expensive_premium = float(
-                            getattr(config, "OPENING_EXPENSIVE_MAX_PREMIUM_USD", max_trade_premium) or max_trade_premium
-                        )
-                        is_core_name = ticker in core_set
-                        if (
-                            tight_opening_expensive_premium > 0
-                            and not is_core_name
-                            and trade_premium_usd > tight_opening_expensive_premium
-                        ):
-                            _mark_skip("opening_expensive_name_gate")
-                            _mark_stage4_reject(reason="opening_expensive_name_gate", ticker=ticker)
-                            print(
-                                f"[{ts(now_et)}] {ticker}: skip (opening expensive-name gate; premium ${trade_premium_usd:.2f} "
-                                f"> ${tight_opening_expensive_premium:.2f} and not core)."
-                            )
-                            continue
-
-                    if opening_premium_cap > 0 and (opening_fresh_premium_deployed_usd + trade_premium_usd) > opening_premium_cap:
-                        if not premium_override_ok:
-                            _mark_skip("opening_fresh_premium_cap")
-                            _mark_stage4_reject(reason="opening_fresh_premium_cap", ticker=ticker)
-                            print(
-                                f"[{ts(now_et)}] {ticker}: skip (opening premium ${opening_fresh_premium_deployed_usd:.2f} + "
-                                f"${trade_premium_usd:.2f} > cap ${opening_premium_cap:.2f})."
-                            )
-                            continue
-                        print(
-                            f"[{ts(now_et)}] {ticker}: opening premium cap override accepted "
-                            f"(${opening_fresh_premium_deployed_usd + trade_premium_usd:.2f} > ${opening_premium_cap:.2f})."
-                        )
-                    opening_expensive_cap = max(0, int(getattr(config, "OPENING_MAX_EXPENSIVE_ENTRIES", 1)))
-                    if is_expensive_symbol and opening_expensive_entries_today_count >= opening_expensive_cap:
-                        if not premium_override_ok:
-                            _mark_skip("opening_expensive_symbol_cap")
-                            _mark_stage4_reject(reason="opening_expensive_symbol_cap", ticker=ticker)
-                            print(
-                                f"[{ts(now_et)}] {ticker}: skip (opening expensive-name cap "
-                                f"{opening_expensive_entries_today_count}/{opening_expensive_cap})."
-                            )
-                            continue
-                        print(
-                            f"[{ts(now_et)}] {ticker}: opening expensive-name cap override accepted "
-                            f"({opening_expensive_entries_today_count}/{opening_expensive_cap})."
-                        )
-
-                if str(volatility_profile.get("label", "normal")) != "normal":
-                    iv_rank_text = "n/a"
-                    if int(volatility_profile.get("iv_available", 0) or 0):
-                        iv_rank_text = f"{float(volatility_profile.get('iv_rank', 0.0) or 0.0):.1f}"
-                    print(
-                        f"[{ts(now_et)}] {ticker}: volatility={volatility_profile.get('label')} "
-                        f"(score={int(volatility_profile.get('score', 0) or 0)}, "
-                        f"atr={float(volatility_profile.get('atr_pct', 0.0) or 0.0):.2f}%, "
-                        f"rvol={float(volatility_profile.get('rvol', 0.0) or 0.0):.2f}, ivr={iv_rank_text}) "
-                        f"-> stop=${signal_stop_loss_usd:.2f}, "
-                        f"trade cap={'unlimited' if max_trade_premium <= 0 else f'${max_trade_premium:.2f}'}."
-                    )
-
-                initial_chain_ask = float(contract.get("ask_price", ask_price) or ask_price)
-                pre_submit_slippage = _slippage_pct(initial_chain_ask, ask_price)
-                if pre_submit_slippage > config.MAX_ENTRY_SLIPPAGE_PCT:
-                    retry_quote = _option_quote_snapshot(data_client, option_symbol)
-                    retry_ok, retry_reason = _entry_quote_spread_gate(
+                    entry_quote = _option_quote_snapshot(data_client, option_symbol)
+                    spread_ok, spread_reason = _entry_quote_spread_gate(
                         option_symbol=option_symbol,
-                        entry_quote=retry_quote,
+                        entry_quote=entry_quote,
                         now_et=now_et,
                         strategy_profile=strategy_profile,
                         spread_override_pct=signal_entry_max_spread,
                     )
-                    retry_ask = float(retry_quote.get("ask") or 0.0)
-                    if retry_ok and retry_ask > 0:
-                        entry_quote = retry_quote
-                        ask_price = retry_ask
-                        pre_submit_slippage = _slippage_pct(initial_chain_ask, ask_price)
-                    elif not retry_ok:
-                        reject_reason = "quote_spread_too_wide" if "spread" in retry_reason else "no_option_ask"
+                    if not spread_ok:
+                        reject_reason = "quote_spread_too_wide" if "spread" in spread_reason else "no_option_ask"
                         _mark_skip(reject_reason)
                         _mark_stage4_reject(reason=reject_reason, ticker=ticker)
-                        print(f"[{ts(now_et)}] {ticker}: skip ({retry_reason}).")
+                        print(f"[{ts(now_et)}] {ticker}: skip ({spread_reason}).")
                         time.sleep(config.RATE_LIMIT_SLEEP_SECONDS)
                         continue
-                if pre_submit_slippage > (config.MAX_ENTRY_SLIPPAGE_PCT * 3):
-                    _mark_skip("entry_slippage_too_high")
-                    _mark_stage4_reject(reason="entry_slippage_too_high", ticker=ticker)
-                    print(
-                        f"[{ts(now_et)}] {ticker}: skip (entry slippage {pre_submit_slippage:.2f}% > "
-                        f"hard cap {(config.MAX_ENTRY_SLIPPAGE_PCT * 3):.2f}%)."
+                    ask_price = float(entry_quote.get("ask") or 0.0)
+    
+                    volatility_premium_mult = max(0.1, float(volatility_profile["premium_cap_mult"]))
+                    volatility_opening_premium_mult = max(0.1, float(volatility_profile["opening_premium_cap_mult"]))
+                    max_trade_premium_base = float(getattr(config, "MAX_PREMIUM_PER_TRADE_USD", 0.0) or 0.0)
+                    allocation_pct = max(0.0, float(getattr(config, "PORTFOLIO_ALLOCATION_PCT", 15.0) or 15.0)) / 100.0
+                    allocation_cap_usd = _equity_pct_cap_usd(float(equity) if equity is not None else None, allocation_pct)
+                    pct_per_trade = max(
+                        0.0,
+                        float(getattr(config, "MAX_PREMIUM_PER_TRADE_PCT_OF_ALLOCATION", 10.0) or 10.0),
+                    ) / 100.0
+                    allocation_trade_cap_usd = (
+                        round(allocation_cap_usd * pct_per_trade, 2) if allocation_cap_usd > 0 and pct_per_trade > 0 else 0.0
                     )
-                    time.sleep(config.RATE_LIMIT_SLEEP_SECONDS)
-                    continue
-
-                if pattern_override_enabled:
-                    history_ok, history_reason = _pre_execution_history_check(signal, ticker, direction, now_et)
-                else:
-                    history_ok, history_reason = True, "pre-execution history check bypassed (rollback/shadow)."
-                if not history_ok:
-                    _mark_skip("pre_execution_history_check")
-                    _mark_stage4_reject(reason="pre_execution_history_check", ticker=ticker, detail=history_reason)
-                    print(f"[{ts(now_et)}] {ticker}: skip ({history_reason}).")
-                    continue
-                if history_reason:
-                    signal = dict(signal)
-                    signal["pre_execution_history_check"] = history_reason
-                    print(f"[{ts(now_et)}] {ticker}: {history_reason}.")
-
-                _mark_stage4_eligible(ticker=ticker)
-                entry_attempts_loop += 1
-                if _is_in_opening_strict_window(now_et):
-                    opening_entry_attempts_loop += 1
-                entry_result = _execute_limit_entry(
-                    broker=broker,
-                    data_client=data_client,
-                    option_symbol=option_symbol,
-                    qty=qty,
-                    now_et=now_et,
-                    label=f"ENTRY {ticker}",
-                    initial_quote=entry_quote,
-                )
-                entry_debug["entry_orders_submitted"] = int(entry_debug.get("entry_orders_submitted", 0)) + int(entry_result.get("attempts", 0) or 0)
-                entry_debug["scan_pass_count"] = int(entry_debug.get("scan_pass_count", 0) or 0) + int(entry_result.get("attempts", 0) or 0)
-                entry_debug["order_attempted_count"] = int(entry_debug.get("order_attempted_count", 0) or 0) + int(entry_result.get("attempts", 0) or 0)
-                _record_entry_order_event(ticker, option_symbol, entry_result)
-                _set_signal_outcome(
-                    ticker=ticker,
-                    disposition="order_submitted",
-                    detail=str(entry_result.get("status", "submitted") or "submitted"),
-                )
-                if not bool(entry_result.get("filled", False)):
-                    if bool(entry_result.get("pending_open", False)):
-                        alpaca_active_buy_orders_by_ticker[ticker] = (
-                            int(alpaca_active_buy_orders_by_ticker.get(ticker, 0)) + 1
+                    if allocation_trade_cap_usd > 0:
+                        max_trade_premium_base = (
+                            min(max_trade_premium_base, allocation_trade_cap_usd)
+                            if max_trade_premium_base > 0
+                            else allocation_trade_cap_usd
                         )
-                        entry_debug["trade_resting_count"] = int(entry_debug.get("trade_resting_count", 0) or 0) + 1
-                        _mark_skip("entry_order_resting")
+                    max_trade_premium = (
+                        max(25.0, max_trade_premium_base * volatility_premium_mult)
+                        if max_trade_premium_base > 0
+                        else 0.0
+                    )
+                    qty = _entry_qty_for_budget(
+                        ask_price=ask_price,
+                        equity=float(equity) if equity is not None else None,
+                        consecutive_losses=consecutive_losses,
+                        max_trade_premium=max_trade_premium,
+                    )
+                    if max_contracts_per_ticker > 0 and existing_qty_for_ticker > 0:
+                        qty = min(qty, max_contracts_per_ticker - existing_qty_for_ticker)
+                    if max_contracts_per_ticker > 0 and qty <= 0:
+                        _mark_skip("ticker_contract_cap")
+                        _mark_stage4_reject(reason="ticker_contract_cap", ticker=ticker)
+                        print(
+                            f"[{ts(now_et)}] {ticker}: skip (no remaining contract capacity "
+                            f"{existing_qty_for_ticker}/{max_contracts_per_ticker})."
+                        )
+                        continue
+                    trade_premium_usd = ask_price * qty * 100.0
+                    contract_cap_text = str(max_contracts_per_ticker) if max_contracts_per_ticker > 0 else "unlimited"
+                    print(
+                        f"[{ts(now_et)}] {ticker}: entry plan qty={qty} ask=${ask_price:.2f} "
+                        f"premium=${trade_premium_usd:.2f} open_qty={existing_qty_for_ticker}/"
+                        f"{contract_cap_text}."
+                    )
+                    if bool(getattr(config, "ENABLE_EXPOSURE_BUCKET_GUARDS", False)):
+                        candidate_expiry = _parse_expiration_text(contract.get("expiration_date"))
+                        candidate_bucket = _option_exposure_bucket(ticker, candidate_expiry, now_et)
+                        contract_evidence_decision = evidence_gate.evaluate_contract(
+                            signal=signal,
+                            ticker=ticker,
+                            direction=direction,
+                            now_et=now_et,
+                            exposure_bucket=candidate_bucket,
+                            spread_pct=entry_quote.get("spread_pct"),
+                            rows=evidence_rows,
+                        )
+                        if not contract_evidence_decision.allowed:
+                            _mark_skip("execution_evidence_gate")
+                            _mark_stage4_reject(
+                                reason="execution_evidence_gate",
+                                ticker=ticker,
+                                detail=contract_evidence_decision.reason,
+                            )
+                            print(f"[{ts(now_et)}] {ticker}: skip ({contract_evidence_decision.reason}).")
+                            continue
+                        if (
+                            candidate_bucket == "0dte_other"
+                            and bool(getattr(config, "BLOCK_NON_SCALP_0DTE_ENTRIES", True))
+                        ):
+                            _mark_skip("non_scalp_0dte_block")
+                            _mark_stage4_reject(
+                                reason="non_scalp_0dte_block",
+                                ticker=ticker,
+                                detail="0DTE entries are restricted to configured scalp symbols",
+                            )
+                            print(
+                                f"[{ts(now_et)}] {ticker}: skip "
+                                "(0DTE entries are restricted to configured scalp symbols)."
+                            )
+                            continue
+                        if candidate_bucket == "0dte_index_etf":
+                            zero_dte_max_attempts = max(
+                                0,
+                                int(getattr(config, "ZERO_DTE_MAX_ENTRY_ATTEMPTS", 0) or 0),
+                            )
+                            zero_dte_symbols = _configured_symbol_set("ZERO_DTE_SCALP_SYMBOLS", ("SPY", "QQQ", "IWM"))
+                            zero_dte_attempts_today = sum(
+                                int(alpaca_buy_orders_by_ticker.get(sym, 0) or 0)
+                                for sym in zero_dte_symbols
+                            )
+                            if zero_dte_max_attempts > 0 and zero_dte_attempts_today >= zero_dte_max_attempts:
+                                _mark_skip("zero_dte_attempt_limit")
+                                _mark_stage4_reject(
+                                    reason="zero_dte_attempt_limit",
+                                    ticker=ticker,
+                                    detail=f"0DTE attempts {zero_dte_attempts_today}/{zero_dte_max_attempts}",
+                                )
+                                print(
+                                    f"[{ts(now_et)}] {ticker}: skip "
+                                    f"(0DTE scalp attempt limit {zero_dte_attempts_today}/{zero_dte_max_attempts})."
+                                )
+                                continue
+                            zero_dte_max_hold = max(1, int(getattr(config, "ZERO_DTE_MAX_HOLD_MINUTES", 5) or 5))
+                            signal_max_hold_minutes = min(signal_max_hold_minutes, zero_dte_max_hold)
+                        bucket_premium, ticker_premium = _open_premium_by_exposure_bucket(
+                            option_positions,
+                            open_trade_meta,
+                            now_et,
+                        )
+                        zero_dte_open = float(bucket_premium.get("0dte_index_etf", 0.0) or 0.0)
+                        weekly_open = float(bucket_premium.get("weekly_single_name", 0.0) or 0.0)
+                        if bool(getattr(config, "EXPOSURE_BUCKET_SEPARATE_0DTE_AND_WEEKLY", True)):
+                            if candidate_bucket == "0dte_index_etf" and weekly_open > 0:
+                                _mark_skip("bucket_mixing_block")
+                                _mark_stage4_reject(
+                                    reason="bucket_mixing_block",
+                                    ticker=ticker,
+                                    detail=f"weekly single-name premium already open ${weekly_open:.2f}",
+                                )
+                                print(
+                                    f"[{ts(now_et)}] {ticker}: skip 0DTE scalp "
+                                    f"(weekly single-name exposure already open ${weekly_open:.2f})."
+                                )
+                                continue
+                            if candidate_bucket == "weekly_single_name" and zero_dte_open > 0:
+                                _mark_skip("bucket_mixing_block")
+                                _mark_stage4_reject(
+                                    reason="bucket_mixing_block",
+                                    ticker=ticker,
+                                    detail=f"0DTE ETF premium already open ${zero_dte_open:.2f}",
+                                )
+                                print(
+                                    f"[{ts(now_et)}] {ticker}: skip weekly single-name entry "
+                                    f"(0DTE ETF scalp exposure already open ${zero_dte_open:.2f})."
+                                )
+                                continue
+    
+                        bucket_cap_pct = 0.0
+                        bucket_cap_label = ""
+                        if candidate_bucket == "0dte_index_etf":
+                            bucket_cap_pct = float(getattr(config, "MAX_0DTE_PREMIUM_PCT_EQUITY", 0.0) or 0.0)
+                            bucket_cap_label = "0DTE ETF"
+                        elif candidate_bucket == "weekly_single_name":
+                            bucket_cap_pct = float(
+                                getattr(config, "MAX_WEEKLY_SINGLE_NAME_PREMIUM_PCT_EQUITY", 0.0) or 0.0
+                            )
+                            bucket_cap_label = "weekly single-name"
+                        bucket_cap_usd = _equity_pct_cap_usd(float(equity) if equity is not None else None, bucket_cap_pct)
+                        if bucket_cap_usd > 0:
+                            current_bucket_premium = float(bucket_premium.get(candidate_bucket, 0.0) or 0.0)
+                            if current_bucket_premium + trade_premium_usd > bucket_cap_usd:
+                                _mark_skip("bucket_premium_cap")
+                                _mark_stage4_reject(
+                                    reason="bucket_premium_cap",
+                                    ticker=ticker,
+                                    detail=(
+                                        f"{bucket_cap_label} premium ${current_bucket_premium + trade_premium_usd:.2f} "
+                                        f"> cap ${bucket_cap_usd:.2f}"
+                                    ),
+                                )
+                                print(
+                                    f"[{ts(now_et)}] {ticker}: skip ({bucket_cap_label} premium "
+                                    f"${current_bucket_premium:.2f} + new ${trade_premium_usd:.2f} "
+                                    f"> cap ${bucket_cap_usd:.2f})."
+                                )
+                                continue
+    
+                        ticker_cap_usd = _equity_pct_cap_usd(
+                            float(equity) if equity is not None else None,
+                            float(getattr(config, "MAX_SINGLE_TICKER_PREMIUM_PCT_EQUITY", 0.0) or 0.0),
+                        )
+                        if ticker_cap_usd > 0:
+                            current_ticker_premium = float(ticker_premium.get(ticker, 0.0) or 0.0)
+                            if current_ticker_premium + trade_premium_usd > ticker_cap_usd:
+                                _mark_skip("ticker_premium_cap")
+                                _mark_stage4_reject(
+                                    reason="ticker_premium_cap",
+                                    ticker=ticker,
+                                    detail=(
+                                        f"{ticker} premium ${current_ticker_premium + trade_premium_usd:.2f} "
+                                        f"> cap ${ticker_cap_usd:.2f}"
+                                    ),
+                                )
+                                print(
+                                    f"[{ts(now_et)}] {ticker}: skip (ticker premium "
+                                    f"${current_ticker_premium:.2f} + new ${trade_premium_usd:.2f} "
+                                    f"> cap ${ticker_cap_usd:.2f})."
+                                )
+                                continue
+    
+                    premium_override_ok = False
+                    premium_override_reason = ""
+                    if max_trade_premium > 0 and trade_premium_usd > max_trade_premium:
+                        premium_override_ok, premium_override_reason = _premium_cap_quality_override_ok(
+                            signal=signal,
+                            entry_quote=entry_quote,
+                            now_et=now_et,
+                        )
+                        if not premium_override_ok:
+                            _mark_skip("premium_per_trade_cap")
+                            _mark_stage4_reject(reason="premium_per_trade_cap", ticker=ticker)
+                            print(
+                                f"[{ts(now_et)}] {ticker}: skip (premium ${trade_premium_usd:.2f} > "
+                                f"per-trade cap ${max_trade_premium:.2f}; {premium_override_reason})."
+                            )
+                            continue
+                        print(
+                            f"[{ts(now_et)}] {ticker}: premium override accepted "
+                            f"(${trade_premium_usd:.2f} > ${max_trade_premium:.2f}; {premium_override_reason})."
+                        )
+    
+                    total_open_premium = _current_open_premium_usd(option_positions, open_trade_meta)
+                    committed_open_premium = total_open_premium + float(active_entry_order_premium_usd or 0.0)
+                    max_total_open_premium_base = float(getattr(config, "MAX_TOTAL_OPEN_PREMIUM_USD", 0.0) or 0.0)
+                    max_total_open_premium = (
+                        max(75.0, max_total_open_premium_base * volatility_premium_mult)
+                        if max_total_open_premium_base > 0
+                        else 0.0
+                    )
+                    if max_total_open_premium > 0 and (committed_open_premium + trade_premium_usd) > max_total_open_premium:
+                        _mark_skip("total_open_premium_cap")
+                        _mark_stage4_reject(reason="total_open_premium_cap", ticker=ticker)
+                        print(
+                            f"[{ts(now_et)}] {ticker}: skip (open premium ${total_open_premium:.2f} + "
+                            f"pending ${active_entry_order_premium_usd:.2f} + "
+                            f"new ${trade_premium_usd:.2f} > cap ${max_total_open_premium:.2f})."
+                        )
+                        continue
+    
+                    expensive_symbols = set(str(s).upper() for s in getattr(config, "EXPENSIVE_PREMIUM_SYMBOLS", ()))
+                    is_expensive_symbol = ticker in expensive_symbols
+                    if _is_in_opening_strict_window(now_et):
+                        opening_premium_cap_base = float(getattr(config, "OPENING_MAX_FRESH_PREMIUM_USD", 0.0) or 0.0)
+                        opening_premium_cap = (
+                            max(75.0, opening_premium_cap_base * volatility_opening_premium_mult)
+                            if opening_premium_cap_base > 0
+                            else 0.0
+                        )
+    
+                        # In opening strict mode, expensive names are blocked unless
+                        # they are core names or fit an extra-tight premium budget.
+                        if is_expensive_symbol:
+                            core_set = set(str(s).upper() for s in getattr(config, "PREFERRED_CORE_TICKERS", ()))
+                            tight_opening_expensive_premium = float(
+                                getattr(config, "OPENING_EXPENSIVE_MAX_PREMIUM_USD", max_trade_premium) or max_trade_premium
+                            )
+                            is_core_name = ticker in core_set
+                            if (
+                                tight_opening_expensive_premium > 0
+                                and not is_core_name
+                                and trade_premium_usd > tight_opening_expensive_premium
+                            ):
+                                _mark_skip("opening_expensive_name_gate")
+                                _mark_stage4_reject(reason="opening_expensive_name_gate", ticker=ticker)
+                                print(
+                                    f"[{ts(now_et)}] {ticker}: skip (opening expensive-name gate; premium ${trade_premium_usd:.2f} "
+                                    f"> ${tight_opening_expensive_premium:.2f} and not core)."
+                                )
+                                continue
+    
+                        if opening_premium_cap > 0 and (opening_fresh_premium_deployed_usd + trade_premium_usd) > opening_premium_cap:
+                            if not premium_override_ok:
+                                _mark_skip("opening_fresh_premium_cap")
+                                _mark_stage4_reject(reason="opening_fresh_premium_cap", ticker=ticker)
+                                print(
+                                    f"[{ts(now_et)}] {ticker}: skip (opening premium ${opening_fresh_premium_deployed_usd:.2f} + "
+                                    f"${trade_premium_usd:.2f} > cap ${opening_premium_cap:.2f})."
+                                )
+                                continue
+                            print(
+                                f"[{ts(now_et)}] {ticker}: opening premium cap override accepted "
+                                f"(${opening_fresh_premium_deployed_usd + trade_premium_usd:.2f} > ${opening_premium_cap:.2f})."
+                            )
+                        opening_expensive_cap = max(0, int(getattr(config, "OPENING_MAX_EXPENSIVE_ENTRIES", 1)))
+                        if is_expensive_symbol and opening_expensive_entries_today_count >= opening_expensive_cap:
+                            if not premium_override_ok:
+                                _mark_skip("opening_expensive_symbol_cap")
+                                _mark_stage4_reject(reason="opening_expensive_symbol_cap", ticker=ticker)
+                                print(
+                                    f"[{ts(now_et)}] {ticker}: skip (opening expensive-name cap "
+                                    f"{opening_expensive_entries_today_count}/{opening_expensive_cap})."
+                                )
+                                continue
+                            print(
+                                f"[{ts(now_et)}] {ticker}: opening expensive-name cap override accepted "
+                                f"({opening_expensive_entries_today_count}/{opening_expensive_cap})."
+                            )
+    
+                    if str(volatility_profile.get("label", "normal")) != "normal":
+                        iv_rank_text = "n/a"
+                        if int(volatility_profile.get("iv_available", 0) or 0):
+                            iv_rank_text = f"{float(volatility_profile.get('iv_rank', 0.0) or 0.0):.1f}"
+                        print(
+                            f"[{ts(now_et)}] {ticker}: volatility={volatility_profile.get('label')} "
+                            f"(score={int(volatility_profile.get('score', 0) or 0)}, "
+                            f"atr={float(volatility_profile.get('atr_pct', 0.0) or 0.0):.2f}%, "
+                            f"rvol={float(volatility_profile.get('rvol', 0.0) or 0.0):.2f}, ivr={iv_rank_text}) "
+                            f"-> stop=${signal_stop_loss_usd:.2f}, "
+                            f"trade cap={'unlimited' if max_trade_premium <= 0 else f'${max_trade_premium:.2f}'}."
+                        )
+    
+                    initial_chain_ask = float(contract.get("ask_price", ask_price) or ask_price)
+                    pre_submit_slippage = _slippage_pct(initial_chain_ask, ask_price)
+                    if pre_submit_slippage > config.MAX_ENTRY_SLIPPAGE_PCT:
+                        retry_quote = _option_quote_snapshot(data_client, option_symbol)
+                        retry_ok, retry_reason = _entry_quote_spread_gate(
+                            option_symbol=option_symbol,
+                            entry_quote=retry_quote,
+                            now_et=now_et,
+                            strategy_profile=strategy_profile,
+                            spread_override_pct=signal_entry_max_spread,
+                        )
+                        retry_ask = float(retry_quote.get("ask") or 0.0)
+                        if retry_ok and retry_ask > 0:
+                            entry_quote = retry_quote
+                            ask_price = retry_ask
+                            pre_submit_slippage = _slippage_pct(initial_chain_ask, ask_price)
+                        elif not retry_ok:
+                            reject_reason = "quote_spread_too_wide" if "spread" in retry_reason else "no_option_ask"
+                            _mark_skip(reject_reason)
+                            _mark_stage4_reject(reason=reject_reason, ticker=ticker)
+                            print(f"[{ts(now_et)}] {ticker}: skip ({retry_reason}).")
+                            time.sleep(config.RATE_LIMIT_SLEEP_SECONDS)
+                            continue
+                    if pre_submit_slippage > (config.MAX_ENTRY_SLIPPAGE_PCT * 3):
+                        _mark_skip("entry_slippage_too_high")
+                        _mark_stage4_reject(reason="entry_slippage_too_high", ticker=ticker)
+                        print(
+                            f"[{ts(now_et)}] {ticker}: skip (entry slippage {pre_submit_slippage:.2f}% > "
+                            f"hard cap {(config.MAX_ENTRY_SLIPPAGE_PCT * 3):.2f}%)."
+                        )
+                        time.sleep(config.RATE_LIMIT_SLEEP_SECONDS)
+                        continue
+    
+                    if pattern_override_enabled:
+                        history_ok, history_reason = _pre_execution_history_check(signal, ticker, direction, now_et)
+                    else:
+                        history_ok, history_reason = True, "pre-execution history check bypassed (rollback/shadow)."
+                    if not history_ok:
+                        _mark_skip("pre_execution_history_check")
+                        _mark_stage4_reject(reason="pre_execution_history_check", ticker=ticker, detail=history_reason)
+                        print(f"[{ts(now_et)}] {ticker}: skip ({history_reason}).")
+                        continue
+                    if history_reason:
+                        signal = dict(signal)
+                        signal["pre_execution_history_check"] = history_reason
+                        print(f"[{ts(now_et)}] {ticker}: {history_reason}.")
+    
+                    _mark_stage4_eligible(ticker=ticker)
+                    entry_attempts_loop += 1
+                    if _is_in_opening_strict_window(now_et):
+                        opening_entry_attempts_loop += 1
+                    entry_result = _execute_limit_entry(
+                        broker=broker,
+                        data_client=data_client,
+                        option_symbol=option_symbol,
+                        qty=qty,
+                        now_et=now_et,
+                        label=f"ENTRY {ticker}",
+                        initial_quote=entry_quote,
+                    )
+                    entry_debug["entry_orders_submitted"] = int(entry_debug.get("entry_orders_submitted", 0)) + int(entry_result.get("attempts", 0) or 0)
+                    entry_debug["scan_pass_count"] = int(entry_debug.get("scan_pass_count", 0) or 0) + int(entry_result.get("attempts", 0) or 0)
+                    entry_debug["order_attempted_count"] = int(entry_debug.get("order_attempted_count", 0) or 0) + int(entry_result.get("attempts", 0) or 0)
+                    _record_entry_order_event(ticker, option_symbol, entry_result)
+                    _set_signal_outcome(
+                        ticker=ticker,
+                        disposition="order_submitted",
+                        detail=str(entry_result.get("status", "submitted") or "submitted"),
+                    )
+                    if not bool(entry_result.get("filled", False)):
+                        if bool(entry_result.get("pending_open", False)):
+                            alpaca_active_buy_orders_by_ticker[ticker] = (
+                                int(alpaca_active_buy_orders_by_ticker.get(ticker, 0)) + 1
+                            )
+                            entry_debug["trade_resting_count"] = int(entry_debug.get("trade_resting_count", 0) or 0) + 1
+                            _mark_skip("entry_order_resting")
+                            _set_signal_outcome(
+                                ticker=ticker,
+                                disposition="order_resting",
+                                detail=str(entry_result.get("status", "pending_open") or "pending_open"),
+                            )
+                            print(
+                                f"[{ts(now_et)}] {ticker}: entry limit order resting "
+                                f"(status={entry_result.get('status', 'pending_open')}, "
+                                f"order={entry_result.get('order_id', '')})."
+                            )
+                            _save_runtime_state()
+                            continue
+                        _mark_skip("entry_not_filled_after_retry")
+                        _bump_counter_bucket(
+                            "order_rejected_count_by_reason",
+                            str(entry_result.get("status", "unknown") or "unknown"),
+                        )
                         _set_signal_outcome(
                             ticker=ticker,
-                            disposition="order_resting",
-                            detail=str(entry_result.get("status", "pending_open") or "pending_open"),
+                            disposition="order_not_filled",
+                            detail=str(entry_result.get("status", "unknown") or "unknown"),
                         )
                         print(
-                            f"[{ts(now_et)}] {ticker}: entry limit order resting "
-                            f"(status={entry_result.get('status', 'pending_open')}, "
-                            f"order={entry_result.get('order_id', '')})."
+                            f"[{ts(now_et)}] {ticker}: entry not filled "
+                            f"(status={entry_result.get('status', 'unknown')}). Skipping."
+                        )
+                        time.sleep(config.RATE_LIMIT_SLEEP_SECONDS)
+                        continue
+    
+                    filled_avg_price = float(entry_result.get("filled_price") or 0.0)
+                    filled_qty = position_qty_as_int(entry_result.get("filled_qty", qty)) or qty
+                    confirmed_qty = _wait_confirmed_long_option_qty(
+                        broker,
+                        option_symbol,
+                        min_qty=min(filled_qty, qty),
+                        wait_seconds=10,
+                    )
+                    _record_entry_order_event(ticker, option_symbol, entry_result, confirmed_qty=confirmed_qty)
+                    if confirmed_qty <= 0:
+                        _mark_skip("fill_not_confirmed_no_position")
+                        _bump_counter_bucket("order_rejected_count_by_reason", "fill_not_confirmed_no_position")
+                        _set_signal_outcome(
+                            ticker=ticker,
+                            disposition="fill_not_confirmed_no_position",
+                            detail=(
+                                f"orderstatus:{entry_result.get('status', 'unknown')} "
+                                f"order={entry_result.get('order_id', '')}"
+                            ),
+                        )
+                        _append_entry_trigger_scan_log(
+                            now_et,
+                            signal,
+                            detail=(
+                                f"fill_not_confirmed_no_position "
+                                f"orderstatus:{entry_result.get('status', 'unknown')} "
+                                f"order={entry_result.get('order_id', '')}"
+                            ),
+                            result="fail",
+                        )
+                        print(
+                            f"[{ts(now_et)}] {ticker}: order reported filled but no long position "
+                            f"confirmed for {option_symbol} (order={entry_result.get('order_id', '')})."
                         )
                         _save_runtime_state()
+                        time.sleep(config.RATE_LIMIT_SLEEP_SECONDS)
                         continue
-                    _mark_skip("entry_not_filled_after_retry")
-                    _bump_counter_bucket(
-                        "order_rejected_count_by_reason",
-                        str(entry_result.get("status", "unknown") or "unknown"),
-                    )
-                    _set_signal_outcome(
-                        ticker=ticker,
-                        disposition="order_not_filled",
-                        detail=str(entry_result.get("status", "unknown") or "unknown"),
-                    )
-                    print(
-                        f"[{ts(now_et)}] {ticker}: entry not filled "
-                        f"(status={entry_result.get('status', 'unknown')}). Skipping."
-                    )
-                    time.sleep(config.RATE_LIMIT_SLEEP_SECONDS)
-                    continue
-
-                filled_avg_price = float(entry_result.get("filled_price") or 0.0)
-                filled_qty = position_qty_as_int(entry_result.get("filled_qty", qty)) or qty
-                confirmed_qty = _wait_confirmed_long_option_qty(
-                    broker,
-                    option_symbol,
-                    min_qty=min(filled_qty, qty),
-                    wait_seconds=10,
-                )
-                _record_entry_order_event(ticker, option_symbol, entry_result, confirmed_qty=confirmed_qty)
-                if confirmed_qty <= 0:
-                    _mark_skip("fill_not_confirmed_no_position")
-                    _bump_counter_bucket("order_rejected_count_by_reason", "fill_not_confirmed_no_position")
-                    _set_signal_outcome(
-                        ticker=ticker,
-                        disposition="fill_not_confirmed_no_position",
-                        detail=(
-                            f"orderstatus:{entry_result.get('status', 'unknown')} "
-                            f"order={entry_result.get('order_id', '')}"
-                        ),
-                    )
+                    if confirmed_qty < filled_qty:
+                        print(
+                            f"[{ts(now_et)}] {ticker}: confirmed {confirmed_qty}/{filled_qty} "
+                            f"filled contract(s) live for {option_symbol}; recording confirmed qty."
+                        )
+                        filled_qty = confirmed_qty
                     _append_entry_trigger_scan_log(
                         now_et,
                         signal,
                         detail=(
-                            f"fill_not_confirmed_no_position "
-                            f"orderstatus:{entry_result.get('status', 'unknown')} "
-                            f"order={entry_result.get('order_id', '')}"
+                            f"confirmed_fill orderstatus:{entry_result.get('status', 'unknown')} "
+                            f"order={entry_result.get('order_id', '')} qty={filled_qty}"
                         ),
-                        result="fail",
                     )
-                    print(
-                        f"[{ts(now_et)}] {ticker}: order reported filled but no long position "
-                        f"confirmed for {option_symbol} (order={entry_result.get('order_id', '')})."
-                    )
+                    if filled_qty > qty:
+                        extra_qty = filled_qty - qty
+                        try:
+                            trim_order = broker.close_option_market(option_symbol, extra_qty)
+                            print(f"[{ts(now_et)}] {ticker}: trimmed fill to requested {qty} contract(s) (closed extra {extra_qty}).")
+                        except Exception as exc:  # noqa: BLE001
+                            print(f"[{ts(now_et)}] {ticker}: WARNING - failed to trim extra qty {extra_qty}: {exc}. Recording qty={qty} anyway.")
+                        filled_qty = qty
+                    fill_slippage = float(entry_result.get("fill_slippage_vs_ask_pct", 0.0) or 0.0)
+                    if (
+                        bool(getattr(config, "ENABLE_FILL_SLIPPAGE_IMMEDIATE_CLOSE", False))
+                        and fill_slippage > config.MAX_FILL_SLIPPAGE_PCT
+                    ):
+                        _mark_skip("fill_slippage_too_high")
+                        _record_bad_fill_event(ticker, now_et, fill_slippage)
+                        print(
+                            f"[{ts(now_et)}] {ticker}: fill slippage {fill_slippage:.2f}% exceeds "
+                            f"{config.MAX_FILL_SLIPPAGE_PCT:.2f}%. Closing immediately."
+                        )
+                        alerts.send(
+                            "high_fill_slippage",
+                            (
+                                f"High fill slippage on {option_symbol}: {fill_slippage:.2f}% "
+                                f"(limit {config.MAX_FILL_SLIPPAGE_PCT:.2f}%). Position closed."
+                            ),
+                            level="warning",
+                            dedupe_key=f"slippage-{option_symbol}-{now_et.strftime('%Y%m%d%H%M')}",
+                        )
+                        try:
+                            broker.close_option_market(option_symbol, filled_qty)
+                        except Exception as exc:  # noqa: BLE001
+                            print(f"[{ts(now_et)}] {ticker}: immediate slippage close failed: {exc}")
+                        time.sleep(config.RATE_LIMIT_SLEEP_SECONDS)
+                        continue
+    
+                    pattern_signature, pattern_key, pattern_global_key = _signal_pattern_keys(signal, ticker, now_et=now_et)
+                    existing_trade_meta = dict(open_trade_meta.get(option_symbol) or {})
+                    open_trade_meta[option_symbol] = {
+                        "timestamp": ts(now_et),
+                        "entry_time_iso": now_et.isoformat(),
+                        "strategy_profile": signal_strategy_profile,
+                        "ticker": ticker,
+                        "direction": direction,
+                        "exposure_bucket": _option_exposure_bucket(
+                            ticker,
+                            _parse_expiration_text(contract.get("expiration_date")),
+                            now_et,
+                        ),
+                        "option_symbol": option_symbol,
+                        "strike": contract.get("strike_price", ""),
+                        "expiry": contract.get("expiration_date", ""),
+                        "qty": filled_qty,
+                        "entry_price": filled_avg_price or ask_price,
+                        "signal_score": round(float(signal.get("signal_score", 0.0) or 0.0), 4),
+                        "direction_score": round(float(signal.get("direction_score", 0.0) or 0.0), 4),
+                        "rvol": round(float(signal.get("rvol", 0.0) or 0.0), 4),
+                        "rsi": round(float(signal.get("rsi", 0.0) or 0.0), 4),
+                        "roc": round(float(signal.get("roc", 0.0) or 0.0), 4),
+                        "iv_rank": round(float(signal.get("iv_rank", 0.0) or 0.0), 4),
+                        "price": round(float(signal.get("price", 0.0) or 0.0), 4),
+                        "vwap": round(float(signal.get("vwap", 0.0) or 0.0), 4),
+                        "flow_score": round(float(signal.get("flow_score", 0.0) or 0.0), 4),
+                        "regime_score": round(float(signal.get("regime_score", 0.0) or 0.0), 4),
+                        "contract_spread_pct": round(float(entry_result.get("submit_spread_pct", 0.0) or 0.0), 4),
+                        "atr_pct": round(float(volatility_profile.get("atr_pct", 0.0) or 0.0), 4),
+                        "volatility_regime": str(volatility_profile.get("label", "normal") or "normal"),
+                        "volatility_score": int(volatility_profile.get("score", 0) or 0),
+                        "signal_pattern_signature": pattern_signature,
+                        "signal_pattern_key": pattern_key,
+                        "signal_pattern_global_key": pattern_global_key,
+                        "pattern_direction_override": signal.get("pattern_direction_override", ""),
+                        "pattern_direction_override_reason": signal.get("pattern_direction_override_reason", ""),
+                        "pre_execution_history_check": signal.get("pre_execution_history_check", ""),
+                        "volatility_stop_loss_mult": round(float(volatility_profile.get("stop_loss_mult", 1.0) or 1.0), 4),
+                        "volatility_premium_cap_mult": round(float(volatility_profile.get("premium_cap_mult", 1.0) or 1.0), 4),
+                        "entry_bid_submit": entry_result.get("submit_bid"),
+                        "entry_ask_submit": entry_result.get("submit_ask"),
+                        "entry_midpoint_submit": entry_result.get("submit_midpoint"),
+                        "entry_intended_limit": entry_result.get("intended_limit"),
+                        "entry_filled_price": filled_avg_price or ask_price,
+                        "entry_spread_pct": entry_result.get("submit_spread_pct"),
+                        "entry_fill_slippage_vs_ask_pct": entry_result.get("fill_slippage_vs_ask_pct"),
+                        "entry_fill_seconds": entry_result.get("fill_seconds"),
+                        "entry_attempts": entry_result.get("attempts", 0),
+                        "stop_floor_plpc": -float(config.STOP_LOSS_PCT),
+                        "stop_loss_usd": signal_stop_loss_usd,
+                        "immediate_take_profit_pct": signal_take_profit_pct,
+                        "max_hold_minutes": signal_max_hold_minutes,
+                        "trade_state": "unproven",
+                        "runner_mode": False,
+                        "max_plpc": 0.0,
+                        "min_plpc": 0.0,
+                    }
+                    if existing_trade_meta:
+                        previous_qty = int(existing_trade_meta.get("qty", 0) or 0)
+                        previous_entry = float(existing_trade_meta.get("entry_price", 0.0) or 0.0)
+                        merged_qty = previous_qty + filled_qty
+                        merged_entry = filled_avg_price or ask_price
+                        if previous_qty > 0 and previous_entry > 0 and merged_entry > 0:
+                            merged_entry = (
+                                (previous_entry * previous_qty) + (merged_entry * filled_qty)
+                            ) / merged_qty
+                        open_trade_meta[option_symbol].update(
+                            {
+                                "entry_time_iso": existing_trade_meta.get("entry_time_iso", now_et.isoformat()),
+                                "qty": merged_qty,
+                                "entry_price": round(float(merged_entry), 4),
+                                "scale_in_count": int(existing_trade_meta.get("scale_in_count", 0) or 0) + 1,
+                                "last_scale_in_time_iso": now_et.isoformat(),
+                                "max_plpc": float(existing_trade_meta.get("max_plpc", 0.0) or 0.0),
+                                "min_plpc": float(existing_trade_meta.get("min_plpc", 0.0) or 0.0),
+                            }
+                        )
+                    if prior_entries >= 1 and reentry_armed:
+                        ticker_reentries_used[ticker] = reentries_used + 1
+                        ticker_reentry_armed[ticker] = False
+                        ticker_reentry_expected_direction[ticker] = ""
+                    ticker_entry_counts[ticker] = prior_entries + 1
+                    open_count += 1
+                    entry_times_rolling.append(now_et)
+                    if _is_in_opening_strict_window(now_et):
+                        opening_entries_today_count += 1
+                        entry_premium_usd = float((filled_avg_price or ask_price) * filled_qty * 100.0)
+                        opening_fresh_premium_deployed_usd += entry_premium_usd
+                        if ticker in set(str(s).upper() for s in getattr(config, "EXPENSIVE_PREMIUM_SYMBOLS", ())):
+                            opening_expensive_entries_today_count += 1
+                    if ticker not in set(str(s).upper() for s in getattr(config, "PREFERRED_CORE_TICKERS", ())):
+                        non_core_entries_today_count += 1
+                    entry_debug["entries_filled"] = int(entry_debug.get("entries_filled", 0)) + 1
+                    entry_debug["trade_filled_count"] = int(entry_debug.get("trade_filled_count", 0) or 0) + 1
+                    _set_signal_outcome(ticker=ticker, disposition="order_filled")
                     _save_runtime_state()
                     time.sleep(config.RATE_LIMIT_SLEEP_SECONDS)
-                    continue
-                if confirmed_qty < filled_qty:
+                except Exception as exc:  # noqa: BLE001
+                    _mark_skip("entry_flow_exception")
+                    _mark_stage4_reject(reason="entry_flow_exception", ticker=ticker)
+                    _record_entry_exception(ticker, exc)
                     print(
-                        f"[{ts(now_et)}] {ticker}: confirmed {confirmed_qty}/{filled_qty} "
-                        f"filled contract(s) live for {option_symbol}; recording confirmed qty."
+                        f"[{ts(now_et)}] {ticker}: error during entry flow "
+                        f"({type(exc).__name__}): {exc!r}"
                     )
-                    filled_qty = confirmed_qty
-                _append_entry_trigger_scan_log(
-                    now_et,
-                    signal,
-                    detail=(
-                        f"confirmed_fill orderstatus:{entry_result.get('status', 'unknown')} "
-                        f"order={entry_result.get('order_id', '')} qty={filled_qty}"
-                    ),
-                )
-                if filled_qty > qty:
-                    extra_qty = filled_qty - qty
-                    try:
-                        trim_order = broker.close_option_market(option_symbol, extra_qty)
-                        print(f"[{ts(now_et)}] {ticker}: trimmed fill to requested {qty} contract(s) (closed extra {extra_qty}).")
-                    except Exception as exc:  # noqa: BLE001
-                        print(f"[{ts(now_et)}] {ticker}: WARNING - failed to trim extra qty {extra_qty}: {exc}. Recording qty={qty} anyway.")
-                    filled_qty = qty
-                fill_slippage = float(entry_result.get("fill_slippage_vs_ask_pct", 0.0) or 0.0)
-                if (
-                    bool(getattr(config, "ENABLE_FILL_SLIPPAGE_IMMEDIATE_CLOSE", False))
-                    and fill_slippage > config.MAX_FILL_SLIPPAGE_PCT
-                ):
-                    _mark_skip("fill_slippage_too_high")
-                    _record_bad_fill_event(ticker, now_et, fill_slippage)
-                    print(
-                        f"[{ts(now_et)}] {ticker}: fill slippage {fill_slippage:.2f}% exceeds "
-                        f"{config.MAX_FILL_SLIPPAGE_PCT:.2f}%. Closing immediately."
-                    )
-                    alerts.send(
-                        "high_fill_slippage",
-                        (
-                            f"High fill slippage on {option_symbol}: {fill_slippage:.2f}% "
-                            f"(limit {config.MAX_FILL_SLIPPAGE_PCT:.2f}%). Position closed."
-                        ),
-                        level="warning",
-                        dedupe_key=f"slippage-{option_symbol}-{now_et.strftime('%Y%m%d%H%M')}",
-                    )
-                    try:
-                        broker.close_option_market(option_symbol, filled_qty)
-                    except Exception as exc:  # noqa: BLE001
-                        print(f"[{ts(now_et)}] {ticker}: immediate slippage close failed: {exc}")
                     time.sleep(config.RATE_LIMIT_SLEEP_SECONDS)
-                    continue
-
-                pattern_signature, pattern_key, pattern_global_key = _signal_pattern_keys(signal, ticker, now_et=now_et)
-                existing_trade_meta = dict(open_trade_meta.get(option_symbol) or {})
-                open_trade_meta[option_symbol] = {
-                    "timestamp": ts(now_et),
-                    "entry_time_iso": now_et.isoformat(),
-                    "strategy_profile": signal_strategy_profile,
-                    "ticker": ticker,
-                    "direction": direction,
-                    "exposure_bucket": _option_exposure_bucket(
-                        ticker,
-                        _parse_expiration_text(contract.get("expiration_date")),
-                        now_et,
-                    ),
-                    "option_symbol": option_symbol,
-                    "strike": contract.get("strike_price", ""),
-                    "expiry": contract.get("expiration_date", ""),
-                    "qty": filled_qty,
-                    "entry_price": filled_avg_price or ask_price,
-                    "signal_score": round(float(signal.get("signal_score", 0.0) or 0.0), 4),
-                    "direction_score": round(float(signal.get("direction_score", 0.0) or 0.0), 4),
-                    "rvol": round(float(signal.get("rvol", 0.0) or 0.0), 4),
-                    "rsi": round(float(signal.get("rsi", 0.0) or 0.0), 4),
-                    "roc": round(float(signal.get("roc", 0.0) or 0.0), 4),
-                    "iv_rank": round(float(signal.get("iv_rank", 0.0) or 0.0), 4),
-                    "price": round(float(signal.get("price", 0.0) or 0.0), 4),
-                    "vwap": round(float(signal.get("vwap", 0.0) or 0.0), 4),
-                    "flow_score": round(float(signal.get("flow_score", 0.0) or 0.0), 4),
-                    "regime_score": round(float(signal.get("regime_score", 0.0) or 0.0), 4),
-                    "contract_spread_pct": round(float(entry_result.get("submit_spread_pct", 0.0) or 0.0), 4),
-                    "atr_pct": round(float(volatility_profile.get("atr_pct", 0.0) or 0.0), 4),
-                    "volatility_regime": str(volatility_profile.get("label", "normal") or "normal"),
-                    "volatility_score": int(volatility_profile.get("score", 0) or 0),
-                    "signal_pattern_signature": pattern_signature,
-                    "signal_pattern_key": pattern_key,
-                    "signal_pattern_global_key": pattern_global_key,
-                    "pattern_direction_override": signal.get("pattern_direction_override", ""),
-                    "pattern_direction_override_reason": signal.get("pattern_direction_override_reason", ""),
-                    "pre_execution_history_check": signal.get("pre_execution_history_check", ""),
-                    "volatility_stop_loss_mult": round(float(volatility_profile.get("stop_loss_mult", 1.0) or 1.0), 4),
-                    "volatility_premium_cap_mult": round(float(volatility_profile.get("premium_cap_mult", 1.0) or 1.0), 4),
-                    "entry_bid_submit": entry_result.get("submit_bid"),
-                    "entry_ask_submit": entry_result.get("submit_ask"),
-                    "entry_midpoint_submit": entry_result.get("submit_midpoint"),
-                    "entry_intended_limit": entry_result.get("intended_limit"),
-                    "entry_filled_price": filled_avg_price or ask_price,
-                    "entry_spread_pct": entry_result.get("submit_spread_pct"),
-                    "entry_fill_slippage_vs_ask_pct": entry_result.get("fill_slippage_vs_ask_pct"),
-                    "entry_fill_seconds": entry_result.get("fill_seconds"),
-                    "entry_attempts": entry_result.get("attempts", 0),
-                    "stop_floor_plpc": -float(config.STOP_LOSS_PCT),
-                    "stop_loss_usd": signal_stop_loss_usd,
-                    "immediate_take_profit_pct": signal_take_profit_pct,
-                    "max_hold_minutes": signal_max_hold_minutes,
-                    "trade_state": "unproven",
-                    "runner_mode": False,
-                    "max_plpc": 0.0,
-                    "min_plpc": 0.0,
-                }
-                if existing_trade_meta:
-                    previous_qty = int(existing_trade_meta.get("qty", 0) or 0)
-                    previous_entry = float(existing_trade_meta.get("entry_price", 0.0) or 0.0)
-                    merged_qty = previous_qty + filled_qty
-                    merged_entry = filled_avg_price or ask_price
-                    if previous_qty > 0 and previous_entry > 0 and merged_entry > 0:
-                        merged_entry = (
-                            (previous_entry * previous_qty) + (merged_entry * filled_qty)
-                        ) / merged_qty
-                    open_trade_meta[option_symbol].update(
-                        {
-                            "entry_time_iso": existing_trade_meta.get("entry_time_iso", now_et.isoformat()),
-                            "qty": merged_qty,
-                            "entry_price": round(float(merged_entry), 4),
-                            "scale_in_count": int(existing_trade_meta.get("scale_in_count", 0) or 0) + 1,
-                            "last_scale_in_time_iso": now_et.isoformat(),
-                            "max_plpc": float(existing_trade_meta.get("max_plpc", 0.0) or 0.0),
-                            "min_plpc": float(existing_trade_meta.get("min_plpc", 0.0) or 0.0),
-                        }
-                    )
-                if prior_entries >= 1 and reentry_armed:
-                    ticker_reentries_used[ticker] = reentries_used + 1
-                    ticker_reentry_armed[ticker] = False
-                    ticker_reentry_expected_direction[ticker] = ""
-                ticker_entry_counts[ticker] = prior_entries + 1
-                open_count += 1
-                entry_times_rolling.append(now_et)
-                if _is_in_opening_strict_window(now_et):
-                    opening_entries_today_count += 1
-                    entry_premium_usd = float((filled_avg_price or ask_price) * filled_qty * 100.0)
-                    opening_fresh_premium_deployed_usd += entry_premium_usd
-                    if ticker in set(str(s).upper() for s in getattr(config, "EXPENSIVE_PREMIUM_SYMBOLS", ())):
-                        opening_expensive_entries_today_count += 1
-                if ticker not in set(str(s).upper() for s in getattr(config, "PREFERRED_CORE_TICKERS", ())):
-                    non_core_entries_today_count += 1
-                entry_debug["entries_filled"] = int(entry_debug.get("entries_filled", 0)) + 1
-                entry_debug["trade_filled_count"] = int(entry_debug.get("trade_filled_count", 0) or 0) + 1
-                _set_signal_outcome(ticker=ticker, disposition="order_filled")
-                _save_runtime_state()
-                time.sleep(config.RATE_LIMIT_SLEEP_SECONDS)
-            except Exception as exc:  # noqa: BLE001
-                _mark_skip("entry_flow_exception")
-                _mark_stage4_reject(reason="entry_flow_exception", ticker=ticker)
-                _record_entry_exception(ticker, exc)
-                print(
-                    f"[{ts(now_et)}] {ticker}: error during entry flow "
-                    f"({type(exc).__name__}): {exc!r}"
-                )
-                time.sleep(config.RATE_LIMIT_SLEEP_SECONDS)
-
-        _finalize_trade_through_cycle(datetime.now(tz))
+    
+        except Exception as exc:  # noqa: BLE001
+            print(f"[{ts(datetime.now(tz))}] TRADE-THROUGH CYCLE ERROR: {type(exc).__name__}: {exc!r}")
+        finally:
+            print(f"[{ts(datetime.now(tz))}] TRADE-THROUGH KPI FINALIZER ENTERED")
+            _finalize_trade_through_cycle(cycle_finalizer_now_et)
         last_entry_debug = entry_debug
         _save_runtime_state()
 
