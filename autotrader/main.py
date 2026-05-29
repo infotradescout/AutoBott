@@ -5176,6 +5176,7 @@ def main():
         else:
             vix_block_notice = None
             signals = run_scan(watchlist) if watchlist else []
+            print(f"[{ts(now_et)}] SCAN CALL RETURNED signals_count={len(signals)}")
         raw_scan_rows_count = len(watchlist)
         raw_scanner_candidate_count = len(signals)
         raw_scanner_failed_count = max(0, raw_scan_rows_count - raw_scanner_candidate_count)
@@ -5685,8 +5686,10 @@ def main():
                 f"loss_causes={dict(truth.get('causes', {}) or {})}"
             )
 
+        print(f"[{ts(now_et)}] EXECUTION LOOP ABOUT TO START signals_count={len(signals)}")
         cycle_finalizer_now_et = datetime.now(tz)
         try:
+            print(f"[{ts(datetime.now(tz))}] EXECUTION LOOP ENTERED")
             opening_entry_attempts_loop = 0
             entry_attempts_loop = 0
             evidence_rows = evidence_gate.load_recent_trade_rows()
@@ -7066,6 +7069,8 @@ def main():
         except Exception as exc:  # noqa: BLE001
             print(f"[{ts(datetime.now(tz))}] TRADE-THROUGH CYCLE ERROR: {type(exc).__name__}: {exc!r}")
         finally:
+            print(f"[{ts(datetime.now(tz))}] EXECUTION LOOP EXITED")
+            print(f"[{ts(datetime.now(tz))}] FINALIZER ABOUT TO RUN")
             print(f"[{ts(datetime.now(tz))}] TRADE-THROUGH KPI FINALIZER ENTERED")
             _finalize_trade_through_cycle(cycle_finalizer_now_et)
         last_entry_debug = entry_debug
