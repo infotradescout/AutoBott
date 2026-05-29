@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from datetime import date, datetime, timedelta
+import time
 from typing import Any
 
 import pandas as pd
@@ -72,6 +73,59 @@ class AlpacaDataClient:
             self._option_contract_base_candidates = list(
                 dict.fromkeys([_LIVE_TRADE_BASE_URL, self.base_url])
             )
+        self._bars_cache: dict[tuple[Any, ...], tuple[float, pd.DataFrame]] = {}
+        self._bars_cache_ttl_seconds = max(1.0, float(getattr(config, "DATA_BARS_CACHE_TTL_SECONDS", 12.0) or 12.0))
+        self._alpaca_backoff_until_ts = 0.0
+        self._alpaca_backoff_seconds = max(1.0, float(getattr(config, "ALPACA_429_BACKOFF_SECONDS", 2.0) or 2.0))
+
+    def _bars_cache_get(self, key: tuple[Any, ...]) -> pd.DataFrame | None:
+        cached = self._bars_cache.get(key)
+        if cached is None:
+            return None
+        expires_at, frame = cached
+        if time.time() >= expires_at:
+            self._bars_cache.pop(key, None)
+            return None
+        return frame.copy()
+
+    def _bars_cache_set(self, key: tuple[Any, ...], frame: pd.DataFrame) -> None:
+        self._bars_cache[key] = (time.time() + self._bars_cache_ttl_seconds, frame.copy())
+
+    def _request_json(
+        self,
+        *,
+        session: requests.Session,
+        url: str,
+        params: dict[str, Any],
+        timeout: int = 15,
+        attempts: int = 3,
+    ) -> dict[str, Any]:
+        last_exc: Exception | None = None
+        for attempt in range(1, max(1, attempts) + 1):
+            wait_seconds = self._alpaca_backoff_until_ts - time.time()
+            if wait_seconds > 0:
+                time.sleep(min(wait_seconds, 3.0))
+            try:
+                resp = session.get(url, params=params, timeout=timeout)
+                if resp.status_code == 429:
+                    self._alpaca_backoff_until_ts = time.time() + self._alpaca_backoff_seconds
+                    retry_after_raw = resp.headers.get("Retry-After")
+                    try:
+                        retry_after = float(retry_after_raw) if retry_after_raw is not None else self._alpaca_backoff_seconds
+                    except (TypeError, ValueError):
+                        retry_after = self._alpaca_backoff_seconds
+                    time.sleep(max(self._alpaca_backoff_seconds, retry_after))
+                    raise requests.HTTPError(f"429 Too Many Requests for {url}", response=resp)
+                resp.raise_for_status()
+                return resp.json() if resp.content else {}
+            except Exception as exc:  # noqa: BLE001
+                last_exc = exc
+                if attempt >= attempts:
+                    break
+                time.sleep(min(1.0 * attempt, 3.0))
+        if last_exc is not None:
+            raise last_exc
+        return {}
 
     def get_stock_bars(
         self,
@@ -101,6 +155,11 @@ class AlpacaDataClient:
         alpaca_tf = timeframe_map.get(tf)
         tz_et = pytz.timezone(config.EASTERN_TZ)
 
+        cache_key = ("stock_bars", str(symbol).upper(), str(alpaca_tf or tf), int(limit))
+        cached = self._bars_cache_get(cache_key)
+        if cached is not None and not cached.empty:
+            return cached
+
         # Primary source: Alpaca bars API (keeps volume basis aligned with intraday feed)
         if alpaca_tf:
             try:
@@ -111,8 +170,9 @@ class AlpacaDataClient:
                     lookback_days = 10
                 start_utc = (now_utc - timedelta(days=lookback_days)).isoformat().replace("+00:00", "Z")
                 end_utc = now_utc.isoformat().replace("+00:00", "Z")
-                resp = self.data_session.get(
-                    f"{self.data_base_url}/v2/stocks/bars",
+                body = self._request_json(
+                    session=self.data_session,
+                    url=f"{self.data_base_url}/v2/stocks/bars",
                     params={
                         "symbols": symbol,
                         "timeframe": alpaca_tf,
@@ -124,8 +184,6 @@ class AlpacaDataClient:
                     },
                     timeout=15,
                 )
-                resp.raise_for_status()
-                body = resp.json()
                 bars_map = body.get("bars", {}) if isinstance(body, dict) else {}
                 rows = bars_map.get(symbol, []) if isinstance(bars_map, dict) else []
                 if rows:
@@ -143,7 +201,9 @@ class AlpacaDataClient:
                         )
                         df["timestamp"] = pd.to_datetime(df["timestamp"], utc=True).dt.tz_convert(tz_et)
                         df = df.tail(limit).reset_index(drop=True)
-                        return df[["timestamp", "open", "high", "low", "close", "volume"]]
+                        result = df[["timestamp", "open", "high", "low", "close", "volume"]]
+                        self._bars_cache_set(cache_key, result)
+                        return result
             except Exception as exc:  # noqa: BLE001
                 print(f"[data] get_stock_bars Alpaca failed for {symbol} tf={timeframe}: {exc}")
 
@@ -227,12 +287,24 @@ class AlpacaDataClient:
             use_one_minute = minutes_since_open < 5
             timeframe = "1Min" if use_one_minute else "5Min"
 
+        cache_key = (
+            "intraday_since_open",
+            str(symbol).upper(),
+            str(timeframe),
+            now_et.strftime("%Y-%m-%d %H:%M"),
+            int(limit),
+        )
+        cached = self._bars_cache_get(cache_key)
+        if cached is not None and not cached.empty:
+            return cached
+
         # Primary source: Alpaca bars API (more stable intraday for live trading loops)
         try:
             start_utc = market_open.astimezone(pytz.UTC).isoformat().replace("+00:00", "Z")
             end_utc = now_et.astimezone(pytz.UTC).isoformat().replace("+00:00", "Z")
-            resp = self.data_session.get(
-                f"{self.data_base_url}/v2/stocks/bars",
+            body = self._request_json(
+                session=self.data_session,
+                url=f"{self.data_base_url}/v2/stocks/bars",
                 params={
                     "symbols": symbol,
                     "timeframe": timeframe,
@@ -244,8 +316,6 @@ class AlpacaDataClient:
                 },
                 timeout=15,
             )
-            resp.raise_for_status()
-            body = resp.json()
             bars_map = body.get("bars", {}) if isinstance(body, dict) else {}
             rows = bars_map.get(symbol, []) if isinstance(bars_map, dict) else []
             if rows:
@@ -265,7 +335,9 @@ class AlpacaDataClient:
                     df = df[(df["timestamp"] >= market_open) & (df["timestamp"] <= now_et)]
                     df = df.tail(limit).reset_index(drop=True)
                     if not df.empty:
-                        return df[["timestamp", "open", "high", "low", "close", "volume"]]
+                        result = df[["timestamp", "open", "high", "low", "close", "volume"]]
+                        self._bars_cache_set(cache_key, result)
+                        return result
         except Exception as exc:  # noqa: BLE001
             print(f"[data] get_intraday_bars_since_open Alpaca failed for {symbol}: {exc}")
 
@@ -322,12 +394,24 @@ class AlpacaDataClient:
         minutes_span = max(1, int((end_et - start_et).total_seconds() // 60))
         timeframe = "1Min" if minutes_span <= 20 else "5Min"
 
+        cache_key = (
+            "intraday_window",
+            str(symbol).upper(),
+            start_et.strftime("%Y-%m-%d %H:%M"),
+            end_et.strftime("%Y-%m-%d %H:%M"),
+            int(limit),
+        )
+        cached = self._bars_cache_get(cache_key)
+        if cached is not None and not cached.empty:
+            return cached
+
         # Primary source: Alpaca bars API
         try:
             start_utc = start_et.astimezone(pytz.UTC).isoformat().replace("+00:00", "Z")
             end_utc = end_et.astimezone(pytz.UTC).isoformat().replace("+00:00", "Z")
-            resp = self.data_session.get(
-                f"{self.data_base_url}/v2/stocks/bars",
+            body = self._request_json(
+                session=self.data_session,
+                url=f"{self.data_base_url}/v2/stocks/bars",
                 params={
                     "symbols": symbol,
                     "timeframe": timeframe,
@@ -339,8 +423,6 @@ class AlpacaDataClient:
                 },
                 timeout=15,
             )
-            resp.raise_for_status()
-            body = resp.json()
             bars_map = body.get("bars", {}) if isinstance(body, dict) else {}
             rows = bars_map.get(symbol, []) if isinstance(bars_map, dict) else []
             if rows:
@@ -360,7 +442,9 @@ class AlpacaDataClient:
                     df = df[(df["timestamp"] >= start_et) & (df["timestamp"] <= end_et)]
                     df = df.tail(limit).reset_index(drop=True)
                     if not df.empty:
-                        return df[["timestamp", "open", "high", "low", "close", "volume"]]
+                        result = df[["timestamp", "open", "high", "low", "close", "volume"]]
+                        self._bars_cache_set(cache_key, result)
+                        return result
         except Exception as exc:  # noqa: BLE001
             print(f"[data] get_intraday_bars_window Alpaca failed for {symbol}: {exc}")
 

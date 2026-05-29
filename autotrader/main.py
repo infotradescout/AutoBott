@@ -2014,6 +2014,14 @@ def _enum_text(value) -> str:
     return text
 
 
+def _normalize_order_side(raw_side) -> str:
+    return _enum_text(raw_side)
+
+
+def _normalize_order_status(raw_status) -> str:
+    return _enum_text(raw_status)
+
+
 def _as_et_datetime(value, tz) -> datetime | None:
     if isinstance(value, datetime):
         if value.tzinfo is None:
@@ -2221,7 +2229,9 @@ def _alpaca_filled_buy_contract_counts_by_ticker_recent(
     for order in broker.get_recent_orders(limit=max(1, int(limit))):
         if _normalize_order_side(getattr(order, "side", "")) != "buy":
             continue
-        if not _is_option_symbol(str(getattr(order, "symbol", "") or "")):
+        order_symbol = str(getattr(order, "symbol", "") or "")
+        parsed_ticker, _parsed_direction = _parse_option_symbol(order_symbol)
+        if not parsed_ticker:
             continue
         if _normalize_order_status(getattr(order, "status", "")) != "filled":
             continue
@@ -2234,7 +2244,7 @@ def _alpaca_filled_buy_contract_counts_by_ticker_recent(
         age_seconds = (now_et - filled_at).total_seconds()
         if age_seconds < 0 or age_seconds > window_seconds:
             continue
-        ticker = _underlying_from_option_symbol(str(getattr(order, "symbol", "") or ""))
+        ticker = parsed_ticker
         if not ticker:
             continue
         qty = position_qty_as_int(getattr(order, "filled_qty", None) or getattr(order, "qty", 0))

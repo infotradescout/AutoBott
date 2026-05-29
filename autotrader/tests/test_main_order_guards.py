@@ -43,6 +43,11 @@ class FakeOrder:
         self.filled_avg_price = None
 
 
+class FakeEnumValue:
+    def __init__(self, value: str):
+        self.value = value
+
+
 class FakeRawSubmittedOrder:
     def __init__(
         self,
@@ -337,6 +342,24 @@ class MainOrderGuardTests(unittest.TestCase):
         counts = main._alpaca_option_buy_order_counts_by_ticker_today(broker, self.now)
 
         self.assertNotIn("JPM", counts)
+
+    def test_filled_buy_contract_counts_accept_enum_style_side_status(self):
+        order = FakeOrder(
+            "JPM260515P00290000",
+            FakeEnumValue("buy"),
+            FakeEnumValue("filled"),
+            self.now - timedelta(minutes=4),
+        )
+        order.filled_qty = 2
+        broker = FakeBroker([order])
+
+        counts = main._alpaca_filled_buy_contract_counts_by_ticker_recent(
+            broker,
+            self.now,
+            lookback_minutes=15,
+        )
+
+        self.assertEqual(counts.get("JPM"), 2)
 
     def test_prior_day_buy_does_not_count_today(self):
         broker = FakeBroker(
