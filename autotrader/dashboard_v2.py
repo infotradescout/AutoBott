@@ -33,7 +33,8 @@ except ImportError:
     import config  # type: ignore
 
 from state_store import load_bot_state, save_bot_state
-from trading_control import load_trading_control, set_manual_stop
+from trading_control import load_trading_control, set_dry_run, set_manual_stop
+from watchlist_control import load_watchlist_control, update_watchlist_control
 
 API_KEY = str(os.getenv("ALPACA_API_KEY") or "").strip()
 SECRET_KEY = str(os.getenv("ALPACA_SECRET_KEY") or "").strip()
@@ -44,6 +45,32 @@ CONTROL_TOKEN = str(getattr(config, "DASHBOARD_CONTROL_TOKEN", "") or "").strip(
 EASTERN = pytz.timezone(str(getattr(config, "EASTERN_TZ", "US/Eastern") or "US/Eastern"))
 DISPLAY_TZ = pytz.timezone(str(os.getenv("DASHBOARD_DISPLAY_TZ", "America/Chicago") or "America/Chicago"))
 SCAN_LOG_CSV = Path(getattr(config, "SCAN_LOG_CSV_PATH"))
+RUNTIME_OVERRIDES_PATH = Path(getattr(config, "DATA_DIR")) / "runtime_parameter_overrides.json"
+RUNTIME_PRESETS_PATH = Path(getattr(config, "DATA_DIR")) / "runtime_parameter_presets.json"
+
+RUNTIME_PARAM_SPECS: dict[str, dict[str, Any]] = {
+    "MIN_SIGNAL_SCORE": {"type": "float", "min": 0.0, "max": 20.0},
+    "DIRECTION_CONVICTION_MIN": {"type": "float", "min": 0.0, "max": 1.0},
+    "RVOL_MIN": {"type": "float", "min": 0.0, "max": 10.0},
+    "ATR_PCT_MIN": {"type": "float", "min": 0.0, "max": 20.0},
+    "MOVEMENT_FORCE_MIN_PCT": {"type": "float", "min": 0.0, "max": 10.0},
+    "FAST_START_MIN_SIGNAL_SCORE": {"type": "float", "min": 0.0, "max": 20.0},
+    "FAST_START_MIN_DIRECTION_SCORE": {"type": "float", "min": 0.0, "max": 1.0},
+    "FAST_START_MIN_RVOL": {"type": "float", "min": 0.0, "max": 10.0},
+    "FAST_START_MIN_ABS_ROC_PCT": {"type": "float", "min": 0.0, "max": 10.0},
+    "FAST_START_MIN_VWAP_DISTANCE_PCT": {"type": "float", "min": 0.0, "max": 10.0},
+    "ENTRY_MAX_QUOTE_SPREAD_PCT": {"type": "float", "min": 0.1, "max": 100.0},
+    "MAX_PREMIUM_PER_TRADE_USD": {"type": "float", "min": 0.0, "max": 1000000.0},
+    "MAX_CONTRACTS_PER_ENTRY": {"type": "int", "min": 0, "max": 1000},
+    "ENTRY_LIMIT_ATTEMPTS": {"type": "int", "min": 1, "max": 20},
+    "ENABLE_ENTRY_MARKET_FALLBACK": {"type": "bool"},
+    "PORTFOLIO_ALLOCATION_PCT": {"type": "float", "min": 0.0, "max": 100.0},
+    "MAX_PREMIUM_PER_TRADE_PCT_OF_ALLOCATION": {"type": "float", "min": 0.0, "max": 100.0},
+    "MAX_CONCURRENT_TRADES": {"type": "int", "min": 0, "max": 1000},
+    "MAX_SAME_DIRECTION_POSITIONS": {"type": "int", "min": 0, "max": 1000},
+    "STOP_LOSS_PCT": {"type": "float", "min": 0.0, "max": 1.0},
+    "DAILY_LOSS_LIMIT_USD": {"type": "float", "min": 0.0, "max": 1000000.0},
+}
 
 app = Flask(__name__)
 
@@ -507,6 +534,8 @@ def _entry_debug_summary(state: dict[str, Any]) -> dict[str, Any]:
         "entries_filled": _int_value(debug.get("entries_filled")),
         "top_reject_reason": top_label,
         "top_reject_reasons": top_reasons,
+        "trade_through_kpi": _as_dict(debug.get("trade_through_kpi")),
+        "raw": debug,
     }
 
 
@@ -682,6 +711,7 @@ def _truth_payload() -> dict[str, Any]:
     realized["open_unrealized_pnl_usd"] = unrealized
     realized["total_intraday_pnl_usd"] = round(float(realized["realized_pnl_usd"]) + unrealized, 2)
     runtime = _runtime()
+    trade_kpi = _as_dict(_as_dict(runtime.get("entry_debug")).get("trade_through_kpi")) if isinstance(runtime, dict) else {}
     truth_profile = _truth_loss_profile(realized)
     adaptive_loss = runtime.get("adaptive_loss") if isinstance(runtime, dict) else {}
     if isinstance(adaptive_loss, dict) and truth_profile and not adaptive_loss.get("profile"):
@@ -702,6 +732,18 @@ def _truth_payload() -> dict[str, Any]:
         "account": _account(),
         "clock": _clock(),
         "runtime": runtime,
+        "execution_bus": {
+            "raw_scan_rows_count": _int_value(trade_kpi.get("raw_scan_rows_count")),
+            "scanner_candidate_count": _int_value(trade_kpi.get("scanner_candidate_count")),
+            "scanner_failed_count": _int_value(trade_kpi.get("scanner_failed_count")),
+            "execution_candidate_count": _int_value(trade_kpi.get("execution_candidate_count")),
+            "execution_rejected_count": _int_value(trade_kpi.get("execution_rejected_count")),
+            "execution_rejected_count_by_reason": _as_dict(trade_kpi.get("execution_rejected_count_by_reason")),
+            "trade_attempted_count": _int_value(trade_kpi.get("trade_attempted_count", trade_kpi.get("trade_attempts"))),
+            "trade_resting_count": _int_value(trade_kpi.get("trade_resting_count")),
+            "trade_filled_count": _int_value(trade_kpi.get("trade_filled_count", trade_kpi.get("fills"))),
+            "zero_trade_cycle_reason": str(trade_kpi.get("zero_trade_cycle_reason", "") or ""),
+        },
         "positions": positions,
         "orders": {
             "submitted_today": len(all_orders),
@@ -745,6 +787,103 @@ def _control_payload() -> dict[str, Any]:
         "updated_at_et": str(state.get("updated_at_et", "") or ""),
         "reason": str(state.get("reason", "") or ""),
     }
+
+
+def _read_runtime_overrides_file() -> dict[str, Any]:
+    if not RUNTIME_OVERRIDES_PATH.exists():
+        return {"overrides": {}, "updated_at_et": "", "reason": ""}
+    try:
+        payload = json.loads(RUNTIME_OVERRIDES_PATH.read_text(encoding="utf-8"))
+    except Exception:
+        return {"overrides": {}, "updated_at_et": "", "reason": ""}
+    if not isinstance(payload, dict):
+        return {"overrides": {}, "updated_at_et": "", "reason": ""}
+    overrides = payload.get("overrides", {})
+    if not isinstance(overrides, dict):
+        overrides = {}
+    return {
+        "overrides": overrides,
+        "updated_at_et": str(payload.get("updated_at_et", "") or ""),
+        "reason": str(payload.get("reason", "") or ""),
+    }
+
+
+def _coerce_runtime_param(name: str, raw: Any) -> tuple[bool, Any, str]:
+    spec = RUNTIME_PARAM_SPECS.get(name)
+    if not spec:
+        return False, None, "unsupported parameter"
+    ptype = spec.get("type")
+    if ptype == "bool":
+        if isinstance(raw, bool):
+            return True, raw, ""
+        text = str(raw or "").strip().lower()
+        if text in {"1", "true", "yes", "on"}:
+            return True, True, ""
+        if text in {"0", "false", "no", "off"}:
+            return True, False, ""
+        return False, None, "invalid bool"
+    try:
+        if ptype == "int":
+            value = int(float(raw))
+        else:
+            value = float(raw)
+    except (TypeError, ValueError):
+        return False, None, f"invalid {ptype}"
+    minimum = spec.get("min")
+    maximum = spec.get("max")
+    if minimum is not None and value < minimum:
+        return False, None, f"must be >= {minimum}"
+    if maximum is not None and value > maximum:
+        return False, None, f"must be <= {maximum}"
+    return True, value, ""
+
+
+def _runtime_parameters_payload() -> dict[str, Any]:
+    file_payload = _read_runtime_overrides_file()
+    active_overrides = file_payload.get("overrides", {})
+    if not isinstance(active_overrides, dict):
+        active_overrides = {}
+    rows: list[dict[str, Any]] = []
+    for name in sorted(RUNTIME_PARAM_SPECS.keys()):
+        current = getattr(config, name, None)
+        rows.append(
+            {
+                "name": name,
+                "current_value": current,
+                "override_value": active_overrides.get(name),
+                "runtime_source": "override" if name in active_overrides else "default_or_env",
+                "spec": dict(RUNTIME_PARAM_SPECS.get(name) or {}),
+            }
+        )
+    return {
+        "updated_at_et": str(file_payload.get("updated_at_et", "") or ""),
+        "reason": str(file_payload.get("reason", "") or ""),
+        "parameters": rows,
+    }
+
+
+def _apply_runtime_overrides(overrides: dict[str, Any], *, reason: str) -> dict[str, Any]:
+    cleaned: dict[str, Any] = {}
+    errors: dict[str, str] = {}
+    for raw_name, raw_value in dict(overrides or {}).items():
+        name = str(raw_name or "").strip().upper()
+        ok, value, err = _coerce_runtime_param(name, raw_value)
+        if not ok:
+            errors[name or str(raw_name)] = err
+            continue
+        cleaned[name] = value
+    if errors:
+        return {"ok": False, "errors": errors}
+    for name, value in cleaned.items():
+        setattr(config, name, value)
+    payload = {
+        "overrides": cleaned,
+        "updated_at_et": _now_et().isoformat(),
+        "reason": str(reason or "runtime_apply"),
+    }
+    RUNTIME_OVERRIDES_PATH.parent.mkdir(parents=True, exist_ok=True)
+    RUNTIME_OVERRIDES_PATH.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
+    return {"ok": True, "applied": cleaned, "updated_at_et": payload["updated_at_et"]}
 
 
 def _broker_close_all_positions() -> dict[str, Any]:
@@ -849,6 +988,216 @@ def api_control_reset_adaptive_loss():
     state["adaptive_loss_profile"] = {}
     save_bot_state(state)
     return jsonify({"ok": True, "runtime": _runtime()})
+
+
+@app.get("/api/runtime/parameters")
+def api_runtime_parameters():
+    return jsonify({"ok": True, **_runtime_parameters_payload()})
+
+
+@app.post("/api/runtime/parameters/preview")
+def api_runtime_parameters_preview():
+    ok, err, status = _verify_control_token()
+    if not ok:
+        return jsonify({"ok": False, "error": err}), status
+    payload = request.get_json(silent=True) if request.is_json else {}
+    if not isinstance(payload, dict):
+        payload = {}
+    overrides = payload.get("overrides", {})
+    if not isinstance(overrides, dict):
+        return jsonify({"ok": False, "error": "overrides must be an object"}), 400
+    preview: dict[str, Any] = {}
+    errors: dict[str, str] = {}
+    for raw_name, raw_value in overrides.items():
+        name = str(raw_name or "").strip().upper()
+        accepted, value, detail = _coerce_runtime_param(name, raw_value)
+        if accepted:
+            preview[name] = value
+        else:
+            errors[name or str(raw_name)] = detail
+    return jsonify({"ok": len(errors) == 0, "preview": preview, "errors": errors})
+
+
+@app.post("/api/runtime/parameters/apply")
+def api_runtime_parameters_apply():
+    ok, err, status = _verify_control_token()
+    if not ok:
+        return jsonify({"ok": False, "error": err}), status
+    payload = request.get_json(silent=True) if request.is_json else {}
+    if not isinstance(payload, dict):
+        payload = {}
+    overrides = payload.get("overrides", {})
+    if not isinstance(overrides, dict):
+        return jsonify({"ok": False, "error": "overrides must be an object"}), 400
+    reason = str(payload.get("reason", "") or "dashboard_runtime_apply")
+    result = _apply_runtime_overrides(overrides, reason=reason)
+    if not bool(result.get("ok")):
+        return jsonify(result), 400
+    return jsonify({"ok": True, "result": result, **_runtime_parameters_payload()})
+
+
+@app.post("/api/runtime/parameters/revert")
+def api_runtime_parameters_revert():
+    ok, err, status = _verify_control_token()
+    if not ok:
+        return jsonify({"ok": False, "error": err}), status
+    payload = {
+        "overrides": {},
+        "updated_at_et": _now_et().isoformat(),
+        "reason": "dashboard_runtime_revert",
+    }
+    RUNTIME_OVERRIDES_PATH.parent.mkdir(parents=True, exist_ok=True)
+    RUNTIME_OVERRIDES_PATH.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
+    for name in RUNTIME_PARAM_SPECS.keys():
+        try:
+            import importlib
+            cfg = importlib.import_module("config")
+            if hasattr(cfg, name):
+                setattr(config, name, getattr(cfg, name))
+        except Exception:
+            continue
+    return jsonify({"ok": True, **_runtime_parameters_payload()})
+
+
+@app.post("/api/runtime/presets/save")
+def api_runtime_presets_save():
+    ok, err, status = _verify_control_token()
+    if not ok:
+        return jsonify({"ok": False, "error": err}), status
+    payload = request.get_json(silent=True) if request.is_json else {}
+    if not isinstance(payload, dict):
+        payload = {}
+    name = str(payload.get("name", "") or "").strip()
+    if not name:
+        return jsonify({"ok": False, "error": "name is required"}), 400
+    current = _read_runtime_overrides_file()
+    presets = {}
+    if RUNTIME_PRESETS_PATH.exists():
+        try:
+            existing = json.loads(RUNTIME_PRESETS_PATH.read_text(encoding="utf-8"))
+            if isinstance(existing, dict):
+                presets = existing
+        except Exception:
+            presets = {}
+    presets[name] = {
+        "overrides": dict(current.get("overrides", {}) or {}),
+        "saved_at_et": _now_et().isoformat(),
+    }
+    RUNTIME_PRESETS_PATH.parent.mkdir(parents=True, exist_ok=True)
+    RUNTIME_PRESETS_PATH.write_text(json.dumps(presets, indent=2, sort_keys=True), encoding="utf-8")
+    return jsonify({"ok": True, "preset": name, "count": len(presets)})
+
+
+@app.post("/api/runtime/presets/load")
+def api_runtime_presets_load():
+    ok, err, status = _verify_control_token()
+    if not ok:
+        return jsonify({"ok": False, "error": err}), status
+    payload = request.get_json(silent=True) if request.is_json else {}
+    if not isinstance(payload, dict):
+        payload = {}
+    name = str(payload.get("name", "") or "").strip()
+    if not name or not RUNTIME_PRESETS_PATH.exists():
+        return jsonify({"ok": False, "error": "preset not found"}), 404
+    try:
+        presets = json.loads(RUNTIME_PRESETS_PATH.read_text(encoding="utf-8"))
+    except Exception:
+        presets = {}
+    if not isinstance(presets, dict) or name not in presets:
+        return jsonify({"ok": False, "error": "preset not found"}), 404
+    selected = presets.get(name, {})
+    overrides = selected.get("overrides", {}) if isinstance(selected, dict) else {}
+    if not isinstance(overrides, dict):
+        return jsonify({"ok": False, "error": "invalid preset payload"}), 400
+    result = _apply_runtime_overrides(overrides, reason=f"dashboard_preset_load:{name}")
+    if not bool(result.get("ok")):
+        return jsonify(result), 400
+    return jsonify({"ok": True, "preset": name, "result": result, **_runtime_parameters_payload()})
+
+
+@app.post("/api/runtime/symbols/mute")
+def api_runtime_symbols_mute():
+    ok, err, status = _verify_control_token()
+    if not ok:
+        return jsonify({"ok": False, "error": err}), status
+    payload = request.get_json(silent=True) if request.is_json else {}
+    if not isinstance(payload, dict):
+        payload = {}
+    ticker = str(payload.get("ticker", "") or "").strip().upper()
+    if not ticker:
+        return jsonify({"ok": False, "error": "ticker is required"}), 400
+    control = load_watchlist_control()
+    tickers = list(control.get("tickers") or [])
+    if ticker not in tickers:
+        tickers.append(ticker)
+    mode = str(control.get("mode", "exclude_listed") or "exclude_listed").strip().lower()
+    if mode not in {"exclude_listed", "only_listed"}:
+        mode = "exclude_listed"
+    updated = update_watchlist_control(mode=mode, tickers=tickers, reason=f"dashboard_mute:{ticker}")
+    return jsonify({"ok": True, "watchlist_control": updated})
+
+
+@app.post("/api/runtime/symbols/solo")
+def api_runtime_symbols_solo():
+    ok, err, status = _verify_control_token()
+    if not ok:
+        return jsonify({"ok": False, "error": err}), status
+    payload = request.get_json(silent=True) if request.is_json else {}
+    if not isinstance(payload, dict):
+        payload = {}
+    tickers_raw = payload.get("tickers", [])
+    if isinstance(tickers_raw, str):
+        tickers = [tickers_raw]
+    elif isinstance(tickers_raw, list):
+        tickers = [str(item or "") for item in tickers_raw]
+    else:
+        return jsonify({"ok": False, "error": "tickers must be list or string"}), 400
+    updated = update_watchlist_control(mode="only_listed", tickers=tickers, reason="dashboard_solo")
+    return jsonify({"ok": True, "watchlist_control": updated})
+
+
+@app.post("/api/runtime/orders/cancel-open-entries")
+def api_runtime_orders_cancel_open_entries():
+    ok, err, status = _verify_control_token()
+    if not ok:
+        return jsonify({"ok": False, "error": err}), status
+    try:
+        from broker import AlpacaBroker
+
+        broker = AlpacaBroker(API_KEY, SECRET_KEY, paper=PAPER)
+        canceled = broker.cancel_all_open_orders()
+        return jsonify({"ok": True, "canceled": canceled})
+    except Exception as exc:  # noqa: BLE001
+        return jsonify({"ok": False, "error": str(exc)[:500]}), 500
+
+
+@app.post("/api/runtime/trading/pause")
+def api_runtime_trading_pause():
+    ok, err, status = _verify_control_token()
+    if not ok:
+        return jsonify({"ok": False, "error": err}), status
+    set_manual_stop(True, reason="dashboard_runtime_pause")
+    return jsonify({"ok": True, **_control_payload()})
+
+
+@app.post("/api/runtime/trading/resume")
+def api_runtime_trading_resume():
+    ok, err, status = _verify_control_token()
+    if not ok:
+        return jsonify({"ok": False, "error": err}), status
+    set_manual_stop(False, reason="dashboard_runtime_resume")
+    set_dry_run(False, reason="dashboard_runtime_resume")
+    return jsonify({"ok": True, **_control_payload()})
+
+
+@app.post("/api/runtime/trading/flatten")
+def api_runtime_trading_flatten():
+    ok, err, status = _verify_control_token()
+    if not ok:
+        return jsonify({"ok": False, "error": err}), status
+    set_manual_stop(True, reason="dashboard_runtime_flatten")
+    close_result = _broker_close_all_positions()
+    return jsonify({"ok": bool(close_result.get("ok")), "control": _control_payload(), "close": close_result})
 
 
 @app.get("/api/runtime-debug")
