@@ -32,7 +32,7 @@ try:
 except ImportError:
     import config  # type: ignore
 
-from state_store import load_bot_state, save_bot_state
+from state_store import get_state_health, load_bot_state, save_bot_state
 from trading_control import load_trading_control, set_dry_run, set_manual_stop
 from watchlist_control import load_watchlist_control, update_watchlist_control
 
@@ -727,6 +727,7 @@ def _truth_payload() -> dict[str, Any]:
         "generated_at_et": _now_et().isoformat(),
         "mode": "paper" if PAPER else "live",
         "source_of_truth": "alpaca_orders_positions",
+        **get_state_health(),
         "deployment": _deployment_meta(),
         "embedded_trader_fallback": embedded_boot,
         "account": _account(),

@@ -3,25 +3,55 @@
 from __future__ import annotations
 
 import json
+import os
 from datetime import datetime, timezone
 from pathlib import Path
+import tempfile
 
 import config
 from kv_store import load_json, redis_key, save_json
 
 _STATE_KEY = redis_key("runtime_state")
+_LAST_STATE_HEALTH = "ok"
+_LAST_STATE_ERROR = ""
+
+
+def get_state_health() -> dict:
+    return {
+        "state_health": str(_LAST_STATE_HEALTH or "ok"),
+        "state_error": str(_LAST_STATE_ERROR or ""),
+    }
+
+
+def _set_state_health(status: str, error: str = "") -> None:
+    global _LAST_STATE_HEALTH, _LAST_STATE_ERROR
+    _LAST_STATE_HEALTH = str(status or "ok")
+    _LAST_STATE_ERROR = str(error or "")
 
 
 def _load_file_state(path: Path) -> dict:
     if not path.exists():
+        _set_state_health("ok", "")
         return {}
     try:
         with path.open("r", encoding="utf-8") as f:
             payload = json.load(f)
         if isinstance(payload, dict):
+            _set_state_health("ok", "")
             return payload
     except Exception as exc:  # noqa: BLE001
         print(f"[state] load failed: {exc}")
+        try:
+            stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S")
+            corrupt_path = path.with_name(f"{path.stem}.corrupt.{stamp}.json")
+            path.replace(corrupt_path)
+            _set_state_health("corrupted_recovered", str(exc))
+            print(f"[state] state_recovered_from_corruption=true moved_to={corrupt_path.name}")
+        except Exception as move_exc:  # noqa: BLE001
+            _set_state_health("load_failed", f"{exc}; quarantine_failed={move_exc}")
+            print(f"[state] corruption quarantine failed: {move_exc}")
+    else:
+        _set_state_health("load_failed", "state payload not dict")
     return {}
 
 
@@ -75,7 +105,20 @@ def save_bot_state(state: dict, path: Path | None = None) -> None:
     state_path = path or config.STATE_JSON_PATH
     state_path.parent.mkdir(parents=True, exist_ok=True)
     try:
-        with state_path.open("w", encoding="utf-8") as f:
-            json.dump(payload, f, indent=2, sort_keys=True)
+        fd, tmp_name = tempfile.mkstemp(prefix=f"{state_path.stem}.", suffix=".tmp", dir=str(state_path.parent))
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
+                json.dump(payload, f, indent=2, sort_keys=True)
+                f.flush()
+                os.fsync(f.fileno())
+            os.replace(tmp_name, state_path)
+            _set_state_health("ok", "")
+        finally:
+            if os.path.exists(tmp_name):
+                try:
+                    os.remove(tmp_name)
+                except Exception:
+                    pass
     except Exception as exc:  # noqa: BLE001
+        _set_state_health("load_failed", str(exc))
         print(f"[state] save failed: {exc}")
