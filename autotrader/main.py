@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import csv
 import json
+import os
 import time
 from datetime import date, datetime, timezone, timedelta
 import re
@@ -3071,6 +3072,10 @@ def main():
     trade_logger = TradeLogger()
     alerts = AlertManager()
     state = load_bot_state()
+    build_sha = str(os.getenv("RENDER_GIT_COMMIT", "") or "local")
+    print(f"[{ts()}] AUTOBOTT_BUILD_SHA={build_sha}")
+    print(f"[{ts()}] TRADE_THROUGH_KPI_VERSION=2")
+    print(f"[{ts()}] STATE_STORE_ATOMIC_WRITE_ENABLED=true")
     open_trade_meta: dict[str, dict] = dict(state.get("open_trade_meta") or {})
     watchlist: list[str] = []
     observation_done = bool(state.get("observation_done", False))
@@ -5546,6 +5551,7 @@ def main():
             }
 
         def _finalize_trade_through_cycle(now_et: datetime) -> None:
+            print(f"[{ts(now_et)}] TRADE-THROUGH KPI FINALIZER ENTERED")
             outcomes = entry_debug.get("signal_outcomes", {})
             if not isinstance(outcomes, dict):
                 outcomes = {}
