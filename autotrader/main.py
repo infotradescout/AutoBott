@@ -5171,6 +5171,9 @@ def main():
         else:
             vix_block_notice = None
             signals = run_scan(watchlist) if watchlist else []
+        raw_scan_rows_count = len(watchlist)
+        raw_scanner_candidate_count = len(signals)
+        raw_scanner_failed_count = max(0, raw_scan_rows_count - raw_scanner_candidate_count)
 
         if (
             bool(getattr(config, "ENABLE_PREMARKET_OPENING_SIGNALS", False))
@@ -5363,6 +5366,10 @@ def main():
             "signal_outcomes": {},
             "skips": {},
             "exceptions": [],
+            "raw_scan_rows_count": int(raw_scan_rows_count),
+            "scanner_candidate_count": int(raw_scanner_candidate_count),
+            "scanner_failed_count": int(raw_scanner_failed_count),
+            "execution_candidate_count": int(len(signals)),
         }
 
         def _normalize_disposition_reason(reason: str) -> str:
@@ -5549,6 +5556,15 @@ def main():
             candidates = int(entry_debug.get("signals_considered", 0) or 0)
             attempts = int(entry_debug.get("entry_orders_submitted", 0) or 0)
             fills = int(entry_debug.get("entries_filled", 0) or 0)
+            events = entry_debug.get("entry_order_events", [])
+            resting = 0
+            if isinstance(events, list):
+                for ev in events:
+                    if not isinstance(ev, dict):
+                        continue
+                    status = str(ev.get("status", "") or "").strip().lower()
+                    if status in {"new", "accepted", "pending_new", "partially_filled", "pending_open"}:
+                        resting += 1
             truth = _today_trade_truth_snapshot(now_et)
             total_account_equity = float(_safe_signal_float(equity, 0.0))
             allocation_pct = max(0.0, float(getattr(config, "PORTFOLIO_ALLOCATION_PCT", 15.0) or 15.0))
@@ -5574,9 +5590,17 @@ def main():
                 else 0.0
             )
             entry_debug["trade_through_kpi"] = {
+                "raw_scan_rows_count": int(entry_debug.get("raw_scan_rows_count", 0) or 0),
+                "scanner_candidate_count": int(entry_debug.get("scanner_candidate_count", 0) or 0),
+                "scanner_failed_count": int(entry_debug.get("scanner_failed_count", 0) or 0),
+                "execution_candidate_count": int(entry_debug.get("execution_candidate_count", 0) or 0),
+                "execution_rejected_count_by_reason": dict(sorted(reject_reasons.items())),
+                "execution_rejected_count": int(sum(int(v) for v in reject_reasons.values())),
                 "scanner_candidates": candidates,
-                "trade_attempts": attempts,
+                "trade_attempted_count": attempts,
                 "rejection_reasons": dict(sorted(reject_reasons.items())),
+                "trade_resting_count": int(resting),
+                "trade_filled_count": fills,
                 "fills": fills,
                 "total_account_equity": round(total_account_equity, 2),
                 "allocated_strategy_capital_pct": allocation_pct,
@@ -5593,9 +5617,25 @@ def main():
                 "loss_cause_breakdown": dict(truth.get("causes", {}) or {}),
                 "pass_means_trade_attempt": bool(getattr(config, "PASS_MEANS_TRADE_ATTEMPT", True)),
             }
+            zero_trade_cycle_reason = ""
+            if attempts <= 0:
+                if int(entry_debug.get("execution_candidate_count", 0) or 0) <= 0:
+                    zero_trade_cycle_reason = "no_execution_candidates_after_filters"
+                elif reject_reasons:
+                    top_reason = sorted(
+                        ((str(k), int(v)) for k, v in reject_reasons.items()),
+                        key=lambda item: (-item[1], item[0]),
+                    )[0][0]
+                    zero_trade_cycle_reason = f"execution_rejected:{top_reason}"
+                else:
+                    zero_trade_cycle_reason = "unknown_block_before_order_attempt"
+            entry_debug["trade_through_kpi"]["zero_trade_cycle_reason"] = zero_trade_cycle_reason
             print(
-                f"[{ts(now_et)}] TRADE-THROUGH KPI candidates={candidates} attempts={attempts} "
-                f"fills={fills} day_pnl=${trade_telemetry_total_pnl_usd:.2f} "
+                f"[{ts(now_et)}] TRADE-THROUGH KPI raw={int(entry_debug.get('raw_scan_rows_count', 0) or 0)} "
+                f"scanner_candidates={int(entry_debug.get('scanner_candidate_count', 0) or 0)} "
+                f"exec_candidates={int(entry_debug.get('execution_candidate_count', 0) or 0)} "
+                f"attempts={attempts} resting={resting} fills={fills} "
+                f"zero_reason={zero_trade_cycle_reason or 'n/a'} day_pnl=${trade_telemetry_total_pnl_usd:.2f} "
                 f"premium_deployed=${premium_deployed_usd:.2f} premium_return={premium_return_pct:.2f}% "
                 f"portfolio_return={portfolio_return_pct:.2f}% "
                 f"direction_accuracy={float(truth.get('accuracy_pct', 0.0) or 0.0):.2f}% "
