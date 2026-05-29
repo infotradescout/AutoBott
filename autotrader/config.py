@@ -194,6 +194,10 @@ MAX_PREMIUM_PER_TRADE_USD           = 0.0
 MAX_TOTAL_OPEN_PREMIUM_USD          = 0.0
 OPENING_MAX_FRESH_PREMIUM_USD       = 0.0
 MAX_SAME_DIRECTION_POSITIONS        = 0
+PORTFOLIO_ALLOCATION_PCT            = 15.0
+MAX_PREMIUM_PER_TRADE_PCT_OF_ALLOCATION = 10.0
+MAX_CONCURRENT_TRADES               = 25
+PASS_MEANS_TRADE_ATTEMPT            = True
 
 # Exposure buckets keep fast same-day ETF scalps separate from larger weekly
 # single-name option positions.

@@ -3979,21 +3979,34 @@ def main():
             elif direction == "put" and underlying_move_pct >= wrong_way_threshold:
                 wrong_way = True
 
+        favorable_underlying_but_red = False
+        if underlying_move_pct is not None:
+            if direction == "call" and underlying_move_pct > 0:
+                favorable_underlying_but_red = True
+            elif direction == "put" and underlying_move_pct < 0:
+                favorable_underlying_but_red = True
+
         if wrong_way:
             cause = "wrong_direction"
             action = "raise direction conviction and block ticker"
         elif max_spread >= spread_threshold or max_slippage >= slip_threshold:
-            cause = "execution_slippage"
-            action = "tighten spread cap and cool ticker"
+            cause = "spread"
+            action = "tighten spread cap and contract quality gates"
+        elif favorable_underlying_but_red:
+            cause = "iv_crush"
+            action = "favor contracts with cleaner IV profile"
         elif hold_seconds > 0 and hold_seconds <= quick_seconds:
-            cause = "rapid_stopout"
-            action = "require stronger momentum before next entry"
+            cause = "late_entry"
+            action = "enter earlier or require momentum confirmation"
         elif underlying_move_pct is not None and abs(underlying_move_pct) < wrong_way_threshold:
-            cause = "chop_no_followthrough"
+            cause = "no_followthrough"
             action = "require stronger ROC/RVOL before next entry"
+        elif entry_spread >= (spread_threshold * 0.7):
+            cause = "bad_contract"
+            action = "prefer tighter spreads and higher OI contracts"
         else:
-            cause = "timing_or_decay"
-            action = "raise signal quality and cool ticker"
+            cause = "theta_decay"
+            action = "reduce hold time and improve timing"
 
         return {
             "source": source,
@@ -4028,8 +4041,8 @@ def main():
 
         loss_count = len(diagnoses)
         wrong_count = int(causes.get("wrong_direction", 0))
-        execution_count = int(causes.get("execution_slippage", 0))
-        momentum_loss_count = int(causes.get("rapid_stopout", 0)) + int(causes.get("chop_no_followthrough", 0))
+        execution_count = int(causes.get("spread", 0)) + int(causes.get("bad_contract", 0))
+        momentum_loss_count = int(causes.get("late_entry", 0)) + int(causes.get("no_followthrough", 0))
         min_signal = float(getattr(config, "ADAPTIVE_LOSS_MIN_SIGNAL_SCORE", 7.8))
         min_signal += loss_count * float(getattr(config, "ADAPTIVE_LOSS_SIGNAL_SCORE_ADD_PER_LOSS", 0.15))
         min_signal = min(float(getattr(config, "ADAPTIVE_LOSS_MAX_SIGNAL_SCORE", 9.2)), min_signal)
@@ -4166,17 +4179,17 @@ def main():
                 int(fallback_minutes),
                 int(getattr(config, "ADAPTIVE_LOSS_WRONG_DIRECTION_COOLDOWN_MINUTES", 90) or 90),
             )
-        if normalized == "execution_slippage":
+        if normalized in {"spread", "bad_contract"}:
             return max(
                 int(fallback_minutes),
                 int(getattr(config, "ADAPTIVE_LOSS_EXECUTION_COOLDOWN_MINUTES", 60) or 60),
             )
-        if normalized == "rapid_stopout":
+        if normalized in {"late_entry", "early_exit"}:
             return max(
                 int(fallback_minutes),
                 int(getattr(config, "ADAPTIVE_LOSS_QUICK_COOLDOWN_MINUTES", 45) or 45),
             )
-        if normalized == "chop_no_followthrough":
+        if normalized in {"no_followthrough", "theta_decay", "iv_crush"}:
             return max(
                 int(fallback_minutes),
                 int(getattr(config, "ADAPTIVE_LOSS_CHOP_COOLDOWN_MINUTES", 30) or 30),
@@ -4249,7 +4262,12 @@ def main():
             return False
 
         option_positions_now = broker.get_open_option_positions()
-        if not can_open_new_positions(len(option_positions_now), config.MAX_POSITIONS):
+        concurrent_cap = int(getattr(config, "MAX_CONCURRENT_TRADES", 0) or 0)
+        max_positions_cap = int(getattr(config, "MAX_POSITIONS", 0) or 0)
+        effective_max_positions = max_positions_cap
+        if concurrent_cap > 0:
+            effective_max_positions = concurrent_cap if effective_max_positions <= 0 else min(effective_max_positions, concurrent_cap)
+        if not can_open_new_positions(len(option_positions_now), effective_max_positions):
             print(f"[{ts(now_et)}] {ticker}: reversal skipped (max positions reached).")
             return False
         if _has_ticker_open_meta(ticker):
@@ -5453,16 +5471,28 @@ def main():
             losses = 0
             correct = 0
             causes: dict[str, int] = {}
+            win_pcts: list[float] = []
+            loss_pcts: list[float] = []
+            deployed_premium_closed_usd = 0.0
+            cumulative = 0.0
+            peak = 0.0
+            max_drawdown_usd = 0.0
             try:
                 with config.TRADES_CSV_PATH.open("r", newline="", encoding="utf-8") as handle:
                     for row in csv.DictReader(handle):
                         if str(row.get("date", "") or "") != now_et.date().isoformat():
                             continue
                         pnl_usd = _safe_signal_float(row.get("realized_pnl_usd"), 0.0)
+                        pnl_pct = _safe_signal_float(row.get("result_pct", row.get("paper_reported_pnl_pct", 0.0)), 0.0)
+                        qty = max(0, int(_safe_signal_float(row.get("qty"), 0.0)))
+                        entry_price = max(0.0, _safe_signal_float(row.get("entry_price"), 0.0))
+                        deployed_premium_closed_usd += entry_price * qty * 100.0
                         if pnl_usd > 0:
                             wins += 1
+                            win_pcts.append(float(pnl_pct))
                         elif pnl_usd < 0:
                             losses += 1
+                            loss_pcts.append(float(pnl_pct))
                         correct_raw = str(row.get("was_direction_correct", "") or "").strip()
                         if correct_raw in {"1", "true", "True"}:
                             correct += 1
@@ -5471,11 +5501,28 @@ def main():
                         ).strip().lower()
                         if cause:
                             causes[cause] = int(causes.get(cause, 0)) + 1
+                        cumulative += pnl_usd
+                        peak = max(peak, cumulative)
+                        max_drawdown_usd = min(max_drawdown_usd, cumulative - peak)
             except Exception:
                 return {"closed": 0, "accuracy_pct": 0.0, "causes": {}}
             closed = wins + losses
             accuracy_pct = (correct / closed * 100.0) if closed > 0 else 0.0
-            return {"closed": closed, "accuracy_pct": round(accuracy_pct, 2), "causes": causes}
+            avg_win_pct = (sum(win_pcts) / len(win_pcts)) if win_pcts else 0.0
+            avg_loss_pct = (sum(loss_pcts) / len(loss_pcts)) if loss_pcts else 0.0
+            win_loss_ratio = (wins / losses) if losses > 0 else (float(wins) if wins > 0 else 0.0)
+            return {
+                "closed": closed,
+                "accuracy_pct": round(accuracy_pct, 2),
+                "causes": causes,
+                "wins": wins,
+                "losses": losses,
+                "avg_win_pct": round(avg_win_pct, 4),
+                "avg_loss_pct": round(avg_loss_pct, 4),
+                "win_loss_ratio": round(win_loss_ratio, 4),
+                "deployed_premium_closed_usd": round(deployed_premium_closed_usd, 2),
+                "max_drawdown_usd": round(abs(max_drawdown_usd), 2),
+            }
 
         def _finalize_trade_through_cycle(now_et: datetime) -> None:
             outcomes = entry_debug.get("signal_outcomes", {})
@@ -5503,18 +5550,54 @@ def main():
             attempts = int(entry_debug.get("entry_orders_submitted", 0) or 0)
             fills = int(entry_debug.get("entries_filled", 0) or 0)
             truth = _today_trade_truth_snapshot(now_et)
+            total_account_equity = float(_safe_signal_float(equity, 0.0))
+            allocation_pct = max(0.0, float(getattr(config, "PORTFOLIO_ALLOCATION_PCT", 15.0) or 15.0))
+            allocated_capital_usd = round(total_account_equity * (allocation_pct / 100.0), 2) if total_account_equity > 0 else 0.0
+            deployed_open_premium_usd = 0.0
+            for meta in open_trade_meta.values():
+                try:
+                    deployed_open_premium_usd += max(0.0, float(meta.get("entry_price", 0.0) or 0.0)) * max(
+                        0, int(meta.get("qty", 0) or 0)
+                    ) * 100.0
+                except Exception:
+                    continue
+            premium_deployed_usd = round(
+                float(truth.get("deployed_premium_closed_usd", 0.0) or 0.0) + deployed_open_premium_usd,
+                2,
+            )
+            day_pnl_usd = round(float(trade_telemetry_total_pnl_usd), 2)
+            premium_return_pct = (day_pnl_usd / premium_deployed_usd * 100.0) if premium_deployed_usd > 0 else 0.0
+            portfolio_return_pct = (day_pnl_usd / total_account_equity * 100.0) if total_account_equity > 0 else 0.0
+            max_drawdown_alloc_pct = (
+                float(truth.get("max_drawdown_usd", 0.0) or 0.0) / allocated_capital_usd * 100.0
+                if allocated_capital_usd > 0
+                else 0.0
+            )
             entry_debug["trade_through_kpi"] = {
                 "scanner_candidates": candidates,
                 "trade_attempts": attempts,
                 "rejection_reasons": dict(sorted(reject_reasons.items())),
                 "fills": fills,
-                "day_pnl_usd": round(float(trade_telemetry_total_pnl_usd), 2),
+                "total_account_equity": round(total_account_equity, 2),
+                "allocated_strategy_capital_pct": allocation_pct,
+                "allocated_strategy_capital_usd": allocated_capital_usd,
+                "premium_deployed_usd": premium_deployed_usd,
+                "premium_return_pct": round(premium_return_pct, 4),
+                "portfolio_return_pct": round(portfolio_return_pct, 4),
+                "day_pnl_usd": day_pnl_usd,
                 "direction_accuracy_pct": float(truth.get("accuracy_pct", 0.0) or 0.0),
+                "average_win_pct": float(truth.get("avg_win_pct", 0.0) or 0.0),
+                "average_loss_pct": float(truth.get("avg_loss_pct", 0.0) or 0.0),
+                "win_loss_ratio": float(truth.get("win_loss_ratio", 0.0) or 0.0),
+                "max_drawdown_on_allocated_slice_pct": round(max_drawdown_alloc_pct, 4),
                 "loss_cause_breakdown": dict(truth.get("causes", {}) or {}),
+                "pass_means_trade_attempt": bool(getattr(config, "PASS_MEANS_TRADE_ATTEMPT", True)),
             }
             print(
                 f"[{ts(now_et)}] TRADE-THROUGH KPI candidates={candidates} attempts={attempts} "
                 f"fills={fills} day_pnl=${trade_telemetry_total_pnl_usd:.2f} "
+                f"premium_deployed=${premium_deployed_usd:.2f} premium_return={premium_return_pct:.2f}% "
+                f"portfolio_return={portfolio_return_pct:.2f}% "
                 f"direction_accuracy={float(truth.get('accuracy_pct', 0.0) or 0.0):.2f}% "
                 f"rejections={dict(sorted(reject_reasons.items()))} "
                 f"loss_causes={dict(truth.get('causes', {}) or {})}"
@@ -6112,6 +6195,13 @@ def main():
             open_count = len(option_positions)
             pending_entry_count = sum(int(v) for v in alpaca_active_buy_orders_by_ticker.values())
             effective_open_count = open_count + pending_entry_count
+            concurrent_cap = int(getattr(config, "MAX_CONCURRENT_TRADES", 0) or 0)
+            max_positions_cap = int(getattr(config, "MAX_POSITIONS", 0) or 0)
+            effective_max_positions = max_positions_cap
+            if concurrent_cap > 0:
+                effective_max_positions = (
+                    concurrent_cap if effective_max_positions <= 0 else min(effective_max_positions, concurrent_cap)
+                )
             if _is_in_opening_strict_window(now_et):
                 opening_max_concurrent = max(1, int(getattr(config, "OPENING_MAX_CONCURRENT_POSITIONS", 3) or 3))
                 if effective_open_count >= opening_max_concurrent:
@@ -6122,12 +6212,12 @@ def main():
                         f"({open_count} open + {pending_entry_count} pending/{opening_max_concurrent})."
                     )
                     break
-            if not can_open_new_positions(effective_open_count, config.MAX_POSITIONS):
+            if not can_open_new_positions(effective_open_count, effective_max_positions):
                 _mark_skip("max_positions_reached")
                 _mark_stage4_reject(reason="max_positions_reached", ticker=ticker)
                 print(
                     f"[{ts(now_et)}] Max positions reached "
-                    f"({open_count} open + {pending_entry_count} pending/{config.MAX_POSITIONS}). "
+                    f"({open_count} open + {pending_entry_count} pending/{effective_max_positions}). "
                     "Stopping new entries this loop."
                 )
                 break
@@ -6284,6 +6374,21 @@ def main():
                 volatility_premium_mult = max(0.1, float(volatility_profile["premium_cap_mult"]))
                 volatility_opening_premium_mult = max(0.1, float(volatility_profile["opening_premium_cap_mult"]))
                 max_trade_premium_base = float(getattr(config, "MAX_PREMIUM_PER_TRADE_USD", 0.0) or 0.0)
+                allocation_pct = max(0.0, float(getattr(config, "PORTFOLIO_ALLOCATION_PCT", 15.0) or 15.0)) / 100.0
+                allocation_cap_usd = _equity_pct_cap_usd(float(equity) if equity is not None else None, allocation_pct)
+                pct_per_trade = max(
+                    0.0,
+                    float(getattr(config, "MAX_PREMIUM_PER_TRADE_PCT_OF_ALLOCATION", 10.0) or 10.0),
+                ) / 100.0
+                allocation_trade_cap_usd = (
+                    round(allocation_cap_usd * pct_per_trade, 2) if allocation_cap_usd > 0 and pct_per_trade > 0 else 0.0
+                )
+                if allocation_trade_cap_usd > 0:
+                    max_trade_premium_base = (
+                        min(max_trade_premium_base, allocation_trade_cap_usd)
+                        if max_trade_premium_base > 0
+                        else allocation_trade_cap_usd
+                    )
                 max_trade_premium = (
                     max(25.0, max_trade_premium_base * volatility_premium_mult)
                     if max_trade_premium_base > 0
@@ -7356,16 +7461,9 @@ def main():
                     loss_diagnosis = {}
                     if trade_pnl_usd < 0:
                         loss_diagnosis = _record_local_loss_diagnosis(trade_row, now_et)
-                        trade_row["loss_cause"] = loss_diagnosis.get("cause", "")
                         cause_raw = str(loss_diagnosis.get("cause", "") or "").strip().lower()
-                        cause_map = {
-                            "wrong_direction": "wrong_direction",
-                            "execution_slippage": "spread",
-                            "rapid_stopout": "bad_timing",
-                            "chop_no_followthrough": "no_followthrough",
-                            "timing_or_decay": "theta",
-                        }
-                        trade_row["loss_cause_bucket"] = cause_map.get(cause_raw, cause_raw or "")
+                        trade_row["loss_cause"] = cause_raw
+                        trade_row["loss_cause_bucket"] = cause_raw
                         trade_row["was_direction_correct"] = "0" if cause_raw == "wrong_direction" else "1"
                         trade_row["loss_adaptation_action"] = loss_diagnosis.get("action", "")
                         trade_row["loss_underlying_move_pct"] = loss_diagnosis.get("underlying_move_pct", "")
@@ -7576,6 +7674,9 @@ def main():
             orders_submitted_this_loop = int(entry_debug.get("entry_orders_submitted", 0) or 0)
             active_entry_orders = sum(int(v) for v in alpaca_active_buy_orders_by_ticker.values())
             max_positions = int(getattr(config, "MAX_POSITIONS", 0) or 0)
+            concurrent_cap = int(getattr(config, "MAX_CONCURRENT_TRADES", 0) or 0)
+            if concurrent_cap > 0:
+                max_positions = concurrent_cap if max_positions <= 0 else min(max_positions, concurrent_cap)
             can_search_for_entry = (
                 entries_filled_this_loop <= 0
                 and orders_submitted_this_loop <= 0
