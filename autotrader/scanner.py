@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import math
 import re
+import threading
 import time
 from datetime import date, datetime, timedelta
 from pathlib import Path
@@ -978,12 +979,14 @@ class IntradayScanner:
         *,
         emit_summary: bool = True,
         write_scan_log: bool = True,
+        source_label: str = "default",
     ):
         self.data_client = data_client
         self.tz = pytz.timezone(config.EASTERN_TZ)
         self.last_failures: list[dict[str, str]] = []
         self.emit_summary = bool(emit_summary)
         self.write_scan_log = bool(write_scan_log)
+        self.source_label = str(source_label or "default")
         self._full_universe_cache: list[str] = []
         self._full_universe_loaded = False
         # symbol -> {until: datetime, bucket: str, reason: str}
@@ -1368,7 +1371,11 @@ class IntradayScanner:
 
     def _print_summary(self, now_et: datetime, total: int, passed: list[dict], failed: list[dict[str, str]]) -> None:
         if self.emit_summary:
-            print(f"[{now_et.strftime('%H:%M ET')}] SCAN RESULTS - {len(passed)} of {total} tickers passed")
+            thread_name = threading.current_thread().name
+            print(
+                f"[{now_et.strftime('%H:%M ET')}] SCAN RESULTS - {len(passed)} of {total} tickers passed "
+                f"(source={self.source_label} thread={thread_name})"
+            )
             for item in passed:
                 vwap_side = "Above VWAP" if item["direction"] == "call" else "Below VWAP"
                 ivr_print = f"{float(item['iv_rank']):.0f}%" if item.get("iv_rank") is not None else "N/A"
@@ -1440,7 +1447,7 @@ class IntradayScanner:
 
 def initialize_scanner(data_client: AlpacaDataClient) -> None:
     global _DEFAULT_SCANNER
-    _DEFAULT_SCANNER = IntradayScanner(data_client)
+    _DEFAULT_SCANNER = IntradayScanner(data_client, source_label="main_runtime")
 
 
 def build_watchlist() -> list[str]:

@@ -4818,6 +4818,9 @@ def main():
                         f"[{ts(now_et)}] Premarket scan on {len(premarket_watchlist)} tickers "
                         f"(watchlist mode={watchlist_mode})."
                     )
+                    print(
+                        f"[{ts(now_et)}] PREMARKET SCAN INVOKE signals_watchlist_count={len(premarket_watchlist)}"
+                    )
                     premarket_signals = run_scan(
                         premarket_watchlist,
                         now_et=now_et,
@@ -5175,6 +5178,7 @@ def main():
             signals = []
         else:
             vix_block_notice = None
+            print(f"[{ts(now_et)}] MAIN LOOP SCAN INVOKE watchlist_count={len(watchlist)}")
             signals = run_scan(watchlist) if watchlist else []
             print(f"[{ts(now_et)}] SCAN CALL RETURNED signals_count={len(signals)}")
         raw_scan_rows_count = len(watchlist)
