@@ -715,6 +715,7 @@ def _truth_payload() -> dict[str, Any]:
     realized["total_intraday_pnl_usd"] = round(float(realized["realized_pnl_usd"]) + unrealized, 2)
     runtime = _runtime()
     trade_kpi = _as_dict(_as_dict(runtime.get("entry_debug")).get("trade_through_kpi")) if isinstance(runtime, dict) else {}
+    cycle_diag = _as_dict(_as_dict(runtime.get("entry_debug")).get("cycle_diagnosis")) if isinstance(runtime, dict) else {}
     truth_profile = _truth_loss_profile(realized)
     adaptive_loss = runtime.get("adaptive_loss") if isinstance(runtime, dict) else {}
     if isinstance(adaptive_loss, dict) and truth_profile and not adaptive_loss.get("profile"):
@@ -750,7 +751,23 @@ def _truth_payload() -> dict[str, Any]:
             "trade_resting_count": _int_value(trade_kpi.get("trade_resting_count")),
             "trade_filled_count": _int_value(trade_kpi.get("trade_filled_count", trade_kpi.get("fills"))),
             "zero_trade_cycle_reason": str(trade_kpi.get("zero_trade_cycle_reason", "") or ""),
+            "primary_blocker": str(trade_kpi.get("primary_blocker", cycle_diag.get("primary_blocker", "")) or ""),
+            "secondary_blockers": list(trade_kpi.get("secondary_blockers", cycle_diag.get("secondary_blockers", [])) or []),
+            "learning_eligible": bool(trade_kpi.get("learning_eligible", cycle_diag.get("learning_eligible", False))),
+            "learning_skip_reason": str(
+                trade_kpi.get("learning_skip_reason", cycle_diag.get("learning_skip_reason", "")) or ""
+            ),
+            "recommended_next_action": str(
+                trade_kpi.get("recommended_next_action", cycle_diag.get("recommended_next_action", "")) or ""
+            ),
+            "system_fault": bool(cycle_diag.get("system_fault", False)),
+            "data_fault": bool(cycle_diag.get("data_fault", False)),
+            "rule_fault": bool(cycle_diag.get("rule_fault", False)),
+            "strategy_fault": bool(cycle_diag.get("strategy_fault", False)),
+            "broker_fault": bool(cycle_diag.get("broker_fault", False)),
+            "pipeline_stage": str(cycle_diag.get("pipeline_stage", "") or ""),
         },
+        "cycle_diagnosis": cycle_diag,
         "positions": positions,
         "orders": {
             "submitted_today": len(all_orders),

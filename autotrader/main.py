@@ -83,6 +83,145 @@ _RUNTIME_OVERRIDE_MTIMES: dict[str, float] = {}
 _RUNTIME_OVERRIDE_VALUES: dict[str, dict[str, float]] = {}
 
 
+def _reason_any(reasons: dict[str, int], needles: tuple[str, ...]) -> bool:
+    if not isinstance(reasons, dict):
+        return False
+    keys = {str(k or "").strip().lower() for k in reasons.keys()}
+    for needle in needles:
+        token = str(needle or "").strip().lower()
+        if not token:
+            continue
+        for key in keys:
+            if token in key:
+                return True
+    return False
+
+
+def _build_cycle_diagnosis(
+    *,
+    cycle_id: str,
+    trade_kpi: dict,
+    reject_reasons: dict[str, int],
+    contract_reject_reasons: dict[str, int],
+    order_reject_reasons: dict[str, int],
+    rate_limit_status: dict[str, object],
+    execution_loop_entered: bool,
+) -> dict[str, object]:
+    scanner_passed = int(trade_kpi.get("scanner_candidate_count", 0) or 0)
+    exec_candidates = int(trade_kpi.get("execution_candidate_count", 0) or 0)
+    contract_selected = int(trade_kpi.get("contract_selected_count", 0) or 0)
+    attempts = int(trade_kpi.get("order_attempted_count", 0) or 0)
+    fills = int(trade_kpi.get("trade_filled_count", 0) or 0)
+    blocked_unclassified_count = int(reject_reasons.get("blocked_unclassified", 0) or 0)
+    rate_degraded = bool(rate_limit_status.get("data_source_degraded", False))
+    had_429 = bool(int(rate_limit_status.get("recent_429_count", 0) or 0) > 0)
+
+    stage = "candidate_rejected_all"
+    if scanner_passed <= 0:
+        stage = "scanner_empty"
+    elif exec_candidates <= 0:
+        stage = "scanner_rejected_all"
+    elif not execution_loop_entered:
+        stage = "execution_not_entered"
+    elif _reason_any(reject_reasons, ("after_entry_window", "before_entry_window")) and attempts <= 0:
+        stage = "entry_window_closed"
+    elif contract_selected <= 0 and _reason_any(contract_reject_reasons, ("no_eligible_option_contract", "no_option_ask")):
+        stage = "options_chain_empty"
+    elif contract_selected <= 0:
+        stage = "contract_selection_failed"
+    elif _reason_any(reject_reasons, ("quote_spread_too_wide", "entry_slippage_too_high", "no_option_ask")):
+        stage = "quote_gate_failed"
+    elif _reason_any(
+        reject_reasons,
+        (
+            "daily_loss_limit",
+            "weekly_loss_limit",
+            "intraday_net_loss_limit",
+            "max_positions_reached",
+            "same_direction_exposure_cap",
+            "ticker_contract_cap",
+            "premium_per_trade_cap",
+            "total_open_premium_cap",
+            "opening_concurrent_position_cap",
+            "execution_evidence_gate",
+        ),
+    ):
+        stage = "risk_gate_failed"
+    elif attempts <= 0 and exec_candidates > 0:
+        stage = "candidate_rejected_all"
+    elif attempts > 0 and fills <= 0 and _reason_any(order_reject_reasons, ("rejected", "invalid", "denied", "broker")):
+        stage = "order_submit_failed"
+    elif attempts > 0 and fills <= 0:
+        stage = "order_submitted"
+    elif fills > 0:
+        stage = "order_filled"
+
+    ranked_rejections = sorted(
+        ((str(k or "").strip().lower(), int(v or 0)) for k, v in dict(reject_reasons or {}).items()),
+        key=lambda item: (-item[1], item[0]),
+    )
+    primary_blocker = ranked_rejections[0][0] if ranked_rejections else stage
+    secondary_blockers = [name for name, _count in ranked_rejections[1:4]]
+    if rate_degraded or had_429:
+        if "alpaca_429_cooldown" != primary_blocker and "alpaca_429_cooldown" not in secondary_blockers:
+            secondary_blockers.append("alpaca_429_cooldown")
+
+    system_fault = blocked_unclassified_count > 0
+    data_fault = rate_degraded or had_429 or _reason_any(reject_reasons, ("429", "cooldown"))
+    rule_fault = _reason_any(
+        reject_reasons,
+        ("after_entry_window", "before_entry_window", "blocked_entry_hour", "dry_run_mode"),
+    )
+    broker_fault = _reason_any(order_reject_reasons, ("broker", "rejected", "denied", "insufficient"))
+    strategy_fault = bool(fills > 0)
+
+    learning_eligible = bool(fills > 0)
+    learning_skip_reason = ""
+    recommended_next_action = "continue strategy learning from filled trades"
+
+    if blocked_unclassified_count > 0:
+        system_fault = True
+        learning_eligible = False
+        learning_skip_reason = "system_fault_blocked_unclassified"
+        recommended_next_action = "patch unclassified rejection path"
+    elif data_fault:
+        learning_eligible = False
+        learning_skip_reason = "data_fault_429_cooldown"
+        recommended_next_action = "reduce Alpaca request pressure and rely on cached data"
+    elif rule_fault and attempts <= 0:
+        learning_eligible = False
+        learning_skip_reason = "rule_fault_entry_window_or_rule_gate"
+        recommended_next_action = "run execution dry-run or adjust entry window"
+    elif broker_fault and attempts > 0 and fills <= 0:
+        learning_eligible = False
+        learning_skip_reason = "broker_fault_order_submit"
+        recommended_next_action = "inspect broker rejects and payload constraints"
+    elif not learning_eligible:
+        learning_skip_reason = "non_executable_cycle"
+        recommended_next_action = "restore trade-through before strategy tuning"
+
+    return {
+        "cycle_id": str(cycle_id or ""),
+        "scanner_passed_count": scanner_passed,
+        "execution_candidate_count": exec_candidates,
+        "execution_loop_entered": bool(execution_loop_entered),
+        "contract_selected_count": contract_selected,
+        "order_attempted_count": attempts,
+        "trade_filled_count": fills,
+        "pipeline_stage": stage,
+        "primary_blocker": str(primary_blocker or ""),
+        "secondary_blockers": list(secondary_blockers),
+        "system_fault": bool(system_fault),
+        "data_fault": bool(data_fault),
+        "rule_fault": bool(rule_fault),
+        "strategy_fault": bool(strategy_fault),
+        "broker_fault": bool(broker_fault),
+        "learning_eligible": bool(learning_eligible),
+        "learning_skip_reason": str(learning_skip_reason or ""),
+        "recommended_next_action": str(recommended_next_action or ""),
+    }
+
+
 def _apply_runtime_overrides_from_path(path: Path | None, label: str) -> None:
     if path is None:
         return
@@ -5694,6 +5833,41 @@ def main():
                 else:
                     zero_trade_cycle_reason = "unknown_block_before_order_attempt"
             entry_debug["trade_through_kpi"]["zero_trade_cycle_reason"] = zero_trade_cycle_reason
+            rate_limit_status = AlpacaDataClient.get_rate_limit_status()
+            cycle_diag = _build_cycle_diagnosis(
+                cycle_id=str(now_et.isoformat()),
+                trade_kpi=dict(entry_debug.get("trade_through_kpi") or {}),
+                reject_reasons=dict(reject_reasons or {}),
+                contract_reject_reasons=dict(entry_debug.get("contract_rejected_count_by_reason") or {}),
+                order_reject_reasons=dict(entry_debug.get("order_rejected_count_by_reason") or {}),
+                rate_limit_status=rate_limit_status,
+                execution_loop_entered=bool(entry_debug.get("execution_loop_entered", False)),
+            )
+            entry_debug["cycle_diagnosis"] = cycle_diag
+            entry_debug["trade_through_kpi"]["primary_blocker"] = str(cycle_diag.get("primary_blocker", "") or "")
+            entry_debug["trade_through_kpi"]["secondary_blockers"] = list(cycle_diag.get("secondary_blockers") or [])
+            entry_debug["trade_through_kpi"]["learning_eligible"] = bool(cycle_diag.get("learning_eligible", False))
+            entry_debug["trade_through_kpi"]["learning_skip_reason"] = str(cycle_diag.get("learning_skip_reason", "") or "")
+            entry_debug["trade_through_kpi"]["recommended_next_action"] = str(
+                cycle_diag.get("recommended_next_action", "") or ""
+            )
+            try:
+                diag_dir = Path(getattr(config, "DATA_DIR"))
+                diag_dir.mkdir(parents=True, exist_ok=True)
+                latest_path = diag_dir / "cycle_diagnosis_latest.json"
+                history_path = diag_dir / "cycle_diagnosis_history.jsonl"
+                latest_path.write_text(json.dumps(cycle_diag, indent=2, sort_keys=True), encoding="utf-8")
+                with history_path.open("a", encoding="utf-8", newline="\n") as handle:
+                    handle.write(json.dumps(cycle_diag, sort_keys=True))
+                    handle.write("\n")
+            except Exception as exc:  # noqa: BLE001
+                print(f"[{ts(now_et)}] cycle diagnosis persist failed: {exc}")
+            print(
+                f"[{ts(now_et)}] NO-TRADE DIAGNOSIS stage={cycle_diag.get('pipeline_stage')} "
+                f"primary={cycle_diag.get('primary_blocker')} secondary={cycle_diag.get('secondary_blockers')} "
+                f"learning_eligible={cycle_diag.get('learning_eligible')} "
+                f"skip_reason={cycle_diag.get('learning_skip_reason')}"
+            )
             print(
                 f"[{ts(now_et)}] TRADE-THROUGH KPI scanner_passed_count={int(entry_debug.get('scanner_candidate_count', 0) or 0)} "
                 f"execution_candidate_count={int(entry_debug.get('execution_candidate_count', 0) or 0)} "
@@ -5722,8 +5896,10 @@ def main():
         _touch_heartbeat()
         print(f"[{ts(now_et)}] EXECUTION LOOP ABOUT TO START signals_count={len(signals)}")
         cycle_finalizer_now_et = datetime.now(tz)
+        entry_debug["execution_loop_entered"] = False
         try:
             print(f"[{ts(datetime.now(tz))}] EXECUTION LOOP ENTERED")
+            entry_debug["execution_loop_entered"] = True
             opening_entry_attempts_loop = 0
             entry_attempts_loop = 0
             evidence_rows = evidence_gate.load_recent_trade_rows()
