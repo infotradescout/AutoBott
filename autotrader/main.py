@@ -5392,6 +5392,7 @@ def main():
             "scanner_failed_count": int(raw_scanner_failed_count),
             "execution_candidate_count": int(len(signals)),
         }
+        loop_terminal_block_reason = ""
 
         def _normalize_disposition_reason(reason: str) -> str:
             token = str(reason or "").strip().lower()
@@ -5425,6 +5426,12 @@ def main():
                 skips = {}
             skips[reason] = int(skips.get(reason, 0)) + 1
             entry_debug["skips"] = skips
+
+        def _set_loop_terminal_block(reason: str) -> None:
+            nonlocal loop_terminal_block_reason
+            token = str(reason or "").strip().lower()
+            if token:
+                loop_terminal_block_reason = token
 
         def _bump_counter_bucket(field: str, key: str) -> None:
             data = entry_debug.get(field, {})
@@ -5576,9 +5583,17 @@ def main():
                 payload = outcomes.get(symbol, {}) if isinstance(outcomes.get(symbol), dict) else {}
                 disposition = str(payload.get("disposition", "") or "").strip().lower()
                 if disposition in {"", "scanner_candidate", "entry_eligible"}:
+                    skips = entry_debug.get("skips", {})
+                    top_skip_reason = ""
+                    if isinstance(skips, dict) and skips:
+                        top_skip_reason = sorted(
+                            ((str(k), int(v)) for k, v in skips.items()),
+                            key=lambda item: (-item[1], item[0]),
+                        )[0][0]
+                    fallback_reason = str(loop_terminal_block_reason or top_skip_reason or "blocked_unclassified").strip().lower()
                     detail = str(payload.get("detail", "") or "").strip() or "candidate ended loop without terminal decision"
-                    outcomes[symbol] = {"disposition": "blocked_unclassified", "detail": detail}
-                    reject_reasons["blocked_unclassified"] = int(reject_reasons.get("blocked_unclassified", 0)) + 1
+                    outcomes[symbol] = {"disposition": f"blocked_{fallback_reason}", "detail": detail}
+                    reject_reasons[fallback_reason] = int(reject_reasons.get(fallback_reason, 0)) + 1
 
             entry_debug["signal_outcomes"] = outcomes
             entry_debug["entry_stage4_reject_reasons"] = reject_reasons
@@ -5731,6 +5746,8 @@ def main():
                     and daily_realized_loss_usd >= daily_loss_limit
                 ):
                     _mark_skip("daily_loss_limit")
+                    _mark_stage4_reject(reason="daily_loss_limit", ticker=str(signal.get("symbol", "") or ""))
+                    _set_loop_terminal_block("daily_loss_limit")
                     print(
                         f"[{ts(now_et)}] DAILY LOSS LIMIT hit: "
                         f"${daily_realized_loss_usd:.2f} >= ${config.DAILY_LOSS_LIMIT_USD:.2f}. "
@@ -5755,6 +5772,8 @@ def main():
                     and weekly_realized_loss_usd >= weekly_loss_limit
                 ):
                     _mark_skip("weekly_loss_limit")
+                    _mark_stage4_reject(reason="weekly_loss_limit", ticker=str(signal.get("symbol", "") or ""))
+                    _set_loop_terminal_block("weekly_loss_limit")
                     print(
                         f"[{ts(now_et)}] WEEKLY LOSS LIMIT hit: "
                         f"${weekly_realized_loss_usd:.2f} >= ${config.WEEKLY_LOSS_LIMIT_USD:.2f}. "
@@ -5776,6 +5795,9 @@ def main():
                     bool(getattr(config, "ALLOW_AUTOMATIC_TRADING_PAUSES", False))
                     and _consecutive_loss_cooldown_active(now_et)
                 ):
+                    _mark_skip("consecutive_loss_cooldown")
+                    _mark_stage4_reject(reason="consecutive_loss_cooldown", ticker=str(signal.get("symbol", "") or ""))
+                    _set_loop_terminal_block("consecutive_loss_cooldown")
                     break
     
                 if zero_dte_loss_lockout_day != now_et.date().isoformat():
@@ -5792,6 +5814,8 @@ def main():
                     and zero_dte_realized_loss_count >= zero_dte_loss_limit
                 ):
                     _mark_skip("zero_dte_loss_lockout")
+                    _mark_stage4_reject(reason="zero_dte_loss_lockout", ticker=str(signal.get("symbol", "") or ""))
+                    _set_loop_terminal_block("zero_dte_loss_lockout")
                     print(
                         f"[{ts(now_et)}] 0DTE loss lockout active: "
                         f"{zero_dte_realized_loss_count}/{zero_dte_loss_limit} realized red 0DTE ETF exit(s). "
@@ -5816,6 +5840,8 @@ def main():
                     and trade_telemetry_total_pnl_usd <= -intraday_net_loss_limit
                 ):
                     _mark_skip("intraday_net_loss_limit")
+                    _mark_stage4_reject(reason="intraday_net_loss_limit", ticker=str(signal.get("symbol", "") or ""))
+                    _set_loop_terminal_block("intraday_net_loss_limit")
                     print(
                         f"[{ts(now_et)}] INTRADAY NET LOSS LIMIT hit: "
                         f"net=${trade_telemetry_total_pnl_usd:.2f} <= -${intraday_net_loss_limit:.2f}. "
@@ -5844,6 +5870,8 @@ def main():
                         and trade_telemetry_total_pnl_usd <= early_red_max_net_pnl
                     ):
                         _mark_skip("early_red_guard")
+                        _mark_stage4_reject(reason="early_red_guard", ticker=str(signal.get("symbol", "") or ""))
+                        _set_loop_terminal_block("early_red_guard")
                         print(
                             f"[{ts(now_et)}] EARLY RED GUARD hit: "
                             f"closed={trade_telemetry_closed_count} net=${trade_telemetry_total_pnl_usd:.2f} "
@@ -5864,9 +5892,13 @@ def main():
                 # --- PDT guard (only blocks if ENFORCE_PDT_GUARD=True) ---
                 if local_trade_budget_hit:
                     _mark_skip("pdt_local_budget_hit")
+                    _mark_stage4_reject(reason="pdt_local_budget_hit", ticker=str(signal.get("symbol", "") or ""))
+                    _set_loop_terminal_block("pdt_local_budget_hit")
                     break
                 if config.ENFORCE_PDT_GUARD and not pdt_allowed:
                     _mark_skip("pdt_broker_block")
+                    _mark_stage4_reject(reason="pdt_broker_block", ticker=str(signal.get("symbol", "") or ""))
+                    _set_loop_terminal_block("pdt_broker_block")
                     break
     
                 ticker = str(signal["symbol"]).upper()
@@ -6169,11 +6201,13 @@ def main():
                 if not is_at_or_after(now_et, config.NO_NEW_TRADES_BEFORE):
                     _mark_skip("before_entry_window")
                     _mark_stage4_reject(reason="before_entry_window", ticker=ticker)
+                    _set_loop_terminal_block("before_entry_window")
                     print(f"[{ts(now_et)}] Entry window not open yet (before {config.NO_NEW_TRADES_BEFORE} ET).")
                     break
                 if is_at_or_after(now_et, config.NO_NEW_TRADES_AFTER):
                     _mark_skip("after_entry_window")
                     _mark_stage4_reject(reason="after_entry_window", ticker=ticker)
+                    _set_loop_terminal_block("after_entry_window")
                     print(f"[{ts(now_et)}] Entry window closed (past {config.NO_NEW_TRADES_AFTER} ET).")
                     break
                 if _is_entry_hour_blocked(now_et, strategy_profile=strategy_profile):
@@ -6313,6 +6347,7 @@ def main():
                     if effective_open_count >= opening_max_concurrent:
                         _mark_skip("opening_concurrent_position_cap")
                         _mark_stage4_reject(reason="opening_concurrent_position_cap", ticker=ticker)
+                        _set_loop_terminal_block("opening_concurrent_position_cap")
                         print(
                             f"[{ts(now_et)}] Opening concurrent-position cap reached "
                             f"({open_count} open + {pending_entry_count} pending/{opening_max_concurrent})."
@@ -6321,6 +6356,7 @@ def main():
                 if not can_open_new_positions(effective_open_count, effective_max_positions):
                     _mark_skip("max_positions_reached")
                     _mark_stage4_reject(reason="max_positions_reached", ticker=ticker)
+                    _set_loop_terminal_block("max_positions_reached")
                     print(
                         f"[{ts(now_et)}] Max positions reached "
                         f"({open_count} open + {pending_entry_count} pending/{effective_max_positions}). "

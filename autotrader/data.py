@@ -29,6 +29,7 @@ class AlpacaDataClient:
         "cooldown_seconds": 0.0,
         "degraded": False,
         "last_error": "",
+        "last_cooldown_skip_log_epoch": 0.0,
     }
 
     def __init__(self, api_key: str, secret_key: str, paper: bool = True):
@@ -100,6 +101,18 @@ class AlpacaDataClient:
         shared["cooldown_remaining_seconds"] = round(remaining, 2)
         shared["data_source_degraded"] = bool(shared.get("degraded", False) and remaining > 0)
         return shared
+
+    def _alpaca_cooldown_active(self) -> bool:
+        return float(self._shared_rate_limit.get("cooldown_until_epoch", 0.0) or 0.0) > time.time()
+
+    def _log_cooldown_skip_once(self, context: str) -> None:
+        now = time.time()
+        last = float(self._shared_rate_limit.get("last_cooldown_skip_log_epoch", 0.0) or 0.0)
+        if now - last < 15.0:
+            return
+        self._shared_rate_limit["last_cooldown_skip_log_epoch"] = now
+        remaining = max(0.0, float(self._shared_rate_limit.get("cooldown_until_epoch", 0.0) or 0.0) - now)
+        print(f"[data] Alpaca cooldown active ({remaining:.1f}s). Skipping Alpaca fetch for {context}.")
 
     def _bars_cache_get(self, key: tuple[Any, ...]) -> pd.DataFrame | None:
         cached = self._bars_cache.get(key)
@@ -204,6 +217,9 @@ class AlpacaDataClient:
             return cached
 
         # Primary source: Alpaca bars API (keeps volume basis aligned with intraday feed)
+        if self._alpaca_cooldown_active():
+            self._log_cooldown_skip_once(f"get_stock_bars:{symbol}:{timeframe}")
+            return pd.DataFrame()
         if alpaca_tf:
             try:
                 now_utc = datetime.now(pytz.UTC)
@@ -342,6 +358,9 @@ class AlpacaDataClient:
             return cached
 
         # Primary source: Alpaca bars API (more stable intraday for live trading loops)
+        if self._alpaca_cooldown_active():
+            self._log_cooldown_skip_once(f"get_intraday_bars_since_open:{symbol}")
+            return pd.DataFrame()
         try:
             start_utc = market_open.astimezone(pytz.UTC).isoformat().replace("+00:00", "Z")
             end_utc = now_et.astimezone(pytz.UTC).isoformat().replace("+00:00", "Z")
@@ -449,6 +468,9 @@ class AlpacaDataClient:
             return cached
 
         # Primary source: Alpaca bars API
+        if self._alpaca_cooldown_active():
+            self._log_cooldown_skip_once(f"get_intraday_bars_window:{symbol}")
+            return pd.DataFrame()
         try:
             start_utc = start_et.astimezone(pytz.UTC).isoformat().replace("+00:00", "Z")
             end_utc = end_et.astimezone(pytz.UTC).isoformat().replace("+00:00", "Z")
