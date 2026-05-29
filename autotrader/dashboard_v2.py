@@ -1115,6 +1115,32 @@ def api_runtime_presets_load():
     return jsonify({"ok": True, "preset": name, "result": result, **_runtime_parameters_payload()})
 
 
+@app.get("/api/runtime/presets")
+def api_runtime_presets_list():
+    if not RUNTIME_PRESETS_PATH.exists():
+        return jsonify({"ok": True, "presets": []})
+    try:
+        payload = json.loads(RUNTIME_PRESETS_PATH.read_text(encoding="utf-8"))
+    except Exception:
+        payload = {}
+    if not isinstance(payload, dict):
+        payload = {}
+    rows = []
+    for name, item in payload.items():
+        if not isinstance(item, dict):
+            continue
+        overrides = item.get("overrides", {})
+        rows.append(
+            {
+                "name": str(name),
+                "saved_at_et": str(item.get("saved_at_et", "") or ""),
+                "override_count": len(overrides) if isinstance(overrides, dict) else 0,
+            }
+        )
+    rows.sort(key=lambda row: str(row.get("saved_at_et", "")), reverse=True)
+    return jsonify({"ok": True, "presets": rows})
+
+
 @app.post("/api/runtime/symbols/mute")
 def api_runtime_symbols_mute():
     ok, err, status = _verify_control_token()
@@ -1228,7 +1254,145 @@ def index():
 
 
 HTML = r'''
-<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>AutoBott Command Center</title><style>:root{--bg:#07111f;--panel:#101c2d;--panel2:#13243a;--line:#27384f;--text:#eef5ff;--muted:#8ea1b8;--green:#21d07a;--red:#ff4d5e;--yellow:#ffd166;--blue:#59a7ff}*{box-sizing:border-box}body{margin:0;background:radial-gradient(circle at top,#102039 0,#07111f 45%,#040913 100%);color:var(--text);font:14px/1.4 system-ui,Segoe UI,Arial,sans-serif}.wrap{max-width:1500px;margin:0 auto;padding:24px}.top{display:flex;justify-content:space-between;gap:18px;align-items:flex-start;margin-bottom:18px}.title h1{margin:0;font-size:32px;letter-spacing:-.04em}.sub{color:var(--muted);margin-top:3px}.pill{display:inline-flex;align-items:center;gap:8px;border:1px solid var(--line);border-radius:999px;padding:8px 12px;background:rgba(255,255,255,.04);font-weight:700}.paper{background:#ffd166;color:#1a1400;border:0}.live{background:#ff4d5e;color:white;border:0}.grid{display:grid;grid-template-columns:repeat(12,1fr);gap:14px}.card{background:linear-gradient(180deg,var(--panel2),var(--panel));border:1px solid var(--line);border-radius:18px;padding:16px;box-shadow:0 14px 40px rgba(0,0,0,.22)}.span3{grid-column:span 3}.span4{grid-column:span 4}.span6{grid-column:span 6}.span12{grid-column:span 12}.label{color:var(--muted);font-size:12px;text-transform:uppercase;letter-spacing:.08em;font-weight:800}.big{font-size:30px;font-weight:900;letter-spacing:-.03em;margin-top:6px}.green{color:var(--green)}.red{color:var(--red)}.yellow{color:var(--yellow)}.blue{color:var(--blue)}.muted{color:var(--muted)}.row{display:flex;justify-content:space-between;gap:12px;border-bottom:1px solid rgba(255,255,255,.06);padding:8px 0}.row:last-child{border-bottom:0}table{width:100%;border-collapse:collapse}th,td{text-align:left;border-bottom:1px solid rgba(255,255,255,.07);padding:9px 8px;font-size:13px}th{color:var(--muted);text-transform:uppercase;font-size:11px;letter-spacing:.08em}tr:last-child td{border-bottom:0}.statusdot{display:inline-block;width:9px;height:9px;border-radius:50%;background:var(--muted);margin-right:7px}.statusdot.on{background:var(--green);box-shadow:0 0 15px var(--green)}.banner{border:1px solid rgba(255,209,102,.35);background:rgba(255,209,102,.10);color:#ffe7a3;border-radius:16px;padding:12px 14px;margin-bottom:14px;font-weight:700}.nowrap{white-space:nowrap}@media(max-width:1100px){.span3,.span4,.span6{grid-column:span 12}.top{display:block}}</style></head><body><div class="wrap"><div class="top"><div class="title"><h1>AutoBott Command Center</h1><div class="sub">Alpaca-first truth dashboard. Local logs are context, not the source of truth.</div></div><div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap"><span id="mode" class="pill paper">PAPER</span><span id="clock" class="pill"><span class="statusdot"></span>Loading</span><span id="updated" class="pill">--</span></div></div><div class="banner">Truth source: Alpaca account + orders + positions. The old Trades Today/P&L cards were log-based and could lie when trade logging missed pairs.</div><div class="grid"><div class="card span3"><div class="label">Equity</div><div id="equity" class="big">--</div><div class="muted">Alpaca account</div></div><div class="card span3"><div class="label">Buying Power</div><div id="bp" class="big">--</div><div class="muted">Available capital</div></div><div class="card span3"><div class="label">Realized P/L Today</div><div id="realized" class="big">--</div><div class="muted">Filled option order pairs</div></div><div class="card span3"><div class="label">Total P/L Today</div><div id="totalpnl" class="big">--</div><div class="muted">Realized + open unrealized</div></div><div class="card span3"><div class="label">Filled Orders</div><div id="filledOrders" class="big">--</div><div class="muted">Alpaca filled orders today</div></div><div class="card span3"><div class="label">Closed Trades</div><div id="closedTrades" class="big">--</div><div class="muted">Paired option legs</div></div><div class="card span3"><div class="label">Win Rate</div><div id="winRate" class="big">--</div><div class="muted">Closed paired trades</div></div><div class="card span3"><div class="label">Open Positions</div><div id="openPositions" class="big">--</div><div class="muted">Live Alpaca positions</div></div><div class="card span4"><div class="label">Runtime</div><div id="runtimeRows"></div></div><div class="card span4"><div class="label">Scanner</div><div id="scannerRows"></div></div><div class="card span4"><div class="label">Best / Worst</div><div id="bestWorst"></div></div><div class="card span6"><div class="label">Open Positions</div><div style="overflow:auto"><table><thead><tr><th>Symbol</th><th>Qty</th><th>Entry</th><th>Current</th><th>P/L</th></tr></thead><tbody id="positionsBody"></tbody></table></div></div><div class="card span6"><div class="label">P/L by Underlying</div><div style="overflow:auto"><table><thead><tr><th>Symbol</th><th>P/L</th></tr></thead><tbody id="underlyingBody"></tbody></table></div></div><div class="card span12"><div class="label">Recent Alpaca Orders</div><div style="overflow:auto"><table><thead><tr><th>Time</th><th>Symbol</th><th>Side</th><th>Type</th><th>Status</th><th>Qty</th><th>Filled</th><th>Price</th></tr></thead><tbody id="ordersBody"></tbody></table></div></div><div class="card span12"><div class="label">Recent Scanner Rows</div><div style="overflow:auto"><table><thead><tr><th>Time</th><th>Symbol</th><th>Result</th><th>Direction</th><th>Score</th><th>RVOL</th><th>Reason</th></tr></thead><tbody id="scannerBody"></tbody></table></div></div></div></div><script>const $=(id)=>document.getElementById(id);const money=(v)=>Number(v||0).toLocaleString(undefined,{style:'currency',currency:'USD'});const cls=(v)=>Number(v||0)>=0?'green':'red';function pct(v){return `${Number(v||0).toFixed(2)}%`}function row(k,v){return `<div class="row"><span class="muted">${k}</span><b>${v}</b></div>`}function safe(v){return (v===null||v===undefined||v==='')?'--':v}function setMoneyCard(id,val){const el=$(id);el.textContent=money(val);el.className='big '+cls(val)}function render(p){$('mode').textContent=p.mode==='live'?'LIVE':'PAPER';$('mode').className='pill '+(p.mode==='live'?'live':'paper');const isOpen=p.clock&&p.clock.is_open===true;$('clock').innerHTML=`<span class="statusdot ${isOpen?'on':''}"></span>${isOpen?'MARKET OPEN':'MARKET CLOSED'}`;$('updated').textContent=new Date().toLocaleTimeString();$('equity').textContent=money(p.account.equity);$('bp').textContent=money(p.account.buying_power);setMoneyCard('realized',p.realized.realized_pnl_usd);setMoneyCard('totalpnl',p.realized.total_intraday_pnl_usd);$('filledOrders').textContent=p.orders.filled_today;$('closedTrades').textContent=p.realized.closed_count;$('winRate').textContent=pct(p.realized.win_rate_pct);$('winRate').className='big '+(Number(p.realized.win_rate_pct)>=50?'green':'yellow');$('openPositions').textContent=p.positions.length;const rt=p.runtime;const promo=rt.replay_auto_promote||{};const promoStatus=promo.enabled?`${promo.promotable?'promotable':'collecting'} (${promo.reason||'n/a'})`:'disabled';const synthTrainer=rt.synthetic_trainer||{};const synthTuner=rt.synthetic_tuner||{};$('runtimeRows').innerHTML=row('Trader heartbeat',rt.heartbeat_label)+row('Manual stop',rt.manual_stop?'ON':'OFF')+row('Dry run',rt.dry_run?'ON':'OFF')+row('Replay promote',promoStatus)+row('Synthetic trainer',synthTrainer.exists?safe(synthTrainer.last_updated_et):'missing')+row('Synthetic rows',safe(synthTrainer.rows_written_total))+row('Synthetic W/L',`${safe(synthTrainer.wins)}/${safe(synthTrainer.losses)}`)+row('Synthetic tuner',synthTuner.exists?safe(synthTuner.last_updated_et):'missing')+row('Tuner win rate',pct(synthTuner.win_rate_pct))+row('Learning quality',safe((rt.learning||{}).quality_verdict).toUpperCase())+row('Rollback active',((rt.pattern_guard||{}).override_disabled_until_iso||'').trim()?safe((rt.pattern_guard||{}).override_disabled_until_iso):'OFF')+row('Suppressed symbols',((rt.pattern_guard||{}).suppressed_symbols||[]).join(', ')||'none')+row('Shadow flips',safe(((rt.pattern_guard||{}).shadow_stats||{}).would_flip_count))+row('Truth source',p.source_of_truth);const sc=p.scanner;$('scannerRows').innerHTML=row('Scan rows today',sc.scan_rows_today)+row('Passes',sc.passes)+row('Fails',sc.fails)+row('Pass rate',pct(sc.pass_rate_pct))+row('Last scan',safe(sc.last_scan));const best=p.realized.best_trade,worst=p.realized.worst_trade;$('bestWorst').innerHTML=row('Best',best?`${best.underlying} ${money(best.realized_pnl_usd)}`:'--')+row('Worst',worst?`${worst.underlying} ${money(worst.realized_pnl_usd)}`:'--')+row('Profit factor',safe(p.realized.profit_factor));$('positionsBody').innerHTML=p.positions.map(x=>`<tr><td>${x.symbol}<div class="muted">${x.underlying}</div></td><td>${x.qty}</td><td>${money(x.avg_entry_price)}</td><td>${money(x.current_price)}</td><td class="${cls(x.unrealized_pl)}"><b>${money(x.unrealized_pl)}</b><div>${pct(x.unrealized_plpc)}</div></td></tr>`).join('')||'<tr><td colspan="5" class="muted">No open positions</td></tr>';$('underlyingBody').innerHTML=p.realized.by_underlying.map(x=>`<tr><td>${x.symbol}</td><td class="${cls(x.pnl_usd)}"><b>${money(x.pnl_usd)}</b></td></tr>`).join('')||'<tr><td colspan="2" class="muted">No paired closed trades yet</td></tr>';$('ordersBody').innerHTML=p.orders.recent.map(o=>`<tr><td class="nowrap">${o.display_time}</td><td>${o.symbol}</td><td class="${o.side==='buy'?'blue':'yellow'}">${o.side}</td><td>${o.type}</td><td>${o.status}</td><td>${o.qty}</td><td>${o.filled_qty}</td><td>${money(o.filled_avg_price||o.limit_price)}</td></tr>`).join('')||'<tr><td colspan="8" class="muted">No orders today</td></tr>';$('scannerBody').innerHTML=sc.recent_rows.map(r=>`<tr><td>${safe(r.timestamp)}</td><td>${safe(r.symbol||r.ticker)}</td><td class="${String(r.result).toLowerCase()==='pass'?'green':'red'}">${safe(r.result)}</td><td>${safe(r.direction)}</td><td>${safe(r.signal_score)}</td><td>${safe(r.rvol)}</td><td>${safe(r.reason)}</td></tr>`).join('')||'<tr><td colspan="7" class="muted">No scanner rows today</td></tr>'}async function load(){try{const res=await fetch('/api/truth',{cache:'no-store'});render(await res.json())}catch(e){console.error(e);$('updated').textContent='Load failed'}}load();setInterval(load,10000);</script></body></html>
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>AutoBott Mixer Control Room</title>
+  <style>
+    :root{--bg:#07111f;--panel:#101c2d;--line:#27384f;--text:#eef5ff;--muted:#8ea1b8;--green:#21d07a;--red:#ff4d5e;--yellow:#ffd166;--blue:#59a7ff}
+    *{box-sizing:border-box} body{margin:0;background:radial-gradient(circle at top,#102039 0,#07111f 45%,#040913 100%);color:var(--text);font:14px/1.4 system-ui,Segoe UI,Arial,sans-serif}
+    .wrap{max-width:1600px;margin:0 auto;padding:18px}.grid{display:grid;grid-template-columns:repeat(12,1fr);gap:12px}
+    .card{background:linear-gradient(180deg,#13243a,var(--panel));border:1px solid var(--line);border-radius:14px;padding:12px}
+    .span3{grid-column:span 3}.span4{grid-column:span 4}.span6{grid-column:span 6}.span8{grid-column:span 8}.span12{grid-column:span 12}
+    .label{color:var(--muted);font-size:11px;text-transform:uppercase;letter-spacing:.08em;font-weight:800}.big{font-size:26px;font-weight:900}
+    .row{display:flex;justify-content:space-between;gap:8px;border-bottom:1px solid rgba(255,255,255,.07);padding:6px 0}.row:last-child{border-bottom:0}
+    .btn{border:1px solid var(--line);background:#162840;color:var(--text);padding:6px 10px;border-radius:8px;cursor:pointer}
+    .btn.red{background:#3a1a21}.btn.green{background:#173325}.btn.yellow{background:#3b3218}
+    input,select{background:#0f1d31;color:var(--text);border:1px solid var(--line);border-radius:8px;padding:6px}
+    table{width:100%;border-collapse:collapse} th,td{padding:6px;border-bottom:1px solid rgba(255,255,255,.06);font-size:12px;text-align:left}
+    .h{font-weight:800;margin-bottom:8px}.muted{color:var(--muted)}
+    @media(max-width:1100px){.span3,.span4,.span6,.span8{grid-column:span 12}}
+  </style>
+</head>
+<body>
+<div class="wrap">
+  <div class="grid">
+    <div class="card span12">
+      <div class="h">Master Strip</div>
+      <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center">
+        <input id="token" placeholder="Control token">
+        <button class="btn" onclick="saveToken()">Save Token</button>
+        <span id="modePill" class="muted">mode: --</span>
+        <span id="updated" class="muted">--</span>
+      </div>
+      <div id="masterRows"></div>
+      <div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:8px">
+        <button class="btn yellow" onclick="guarded('/api/runtime/trading/pause')">Pause</button>
+        <button class="btn green" onclick="guarded('/api/runtime/trading/resume')">Resume</button>
+        <button class="btn red" onclick="guarded('/api/runtime/orders/cancel-open-entries')">Cancel Open Entries</button>
+        <button class="btn red" onclick="guarded('/api/runtime/trading/flatten')">Flatten</button>
+      </div>
+    </div>
+    <div class="card span4"><div class="h">Execution Bus</div><div id="busRows"></div></div>
+    <div class="card span4"><div class="h">Preset Panel</div>
+      <div style="display:flex;gap:6px"><input id="presetName" placeholder="Preset name"><button class="btn" onclick="savePreset()">Save</button></div>
+      <div style="display:flex;gap:6px;margin-top:6px"><select id="presetSelect"></select><button class="btn" onclick="loadPreset()">Load</button></div>
+      <div id="presetRows" class="muted" style="margin-top:8px"></div>
+    </div>
+    <div class="card span4"><div class="h">Paper Trade-Through</div>
+      <div id="truthRows"></div>
+    </div>
+    <div class="card span6"><div class="h">Entry Mixer Faders</div><div id="entryParams"></div></div>
+    <div class="card span6"><div class="h">Options Contract Mixer</div><div id="contractParams"></div></div>
+    <div class="card span12">
+      <div class="h">Symbol Channel Strips</div>
+      <table><thead><tr><th>Symbol</th><th>Last Reason</th><th>Action</th></tr></thead><tbody id="symbolRows"></tbody></table>
+    </div>
+  </div>
+</div>
+<script>
+const $=(id)=>document.getElementById(id);
+const money=(v)=>Number(v||0).toLocaleString(undefined,{style:'currency',currency:'USD'});
+const pct=(v)=>`${Number(v||0).toFixed(2)}%`;
+const row=(k,v)=>`<div class="row"><span class="muted">${k}</span><b>${v}</b></div>`;
+let paramState={};
+const ENTRY_KEYS=["MIN_SIGNAL_SCORE","DIRECTION_CONVICTION_MIN","RVOL_MIN","ATR_PCT_MIN","MOVEMENT_FORCE_MIN_PCT","FAST_START_MIN_SIGNAL_SCORE","FAST_START_MIN_DIRECTION_SCORE","FAST_START_MIN_RVOL","FAST_START_MIN_ABS_ROC_PCT","FAST_START_MIN_VWAP_DISTANCE_PCT"];
+const CONTRACT_KEYS=["ENTRY_MAX_QUOTE_SPREAD_PCT","MAX_PREMIUM_PER_TRADE_USD","MAX_CONTRACTS_PER_ENTRY","ENTRY_LIMIT_ATTEMPTS","ENABLE_ENTRY_MARKET_FALLBACK"];
+function token(){return localStorage.getItem("dash_token")||""}
+function saveToken(){localStorage.setItem("dash_token",$("token").value.trim())}
+async function api(url,opt={}){
+  const headers=Object.assign({"Content-Type":"application/json"},opt.headers||{});
+  const t=token(); if(t) headers["X-Control-Token"]=t;
+  const res=await fetch(url,Object.assign({method:"GET",headers},opt));
+  const j=await res.json().catch(()=>({ok:false,error:"bad json"})); if(!res.ok) throw new Error(j.error||res.statusText); return j;
+}
+async function guarded(url,body={}){
+  if(!confirm(`Confirm ${url}?`)) return;
+  try{await api(url,{method:"POST",body:JSON.stringify(body)}); await loadAll();}catch(e){alert(e.message)}
+}
+function renderParamGroup(targetId,keys){
+  const rows=(paramState.parameters||[]).filter(p=>keys.includes(p.name));
+  $(targetId).innerHTML=rows.map(p=>`<div class="row"><span>${p.name}</span><span><input id="p_${p.name}" value="${p.override_value??p.current_value}" style="width:140px"></span></div>`).join("")+
+  `<div style="margin-top:8px;display:flex;gap:8px"><button class="btn" onclick="previewApply(${JSON.stringify(keys).replace(/"/g,'&quot;')})">Preview</button><button class="btn green" onclick="applyGroup(${JSON.stringify(keys).replace(/"/g,'&quot;')})">Apply</button><button class="btn" onclick="revertOverrides()">Revert All</button></div>`;
+}
+async function previewApply(keys){
+  const overrides={}; keys.forEach(k=>overrides[k]=$(`p_${k}`)?.value);
+  try{const r=await api("/api/runtime/parameters/preview",{method:"POST",body:JSON.stringify({overrides})}); alert(`Preview ok=${r.ok}\nErrors=${JSON.stringify(r.errors||{})}`)}catch(e){alert(e.message)}
+}
+async function applyGroup(keys){
+  const overrides={}; keys.forEach(k=>overrides[k]=$(`p_${k}`)?.value);
+  await guarded("/api/runtime/parameters/apply",{overrides,reason:"mixer_apply"});
+}
+async function revertOverrides(){await guarded("/api/runtime/parameters/revert",{})}
+async function savePreset(){const name=$("presetName").value.trim(); if(!name) return alert("Preset name required"); await guarded("/api/runtime/presets/save",{name})}
+async function loadPreset(){const name=$("presetSelect").value; if(!name) return; await guarded("/api/runtime/presets/load",{name})}
+async function muteTicker(t){await guarded("/api/runtime/symbols/mute",{ticker:t})}
+async function soloTicker(t){await guarded("/api/runtime/symbols/solo",{tickers:[t]})}
+async function loadAll(){
+  $("token").value=token();
+  const [truth,params,presets]=await Promise.all([api("/api/truth"),api("/api/runtime/parameters"),api("/api/runtime/presets")]);
+  paramState=params;
+  $("updated").textContent=new Date().toLocaleTimeString();
+  $("modePill").textContent=`mode: ${(truth.mode||'--').toUpperCase()}`;
+  const rt=truth.runtime||{}, bus=truth.execution_bus||{}, acct=truth.account||{}, real=truth.realized||{}, ord=truth.orders||{};
+  $("masterRows").innerHTML=
+    row("Trading Status", rt.manual_stop?"PAUSED":"ON")+
+    row("Paper/Live",(truth.mode||"").toUpperCase())+
+    row("Dry Run", rt.dry_run?"ON":"OFF")+
+    row("Open Positions", (truth.positions||[]).length)+
+    row("Orders Submitted Today", ord.submitted_today||0)+
+    row("Filled Orders Today", ord.filled_today||0)+
+    row("Realized P/L", money(real.realized_pnl_usd||0))+
+    row("Unrealized P/L", money(real.open_unrealized_pnl_usd||0))+
+    row("Win Rate", pct(real.win_rate_pct||0))+
+    row("Zero Trade Warning", bus.zero_trade_cycle_reason||"none");
+  $("busRows").innerHTML=
+    row("raw_scan_rows_count", bus.raw_scan_rows_count||0)+
+    row("scanner_candidate_count", bus.scanner_candidate_count||0)+
+    row("scanner_failed_count", bus.scanner_failed_count||0)+
+    row("execution_candidate_count", bus.execution_candidate_count||0)+
+    row("trade_attempted_count", bus.trade_attempted_count||0)+
+    row("trade_resting_count", bus.trade_resting_count||0)+
+    row("trade_filled_count", bus.trade_filled_count||0)+
+    row("zero_trade_cycle_reason", bus.zero_trade_cycle_reason||"n/a");
+  $("truthRows").innerHTML=
+    row("Equity", money(acct.equity||0))+
+    row("Buying Power", money(acct.buying_power||0))+
+    row("Direction Accuracy", pct((bus.direction_accuracy_pct||0)))+
+    row("Loss Causes", JSON.stringify((bus.loss_cause_breakdown||{})));
+  $("presetSelect").innerHTML=`<option value="">Select preset</option>`+(presets.presets||[]).map(p=>`<option>${p.name}</option>`).join("");
+  $("presetRows").textContent=`Saved presets: ${(presets.presets||[]).length}`;
+  renderParamGroup("entryParams",ENTRY_KEYS);
+  renderParamGroup("contractParams",CONTRACT_KEYS);
+  const top=((truth.scanner||{}).recent_rows||[]).slice(0,20);
+  $("symbolRows").innerHTML=top.map(r=>{const s=(r.symbol||r.ticker||"").toUpperCase(); return `<tr><td>${s}</td><td>${r.reason||""}</td><td><button class="btn" onclick="muteTicker('${s}')">Mute</button> <button class="btn" onclick="soloTicker('${s}')">Solo</button></td></tr>`}).join("") || `<tr><td colspan="3" class="muted">No symbols</td></tr>`;
+}
+loadAll().catch(e=>alert(e.message)); setInterval(()=>loadAll().catch(()=>{}),10000);
+</script>
+</body>
+</html>
 '''
 
 
