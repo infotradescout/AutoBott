@@ -5363,6 +5363,12 @@ def main():
             "entry_orders_submitted": 0,
             "entry_order_events": [],
             "entries_filled": 0,
+            "contract_selected_count": 0,
+            "contract_rejected_count_by_reason": {},
+            "order_attempted_count": 0,
+            "order_rejected_count_by_reason": {},
+            "trade_resting_count": 0,
+            "trade_filled_count": 0,
             "signal_outcomes": {},
             "skips": {},
             "exceptions": [],
@@ -5404,6 +5410,14 @@ def main():
                 skips = {}
             skips[reason] = int(skips.get(reason, 0)) + 1
             entry_debug["skips"] = skips
+
+        def _bump_counter_bucket(field: str, key: str) -> None:
+            data = entry_debug.get(field, {})
+            if not isinstance(data, dict):
+                data = {}
+            token = str(key or "").strip().lower() or "unknown"
+            data[token] = int(data.get(token, 0)) + 1
+            entry_debug[field] = data
 
         def _mark_stage4_reject(*, reason: str, ticker: str, detail: str = "") -> None:
             reject_reasons = entry_debug.get("entry_stage4_reject_reasons", {})
@@ -5554,8 +5568,8 @@ def main():
             entry_debug["entry_stage4_reject_reasons"] = reject_reasons
 
             candidates = int(entry_debug.get("signals_considered", 0) or 0)
-            attempts = int(entry_debug.get("entry_orders_submitted", 0) or 0)
-            fills = int(entry_debug.get("entries_filled", 0) or 0)
+            attempts = int(entry_debug.get("order_attempted_count", entry_debug.get("entry_orders_submitted", 0)) or 0)
+            fills = int(entry_debug.get("trade_filled_count", entry_debug.get("entries_filled", 0)) or 0)
             events = entry_debug.get("entry_order_events", [])
             resting = 0
             if isinstance(events, list):
@@ -5596,6 +5610,14 @@ def main():
                 "execution_candidate_count": int(entry_debug.get("execution_candidate_count", 0) or 0),
                 "execution_rejected_count_by_reason": dict(sorted(reject_reasons.items())),
                 "execution_rejected_count": int(sum(int(v) for v in reject_reasons.values())),
+                "contract_selected_count": int(entry_debug.get("contract_selected_count", 0) or 0),
+                "contract_rejected_count_by_reason": dict(
+                    sorted(dict(entry_debug.get("contract_rejected_count_by_reason") or {}).items())
+                ),
+                "order_attempted_count": attempts,
+                "order_rejected_count_by_reason": dict(
+                    sorted(dict(entry_debug.get("order_rejected_count_by_reason") or {}).items())
+                ),
                 "scanner_candidates": candidates,
                 "trade_attempted_count": attempts,
                 "rejection_reasons": dict(sorted(reject_reasons.items())),
@@ -5621,6 +5643,17 @@ def main():
             if attempts <= 0:
                 if int(entry_debug.get("execution_candidate_count", 0) or 0) <= 0:
                     zero_trade_cycle_reason = "no_execution_candidates_after_filters"
+                elif int(entry_debug.get("contract_selected_count", 0) or 0) <= 0 and dict(
+                    entry_debug.get("contract_rejected_count_by_reason") or {}
+                ):
+                    top_contract_reason = sorted(
+                        (
+                            (str(k), int(v))
+                            for k, v in dict(entry_debug.get("contract_rejected_count_by_reason") or {}).items()
+                        ),
+                        key=lambda item: (-item[1], item[0]),
+                    )[0][0]
+                    zero_trade_cycle_reason = f"contract_rejected:{top_contract_reason}"
                 elif reject_reasons:
                     top_reason = sorted(
                         ((str(k), int(v)) for k, v in reject_reasons.items()),
@@ -5631,10 +5664,13 @@ def main():
                     zero_trade_cycle_reason = "unknown_block_before_order_attempt"
             entry_debug["trade_through_kpi"]["zero_trade_cycle_reason"] = zero_trade_cycle_reason
             print(
-                f"[{ts(now_et)}] TRADE-THROUGH KPI raw={int(entry_debug.get('raw_scan_rows_count', 0) or 0)} "
-                f"scanner_candidates={int(entry_debug.get('scanner_candidate_count', 0) or 0)} "
-                f"exec_candidates={int(entry_debug.get('execution_candidate_count', 0) or 0)} "
-                f"attempts={attempts} resting={resting} fills={fills} "
+                f"[{ts(now_et)}] TRADE-THROUGH KPI scanner_passed_count={int(entry_debug.get('scanner_candidate_count', 0) or 0)} "
+                f"execution_candidate_count={int(entry_debug.get('execution_candidate_count', 0) or 0)} "
+                f"contract_selected_count={int(entry_debug.get('contract_selected_count', 0) or 0)} "
+                f"contract_rejected_count_by_reason={dict(entry_debug.get('contract_rejected_count_by_reason', {}) or {})} "
+                f"order_attempted_count={attempts} "
+                f"order_rejected_count_by_reason={dict(entry_debug.get('order_rejected_count_by_reason', {}) or {})} "
+                f"trade_resting_count={resting} trade_filled_count={fills} "
                 f"zero_reason={zero_trade_cycle_reason or 'n/a'} day_pnl=${trade_telemetry_total_pnl_usd:.2f} "
                 f"premium_deployed=${premium_deployed_usd:.2f} premium_return={premium_return_pct:.2f}% "
                 f"portfolio_return={portfolio_return_pct:.2f}% "
@@ -6381,14 +6417,20 @@ def main():
                 if not contract:
                     _mark_skip("no_eligible_option_contract")
                     _mark_stage4_reject(reason="no_eligible_option_contract", ticker=ticker)
+                    _bump_counter_bucket(
+                        "contract_rejected_count_by_reason",
+                        f"no_eligible_option_contract:{str(contract_reason or 'unknown')}",
+                    )
                     print(f"[{ts(now_et)}] {ticker}: skip (no eligible option contract: {contract_reason}).")
                     time.sleep(config.RATE_LIMIT_SLEEP_SECONDS)
                     continue
 
+                entry_debug["contract_selected_count"] = int(entry_debug.get("contract_selected_count", 0) or 0) + 1
                 option_symbol = contract["symbol"]
                 if not _option_symbol_matches_direction(option_symbol, direction):
                     _mark_skip("contract_direction_mismatch")
                     _mark_stage4_reject(reason="contract_direction_mismatch", ticker=ticker)
+                    _bump_counter_bucket("contract_rejected_count_by_reason", "contract_direction_mismatch")
                     print(
                         f"[{ts(now_et)}] {ticker}: skip (contract direction mismatch "
                         f"{option_symbol} vs {direction.upper()})."
@@ -6776,6 +6818,7 @@ def main():
                 )
                 entry_debug["entry_orders_submitted"] = int(entry_debug.get("entry_orders_submitted", 0)) + int(entry_result.get("attempts", 0) or 0)
                 entry_debug["scan_pass_count"] = int(entry_debug.get("scan_pass_count", 0) or 0) + int(entry_result.get("attempts", 0) or 0)
+                entry_debug["order_attempted_count"] = int(entry_debug.get("order_attempted_count", 0) or 0) + int(entry_result.get("attempts", 0) or 0)
                 _record_entry_order_event(ticker, option_symbol, entry_result)
                 _set_signal_outcome(
                     ticker=ticker,
@@ -6787,6 +6830,7 @@ def main():
                         alpaca_active_buy_orders_by_ticker[ticker] = (
                             int(alpaca_active_buy_orders_by_ticker.get(ticker, 0)) + 1
                         )
+                        entry_debug["trade_resting_count"] = int(entry_debug.get("trade_resting_count", 0) or 0) + 1
                         _mark_skip("entry_order_resting")
                         _set_signal_outcome(
                             ticker=ticker,
@@ -6801,6 +6845,10 @@ def main():
                         _save_runtime_state()
                         continue
                     _mark_skip("entry_not_filled_after_retry")
+                    _bump_counter_bucket(
+                        "order_rejected_count_by_reason",
+                        str(entry_result.get("status", "unknown") or "unknown"),
+                    )
                     _set_signal_outcome(
                         ticker=ticker,
                         disposition="order_not_filled",
@@ -6824,6 +6872,7 @@ def main():
                 _record_entry_order_event(ticker, option_symbol, entry_result, confirmed_qty=confirmed_qty)
                 if confirmed_qty <= 0:
                     _mark_skip("fill_not_confirmed_no_position")
+                    _bump_counter_bucket("order_rejected_count_by_reason", "fill_not_confirmed_no_position")
                     _set_signal_outcome(
                         ticker=ticker,
                         disposition="fill_not_confirmed_no_position",
@@ -6992,6 +7041,7 @@ def main():
                 if ticker not in set(str(s).upper() for s in getattr(config, "PREFERRED_CORE_TICKERS", ())):
                     non_core_entries_today_count += 1
                 entry_debug["entries_filled"] = int(entry_debug.get("entries_filled", 0)) + 1
+                entry_debug["trade_filled_count"] = int(entry_debug.get("trade_filled_count", 0) or 0) + 1
                 _set_signal_outcome(ticker=ticker, disposition="order_filled")
                 _save_runtime_state()
                 time.sleep(config.RATE_LIMIT_SLEEP_SECONDS)
