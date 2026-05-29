@@ -5181,6 +5181,8 @@ def main():
             print(f"[{ts(now_et)}] MAIN LOOP SCAN INVOKE watchlist_count={len(watchlist)}")
             signals = run_scan(watchlist) if watchlist else []
             print(f"[{ts(now_et)}] SCAN CALL RETURNED signals_count={len(signals)}")
+            print(f"[{ts(now_et)}] EXECUTION BRIDGE CHECKPOINT A post_scan_return")
+            _touch_heartbeat()
         raw_scan_rows_count = len(watchlist)
         raw_scanner_candidate_count = len(signals)
         raw_scanner_failed_count = max(0, raw_scan_rows_count - raw_scanner_candidate_count)
@@ -5200,6 +5202,8 @@ def main():
             signals = merged
             premarket_opening_signals = []
             _save_runtime_state()
+        print(f"[{ts(now_et)}] EXECUTION BRIDGE CHECKPOINT B post_signal_merge signals_count={len(signals)}")
+        _touch_heartbeat()
 
         def _update_pattern_override_rollback(now_et: datetime) -> tuple[bool, str]:
             nonlocal pattern_override_disabled_until, pattern_override_disable_reason
@@ -5315,6 +5319,7 @@ def main():
         queue_ranked = False
         if bool(getattr(config, "ENABLE_CANDIDATE_QUEUE", True)):
             try:
+                _touch_heartbeat()
                 queue_payload = candidate_queue.build_candidate_queue(
                     list(signals),
                     market_context=active_market_context,
@@ -5698,6 +5703,8 @@ def main():
             print("[{0}] EXECUTION BRIDGE BLOCKED reason=empty_watchlist".format(ts(now_et)))
         elif not signals:
             print("[{0}] EXECUTION BRIDGE BLOCKED reason=no_signals_after_filters".format(ts(now_et)))
+        print(f"[{ts(now_et)}] EXECUTION BRIDGE CHECKPOINT C pre_execution_loop signals_count={len(signals)}")
+        _touch_heartbeat()
         print(f"[{ts(now_et)}] EXECUTION LOOP ABOUT TO START signals_count={len(signals)}")
         cycle_finalizer_now_et = datetime.now(tz)
         try:
