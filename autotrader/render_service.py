@@ -363,6 +363,20 @@ def _historical_learning_enabled() -> bool:
     return _env_bool("ENABLE_HISTORICAL_REPLAY_LEARNING", True)
 
 
+def _historical_learning_allowed_during_market_hours() -> bool:
+    return _env_bool("ENABLE_HISTORICAL_REPLAY_DURING_MARKET_HOURS", False)
+
+
+def _is_regular_market_hours(now_et: datetime | None = None) -> bool:
+    now = now_et or _now_et_dt()
+    if now.weekday() >= 5:
+        return False
+    h = now.hour
+    m = now.minute
+    minutes = h * 60 + m
+    return (9 * 60 + 30) <= minutes < (16 * 60)
+
+
 def _historical_learning_offline() -> bool:
     return _env_bool("HISTORICAL_REPLAY_OFFLINE", False)
 
@@ -735,6 +749,22 @@ def _run_historical_learning_supervisor() -> None:
     next_auto_promote_eval_at = 0.0
     while True:
         try:
+            if _is_regular_market_hours() and not _historical_learning_allowed_during_market_hours():
+                running_status = replay_farm.status_workers(output_root=output_root)
+                running_names = [
+                    str(item.get("worker", "") or "")
+                    for item in running_status.get("workers", [])
+                    if isinstance(item, dict) and bool(item.get("running", False))
+                ]
+                if running_names:
+                    worker_names = ",".join(running_names)
+                    replay_farm.stop_workers(worker_names=worker_names, output_root=output_root, worker_specs=specs)
+                    print(
+                        "[render_service] Historical replay paused during regular market hours "
+                        f"(workers_stopped={worker_names})."
+                    )
+                time.sleep(check_seconds)
+                continue
             status = replay_farm.status_workers(output_root=output_root)
             running_by_name = {
                 str(item.get("worker", "") or ""): bool(item.get("running", False))

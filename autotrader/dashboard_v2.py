@@ -35,6 +35,7 @@ except ImportError:
 from state_store import get_state_health, load_bot_state, save_bot_state
 from trading_control import load_trading_control, set_dry_run, set_manual_stop
 from watchlist_control import load_watchlist_control, update_watchlist_control
+from data import AlpacaDataClient
 
 API_KEY = str(os.getenv("ALPACA_API_KEY") or "").strip()
 SECRET_KEY = str(os.getenv("ALPACA_SECRET_KEY") or "").strip()
@@ -47,6 +48,8 @@ DISPLAY_TZ = pytz.timezone(str(os.getenv("DASHBOARD_DISPLAY_TZ", "America/Chicag
 SCAN_LOG_CSV = Path(getattr(config, "SCAN_LOG_CSV_PATH"))
 RUNTIME_OVERRIDES_PATH = Path(getattr(config, "DATA_DIR")) / "runtime_parameter_overrides.json"
 RUNTIME_PRESETS_PATH = Path(getattr(config, "DATA_DIR")) / "runtime_parameter_presets.json"
+_TRUTH_CACHE: dict[str, Any] = {"ts": 0.0, "payload": None}
+_TRUTH_CACHE_SECONDS = max(1, int(getattr(config, "DASHBOARD_TRUTH_CACHE_SECONDS", 10) or 10))
 
 RUNTIME_PARAM_SPECS: dict[str, dict[str, Any]] = {
     "MIN_SIGNAL_SCORE": {"type": "float", "min": 0.0, "max": 20.0},
@@ -760,6 +763,7 @@ def _truth_payload() -> dict[str, Any]:
         },
         "realized": realized,
         "scanner": scanner,
+        "rate_limit": AlpacaDataClient.get_rate_limit_status(),
     }
 
 
@@ -935,7 +939,15 @@ def healthz():
 
 @app.get("/api/truth")
 def api_truth():
-    return jsonify(_truth_payload())
+    now = time_module.time()
+    cached = _TRUTH_CACHE.get("payload")
+    cached_ts = float(_TRUTH_CACHE.get("ts", 0.0) or 0.0)
+    if cached is not None and (now - cached_ts) < _TRUTH_CACHE_SECONDS:
+        return jsonify(cached)
+    payload = _truth_payload()
+    _TRUTH_CACHE["payload"] = payload
+    _TRUTH_CACHE["ts"] = now
+    return jsonify(payload)
 
 
 @app.get("/api/trading-control")
@@ -1334,7 +1346,7 @@ async function api(url,opt={}){
 }
 async function guarded(url,body={}){
   if(!confirm(`Confirm ${url}?`)) return;
-  try{await api(url,{method:"POST",body:JSON.stringify(body)}); await loadAll();}catch(e){alert(e.message)}
+  try{await api(url,{method:"POST",body:JSON.stringify(body)}); await loadAll(true);}catch(e){alert(e.message)}
 }
 function renderParamGroup(targetId,keys){
   const rows=(paramState.parameters||[]).filter(p=>keys.includes(p.name));
@@ -1354,13 +1366,25 @@ async function savePreset(){const name=$("presetName").value.trim(); if(!name) r
 async function loadPreset(){const name=$("presetSelect").value; if(!name) return; await guarded("/api/runtime/presets/load",{name})}
 async function muteTicker(t){await guarded("/api/runtime/symbols/mute",{ticker:t})}
 async function soloTicker(t){await guarded("/api/runtime/symbols/solo",{tickers:[t]})}
-async function loadAll(){
+let lastTruth=null, lastParams=null, lastPresets=null;
+async function loadAll(force=false){
   $("token").value=token();
-  const [truth,params,presets]=await Promise.all([api("/api/truth"),api("/api/runtime/parameters"),api("/api/runtime/presets")]);
+  const now=Date.now();
+  if(force || !lastTruth || (now-(lastTruth.ts||0))>=10000){
+    lastTruth={ts:now,data:await api("/api/truth")};
+  }
+  if(force || !lastParams || (now-(lastParams.ts||0))>=60000){
+    lastParams={ts:now,data:await api("/api/runtime/parameters")};
+  }
+  if(force || !lastPresets){
+    lastPresets={ts:now,data:await api("/api/runtime/presets")};
+  }
+  const truth=lastTruth.data, params=lastParams.data, presets=lastPresets.data;
   paramState=params;
   $("updated").textContent=new Date().toLocaleTimeString();
   $("modePill").textContent=`mode: ${(truth.mode||'--').toUpperCase()}`;
   const rt=truth.runtime||{}, bus=truth.execution_bus||{}, acct=truth.account||{}, real=truth.realized||{}, ord=truth.orders||{};
+  const rl=truth.rate_limit||{};
   $("masterRows").innerHTML=
     row("Trading Status", rt.manual_stop?"PAUSED":"ON")+
     row("Paper/Live",(truth.mode||"").toUpperCase())+
@@ -1385,7 +1409,10 @@ async function loadAll(){
     row("Equity", money(acct.equity||0))+
     row("Buying Power", money(acct.buying_power||0))+
     row("Direction Accuracy", pct((bus.direction_accuracy_pct||0)))+
-    row("Loss Causes", JSON.stringify((bus.loss_cause_breakdown||{})));
+    row("Loss Causes", JSON.stringify((bus.loss_cause_breakdown||{})))+
+    row("Data Source Degraded", (rl.data_source_degraded?"YES":"NO"))+
+    row("429 Count", rl.recent_429_count||0)+
+    row("429 Cooldown(s)", rl.cooldown_remaining_seconds||0);
   $("presetSelect").innerHTML=`<option value="">Select preset</option>`+(presets.presets||[]).map(p=>`<option>${p.name}</option>`).join("");
   $("presetRows").textContent=`Saved presets: ${(presets.presets||[]).length}`;
   renderParamGroup("entryParams",ENTRY_KEYS);
@@ -1393,7 +1420,7 @@ async function loadAll(){
   const top=((truth.scanner||{}).recent_rows||[]).slice(0,20);
   $("symbolRows").innerHTML=top.map(r=>{const s=(r.symbol||r.ticker||"").toUpperCase(); return `<tr><td>${s}</td><td>${r.reason||""}</td><td><button class="btn" onclick="muteTicker('${s}')">Mute</button> <button class="btn" onclick="soloTicker('${s}')">Solo</button></td></tr>`}).join("") || `<tr><td colspan="3" class="muted">No symbols</td></tr>`;
 }
-loadAll().catch(e=>alert(e.message)); setInterval(()=>loadAll().catch(()=>{}),10000);
+loadAll(true).catch(e=>alert(e.message)); setInterval(()=>loadAll(false).catch(()=>{}),10000);
 </script>
 </body>
 </html>

@@ -22,6 +22,15 @@ _LIVE_TRADE_BASE_URL = "https://api.alpaca.markets"
 
 
 class AlpacaDataClient:
+    _shared_rate_limit: dict[str, Any] = {
+        "recent_429_count": 0,
+        "last_429_at_epoch": 0.0,
+        "cooldown_until_epoch": 0.0,
+        "cooldown_seconds": 0.0,
+        "degraded": False,
+        "last_error": "",
+    }
+
     def __init__(self, api_key: str, secret_key: str, paper: bool = True):
         self.api_key = api_key
         self.secret_key = secret_key
@@ -77,6 +86,20 @@ class AlpacaDataClient:
         self._bars_cache_ttl_seconds = max(1.0, float(getattr(config, "DATA_BARS_CACHE_TTL_SECONDS", 12.0) or 12.0))
         self._alpaca_backoff_until_ts = 0.0
         self._alpaca_backoff_seconds = max(1.0, float(getattr(config, "ALPACA_429_BACKOFF_SECONDS", 2.0) or 2.0))
+        self._alpaca_cooldown_seconds = max(
+            self._alpaca_backoff_seconds,
+            float(getattr(config, "ALPACA_429_COOLDOWN_SECONDS", 90.0) or 90.0),
+        )
+
+    @classmethod
+    def get_rate_limit_status(cls) -> dict[str, Any]:
+        now = time.time()
+        shared = dict(cls._shared_rate_limit)
+        cooldown_until = float(shared.get("cooldown_until_epoch", 0.0) or 0.0)
+        remaining = max(0.0, cooldown_until - now)
+        shared["cooldown_remaining_seconds"] = round(remaining, 2)
+        shared["data_source_degraded"] = bool(shared.get("degraded", False) and remaining > 0)
+        return shared
 
     def _bars_cache_get(self, key: tuple[Any, ...]) -> pd.DataFrame | None:
         cached = self._bars_cache.get(key)
@@ -101,7 +124,12 @@ class AlpacaDataClient:
         attempts: int = 3,
     ) -> dict[str, Any]:
         last_exc: Exception | None = None
+        endpoint = str(url.split("?", 1)[0] if "?" in str(url) else url)
         for attempt in range(1, max(1, attempts) + 1):
+            shared_cooldown_until = float(self._shared_rate_limit.get("cooldown_until_epoch", 0.0) or 0.0)
+            if shared_cooldown_until > time.time():
+                remaining = shared_cooldown_until - time.time()
+                raise requests.HTTPError(f"429 cooldown active for {endpoint} ({remaining:.1f}s remaining)")
             wait_seconds = self._alpaca_backoff_until_ts - time.time()
             if wait_seconds > 0:
                 time.sleep(min(wait_seconds, 3.0))
@@ -114,12 +142,27 @@ class AlpacaDataClient:
                         retry_after = float(retry_after_raw) if retry_after_raw is not None else self._alpaca_backoff_seconds
                     except (TypeError, ValueError):
                         retry_after = self._alpaca_backoff_seconds
-                    time.sleep(max(self._alpaca_backoff_seconds, retry_after))
+                    cooldown_seconds = max(self._alpaca_cooldown_seconds, self._alpaca_backoff_seconds, retry_after)
+                    cooldown_until = time.time() + cooldown_seconds
+                    self._shared_rate_limit.update(
+                        {
+                            "recent_429_count": int(self._shared_rate_limit.get("recent_429_count", 0) or 0) + 1,
+                            "last_429_at_epoch": time.time(),
+                            "cooldown_until_epoch": cooldown_until,
+                            "cooldown_seconds": float(cooldown_seconds),
+                            "degraded": True,
+                            "last_error": f"429 Too Many Requests for {endpoint}",
+                        }
+                    )
+                    time.sleep(min(max(self._alpaca_backoff_seconds, retry_after), 3.0))
                     raise requests.HTTPError(f"429 Too Many Requests for {url}", response=resp)
                 resp.raise_for_status()
+                if float(self._shared_rate_limit.get("cooldown_until_epoch", 0.0) or 0.0) <= time.time():
+                    self._shared_rate_limit["degraded"] = False
                 return resp.json() if resp.content else {}
             except Exception as exc:  # noqa: BLE001
                 last_exc = exc
+                self._shared_rate_limit["last_error"] = str(exc)[:200]
                 if attempt >= attempts:
                     break
                 time.sleep(min(1.0 * attempt, 3.0))
