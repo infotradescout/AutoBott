@@ -3006,6 +3006,13 @@ def _build_scan_universe(data_client: AlpacaDataClient) -> list[str]:
     protected = set(base + core)
     base = list(dict.fromkeys(base + core))
     mover_candidates: list[str] = []
+    rate_limit_status = data_client.get_rate_limit_status() if hasattr(data_client, "get_rate_limit_status") else {}
+    cooldown_remaining = 0.0
+    if isinstance(rate_limit_status, dict):
+        try:
+            cooldown_remaining = float(rate_limit_status.get("cooldown_remaining_seconds", 0.0) or 0.0)
+        except (TypeError, ValueError):
+            cooldown_remaining = 0.0
     universe_mode = str(getattr(config, "UNIVERSE_MODE", "core") or "core").strip().lower()
     if universe_mode in {"all", "all_optionable", "all_optionable_assets"}:
         try:
@@ -3015,7 +3022,8 @@ def _build_scan_universe(data_client: AlpacaDataClient) -> list[str]:
             base.extend(str(sym).upper() for sym in all_optionable if str(sym).strip())
         except Exception as exc:  # noqa: BLE001
             print(f"[{ts()}] All-optionable universe unavailable ({exc}); using core/movers fallback.")
-    if config.AUTO_EXPAND_UNIVERSE_WITH_MOVERS or universe_mode == "movers":
+    allow_movers = cooldown_remaining <= 0
+    if (config.AUTO_EXPAND_UNIVERSE_WITH_MOVERS or universe_mode == "movers") and allow_movers:
         try:
             gainers, losers = data_client.get_top_movers(top=int(config.UNIVERSE_MOVER_TOP))
             mover_candidates.extend(str(sym).upper() for sym in gainers if str(sym).strip())
@@ -3035,7 +3043,11 @@ def _build_scan_universe(data_client: AlpacaDataClient) -> list[str]:
 
     deduped = list(dict.fromkeys(base + filtered_movers))
     max_tickers = max(1, int(config.UNIVERSE_MAX_TICKERS))
-    if len(deduped) < max_tickers and universe_mode in {"movers", "all", "all_optionable", "all_optionable_assets"}:
+    if (
+        len(deduped) < max_tickers
+        and universe_mode in {"movers", "all", "all_optionable", "all_optionable_assets"}
+        and cooldown_remaining <= 0
+    ):
         try:
             supplement = data_client.get_all_optionable_tickers(max_count=max_tickers * 3)
             before = len(deduped)
@@ -3048,6 +3060,12 @@ def _build_scan_universe(data_client: AlpacaDataClient) -> list[str]:
                 )
         except Exception as exc:  # noqa: BLE001
             print(f"[{ts()}] Universe optionable supplement unavailable ({exc}); scanning {len(deduped)} tickers.")
+    if cooldown_remaining > 0:
+        deduped = list(dict.fromkeys(core + base))
+        print(
+            f"[{ts()}] Universe narrowed to core/base while Alpaca cooldown is active "
+            f"({cooldown_remaining:.1f}s remaining)."
+        )
     if len(deduped) <= len(base):
         print(
             f"[{ts()}] WARNING: mover universe produced no extra tradable symbols; "
