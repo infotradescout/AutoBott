@@ -7919,6 +7919,7 @@ def main():
                     else:
                         consecutive_losses = 0
 
+                    remaining_qty = max(0, qty - filled_close_qty)
                     ticker = str(meta.get("ticker", "") or "").upper()
                     reversal_direction = ""
                     reentries_used = int(ticker_reentries_used.get(ticker, 0)) if ticker else 0
@@ -7980,7 +7981,6 @@ def main():
                         ticker_reentry_armed[ticker] = False
                         ticker_reentry_expected_direction[ticker] = ""
 
-                    remaining_qty = max(0, qty - filled_close_qty)
                     if remaining_qty <= 0:
                         open_trade_meta.pop(symbol, None)
                     else:
