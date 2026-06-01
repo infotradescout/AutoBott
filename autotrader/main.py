@@ -8007,6 +8007,16 @@ def main():
 
         _save_runtime_state()
         loop_sleep_seconds = max(1, int(config.LOOP_INTERVAL_SECONDS))
+        cooldown_remaining = 0.0
+        try:
+            rl_status = data_client.get_rate_limit_status()
+            if isinstance(rl_status, dict):
+                cooldown_remaining = float(rl_status.get("cooldown_remaining_seconds", 0.0) or 0.0)
+        except Exception:
+            cooldown_remaining = 0.0
+        if cooldown_remaining > 0:
+            # When Alpaca is in cooldown, avoid rapid re-scans that amplify 429s and memory/log churn.
+            loop_sleep_seconds = max(loop_sleep_seconds, min(60, int(cooldown_remaining)))
         if bool(getattr(config, "CONTINUOUS_ENTRY_SEARCH_ENABLED", False)):
             entries_filled_this_loop = int(entry_debug.get("entries_filled", 0) or 0)
             orders_submitted_this_loop = int(entry_debug.get("entry_orders_submitted", 0) or 0)
@@ -8022,6 +8032,7 @@ def main():
                 and (max_positions <= 0 or open_count < max_positions)
                 and is_at_or_after(now_et, config.NO_NEW_TRADES_BEFORE)
                 and not is_at_or_after(now_et, config.NO_NEW_TRADES_AFTER)
+                and cooldown_remaining <= 0
             )
             if can_search_for_entry:
                 loop_sleep_seconds = max(

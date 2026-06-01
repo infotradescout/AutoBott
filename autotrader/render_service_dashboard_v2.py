@@ -11,6 +11,7 @@ and registers always-available quick-link buttons.
 from __future__ import annotations
 
 import csv
+import os
 import runpy
 import sys
 import threading
@@ -33,6 +34,10 @@ register_quick_links(dashboard_v2.app)
 
 
 def _start_learning_memory_worker() -> None:
+    enabled = str(os.getenv("ENABLE_DECISION_MEMORY_WORKER", "") or "").strip().lower() in {"1", "true", "yes", "y", "on"}
+    if not enabled:
+        print("[decision_memory] background worker disabled (set ENABLE_DECISION_MEMORY_WORKER=true to enable).")
+        return
     try:
         worker = threading.Thread(target=run_learning_memory_forever, daemon=True)
         worker.start()

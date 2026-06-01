@@ -102,7 +102,7 @@ TRADER_HEARTBEAT_STALE_SECONDS = _env_int(
     minimum=300,
     maximum=86400,
 )
-ENABLE_EMBEDDED_TRADER_FALLBACK = _env_bool("ENABLE_EMBEDDED_TRADER_FALLBACK", True)
+ENABLE_EMBEDDED_TRADER_FALLBACK = _env_bool("ENABLE_EMBEDDED_TRADER_FALLBACK", False)
 
 _embedded_trader_lock = threading.Lock()
 _embedded_trader_thread: threading.Thread | None = None

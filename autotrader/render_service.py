@@ -1166,6 +1166,8 @@ def _run_market_context_worker() -> None:
 
 
 if __name__ == "__main__":
+    # Render's starter instance is memory-constrained; keep single trader loop ownership in render_service.
+    os.environ.setdefault("ENABLE_EMBEDDED_TRADER_FALLBACK", "false")
     _apply_boot_auto_resume()
     _print_startup_readiness()
     trader_thread = threading.Thread(target=_run_trader_forever, daemon=True, name="autobott-trader")
