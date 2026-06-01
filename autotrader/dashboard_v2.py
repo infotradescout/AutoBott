@@ -627,6 +627,14 @@ def _runtime() -> dict[str, Any]:
     learning_summary = _read_json_file(learning_summary_path)
     age = _heartbeat_age_seconds(state)
     stale = bool(age is None or age >= TRADER_HEARTBEAT_STALE_SECONDS)
+    trades_path = Path(getattr(config, "TRADES_CSV_PATH"))
+    latest_trade_rows: list[dict[str, Any]] = []
+    try:
+        if trades_path.exists():
+            with trades_path.open("r", newline="", encoding="utf-8") as handle:
+                latest_trade_rows = list(deque(csv.DictReader(handle), maxlen=8))
+    except Exception:
+        latest_trade_rows = []
     return {
         "heartbeat_age_seconds": age,
         "heartbeat_label": f"{age}s ago" if age is not None else "unknown",
@@ -656,6 +664,18 @@ def _runtime() -> dict[str, Any]:
         "replay_auto_promote_events_path": str(replay_events_path),
         "replay_auto_promote_last_event": _read_csv_last_row(replay_events_path),
         "entry_debug": _entry_debug_summary(state),
+        "trade_logger": {
+            "path": str(state.get("last_trade_log_path", "") or trades_path),
+            "write_success_count": _int_value(state.get("trade_log_write_success_count")),
+            "write_failed_count": _int_value(state.get("trade_log_write_failed_count")),
+            "last_error": str(state.get("trade_telemetry_last_log_error", "") or ""),
+            "last_logged_trade_symbol": str(state.get("last_logged_trade_symbol", "") or ""),
+            "last_logged_trade_realized_pnl_usd": _num(state.get("last_logged_trade_realized_pnl_usd")),
+            "last_logged_trade_exit_reason": str(state.get("last_logged_trade_exit_reason", "") or ""),
+            "today_closed_trade_count_from_csv": _int_value(state.get("today_closed_trade_count")),
+            "today_closed_pnl_from_csv": _num(state.get("today_closed_pnl_from_trades_csv")),
+            "latest_trade_rows": latest_trade_rows,
+        },
         "learning": {
             "summary_path": str(learning_summary_path),
             "summary_exists": learning_summary_path.exists(),

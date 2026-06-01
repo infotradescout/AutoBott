@@ -184,14 +184,14 @@ def _build_cycle_diagnosis(
         learning_eligible = False
         learning_skip_reason = "system_fault_blocked_unclassified"
         recommended_next_action = "patch unclassified rejection path"
-    elif data_fault:
-        learning_eligible = False
-        learning_skip_reason = "data_fault_429_cooldown"
-        recommended_next_action = "reduce Alpaca request pressure and rely on cached data"
     elif rule_fault and attempts <= 0:
         learning_eligible = False
         learning_skip_reason = "rule_fault_entry_window_or_rule_gate"
         recommended_next_action = "run execution dry-run or adjust entry window"
+    elif data_fault:
+        learning_eligible = False
+        learning_skip_reason = "data_fault_429_cooldown"
+        recommended_next_action = "reduce Alpaca request pressure and rely on cached data"
     elif broker_fault and attempts > 0 and fills <= 0:
         learning_eligible = False
         learning_skip_reason = "broker_fault_order_submit"
@@ -3307,6 +3307,8 @@ def main():
     trade_telemetry_last_close_iso = str(state.get("trade_telemetry_last_close_iso", "") or "")
     trade_telemetry_last_log_error = str(state.get("trade_telemetry_last_log_error", "") or "")
     trade_log_write_success_count = int(state.get("trade_log_write_success_count", 0) or 0)
+    trade_log_write_failed_count = int(state.get("trade_log_write_failed_count", 0) or 0)
+    last_trade_log_path = str(state.get("last_trade_log_path", "") or "")
     last_logged_trade_symbol = str(state.get("last_logged_trade_symbol", "") or "")
     last_logged_trade_realized_pnl_usd = float(state.get("last_logged_trade_realized_pnl_usd", 0.0) or 0.0)
     last_logged_trade_exit_reason = str(state.get("last_logged_trade_exit_reason", "") or "")
@@ -3502,6 +3504,8 @@ def main():
                 "trade_telemetry_last_close_iso": trade_telemetry_last_close_iso,
                 "trade_telemetry_last_log_error": trade_telemetry_last_log_error,
                 "trade_log_write_success_count": trade_log_write_success_count,
+                "trade_log_write_failed_count": trade_log_write_failed_count,
+                "last_trade_log_path": str(last_trade_log_path or str(config.TRADES_CSV_PATH)),
                 "last_logged_trade_symbol": last_logged_trade_symbol,
                 "last_logged_trade_realized_pnl_usd": round(last_logged_trade_realized_pnl_usd, 6),
                 "last_logged_trade_exit_reason": last_logged_trade_exit_reason,
@@ -7867,12 +7871,15 @@ def main():
                         trade_logger.log_trade(trade_row)
                         trade_telemetry_last_log_error = ""
                         trade_log_write_success_count += 1
+                        last_trade_log_path = str(config.TRADES_CSV_PATH)
                         last_logged_trade_symbol = str(trade_row.get("option_symbol", "") or "")
                         last_logged_trade_realized_pnl_usd = float(
                             trade_row.get("realized_pnl_usd", 0.0) or 0.0
                         )
                         last_logged_trade_exit_reason = str(trade_row.get("exit_reason", "") or "")
                     except Exception as log_exc:  # noqa: BLE001
+                        trade_log_write_failed_count += 1
+                        last_trade_log_path = str(config.TRADES_CSV_PATH)
                         trade_telemetry_last_log_error = str(log_exc)[:300]
                         print(f"[{ts(now_et)}] trade log write failed: {log_exc}")
 
