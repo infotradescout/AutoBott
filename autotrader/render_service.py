@@ -130,6 +130,7 @@ except Exception:  # noqa: BLE001
 
 ALERTS = AlertManager()
 BROKER: AlpacaBroker | None = None
+_BROKER_INIT_ERROR: str | None = None
 
 
 def _position_qty_as_int(qty_value) -> int:
@@ -360,7 +361,8 @@ def _env_float(name: str, default: float, *, minimum: float, maximum: float) -> 
 
 
 def _historical_learning_enabled() -> bool:
-    return _env_bool("ENABLE_HISTORICAL_REPLAY_LEARNING", True)
+    # Keep live trader memory headroom by default; replay workers can be enabled explicitly.
+    return _env_bool("ENABLE_HISTORICAL_REPLAY_LEARNING", False)
 
 
 def _historical_learning_allowed_during_market_hours() -> bool:
@@ -858,11 +860,16 @@ def _position_unrealized_usd(pos) -> float | None:
 
 
 def _broker() -> AlpacaBroker:
-    global BROKER
+    global BROKER, _BROKER_INIT_ERROR
     if BROKER is None:
-        api_key = get_required_env("ALPACA_API_KEY")
-        secret_key = get_required_env("ALPACA_SECRET_KEY")
-        BROKER = AlpacaBroker(api_key, secret_key, paper=config.PAPER)
+        try:
+            api_key = get_required_env("ALPACA_API_KEY")
+            secret_key = get_required_env("ALPACA_SECRET_KEY")
+            BROKER = AlpacaBroker(api_key, secret_key, paper=config.PAPER)
+            _BROKER_INIT_ERROR = None
+        except Exception as exc:  # noqa: BLE001
+            _BROKER_INIT_ERROR = str(exc)
+            raise
     return BROKER
 
 
@@ -967,6 +974,7 @@ def _run_trader_forever() -> None:
 def _run_independent_stoploss_guard() -> None:
     guard_sleep_seconds = max(1, int(getattr(config, "INDEPENDENT_STOPLOSS_INTERVAL_SECONDS", 2) or 2))
     require_stale_loop = bool(getattr(config, "INDEPENDENT_STOPLOSS_REQUIRE_STALE_LOOP", False))
+    broker_missing_warned = False
     while True:
         try:
             runtime_state = load_bot_state()
@@ -976,7 +984,15 @@ def _run_independent_stoploss_guard() -> None:
                 time.sleep(guard_sleep_seconds)
                 continue
 
-            broker = _broker()
+            try:
+                broker = _broker()
+            except Exception as exc:  # noqa: BLE001
+                if not broker_missing_warned:
+                    print(f"[render_service] independent stop-loss guard unavailable: {exc}")
+                    broker_missing_warned = True
+                time.sleep(max(guard_sleep_seconds, 30))
+                continue
+            broker_missing_warned = False
             positions = broker.get_open_option_positions()
             stop_cap = abs(float(getattr(config, "STOP_LOSS_USD", 10.0) or 10.0))
             if stop_cap <= 0:
