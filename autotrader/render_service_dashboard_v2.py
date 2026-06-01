@@ -20,6 +20,7 @@ from pathlib import Path
 
 from flask import jsonify, render_template_string, request
 
+os.environ.setdefault("PAPER_TRADE_THROUGH_MODE", "true")
 import dashboard_v2
 import volatility_proxy_boot
 from decision_journal import build_decision_journal
