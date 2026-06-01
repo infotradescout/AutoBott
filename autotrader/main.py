@@ -162,7 +162,7 @@ def _build_cycle_diagnosis(
     )
     primary_blocker = ranked_rejections[0][0] if ranked_rejections else stage
     secondary_blockers = [name for name, _count in ranked_rejections[1:4]]
-    if rate_degraded or had_429:
+    if (rate_degraded or had_429) and stage != "entry_window_closed":
         if "alpaca_429_cooldown" != primary_blocker and "alpaca_429_cooldown" not in secondary_blockers:
             secondary_blockers.append("alpaca_429_cooldown")
 
@@ -172,6 +172,9 @@ def _build_cycle_diagnosis(
         reject_reasons,
         ("after_entry_window", "before_entry_window", "blocked_entry_hour", "dry_run_mode"),
     )
+    if stage == "entry_window_closed" and attempts <= 0:
+        data_fault = False
+        rule_fault = True
     broker_fault = _reason_any(order_reject_reasons, ("broker", "rejected", "denied", "insufficient"))
     strategy_fault = bool(fills > 0)
 
