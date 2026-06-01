@@ -1171,9 +1171,10 @@ if __name__ == "__main__":
     # Prefer stable, option-liquid core symbols in constrained hosted runtime.
     os.environ.setdefault("UNIVERSE_MODE", "core")
     os.environ.setdefault("AUTO_EXPAND_UNIVERSE_WITH_MOVERS", "false")
-    # Avoid "one loss then freeze" behavior in hosted runtime.
-    os.environ.setdefault("LOSS_THROTTLE_AFTER_CONSEC_LOSSES", "3")
-    os.environ.setdefault("ADAPTIVE_LOSS_BLOCK_TICKER_AFTER_LOSSES", "3")
+    # Learning-first mode: keep trading after losses and adapt, rather than hard-blocking.
+    os.environ.setdefault("LOSS_THROTTLE_AFTER_CONSEC_LOSSES", "999")
+    os.environ.setdefault("ADAPTIVE_LOSS_BLOCK_TICKER_AFTER_LOSSES", "999")
+    os.environ.setdefault("CONSECUTIVE_LOSS_COOLDOWN_MINUTES", "0")
     os.environ.setdefault("ENABLE_AUTO_SYMBOL_SUPPRESSION_FROM_LEARNING", "false")
     os.environ.setdefault("ADAPTIVE_LOSS_MIN_DIRECTION_SCORE", "0.55")
     _apply_boot_auto_resume()
