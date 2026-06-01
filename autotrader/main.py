@@ -6097,7 +6097,14 @@ def main():
     
                 ticker = str(signal["symbol"]).upper()
                 direction = str(signal["direction"]).lower()
-                _refresh_learning_symbol_suppression(now_et)
+                if bool(getattr(config, "PAPER_TRADE_THROUGH_MODE", False)):
+                    if learning_suppressed_symbols:
+                        learning_suppressed_symbols = set()
+                        learning_suppressed_symbols_reason = "paper_trade_through_mode_cleared_stale_suppression"
+                        print(f"[{ts(now_et)}] Paper trade-through mode cleared stale learning-symbol suppression.")
+                        _save_runtime_state()
+                else:
+                    _refresh_learning_symbol_suppression(now_et)
                 if ticker in learning_suppressed_symbols:
                     _mark_skip("learning_symbol_suppressed")
                     _mark_stage4_reject(reason="learning_symbol_suppressed", ticker=ticker, detail=learning_suppressed_symbols_reason)
@@ -6158,7 +6165,7 @@ def main():
                     print(f"[{ts(now_et)}] {ticker}: skip ({evidence_decision.reason}).")
                     continue
     
-                if adaptive_loss_active:
+                if adaptive_loss_active and (not bool(getattr(config, "PAPER_TRADE_THROUGH_MODE", False))):
                     profile = adaptive_loss_profile if isinstance(adaptive_loss_profile, dict) else {}
                     ticker_losses = dict(profile.get("ticker_losses") or {})
                     block_after = max(1, int(getattr(config, "ADAPTIVE_LOSS_BLOCK_TICKER_AFTER_LOSSES", 1)))

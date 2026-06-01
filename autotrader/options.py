@@ -196,6 +196,9 @@ def select_atm_option_contract_with_reason(
         )
 
     liquidity_candidates: list[dict[str, Any]] = []
+    enrich_attempts = 0
+    enrich_attempt_cap = max(0, int(getattr(config, "OPTION_ENRICHMENT_MAX_ATTEMPTS_PER_CYCLE", 3) or 3))
+    enrich_rate_limited = False
     fail_counts = {
         "inactive_or_untradable": 0,
         "missing_fields": 0,
@@ -211,7 +214,12 @@ def select_atm_option_contract_with_reason(
         # from the chain response. This avoids 429 rate-limit errors from making
         # one API call per strike across a full chain (30+ calls for NVDA, etc.).
         # Most chain responses already include open_interest; skip enrichment if so.
-        needs_enrichment = (open_interest is None) and symbol
+        needs_enrichment = (open_interest is None) and symbol and (not enrich_rate_limited)
+        if needs_enrichment:
+            if enrich_attempts >= enrich_attempt_cap:
+                needs_enrichment = False
+            else:
+                enrich_attempts += 1
         if needs_enrichment:
             try:
                 time.sleep(config.RATE_LIMIT_SLEEP_SECONDS)
@@ -220,6 +228,8 @@ def select_atm_option_contract_with_reason(
                     details.update(enriched)
             except Exception as exc:  # noqa: BLE001
                 print(f"[options] enrichment failed for {symbol}: {exc}")
+                if "429" in str(exc):
+                    enrich_rate_limited = True
             open_interest = _safe_float(details.get("open_interest"))
             volume = _safe_float(details.get("volume") or details.get("daily_volume"))
         details["open_interest"] = open_interest
