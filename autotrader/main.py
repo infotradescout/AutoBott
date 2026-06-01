@@ -3306,6 +3306,10 @@ def main():
     trade_telemetry_total_pnl_usd = float(state.get("trade_telemetry_total_pnl_usd", 0.0) or 0.0)
     trade_telemetry_last_close_iso = str(state.get("trade_telemetry_last_close_iso", "") or "")
     trade_telemetry_last_log_error = str(state.get("trade_telemetry_last_log_error", "") or "")
+    trade_log_write_success_count = int(state.get("trade_log_write_success_count", 0) or 0)
+    last_logged_trade_symbol = str(state.get("last_logged_trade_symbol", "") or "")
+    last_logged_trade_realized_pnl_usd = float(state.get("last_logged_trade_realized_pnl_usd", 0.0) or 0.0)
+    last_logged_trade_exit_reason = str(state.get("last_logged_trade_exit_reason", "") or "")
     zero_dte_loss_lockout_day = str(state.get("zero_dte_loss_lockout_day", "") or "")
     zero_dte_realized_loss_count = int(state.get("zero_dte_realized_loss_count", 0) or 0)
     broker_truth_day_pnl_usd = float(state.get("broker_truth_day_pnl_usd", 0.0) or 0.0)
@@ -3422,7 +3426,26 @@ def main():
         catalyst_mode_until = None
     set_catalyst_mode(catalyst_mode_active, catalyst_mode_reason)
 
+    def _today_closed_trade_stats_from_csv(target_date_iso: str) -> tuple[int, float]:
+        if not target_date_iso:
+            return 0, 0.0
+        count = 0
+        pnl_total = 0.0
+        try:
+            with config.TRADES_CSV_PATH.open("r", newline="", encoding="utf-8") as handle:
+                for row in csv.DictReader(handle):
+                    if str(row.get("date", "") or "") != target_date_iso:
+                        continue
+                    count += 1
+                    pnl_total += _safe_signal_float(row.get("realized_pnl_usd"), 0.0)
+        except Exception:
+            return 0, 0.0
+        return count, round(pnl_total, 2)
+
     def _save_runtime_state() -> None:
+        closed_count_csv, closed_pnl_csv = _today_closed_trade_stats_from_csv(
+            trade_telemetry_day or datetime.now(tz).date().isoformat()
+        )
         save_bot_state(
             {
                 "open_trade_meta": open_trade_meta,
@@ -3478,6 +3501,12 @@ def main():
                 "trade_telemetry_total_pnl_usd": round(trade_telemetry_total_pnl_usd, 6),
                 "trade_telemetry_last_close_iso": trade_telemetry_last_close_iso,
                 "trade_telemetry_last_log_error": trade_telemetry_last_log_error,
+                "trade_log_write_success_count": trade_log_write_success_count,
+                "last_logged_trade_symbol": last_logged_trade_symbol,
+                "last_logged_trade_realized_pnl_usd": round(last_logged_trade_realized_pnl_usd, 6),
+                "last_logged_trade_exit_reason": last_logged_trade_exit_reason,
+                "today_closed_trade_count": closed_count_csv,
+                "today_closed_pnl_from_trades_csv": closed_pnl_csv,
                 "zero_dte_loss_lockout_day": zero_dte_loss_lockout_day,
                 "zero_dte_realized_loss_count": zero_dte_realized_loss_count,
                 "broker_truth_day_pnl_usd": round(broker_truth_day_pnl_usd, 6),
@@ -7837,6 +7866,12 @@ def main():
                     try:
                         trade_logger.log_trade(trade_row)
                         trade_telemetry_last_log_error = ""
+                        trade_log_write_success_count += 1
+                        last_logged_trade_symbol = str(trade_row.get("option_symbol", "") or "")
+                        last_logged_trade_realized_pnl_usd = float(
+                            trade_row.get("realized_pnl_usd", 0.0) or 0.0
+                        )
+                        last_logged_trade_exit_reason = str(trade_row.get("exit_reason", "") or "")
                     except Exception as log_exc:  # noqa: BLE001
                         trade_telemetry_last_log_error = str(log_exc)[:300]
                         print(f"[{ts(now_et)}] trade log write failed: {log_exc}")
