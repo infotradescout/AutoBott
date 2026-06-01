@@ -19,6 +19,8 @@ import math
 from env_config import get_required_env, load_runtime_env
 
 load_runtime_env()
+# Render default: enable paper trade-through mode before config import resolves runtime constants.
+os.environ.setdefault("PAPER_TRADE_THROUGH_MODE", "true")
 
 
 def _force_writable_data_dir() -> None:
@@ -1168,7 +1170,6 @@ def _run_market_context_worker() -> None:
 if __name__ == "__main__":
     # Render's starter instance is memory-constrained; keep single trader loop ownership in render_service.
     os.environ.setdefault("ENABLE_EMBEDDED_TRADER_FALLBACK", "false")
-    os.environ.setdefault("PAPER_TRADE_THROUGH_MODE", "true")
     # Prefer stable, option-liquid core symbols in constrained hosted runtime.
     os.environ.setdefault("UNIVERSE_MODE", "core")
     os.environ.setdefault("AUTO_EXPAND_UNIVERSE_WITH_MOVERS", "false")
