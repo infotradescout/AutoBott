@@ -72,7 +72,7 @@ def test_growth_frequency_config_keeps_trading_through_day():
     assert config.LOOP_INTERVAL_SECONDS == 5
     assert config.MAX_POSITIONS == 0
     assert config.MAX_POSITION_SIZE_USD == 0.0
-    assert config.MAX_CONTRACTS_PER_ENTRY == 0
+    assert config.MAX_CONTRACTS_PER_ENTRY == 1
     assert config.MAX_CONTRACTS_PER_TICKER == 0
     assert config.MAX_PREMIUM_PER_TRADE_USD == 0.0
     assert config.MAX_TOTAL_OPEN_PREMIUM_USD == 0.0

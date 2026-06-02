@@ -126,23 +126,22 @@ def _contract_quality_reject_reason(
 
     spread_pct = ((ask - bid) / midpoint) * 100.0
     quality["contract_spread_pct"] = round(spread_pct, 4)
-    max_spread = 2.0 if _is_index_etf(underlying_symbol) else 2.5
-    if spread_pct > max_spread:
+    if spread_pct > 2.0:
         return "contract_quality_spread_too_wide", quality
 
     if strike is None or underlying_price <= 0:
         return "contract_quality_strike_too_far", quality
     strike_distance_pct = abs(float(strike) - float(underlying_price)) / float(underlying_price) * 100.0
     quality["contract_strike_distance_pct"] = round(strike_distance_pct, 4)
-    max_strike_distance = 1.5 if _is_index_etf(underlying_symbol) else 3.0
+    max_strike_distance = 1.0 if _is_index_etf(underlying_symbol) else 2.5
     if strike_distance_pct > max_strike_distance:
         return "contract_quality_strike_too_far", quality
 
     premium_pct = (ask / float(underlying_price)) * 100.0
-    if premium_pct > 8.0:
+    if premium_pct > 5.0:
         return "contract_quality_premium_too_large", quality
 
-    if open_interest <= 0 and daily_volume <= 0:
+    if open_interest <= 0 and daily_volume <= 0 and spread_pct > 1.0:
         return "contract_quality_illiquid", quality
 
     if expiration == now_et.date() and (now_et.hour, now_et.minute) >= (13, 30):

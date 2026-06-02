@@ -74,7 +74,7 @@ class OptionSelectionTests(unittest.TestCase):
             ],
             quotes={
                 "JPM260515C00300000": {"bid": 74.8, "ask": 75.0},
-                "JPM260515C00301000": {"bid": 5.9, "ask": 6.0},
+                "JPM260515C00301000": {"bid": 4.95, "ask": 5.0},
             },
         )
 
@@ -183,6 +183,34 @@ class OptionSelectionTests(unittest.TestCase):
         self.assertEqual(contract["contract_quality_reason"], "contract_quality_selected")
         self.assertEqual(contract["selected_contract_rank"], 1)
 
+    def test_contract_quality_allows_missing_liquidity_only_with_excellent_quote(self):
+        data = FakeOptionData(
+            contracts=[
+                {
+                    "symbol": "AAPL260515C00181000",
+                    "expiration_date": "2026-05-15",
+                    "strike_price": 181.0,
+                    "open_interest": 0,
+                    "volume": 0,
+                    "delta": 0.50,
+                }
+            ],
+            quotes={
+                "AAPL260515C00181000": {"bid": 1.00, "ask": 1.005},
+            },
+        )
+
+        contract, reason = options.select_atm_option_contract_with_reason(
+            data_client=data,
+            underlying_symbol="AAPL",
+            direction="call",
+            underlying_price=180.0,
+            now_et=self.now,
+        )
+
+        self.assertEqual(reason, "ok(failopen_liquidity)")
+        self.assertEqual(contract["symbol"], "AAPL260515C00181000")
+
     def test_contract_quality_blocks_late_same_day_non_etf(self):
         data = FakeOptionData(
             contracts=[
@@ -223,7 +251,7 @@ class OptionSelectionTests(unittest.TestCase):
                 }
             ],
             quotes={
-                "SPY260514C00500000": {"bid": 1.00, "ask": 1.01},
+                "SPY260514C00500000": {"bid": 1.00, "ask": 1.005},
             },
         )
         late = EASTERN.localize(datetime(2026, 5, 14, 13, 45, 0))

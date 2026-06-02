@@ -1134,9 +1134,10 @@ def _direction_engine_from_bars(
     roc_fast = _pct_change(latest_close, float(closes.iloc[-4]))
     roc_slow = _pct_change(latest_close, float(closes.iloc[-11])) if len(closes) >= 11 else move5
     candle_move = _pct_change(latest_close, latest_open)
-    prior_5bar_low = float(lows.iloc[-6:-1].min())
-    prior_5bar_high = float(highs.iloc[-6:-1].max())
-    sharp_candle_pct = 0.08
+    prior_3bar_low = float(lows.iloc[-4:-1].min())
+    prior_3bar_high = float(highs.iloc[-4:-1].max())
+    rvol = _safe_signal_float((market_context or {}).get("signal_rvol"), 0.0)
+    signal_roc = _safe_signal_float((market_context or {}).get("signal_roc"), roc_slow)
 
     preferred_direction = str((market_context or {}).get("preferred_direction", "") or "").lower()
     call_votes = 0
@@ -1152,11 +1153,9 @@ def _direction_engine_from_bars(
     put_votes += int(move3 < 0)
     call_votes += int(move5 > 0)
     put_votes += int(move5 < 0)
-    call_votes += int(roc_fast > 0 and roc_slow > 0)
-    put_votes += int(roc_fast < 0 and roc_slow < 0)
+    call_votes += int(candle_move >= 0 and latest_close >= prior_3bar_low and signal_roc >= 0.15 and rvol >= 0.40)
+    put_votes += int(candle_move <= 0 and latest_close <= prior_3bar_high and signal_roc <= -0.15 and rvol >= 0.40)
 
-    latest_not_sharp_red = candle_move >= -sharp_candle_pct
-    latest_not_sharp_green = candle_move <= sharp_candle_pct
     call_hard_ok = (
         vwap > 0
         and latest_close > vwap
@@ -1164,8 +1163,10 @@ def _direction_engine_from_bars(
         and ema9_slope > 0
         and move3 > 0
         and move5 > 0
-        and latest_not_sharp_red
-        and latest_close >= prior_5bar_low
+        and candle_move >= 0
+        and latest_close >= prior_3bar_low
+        and signal_roc >= 0.15
+        and rvol >= 0.40
     )
     put_hard_ok = (
         vwap > 0
@@ -1174,8 +1175,10 @@ def _direction_engine_from_bars(
         and ema9_slope < 0
         and move3 < 0
         and move5 < 0
-        and latest_not_sharp_green
-        and latest_close <= prior_5bar_high
+        and candle_move <= 0
+        and latest_close <= prior_3bar_high
+        and signal_roc <= -0.15
+        and rvol >= 0.40
     )
     call_valid = call_hard_ok and call_votes >= 4 and call_votes > put_votes
     put_valid = put_hard_ok and put_votes >= 4 and put_votes > call_votes
@@ -1189,11 +1192,12 @@ def _direction_engine_from_bars(
     if direction == "no_trade":
         reason = "direction_not_clean"
     else:
-        reason = f"direction_engine_{direction}"
+        reason = f"strict_template_{direction}_pass"
     reason += (
         f" votes_call={call_votes} votes_put={put_votes} "
         f"move3={move3:+.2f}% move5={move5:+.2f}% candle={candle_move:+.2f}% "
-        f"ema9_vs_21={ema9_now - ema21_now:+.4f} ema9_slope={ema9_slope:+.4f}"
+        f"ema9_vs_21={ema9_now - ema21_now:+.4f} ema9_slope={ema9_slope:+.4f} "
+        f"roc={signal_roc:+.2f}% rvol={rvol:.2f}"
     )
     if preferred_direction in {"call", "put"}:
         reason += f" market_preferred={preferred_direction}"
@@ -1215,8 +1219,8 @@ def _direction_engine_from_bars(
         "ema9": round(ema9_now, 4),
         "ema21": round(ema21_now, 4),
         "ema9_slope": round(ema9_slope, 6),
-        "prior_5bar_low": round(prior_5bar_low, 4),
-        "prior_5bar_high": round(prior_5bar_high, 4),
+        "prior_3bar_low": round(prior_3bar_low, 4),
+        "prior_3bar_high": round(prior_3bar_high, 4),
     }
 
 
@@ -5901,9 +5905,14 @@ def main():
             "contract_rejected_count_by_reason": {},
             "order_attempted_count": 0,
             "order_rejected_count_by_reason": {},
+            "strict_template_call_pass": 0,
+            "strict_template_put_pass": 0,
+            "strict_template_no_trade": 0,
+            "contract_quality_reject": 0,
             "spread_to_move_gate": 0,
             "high_spread_requires_strong_direction": 0,
             "accepted_low_spread_entry": 0,
+            "position_size_capped_to_one": 0,
             "trade_resting_count": 0,
             "trade_filled_count": 0,
             "signal_outcomes": {},
@@ -7033,7 +7042,11 @@ def main():
                     )
                     direction_engine = _direction_engine_from_bars(
                         direction_bars,
-                        market_context=active_market_context,
+                        market_context={
+                            **dict(active_market_context or {}),
+                            "signal_roc": signal.get("roc"),
+                            "signal_rvol": signal.get("rvol"),
+                        },
                         failed_direction_warning=_direction_engine_failed_direction_warning(signal),
                     )
                     _persist_direction_engine_fields(signal, direction_engine)
@@ -7044,6 +7057,7 @@ def main():
                     )
                     if not engine_ok:
                         _append_direction_engine_scan_log(now_et, signal, result=engine_direction)
+                        entry_debug["strict_template_no_trade"] = int(entry_debug.get("strict_template_no_trade", 0) or 0) + 1
                         _mark_skip(engine_direction)
                         _mark_stage4_reject(reason=engine_direction, ticker=ticker, detail=engine_reason)
                         print(f"[{ts(now_et)}] {ticker}: skip ({engine_reason}).")
@@ -7056,6 +7070,10 @@ def main():
                         )
                     else:
                         print(f"[{ts(now_et)}] {ticker}: direction engine accepted {engine_direction.upper()} ({engine_reason}).")
+                    if engine_direction == "call":
+                        entry_debug["strict_template_call_pass"] = int(entry_debug.get("strict_template_call_pass", 0) or 0) + 1
+                    elif engine_direction == "put":
+                        entry_debug["strict_template_put_pass"] = int(entry_debug.get("strict_template_put_pass", 0) or 0) + 1
                     _append_direction_engine_scan_log(now_et, signal, result="direction_engine_pass")
                     direction = engine_direction
 
@@ -7082,6 +7100,9 @@ def main():
                     if not contract:
                         _mark_skip("no_eligible_option_contract")
                         _mark_stage4_reject(reason="no_eligible_option_contract", ticker=ticker)
+                        if "contract_quality_" in str(contract_reason or ""):
+                            entry_debug["contract_quality_reject"] = int(entry_debug.get("contract_quality_reject", 0) or 0) + 1
+                            _bump_counter_bucket("contract_rejected_count_by_reason", "contract_quality_reject")
                         _bump_counter_bucket(
                             "contract_rejected_count_by_reason",
                             f"no_eligible_option_contract:{str(contract_reason or 'unknown')}",
@@ -7159,16 +7180,18 @@ def main():
                         consecutive_losses=consecutive_losses,
                         max_trade_premium=max_trade_premium,
                     )
-                    if max_contracts_per_ticker > 0 and existing_qty_for_ticker > 0:
-                        qty = min(qty, max_contracts_per_ticker - existing_qty_for_ticker)
-                    if max_contracts_per_ticker > 0 and qty <= 0:
+                    if existing_qty_for_ticker > 0:
                         _mark_skip("ticker_contract_cap")
                         _mark_stage4_reject(reason="ticker_contract_cap", ticker=ticker)
                         print(
-                            f"[{ts(now_et)}] {ticker}: skip (no remaining contract capacity "
-                            f"{existing_qty_for_ticker}/{max_contracts_per_ticker})."
+                            f"[{ts(now_et)}] {ticker}: skip (scale-in disabled; "
+                            f"{existing_qty_for_ticker} contract(s) already open)."
                         )
                         continue
+                    if qty != 1:
+                        entry_debug["position_size_capped_to_one"] = int(entry_debug.get("position_size_capped_to_one", 0) or 0) + 1
+                        _mark_skip("position_size_capped_to_one")
+                        qty = 1
                     trade_premium_usd = ask_price * qty * 100.0
                     contract_cap_text = str(max_contracts_per_ticker) if max_contracts_per_ticker > 0 else "unlimited"
                     print(

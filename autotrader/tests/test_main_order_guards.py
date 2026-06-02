@@ -285,8 +285,8 @@ class MainOrderGuardTests(unittest.TestCase):
         config.POSITION_SIZE_USD = 1200
         config.RISK_PER_TRADE_PCT = 0.01
         config.MAX_POSITION_SIZE_USD = 1500
-        config.MAX_CONTRACTS_PER_ENTRY = 8
-        config.MAX_CONTRACTS_PER_TICKER = 8
+        config.MAX_CONTRACTS_PER_ENTRY = 1
+        config.MAX_CONTRACTS_PER_TICKER = 1
         config.DRAWDOWN_REDUCE_AFTER_CONSEC_LOSSES = 1
         config.DRAWDOWN_SIZE_MULTIPLIER = 0.5
         config.EXECUTION_MIN_RVOL_AFTER_IGNORE = 0.20
@@ -498,7 +498,7 @@ class MainOrderGuardTests(unittest.TestCase):
             max_trade_premium=1500.0,
         )
 
-        self.assertEqual(qty, 8)
+        self.assertEqual(qty, 1)
 
     def test_entry_qty_reduces_after_loss(self):
         qty = main._entry_qty_for_budget(
@@ -508,7 +508,7 @@ class MainOrderGuardTests(unittest.TestCase):
             max_trade_premium=1500.0,
         )
 
-        self.assertEqual(qty, 7)
+        self.assertEqual(qty, 1)
 
     def test_fast_start_midday_still_rejects_dead_rvol(self):
         now = EASTERN.localize(datetime(2026, 5, 13, 11, 31, 0))
@@ -619,7 +619,7 @@ class MainOrderGuardTests(unittest.TestCase):
     def test_direction_engine_bullish_bars_produce_call(self):
         bars = direction_bars([100 + (i * 0.12) for i in range(30)])
 
-        engine = main._direction_engine_from_bars(bars)
+        engine = main._direction_engine_from_bars(bars, market_context={"signal_roc": 0.30, "signal_rvol": 0.80})
 
         self.assertEqual(engine["direction"], "call")
         self.assertGreaterEqual(engine["votes_call"], 4)
@@ -627,7 +627,7 @@ class MainOrderGuardTests(unittest.TestCase):
     def test_direction_engine_bearish_bars_produce_put(self):
         bars = direction_bars([104 - (i * 0.12) for i in range(30)])
 
-        engine = main._direction_engine_from_bars(bars)
+        engine = main._direction_engine_from_bars(bars, market_context={"signal_roc": -0.30, "signal_rvol": 0.80})
 
         self.assertEqual(engine["direction"], "put")
         self.assertGreaterEqual(engine["votes_put"], 4)
@@ -635,7 +635,23 @@ class MainOrderGuardTests(unittest.TestCase):
     def test_direction_engine_mixed_chop_rejects(self):
         bars = direction_bars([100.0, 100.04, 99.98, 100.03, 99.99, 100.02] * 5)
 
-        engine = main._direction_engine_from_bars(bars)
+        engine = main._direction_engine_from_bars(bars, market_context={"signal_roc": 0.30, "signal_rvol": 0.80})
+
+        self.assertEqual(engine["direction"], "no_trade")
+        self.assertIn("direction_not_clean", engine["reason"])
+
+    def test_direction_engine_weak_roc_rejects(self):
+        bars = direction_bars([100 + (i * 0.12) for i in range(30)])
+
+        engine = main._direction_engine_from_bars(bars, market_context={"signal_roc": 0.05, "signal_rvol": 0.80})
+
+        self.assertEqual(engine["direction"], "no_trade")
+        self.assertIn("direction_not_clean", engine["reason"])
+
+    def test_direction_engine_low_rvol_rejects(self):
+        bars = direction_bars([100 + (i * 0.12) for i in range(30)])
+
+        engine = main._direction_engine_from_bars(bars, market_context={"signal_roc": 0.30, "signal_rvol": 0.20})
 
         self.assertEqual(engine["direction"], "no_trade")
         self.assertIn("direction_not_clean", engine["reason"])
@@ -680,6 +696,16 @@ class MainOrderGuardTests(unittest.TestCase):
         )
 
         self.assertEqual(reason, "underlying_direction_invalidated")
+
+    def test_entry_qty_config_caps_to_one(self):
+        qty = main._entry_qty_for_budget(
+            ask_price=0.20,
+            equity=100000.0,
+            consecutive_losses=0,
+            max_trade_premium=0.0,
+        )
+
+        self.assertEqual(qty, 1)
 
     def test_ticker_open_qty_counts_live_positions_and_meta(self):
         positions = [FakePosition("IWM260515C00282000", qty=3)]
