@@ -115,6 +115,129 @@ class OptionSelectionTests(unittest.TestCase):
 
         self.assertIsNone(contract)
         self.assertIn("strike_too_far=1", reason)
+        self.assertIn("contract_quality_strike_too_far=1", reason)
+
+    def test_contract_quality_rejects_wide_spread_contract(self):
+        data = FakeOptionData(
+            contracts=[
+                {
+                    "symbol": "AAPL260515C00180000",
+                    "expiration_date": "2026-05-15",
+                    "strike_price": 180.0,
+                    "open_interest": 100,
+                    "volume": 50,
+                }
+            ],
+            quotes={
+                "AAPL260515C00180000": {"bid": 1.00, "ask": 1.10},
+            },
+        )
+
+        contract, reason = options.select_atm_option_contract_with_reason(
+            data_client=data,
+            underlying_symbol="AAPL",
+            direction="call",
+            underlying_price=180.0,
+            now_et=self.now,
+        )
+
+        self.assertIsNone(contract)
+        self.assertIn("contract_quality_spread_too_wide=1", reason)
+
+    def test_contract_quality_selects_tight_atm_over_farther_contract(self):
+        data = FakeOptionData(
+            contracts=[
+                {
+                    "symbol": "AAPL260515C00185000",
+                    "expiration_date": "2026-05-15",
+                    "strike_price": 185.0,
+                    "open_interest": 300,
+                    "volume": 80,
+                    "delta": 0.50,
+                },
+                {
+                    "symbol": "AAPL260515C00181000",
+                    "expiration_date": "2026-05-15",
+                    "strike_price": 181.0,
+                    "open_interest": 100,
+                    "volume": 50,
+                    "delta": 0.50,
+                },
+            ],
+            quotes={
+                "AAPL260515C00185000": {"bid": 1.00, "ask": 1.02},
+                "AAPL260515C00181000": {"bid": 1.00, "ask": 1.02},
+            },
+        )
+
+        contract, reason = options.select_atm_option_contract_with_reason(
+            data_client=data,
+            underlying_symbol="AAPL",
+            direction="call",
+            underlying_price=180.0,
+            now_et=self.now,
+        )
+
+        self.assertEqual(reason, "ok(strict)")
+        self.assertEqual(contract["symbol"], "AAPL260515C00181000")
+        self.assertEqual(contract["contract_quality_reason"], "contract_quality_selected")
+        self.assertEqual(contract["selected_contract_rank"], 1)
+
+    def test_contract_quality_blocks_late_same_day_non_etf(self):
+        data = FakeOptionData(
+            contracts=[
+                {
+                    "symbol": "AMD260514C00110000",
+                    "expiration_date": "2026-05-14",
+                    "strike_price": 110.0,
+                    "open_interest": 100,
+                    "volume": 50,
+                }
+            ],
+            quotes={
+                "AMD260514C00110000": {"bid": 1.00, "ask": 1.01},
+            },
+        )
+        late = EASTERN.localize(datetime(2026, 5, 14, 13, 45, 0))
+
+        contract, reason = options.select_atm_option_contract_with_reason(
+            data_client=data,
+            underlying_symbol="AMD",
+            direction="call",
+            underlying_price=110.0,
+            now_et=late,
+        )
+
+        self.assertIsNone(contract)
+        self.assertIn("contract_quality_late_0dte_block=1", reason)
+
+    def test_contract_quality_allows_late_same_day_etf_when_very_tight(self):
+        data = FakeOptionData(
+            contracts=[
+                {
+                    "symbol": "SPY260514C00500000",
+                    "expiration_date": "2026-05-14",
+                    "strike_price": 500.0,
+                    "open_interest": 0,
+                    "volume": 0,
+                }
+            ],
+            quotes={
+                "SPY260514C00500000": {"bid": 1.00, "ask": 1.01},
+            },
+        )
+        late = EASTERN.localize(datetime(2026, 5, 14, 13, 45, 0))
+
+        contract, reason = options.select_atm_option_contract_with_reason(
+            data_client=data,
+            underlying_symbol="SPY",
+            direction="call",
+            underlying_price=500.0,
+            now_et=late,
+        )
+
+        self.assertEqual(reason, "ok(failopen_liquidity)")
+        self.assertEqual(contract["symbol"], "SPY260514C00500000")
 
     def test_rejects_same_day_contracts_near_option_expiry_cutoff(self):
         data = FakeOptionData(

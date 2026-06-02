@@ -79,6 +79,96 @@ def _extract_delta(contract: dict[str, Any]) -> float | None:
     return abs(value)
 
 
+def _contract_open_interest(contract: dict[str, Any]) -> float:
+    value = _safe_float(contract.get("open_interest"))
+    return float(value or 0.0)
+
+
+def _contract_daily_volume(contract: dict[str, Any]) -> float:
+    value = _safe_float(contract.get("volume") or contract.get("daily_volume"))
+    return float(value or 0.0)
+
+
+def _is_index_etf(symbol: str) -> bool:
+    return str(symbol or "").upper() in {"SPY", "QQQ", "IWM"}
+
+
+def _contract_quality_reject_reason(
+    *,
+    contract: dict[str, Any],
+    underlying_symbol: str,
+    underlying_price: float,
+    bid: float | None,
+    ask: float | None,
+    now_et: datetime,
+) -> tuple[str | None, dict[str, Any]]:
+    strike = _contract_strike(contract)
+    expiration = _safe_date(contract.get("expiration_date"))
+    delta_abs = _extract_delta(contract)
+    open_interest = _contract_open_interest(contract)
+    daily_volume = _contract_daily_volume(contract)
+    quality: dict[str, Any] = {
+        "contract_bid": bid if bid is not None else "",
+        "contract_ask": ask if ask is not None else "",
+        "contract_delta_abs": round(float(delta_abs), 4) if delta_abs is not None else "",
+        "contract_open_interest": int(open_interest),
+        "contract_daily_volume": int(daily_volume),
+        "contract_spread_pct": "",
+        "contract_strike_distance_pct": "",
+    }
+
+    if bid is None or ask is None or bid <= 0 or ask <= 0 or ask < bid:
+        return "contract_quality_bad_quote", quality
+
+    midpoint = (bid + ask) / 2.0
+    if midpoint <= 0:
+        return "contract_quality_bad_quote", quality
+
+    spread_pct = ((ask - bid) / midpoint) * 100.0
+    quality["contract_spread_pct"] = round(spread_pct, 4)
+    max_spread = 1.5 if (now_et.hour, now_et.minute) >= (13, 30) else 2.5
+    if spread_pct > max_spread:
+        return "contract_quality_spread_too_wide", quality
+
+    if strike is None or underlying_price <= 0:
+        return "contract_quality_strike_too_far", quality
+    strike_distance_pct = abs(float(strike) - float(underlying_price)) / float(underlying_price) * 100.0
+    quality["contract_strike_distance_pct"] = round(strike_distance_pct, 4)
+    max_strike_distance = 2.5 if _is_index_etf(underlying_symbol) else 5.0
+    if strike_distance_pct > max_strike_distance:
+        return "contract_quality_strike_too_far", quality
+
+    premium_pct = (ask / float(underlying_price)) * 100.0
+    if premium_pct > 8.0:
+        return "contract_quality_premium_too_large", quality
+
+    excellent_quote = spread_pct <= 1.0
+    if open_interest <= 0 and daily_volume <= 0 and not excellent_quote:
+        return "contract_quality_illiquid", quality
+
+    if expiration == now_et.date() and (now_et.hour, now_et.minute) >= (13, 30):
+        if not (_is_index_etf(underlying_symbol) and spread_pct <= 1.5):
+            return "contract_quality_late_0dte_block", quality
+
+    if delta_abs is not None and not (0.35 <= delta_abs <= 0.60):
+        return "contract_quality_bad_delta", quality
+
+    return None, quality
+
+
+def _contract_quality_rank(contract: dict[str, Any], underlying_price: float) -> tuple[float, float, float, float, float, float]:
+    spread_pct = float(contract.get("contract_spread_pct", contract.get("spread_pct", 999.0)) or 999.0)
+    strike_distance = float(contract.get("contract_strike_distance_pct", 999.0) or 999.0)
+    delta_abs = _safe_float(contract.get("contract_delta_abs"))
+    delta_gap = abs(float(delta_abs) - 0.50) if delta_abs is not None else 0.25
+    open_interest = _contract_open_interest(contract)
+    daily_volume = _contract_daily_volume(contract)
+    ask = _safe_float(contract.get("ask_price")) or 999.0
+    premium_pct = (ask / underlying_price * 100.0) if underlying_price > 0 else 999.0
+    liquidity_rank = -(open_interest + daily_volume)
+    return (spread_pct, strike_distance, delta_gap, liquidity_rank, premium_pct, float(contract.get("_select_score", 999.0) or 999.0))
+
+
 def _contract_symbol(contract: dict[str, Any]) -> str:
     return str(contract.get("symbol") or contract.get("option_symbol") or "").strip()
 
@@ -315,11 +405,16 @@ def select_atm_option_contract_with_reason(
     )
     for contract in filtered:
         exp_date = _safe_date(contract.get("expiration_date"))
-        if exp_date == today and avoid_0dte_now:
+        if exp_date == today and avoid_0dte_now and not _is_index_etf(underlying_symbol):
             fail_counts["expires_too_soon"] = fail_counts.get("expires_too_soon", 0) + 1
             continue
         open_interest = _safe_float(contract.get("open_interest")) or 0.0
-        if (not config.EMERGENCY_EXECUTION_MODE) and exp_date == today and open_interest < float(config.MIN_OPTION_OPEN_INTEREST_0DTE):
+        if (
+            (not config.EMERGENCY_EXECUTION_MODE)
+            and exp_date == today
+            and not _is_index_etf(underlying_symbol)
+            and open_interest < float(config.MIN_OPTION_OPEN_INTEREST_0DTE)
+        ):
             fail_counts["low_open_interest"] += 1
             continue
         strike_val = _contract_strike(contract)
@@ -379,53 +474,64 @@ def select_atm_option_contract_with_reason(
         "spread_too_wide": 0,
         "premium_too_expensive": 0,
         "strike_too_far": 0,
+        "contract_quality_bad_quote": 0,
+        "contract_quality_spread_too_wide": 0,
+        "contract_quality_strike_too_far": 0,
+        "contract_quality_premium_too_large": 0,
+        "contract_quality_bad_delta": 0,
+        "contract_quality_illiquid": 0,
+        "contract_quality_late_0dte_block": 0,
     }
+    quality_candidates: list[dict[str, Any]] = []
     for contract in scored[:40]:
         symbol = _contract_symbol(contract)
         if not symbol:
             quote_fail_counts["bad_quote"] += 1
+            quote_fail_counts["contract_quality_bad_quote"] += 1
             continue
-        strike_val = _contract_strike(contract)
-        max_strike_distance_pct = float(getattr(config, "MAX_OPTION_STRIKE_DISTANCE_PCT", 0.0) or 0.0)
-        if (
-            (not config.EMERGENCY_EXECUTION_MODE)
-            and max_strike_distance_pct > 0
-            and underlying_price > 0
-            and strike_val is not None
-        ):
-            strike_distance_pct = abs(float(strike_val) - float(underlying_price)) / float(underlying_price) * 100.0
-            if strike_distance_pct > max_strike_distance_pct:
-                quote_fail_counts["strike_too_far"] += 1
-                continue
         quote = data_client.get_latest_option_quote(symbol)
         bid = _safe_float(quote.get("bid"))
         ask = _safe_float(quote.get("ask"))
-        if bid is None or ask is None or bid <= 0 or ask <= 0 or ask < bid:
-            quote_fail_counts["bad_quote"] += 1
-            time.sleep(config.RATE_LIMIT_SLEEP_SECONDS)
-            continue
-        mid = (bid + ask) / 2
-        if mid <= 0:
-            quote_fail_counts["nonpositive_mid"] += 1
-            time.sleep(config.RATE_LIMIT_SLEEP_SECONDS)
-            continue
-        max_premium_pct = float(getattr(config, "MAX_OPTION_PREMIUM_TO_UNDERLYING_PCT", 0.0) or 0.0)
-        if (not config.EMERGENCY_EXECUTION_MODE) and max_premium_pct > 0 and underlying_price > 0:
-            premium_pct = (ask / float(underlying_price)) * 100.0
-            if premium_pct > max_premium_pct:
+        quality_reason, quality = _contract_quality_reject_reason(
+            contract=contract,
+            underlying_symbol=underlying_symbol,
+            underlying_price=float(underlying_price),
+            bid=bid,
+            ask=ask,
+            now_et=now_et,
+        )
+        if quality_reason and not config.EMERGENCY_EXECUTION_MODE:
+            quote_fail_counts[quality_reason] = int(quote_fail_counts.get(quality_reason, 0)) + 1
+            if quality_reason == "contract_quality_bad_quote":
+                quote_fail_counts["bad_quote"] += 1
+            elif quality_reason == "contract_quality_spread_too_wide":
+                quote_fail_counts["spread_too_wide"] += 1
+            elif quality_reason == "contract_quality_premium_too_large":
                 quote_fail_counts["premium_too_expensive"] += 1
-                time.sleep(config.RATE_LIMIT_SLEEP_SECONDS)
-                continue
-        spread_pct = ((ask - bid) / mid) * 100
-        if (not config.EMERGENCY_EXECUTION_MODE) and spread_pct >= config.MAX_OPTION_SPREAD_PCT:
-            quote_fail_counts["spread_too_wide"] += 1
+            elif quality_reason == "contract_quality_strike_too_far":
+                quote_fail_counts["strike_too_far"] += 1
             time.sleep(config.RATE_LIMIT_SLEEP_SECONDS)
             continue
 
         contract["bid_price"] = bid
         contract["ask_price"] = ask
-        contract["spread_pct"] = round(spread_pct, 2)
-        return contract, f"ok({liquidity_mode})"
+        contract["spread_pct"] = round(float(quality.get("contract_spread_pct") or 0.0), 2)
+        contract["daily_volume"] = _contract_daily_volume(contract)
+        contract.update(quality)
+        contract["contract_quality_reason"] = "contract_quality_selected"
+        quality_candidates.append(contract)
+
+    if quality_candidates:
+        quality_candidates.sort(key=lambda item: _contract_quality_rank(item, float(underlying_price)))
+        selected = quality_candidates[0]
+        selected["selected_contract_rank"] = 1
+        selected["selected_contract_score"] = round(
+            float(_contract_quality_rank(selected, float(underlying_price))[0])
+            + float(_contract_quality_rank(selected, float(underlying_price))[1])
+            + float(_contract_quality_rank(selected, float(underlying_price))[2]),
+            4,
+        )
+        return selected, f"ok({liquidity_mode})"
 
     if config.EMERGENCY_EXECUTION_MODE and scored:
         fallback = scored[0]
@@ -441,6 +547,13 @@ def select_atm_option_contract_with_reason(
         f"premium_too_expensive={quote_fail_counts['premium_too_expensive']}>max("
         f"{getattr(config, 'MAX_OPTION_PREMIUM_TO_UNDERLYING_PCT', 0.0)}% underlying), "
         f"strike_too_far={quote_fail_counts['strike_too_far']}>max("
-        f"{getattr(config, 'MAX_OPTION_STRIKE_DISTANCE_PCT', 0.0)}% underlying)"
+        f"{getattr(config, 'MAX_OPTION_STRIKE_DISTANCE_PCT', 0.0)}% underlying), "
+        f"contract_quality_bad_quote={quote_fail_counts['contract_quality_bad_quote']}, "
+        f"contract_quality_spread_too_wide={quote_fail_counts['contract_quality_spread_too_wide']}, "
+        f"contract_quality_strike_too_far={quote_fail_counts['contract_quality_strike_too_far']}, "
+        f"contract_quality_premium_too_large={quote_fail_counts['contract_quality_premium_too_large']}, "
+        f"contract_quality_bad_delta={quote_fail_counts['contract_quality_bad_delta']}, "
+        f"contract_quality_illiquid={quote_fail_counts['contract_quality_illiquid']}, "
+        f"contract_quality_late_0dte_block={quote_fail_counts['contract_quality_late_0dte_block']}"
     )
     return None, reason
