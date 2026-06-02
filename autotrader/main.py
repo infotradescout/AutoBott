@@ -35,7 +35,7 @@ from risk import (
     is_at_or_after,
     position_matches_ticker,
 )
-from scanner import SCAN_LOG_COLUMNS, initialize_scanner, run_observation_phase, run_scan, set_catalyst_mode
+from scanner import SCAN_LOG_COLUMNS, SCAN_LOG_PATH, initialize_scanner, run_observation_phase, run_scan, set_catalyst_mode
 from session_rules import (
     premarket_scan_decision,
     should_force_same_day_exit,
@@ -1068,6 +1068,223 @@ def _entry_spread_quality_gate(signal: dict[str, Any], entry_spread_pct: float) 
         return False, "spread_to_move_gate", spread_to_move_reason
 
     return True, "", ""
+
+
+def _pct_change(new_value: float, old_value: float) -> float:
+    if old_value == 0:
+        return 0.0
+    return ((new_value - old_value) / old_value) * 100.0
+
+
+def _direction_engine_from_bars(
+    bars,
+    *,
+    market_context: dict | None = None,
+    failed_direction_warning: str = "",
+) -> dict[str, Any]:
+    if bars is None or getattr(bars, "empty", True):
+        return {
+            "direction": "",
+            "votes_call": 0,
+            "votes_put": 0,
+            "confidence": 0,
+            "reason": "direction_engine_mixed insufficient_bars",
+        }
+
+    try:
+        closes = bars["close"].astype(float)
+        opens = bars["open"].astype(float)
+    except Exception:
+        return {
+            "direction": "",
+            "votes_call": 0,
+            "votes_put": 0,
+            "confidence": 0,
+            "reason": "direction_engine_mixed invalid_bars",
+        }
+
+    if len(closes) < 22 or len(opens) < 1:
+        return {
+            "direction": "",
+            "votes_call": 0,
+            "votes_put": 0,
+            "confidence": 0,
+            "reason": "direction_engine_mixed insufficient_bars",
+        }
+
+    try:
+        from scanner import calculate_vwap
+
+        vwap = float(calculate_vwap(bars))
+    except Exception:
+        vwap = 0.0
+
+    latest_close = float(closes.iloc[-1])
+    latest_open = float(opens.iloc[-1])
+    ema9 = closes.ewm(span=9, adjust=False).mean()
+    ema21 = closes.ewm(span=21, adjust=False).mean()
+    ema9_now = float(ema9.iloc[-1])
+    ema21_now = float(ema21.iloc[-1])
+    ema9_prev = float(ema9.iloc[-3])
+    ema9_slope = ema9_now - ema9_prev
+    move3 = _pct_change(latest_close, float(closes.iloc[-4]))
+    move5 = _pct_change(latest_close, float(closes.iloc[-6]))
+    roc_fast = _pct_change(latest_close, float(closes.iloc[-4]))
+    roc_slow = _pct_change(latest_close, float(closes.iloc[-11])) if len(closes) >= 11 else move5
+    candle_move = _pct_change(latest_close, latest_open)
+    sharp_candle_pct = 0.08
+    flat_band_pct = 0.02
+
+    preferred_direction = str((market_context or {}).get("preferred_direction", "") or "").lower()
+    call_votes = 0
+    put_votes = 0
+
+    call_votes += int(vwap > 0 and latest_close > vwap)
+    put_votes += int(vwap > 0 and latest_close < vwap)
+    call_votes += int(ema9_now > ema21_now)
+    put_votes += int(ema9_now < ema21_now)
+    call_votes += int(ema9_slope > 0)
+    put_votes += int(ema9_slope < 0)
+    call_votes += int(move3 > 0)
+    put_votes += int(move3 < 0)
+    call_votes += int(move5 >= -flat_band_pct)
+    put_votes += int(move5 <= flat_band_pct)
+    call_votes += int(roc_fast > 0 and roc_slow >= -flat_band_pct)
+    put_votes += int(roc_fast < 0 and roc_slow <= flat_band_pct)
+
+    latest_not_sharp_red = candle_move >= -sharp_candle_pct
+    latest_not_sharp_green = candle_move <= sharp_candle_pct
+    call_hard_ok = (
+        vwap > 0
+        and latest_close > vwap
+        and ema9_now > ema21_now
+        and ema9_slope > 0
+        and move3 > 0
+        and move5 >= -flat_band_pct
+        and latest_not_sharp_red
+    )
+    put_hard_ok = (
+        vwap > 0
+        and latest_close < vwap
+        and ema9_now < ema21_now
+        and ema9_slope < 0
+        and move3 < 0
+        and move5 <= flat_band_pct
+        and latest_not_sharp_green
+    )
+    call_valid = call_hard_ok and call_votes >= 4 and call_votes > put_votes
+    put_valid = put_hard_ok and put_votes >= 4 and put_votes > call_votes
+
+    direction = ""
+    if call_valid and not put_valid:
+        direction = "call"
+    elif put_valid and not call_valid:
+        direction = "put"
+    confidence = max(call_votes, put_votes)
+    if not direction:
+        reason = "direction_engine_mixed"
+    else:
+        reason = f"direction_engine_{direction}"
+    reason += (
+        f" votes_call={call_votes} votes_put={put_votes} "
+        f"move3={move3:+.2f}% move5={move5:+.2f}% candle={candle_move:+.2f}% "
+        f"ema9_vs_21={ema9_now - ema21_now:+.4f} ema9_slope={ema9_slope:+.4f}"
+    )
+    if preferred_direction in {"call", "put"}:
+        reason += f" market_preferred={preferred_direction}"
+    if failed_direction_warning:
+        reason += f" failed_direction_warning={failed_direction_warning}"
+
+    return {
+        "direction": direction,
+        "votes_call": int(call_votes),
+        "votes_put": int(put_votes),
+        "confidence": int(confidence),
+        "reason": reason,
+        "move3_pct": round(move3, 4),
+        "move5_pct": round(move5, 4),
+        "candle_pct": round(candle_move, 4),
+        "roc_fast": round(roc_fast, 4),
+        "roc_slow": round(roc_slow, 4),
+        "vwap": round(vwap, 4),
+        "ema9": round(ema9_now, 4),
+        "ema21": round(ema21_now, 4),
+        "ema9_slope": round(ema9_slope, 6),
+    }
+
+
+def _direction_engine_failed_direction_warning(signal: dict[str, Any]) -> str:
+    for key in ("pattern_direction_override_reason", "pre_execution_history_check"):
+        value = str(signal.get(key, "") or "").strip()
+        if value:
+            return value[:120].replace(",", ";")
+    return ""
+
+
+def _apply_direction_engine(
+    signal: dict[str, Any],
+    *,
+    scanner_direction: str,
+    engine: dict[str, Any],
+) -> tuple[bool, str, str]:
+    engine_direction = str(engine.get("direction", "") or "").lower()
+    confidence = int(engine.get("confidence", 0) or 0)
+    scanner_direction = str(scanner_direction or "").lower()
+    if engine_direction not in {"call", "put"}:
+        return False, "direction_engine_mixed", str(engine.get("reason", "direction_engine_mixed") or "")
+    if scanner_direction == engine_direction:
+        signal["direction"] = engine_direction
+        return True, engine_direction, str(engine.get("reason", "") or "")
+    if confidence >= 5:
+        signal["direction"] = engine_direction
+        signal["direction_engine_override_from"] = scanner_direction
+        signal["direction_engine_override_to"] = engine_direction
+        return True, engine_direction, str(engine.get("reason", "") or "")
+    return False, "direction_engine_disagrees", str(engine.get("reason", "direction_engine_disagrees") or "")
+
+
+def _persist_direction_engine_fields(signal: dict[str, Any], engine: dict[str, Any]) -> None:
+    signal["direction_engine_direction"] = str(engine.get("direction", "") or "")
+    signal["direction_engine_votes_call"] = int(engine.get("votes_call", 0) or 0)
+    signal["direction_engine_votes_put"] = int(engine.get("votes_put", 0) or 0)
+    signal["direction_engine_confidence"] = int(engine.get("confidence", 0) or 0)
+    signal["direction_engine_reason"] = str(engine.get("reason", "") or "")
+
+
+def _append_direction_engine_scan_log(now_et: datetime, signal: dict[str, Any], result: str) -> None:
+    try:
+        SCAN_LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
+        write_header = not SCAN_LOG_PATH.exists()
+        with SCAN_LOG_PATH.open("a", newline="", encoding="utf-8") as handle:
+            writer = csv.DictWriter(handle, fieldnames=SCAN_LOG_COLUMNS)
+            if write_header:
+                writer.writeheader()
+            writer.writerow(
+                {
+                    "timestamp": ts(now_et),
+                    "symbol": signal.get("symbol", ""),
+                    "strategy_profile": signal.get("strategy_profile", ""),
+                    "result": result,
+                    "direction": signal.get("direction", ""),
+                    "rvol": signal.get("rvol", ""),
+                    "rsi": signal.get("rsi", ""),
+                    "roc": signal.get("roc", ""),
+                    "iv_rank": signal.get("iv_rank", ""),
+                    "volatility_score": signal.get("volatility_score", ""),
+                    "regime_score": signal.get("regime_score", ""),
+                    "signal_score": signal.get("signal_score", ""),
+                    "flow_score": signal.get("flow_score", ""),
+                    "htf_reason": signal.get("htf_reason", ""),
+                    "direction_engine_direction": signal.get("direction_engine_direction", ""),
+                    "direction_engine_votes_call": signal.get("direction_engine_votes_call", ""),
+                    "direction_engine_votes_put": signal.get("direction_engine_votes_put", ""),
+                    "direction_engine_confidence": signal.get("direction_engine_confidence", ""),
+                    "direction_engine_reason": signal.get("direction_engine_reason", ""),
+                    "reason": signal.get("reason", ""),
+                }
+            )
+    except Exception as exc:  # noqa: BLE001
+        print(f"[{ts(now_et)}] direction engine scan log write failed: {exc}")
 
 
 def _buy_fill_slippage_vs_ask_pct(ask_price: float | None, fill_price: float | None) -> float:
@@ -6755,6 +6972,39 @@ def main():
                         time.sleep(config.RATE_LIMIT_SLEEP_SECONDS)
                         continue
     
+                    direction_bars = data_client.get_stock_bars(
+                        symbol=ticker,
+                        timeframe=str(getattr(config, "BAR_TIMEFRAME", "5Min") or "5Min"),
+                        limit=30,
+                    )
+                    direction_engine = _direction_engine_from_bars(
+                        direction_bars,
+                        market_context=active_market_context,
+                        failed_direction_warning=_direction_engine_failed_direction_warning(signal),
+                    )
+                    _persist_direction_engine_fields(signal, direction_engine)
+                    engine_ok, engine_direction, engine_reason = _apply_direction_engine(
+                        signal,
+                        scanner_direction=direction,
+                        engine=direction_engine,
+                    )
+                    if not engine_ok:
+                        _append_direction_engine_scan_log(now_et, signal, result=engine_direction)
+                        _mark_skip(engine_direction)
+                        _mark_stage4_reject(reason=engine_direction, ticker=ticker, detail=engine_reason)
+                        print(f"[{ts(now_et)}] {ticker}: skip ({engine_reason}).")
+                        time.sleep(config.RATE_LIMIT_SLEEP_SECONDS)
+                        continue
+                    if engine_direction != direction:
+                        print(
+                            f"[{ts(now_et)}] {ticker}: direction engine override "
+                            f"{direction.upper()} -> {engine_direction.upper()} ({engine_reason})."
+                        )
+                    else:
+                        print(f"[{ts(now_et)}] {ticker}: direction engine accepted {engine_direction.upper()} ({engine_reason}).")
+                    _append_direction_engine_scan_log(now_et, signal, result="direction_engine_pass")
+                    direction = engine_direction
+
                     fresh_tape_ok, fresh_tape_reason = _fresh_tape_direction_guard(
                         data_client=data_client,
                         ticker=ticker,
@@ -7372,6 +7622,11 @@ def main():
                         "pattern_direction_override": signal.get("pattern_direction_override", ""),
                         "pattern_direction_override_reason": signal.get("pattern_direction_override_reason", ""),
                         "pre_execution_history_check": signal.get("pre_execution_history_check", ""),
+                        "direction_engine_direction": signal.get("direction_engine_direction", ""),
+                        "direction_engine_votes_call": signal.get("direction_engine_votes_call", ""),
+                        "direction_engine_votes_put": signal.get("direction_engine_votes_put", ""),
+                        "direction_engine_confidence": signal.get("direction_engine_confidence", ""),
+                        "direction_engine_reason": signal.get("direction_engine_reason", ""),
                         "volatility_stop_loss_mult": round(float(volatility_profile.get("stop_loss_mult", 1.0) or 1.0), 4),
                         "volatility_premium_cap_mult": round(float(volatility_profile.get("premium_cap_mult", 1.0) or 1.0), 4),
                         "entry_bid_submit": entry_result.get("submit_bid"),
@@ -7899,6 +8154,11 @@ def main():
                         "pattern_direction_override": meta.get("pattern_direction_override", ""),
                         "pattern_direction_override_reason": meta.get("pattern_direction_override_reason", ""),
                         "pre_execution_history_check": meta.get("pre_execution_history_check", ""),
+                        "direction_engine_direction": meta.get("direction_engine_direction", ""),
+                        "direction_engine_votes_call": meta.get("direction_engine_votes_call", ""),
+                        "direction_engine_votes_put": meta.get("direction_engine_votes_put", ""),
+                        "direction_engine_confidence": meta.get("direction_engine_confidence", ""),
+                        "direction_engine_reason": meta.get("direction_engine_reason", ""),
                         "entry_time": meta.get("entry_time_iso", ""),
                         "exit_time": now_et.isoformat(),
                         "hold_seconds": hold_seconds,

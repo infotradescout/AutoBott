@@ -38,6 +38,11 @@ SCAN_LOG_COLUMNS = [
     "signal_score",
     "flow_score",
     "htf_reason",
+    "direction_engine_direction",
+    "direction_engine_votes_call",
+    "direction_engine_votes_put",
+    "direction_engine_confidence",
+    "direction_engine_reason",
     "reason",
 ]
 OBSERVATION_LOG_PATH = Path(config.OBSERVATION_LOG_CSV_PATH)
@@ -1417,6 +1422,11 @@ class IntradayScanner:
                         "signal_score": item.get("signal_score", ""),
                         "flow_score": item.get("flow_score", ""),
                         "htf_reason": item.get("htf_reason", ""),
+                        "direction_engine_direction": item.get("direction_engine_direction", ""),
+                        "direction_engine_votes_call": item.get("direction_engine_votes_call", ""),
+                        "direction_engine_votes_put": item.get("direction_engine_votes_put", ""),
+                        "direction_engine_confidence": item.get("direction_engine_confidence", ""),
+                        "direction_engine_reason": item.get("direction_engine_reason", ""),
                         "reason": item.get("reason", ""),
                     }
                 )
@@ -1437,6 +1447,11 @@ class IntradayScanner:
                         "signal_score": "",
                         "flow_score": "",
                         "htf_reason": "",
+                        "direction_engine_direction": "",
+                        "direction_engine_votes_call": "",
+                        "direction_engine_votes_put": "",
+                        "direction_engine_confidence": "",
+                        "direction_engine_reason": "",
                         "reason": item.get("reason", ""),
                     }
                 )

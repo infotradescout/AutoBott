@@ -48,6 +48,23 @@ class FakeEnumValue:
         self.value = value
 
 
+def direction_bars(closes: list[float]) -> pd.DataFrame:
+    rows = []
+    for index, close in enumerate(closes):
+        previous = closes[index - 1] if index > 0 else close
+        open_price = previous
+        rows.append(
+            {
+                "open": open_price,
+                "high": max(open_price, close) + 0.05,
+                "low": min(open_price, close) - 0.05,
+                "close": close,
+                "volume": 1000 + index,
+            }
+        )
+    return pd.DataFrame(rows)
+
+
 class FakeRawSubmittedOrder:
     def __init__(
         self,
@@ -590,6 +607,73 @@ class MainOrderGuardTests(unittest.TestCase):
         ok, reason = main._entry_spread_to_move_gate(signal, 3.5)
 
         self.assertTrue(ok, reason)
+
+    def test_direction_engine_bullish_bars_produce_call(self):
+        bars = direction_bars([100 + (i * 0.12) for i in range(30)])
+
+        engine = main._direction_engine_from_bars(bars)
+
+        self.assertEqual(engine["direction"], "call")
+        self.assertGreaterEqual(engine["votes_call"], 4)
+
+    def test_direction_engine_bearish_bars_produce_put(self):
+        bars = direction_bars([104 - (i * 0.12) for i in range(30)])
+
+        engine = main._direction_engine_from_bars(bars)
+
+        self.assertEqual(engine["direction"], "put")
+        self.assertGreaterEqual(engine["votes_put"], 4)
+
+    def test_direction_engine_mixed_chop_rejects(self):
+        bars = direction_bars([100.0, 100.04, 99.98, 100.03, 99.99, 100.02] * 5)
+
+        engine = main._direction_engine_from_bars(bars)
+
+        self.assertEqual(engine["direction"], "")
+        self.assertIn("direction_engine_mixed", engine["reason"])
+
+    def test_scanner_call_rejected_when_engine_mixed(self):
+        signal = {"direction": "call"}
+        engine = {"direction": "", "confidence": 3, "reason": "direction_engine_mixed"}
+
+        ok, reason, detail = main._apply_direction_engine(signal, scanner_direction="call", engine=engine)
+
+        self.assertFalse(ok)
+        self.assertEqual(reason, "direction_engine_mixed")
+        self.assertIn("direction_engine_mixed", detail)
+
+    def test_scanner_call_overridden_to_put_only_with_high_confidence(self):
+        signal = {"direction": "call"}
+        engine = {
+            "direction": "put",
+            "votes_call": 0,
+            "votes_put": 6,
+            "confidence": 6,
+            "reason": "direction_engine_put",
+        }
+
+        ok, direction, detail = main._apply_direction_engine(signal, scanner_direction="call", engine=engine)
+
+        self.assertTrue(ok, detail)
+        self.assertEqual(direction, "put")
+        self.assertEqual(signal["direction"], "put")
+        self.assertEqual(signal["direction_engine_override_from"], "call")
+
+    def test_scanner_call_disagreement_without_high_confidence_rejects(self):
+        signal = {"direction": "call"}
+        engine = {
+            "direction": "put",
+            "votes_call": 2,
+            "votes_put": 4,
+            "confidence": 4,
+            "reason": "direction_engine_put",
+        }
+
+        ok, reason, detail = main._apply_direction_engine(signal, scanner_direction="call", engine=engine)
+
+        self.assertFalse(ok)
+        self.assertEqual(reason, "direction_engine_disagrees")
+        self.assertIn("direction_engine_put", detail)
 
     def test_ticker_open_qty_counts_live_positions_and_meta(self):
         positions = [FakePosition("IWM260515C00282000", qty=3)]
