@@ -561,6 +561,36 @@ class MainOrderGuardTests(unittest.TestCase):
 
         self.assertEqual(signals[0]["symbol"], "IWM")
 
+    def test_high_spread_requires_strong_direction(self):
+        signal = {"signal_score": 11.9, "direction_score": 0.9, "roc": 1.0, "atr_pct": 2.0}
+
+        ok, reason = main._high_spread_direction_strength_gate(signal, 2.6)
+
+        self.assertFalse(ok)
+        self.assertIn("high_spread_requires_strong_direction", reason)
+
+    def test_low_spread_keeps_current_direction_thresholds(self):
+        signal = {"signal_score": 6.0, "direction_score": 0.4, "roc": 0.05, "atr_pct": 0.2}
+
+        ok, reason = main._high_spread_direction_strength_gate(signal, 2.5)
+
+        self.assertTrue(ok, reason)
+
+    def test_spread_to_move_gate_rejects_bad_contract(self):
+        signal = {"signal_score": 12.0, "direction_score": 0.9, "roc": 0.05, "roc_fast": 0.04, "atr_pct": 0.12}
+
+        ok, reason = main._entry_spread_to_move_gate(signal, 4.0)
+
+        self.assertFalse(ok)
+        self.assertIn("spread_to_move_gate", reason)
+
+    def test_spread_to_move_gate_accepts_quality_move(self):
+        signal = {"signal_score": 14.0, "direction_score": 0.95, "roc": 1.1, "roc_fast": 0.9, "atr_pct": 1.8}
+
+        ok, reason = main._entry_spread_to_move_gate(signal, 3.5)
+
+        self.assertTrue(ok, reason)
+
     def test_ticker_open_qty_counts_live_positions_and_meta(self):
         positions = [FakePosition("IWM260515C00282000", qty=3)]
         meta = {

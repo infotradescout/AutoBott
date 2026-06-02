@@ -1015,6 +1015,61 @@ def _entry_quote_spread_gate(
     return True, ""
 
 
+def _expected_underlying_move_quality_pct(signal: dict[str, Any]) -> float:
+    roc_pct = abs(_safe_signal_float(signal.get("roc"), 0.0))
+    roc_fast_pct = abs(_safe_signal_float(signal.get("roc_fast"), 0.0))
+    atr_pct = max(0.0, _safe_signal_float(signal.get("atr_pct"), 0.0))
+    direction_score = min(1.0, abs(_safe_signal_float(signal.get("direction_score"), 0.0)))
+    signal_score = max(0.0, _safe_signal_float(signal.get("signal_score"), 0.0))
+
+    expected_move_pct = max(roc_pct, roc_fast_pct, atr_pct * 0.50)
+    score_quality = min(1.50, max(0.50, signal_score / 12.0))
+    return expected_move_pct * max(0.25, direction_score) * score_quality
+
+
+def _entry_spread_to_move_gate(signal: dict[str, Any], entry_spread_pct: float) -> tuple[bool, str]:
+    spread_pct = max(0.0, float(entry_spread_pct or 0.0))
+    low_spread_threshold = 2.5
+    if spread_pct <= low_spread_threshold:
+        return True, ""
+
+    move_quality_pct = _expected_underlying_move_quality_pct(signal)
+    allowed_spread_pct = max(low_spread_threshold, move_quality_pct * 4.0)
+    if spread_pct > allowed_spread_pct:
+        return (
+            False,
+            f"spread_to_move_gate spread={spread_pct:.2f}% move_quality={move_quality_pct:.2f}% max={allowed_spread_pct:.2f}%",
+        )
+    return True, ""
+
+
+def _high_spread_direction_strength_gate(signal: dict[str, Any], entry_spread_pct: float) -> tuple[bool, str]:
+    spread_pct = max(0.0, float(entry_spread_pct or 0.0))
+    if spread_pct <= 2.5:
+        return True, ""
+
+    direction_score = abs(_safe_signal_float(signal.get("direction_score"), 0.0))
+    signal_score = _safe_signal_float(signal.get("signal_score"), 0.0)
+    if direction_score < 0.85 or signal_score < 12.0:
+        return (
+            False,
+            f"high_spread_requires_strong_direction spread={spread_pct:.2f}% direction={direction_score:.2f}/0.85 score={signal_score:.2f}/12.00",
+        )
+    return True, ""
+
+
+def _entry_spread_quality_gate(signal: dict[str, Any], entry_spread_pct: float) -> tuple[bool, str, str]:
+    high_spread_ok, high_spread_reason = _high_spread_direction_strength_gate(signal, entry_spread_pct)
+    if not high_spread_ok:
+        return False, "high_spread_requires_strong_direction", high_spread_reason
+
+    spread_to_move_ok, spread_to_move_reason = _entry_spread_to_move_gate(signal, entry_spread_pct)
+    if not spread_to_move_ok:
+        return False, "spread_to_move_gate", spread_to_move_reason
+
+    return True, "", ""
+
+
 def _buy_fill_slippage_vs_ask_pct(ask_price: float | None, fill_price: float | None) -> float:
     ask_value = float(ask_price or 0.0)
     fill_value = float(fill_price or 0.0)
@@ -5575,6 +5630,9 @@ def main():
             "contract_rejected_count_by_reason": {},
             "order_attempted_count": 0,
             "order_rejected_count_by_reason": {},
+            "spread_to_move_gate": 0,
+            "high_spread_requires_strong_direction": 0,
+            "accepted_low_spread_entry": 0,
             "trade_resting_count": 0,
             "trade_filled_count": 0,
             "signal_outcomes": {},
@@ -6754,6 +6812,18 @@ def main():
                         print(f"[{ts(now_et)}] {ticker}: skip ({spread_reason}).")
                         time.sleep(config.RATE_LIMIT_SLEEP_SECONDS)
                         continue
+                    entry_spread_pct = float(entry_quote.get("spread_pct") or 0.0)
+                    spread_quality_ok, spread_quality_reason, spread_quality_detail = _entry_spread_quality_gate(
+                        signal,
+                        entry_spread_pct,
+                    )
+                    if not spread_quality_ok:
+                        entry_debug[spread_quality_reason] = int(entry_debug.get(spread_quality_reason, 0) or 0) + 1
+                        _mark_skip(spread_quality_reason)
+                        _mark_stage4_reject(reason=spread_quality_reason, ticker=ticker, detail=spread_quality_detail)
+                        print(f"[{ts(now_et)}] {ticker}: skip ({spread_quality_detail}).")
+                        time.sleep(config.RATE_LIMIT_SLEEP_SECONDS)
+                        continue
                     ask_price = float(entry_quote.get("ask") or 0.0)
     
                     volatility_premium_mult = max(0.1, float(volatility_profile["premium_cap_mult"]))
@@ -7074,7 +7144,19 @@ def main():
                         if retry_ok and retry_ask > 0:
                             entry_quote = retry_quote
                             ask_price = retry_ask
+                            entry_spread_pct = float(entry_quote.get("spread_pct") or 0.0)
                             pre_submit_slippage = _slippage_pct(initial_chain_ask, ask_price)
+                            spread_quality_ok, spread_quality_reason, spread_quality_detail = _entry_spread_quality_gate(
+                                signal,
+                                entry_spread_pct,
+                            )
+                            if not spread_quality_ok:
+                                entry_debug[spread_quality_reason] = int(entry_debug.get(spread_quality_reason, 0) or 0) + 1
+                                _mark_skip(spread_quality_reason)
+                                _mark_stage4_reject(reason=spread_quality_reason, ticker=ticker, detail=spread_quality_detail)
+                                print(f"[{ts(now_et)}] {ticker}: skip ({spread_quality_detail}).")
+                                time.sleep(config.RATE_LIMIT_SLEEP_SECONDS)
+                                continue
                         elif not retry_ok:
                             reject_reason = "quote_spread_too_wide" if "spread" in retry_reason else "no_option_ask"
                             _mark_skip(reject_reason)
@@ -7106,6 +7188,8 @@ def main():
                         signal["pre_execution_history_check"] = history_reason
                         print(f"[{ts(now_et)}] {ticker}: {history_reason}.")
     
+                    if entry_spread_pct <= 2.5:
+                        entry_debug["accepted_low_spread_entry"] = int(entry_debug.get("accepted_low_spread_entry", 0) or 0) + 1
                     _mark_stage4_eligible(ticker=ticker)
                     entry_attempts_loop += 1
                     if _is_in_opening_strict_window(now_et):
