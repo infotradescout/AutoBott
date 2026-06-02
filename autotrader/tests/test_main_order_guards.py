@@ -134,6 +134,14 @@ class FakeBarsDataClient:
         return pd.DataFrame({"close": self.closes})
 
 
+class FakeStockBarsDataClient:
+    def __init__(self, closes: list[float]):
+        self.bars = direction_bars(closes)
+
+    def get_stock_bars(self, **_kwargs):
+        return self.bars
+
+
 class FakeDataClient:
     def get_latest_option_quote(self, option_symbol: str):
         return {"bid": 5.0, "ask": 5.04}
@@ -629,26 +637,26 @@ class MainOrderGuardTests(unittest.TestCase):
 
         engine = main._direction_engine_from_bars(bars)
 
-        self.assertEqual(engine["direction"], "")
-        self.assertIn("direction_engine_mixed", engine["reason"])
+        self.assertEqual(engine["direction"], "no_trade")
+        self.assertIn("direction_not_clean", engine["reason"])
 
     def test_scanner_call_rejected_when_engine_mixed(self):
         signal = {"direction": "call"}
-        engine = {"direction": "", "confidence": 3, "reason": "direction_engine_mixed"}
+        engine = {"direction": "no_trade", "confidence": 3, "reason": "direction_not_clean"}
 
         ok, reason, detail = main._apply_direction_engine(signal, scanner_direction="call", engine=engine)
 
         self.assertFalse(ok)
-        self.assertEqual(reason, "direction_engine_mixed")
-        self.assertIn("direction_engine_mixed", detail)
+        self.assertEqual(reason, "direction_not_clean")
+        self.assertIn("direction_not_clean", detail)
 
-    def test_scanner_call_overridden_to_put_only_with_high_confidence(self):
+    def test_scanner_call_uses_engine_put_direction(self):
         signal = {"direction": "call"}
         engine = {
             "direction": "put",
             "votes_call": 0,
-            "votes_put": 6,
-            "confidence": 6,
+            "votes_put": 4,
+            "confidence": 4,
             "reason": "direction_engine_put",
         }
 
@@ -659,21 +667,19 @@ class MainOrderGuardTests(unittest.TestCase):
         self.assertEqual(signal["direction"], "put")
         self.assertEqual(signal["direction_engine_override_from"], "call")
 
-    def test_scanner_call_disagreement_without_high_confidence_rejects(self):
-        signal = {"direction": "call"}
-        engine = {
-            "direction": "put",
-            "votes_call": 2,
-            "votes_put": 4,
-            "confidence": 4,
-            "reason": "direction_engine_put",
-        }
+    def test_early_underlying_invalidation_exits_call_when_vwap_lost(self):
+        now = EASTERN.localize(datetime(2026, 5, 15, 10, 10, 0))
+        closes = [100 + (i * 0.05) for i in range(25)] + [101.0, 100.7, 100.2, 99.8, 99.4]
 
-        ok, reason, detail = main._apply_direction_engine(signal, scanner_direction="call", engine=engine)
+        reason = main._early_underlying_invalidation_reason(
+            FakeStockBarsDataClient(closes),
+            ticker="AAPL",
+            direction="call",
+            entry_time=now - timedelta(minutes=5),
+            now_et=now,
+        )
 
-        self.assertFalse(ok)
-        self.assertEqual(reason, "direction_engine_disagrees")
-        self.assertIn("direction_engine_put", detail)
+        self.assertEqual(reason, "underlying_direction_invalidated")
 
     def test_ticker_open_qty_counts_live_positions_and_meta(self):
         positions = [FakePosition("IWM260515C00282000", qty=3)]

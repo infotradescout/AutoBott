@@ -121,15 +121,15 @@ class OptionSelectionTests(unittest.TestCase):
         data = FakeOptionData(
             contracts=[
                 {
-                    "symbol": "AAPL260515C00180000",
+                    "symbol": "AAPL260515C00181000",
                     "expiration_date": "2026-05-15",
-                    "strike_price": 180.0,
+                    "strike_price": 181.0,
                     "open_interest": 100,
                     "volume": 50,
                 }
             ],
             quotes={
-                "AAPL260515C00180000": {"bid": 1.00, "ask": 1.10},
+                "AAPL260515C00181000": {"bid": 1.00, "ask": 1.10},
             },
         )
 
@@ -218,8 +218,8 @@ class OptionSelectionTests(unittest.TestCase):
                     "symbol": "SPY260514C00500000",
                     "expiration_date": "2026-05-14",
                     "strike_price": 500.0,
-                    "open_interest": 0,
-                    "volume": 0,
+                    "open_interest": 10,
+                    "volume": 10,
                 }
             ],
             quotes={
@@ -236,7 +236,7 @@ class OptionSelectionTests(unittest.TestCase):
             now_et=late,
         )
 
-        self.assertEqual(reason, "ok(failopen_liquidity)")
+        self.assertEqual(reason, "ok(strict)")
         self.assertEqual(contract["symbol"], "SPY260514C00500000")
 
     def test_rejects_same_day_contracts_near_option_expiry_cutoff(self):
@@ -251,7 +251,7 @@ class OptionSelectionTests(unittest.TestCase):
                 }
             ],
             quotes={
-                "AMD260514C00110000": {"bid": 1.95, "ask": 2.0},
+                "AMD260514C00110000": {"bid": 1.99, "ask": 2.0},
             },
         )
         near_cutoff = EASTERN.localize(datetime(2026, 5, 14, 14, 55, 0))
@@ -265,7 +265,7 @@ class OptionSelectionTests(unittest.TestCase):
         )
 
         self.assertIsNone(contract)
-        self.assertIn("no eligible non-0DTE contracts", reason)
+        self.assertIn("contract_quality_late_0dte_block=1", reason)
 
 
 if __name__ == "__main__":  # pragma: no cover

@@ -1084,32 +1084,34 @@ def _direction_engine_from_bars(
 ) -> dict[str, Any]:
     if bars is None or getattr(bars, "empty", True):
         return {
-            "direction": "",
+            "direction": "no_trade",
             "votes_call": 0,
             "votes_put": 0,
             "confidence": 0,
-            "reason": "direction_engine_mixed insufficient_bars",
+            "reason": "direction_not_clean insufficient_bars",
         }
 
     try:
         closes = bars["close"].astype(float)
         opens = bars["open"].astype(float)
+        lows = bars["low"].astype(float)
+        highs = bars["high"].astype(float)
     except Exception:
         return {
-            "direction": "",
+            "direction": "no_trade",
             "votes_call": 0,
             "votes_put": 0,
             "confidence": 0,
-            "reason": "direction_engine_mixed invalid_bars",
+            "reason": "direction_not_clean invalid_bars",
         }
 
     if len(closes) < 22 or len(opens) < 1:
         return {
-            "direction": "",
+            "direction": "no_trade",
             "votes_call": 0,
             "votes_put": 0,
             "confidence": 0,
-            "reason": "direction_engine_mixed insufficient_bars",
+            "reason": "direction_not_clean insufficient_bars",
         }
 
     try:
@@ -1132,8 +1134,9 @@ def _direction_engine_from_bars(
     roc_fast = _pct_change(latest_close, float(closes.iloc[-4]))
     roc_slow = _pct_change(latest_close, float(closes.iloc[-11])) if len(closes) >= 11 else move5
     candle_move = _pct_change(latest_close, latest_open)
+    prior_5bar_low = float(lows.iloc[-6:-1].min())
+    prior_5bar_high = float(highs.iloc[-6:-1].max())
     sharp_candle_pct = 0.08
-    flat_band_pct = 0.02
 
     preferred_direction = str((market_context or {}).get("preferred_direction", "") or "").lower()
     call_votes = 0
@@ -1147,10 +1150,10 @@ def _direction_engine_from_bars(
     put_votes += int(ema9_slope < 0)
     call_votes += int(move3 > 0)
     put_votes += int(move3 < 0)
-    call_votes += int(move5 >= -flat_band_pct)
-    put_votes += int(move5 <= flat_band_pct)
-    call_votes += int(roc_fast > 0 and roc_slow >= -flat_band_pct)
-    put_votes += int(roc_fast < 0 and roc_slow <= flat_band_pct)
+    call_votes += int(move5 > 0)
+    put_votes += int(move5 < 0)
+    call_votes += int(roc_fast > 0 and roc_slow > 0)
+    put_votes += int(roc_fast < 0 and roc_slow < 0)
 
     latest_not_sharp_red = candle_move >= -sharp_candle_pct
     latest_not_sharp_green = candle_move <= sharp_candle_pct
@@ -1160,8 +1163,9 @@ def _direction_engine_from_bars(
         and ema9_now > ema21_now
         and ema9_slope > 0
         and move3 > 0
-        and move5 >= -flat_band_pct
+        and move5 > 0
         and latest_not_sharp_red
+        and latest_close >= prior_5bar_low
     )
     put_hard_ok = (
         vwap > 0
@@ -1169,20 +1173,21 @@ def _direction_engine_from_bars(
         and ema9_now < ema21_now
         and ema9_slope < 0
         and move3 < 0
-        and move5 <= flat_band_pct
+        and move5 < 0
         and latest_not_sharp_green
+        and latest_close <= prior_5bar_high
     )
     call_valid = call_hard_ok and call_votes >= 4 and call_votes > put_votes
     put_valid = put_hard_ok and put_votes >= 4 and put_votes > call_votes
 
-    direction = ""
+    direction = "no_trade"
     if call_valid and not put_valid:
         direction = "call"
     elif put_valid and not call_valid:
         direction = "put"
     confidence = max(call_votes, put_votes)
-    if not direction:
-        reason = "direction_engine_mixed"
+    if direction == "no_trade":
+        reason = "direction_not_clean"
     else:
         reason = f"direction_engine_{direction}"
     reason += (
@@ -1210,6 +1215,8 @@ def _direction_engine_from_bars(
         "ema9": round(ema9_now, 4),
         "ema21": round(ema21_now, 4),
         "ema9_slope": round(ema9_slope, 6),
+        "prior_5bar_low": round(prior_5bar_low, 4),
+        "prior_5bar_high": round(prior_5bar_high, 4),
     }
 
 
@@ -1228,19 +1235,14 @@ def _apply_direction_engine(
     engine: dict[str, Any],
 ) -> tuple[bool, str, str]:
     engine_direction = str(engine.get("direction", "") or "").lower()
-    confidence = int(engine.get("confidence", 0) or 0)
-    scanner_direction = str(scanner_direction or "").lower()
+    _scanner_direction = str(scanner_direction or "").lower()
     if engine_direction not in {"call", "put"}:
-        return False, "direction_engine_mixed", str(engine.get("reason", "direction_engine_mixed") or "")
-    if scanner_direction == engine_direction:
-        signal["direction"] = engine_direction
-        return True, engine_direction, str(engine.get("reason", "") or "")
-    if confidence >= 5:
-        signal["direction"] = engine_direction
-        signal["direction_engine_override_from"] = scanner_direction
+        return False, "direction_not_clean", str(engine.get("reason", "direction_not_clean") or "")
+    signal["direction"] = engine_direction
+    if _scanner_direction != engine_direction:
+        signal["direction_engine_override_from"] = _scanner_direction
         signal["direction_engine_override_to"] = engine_direction
-        return True, engine_direction, str(engine.get("reason", "") or "")
-    return False, "direction_engine_disagrees", str(engine.get("reason", "direction_engine_disagrees") or "")
+    return True, engine_direction, str(engine.get("reason", "") or "")
 
 
 def _persist_direction_engine_fields(signal: dict[str, Any], engine: dict[str, Any]) -> None:
@@ -1285,6 +1287,58 @@ def _append_direction_engine_scan_log(now_et: datetime, signal: dict[str, Any], 
             )
     except Exception as exc:  # noqa: BLE001
         print(f"[{ts(now_et)}] direction engine scan log write failed: {exc}")
+
+
+def _bar_timeframe_minutes() -> int:
+    text = str(getattr(config, "BAR_TIMEFRAME", "5Min") or "5Min").strip().lower()
+    if text.endswith("min"):
+        text = text[:-3]
+    elif text.endswith("m"):
+        text = text[:-1]
+    try:
+        return max(1, int(float(text)))
+    except (TypeError, ValueError):
+        return 5
+
+
+def _early_underlying_invalidation_reason(
+    data_client: AlpacaDataClient,
+    *,
+    ticker: str,
+    direction: str,
+    entry_time: datetime | None,
+    now_et: datetime,
+) -> str:
+    direction_lc = str(direction or "").lower()
+    if direction_lc not in {"call", "put"} or entry_time is None:
+        return ""
+    elapsed_seconds = max(0.0, (now_et - entry_time).total_seconds())
+    if elapsed_seconds > (_bar_timeframe_minutes() * 2 * 60):
+        return ""
+    try:
+        bars = data_client.get_stock_bars(
+            symbol=ticker,
+            timeframe=str(getattr(config, "BAR_TIMEFRAME", "5Min") or "5Min"),
+            limit=30,
+        )
+        if bars is None or len(bars) < 22:
+            return ""
+        closes = bars["close"].astype(float)
+        ema9 = closes.ewm(span=9, adjust=False).mean()
+        ema21 = closes.ewm(span=21, adjust=False).mean()
+        from scanner import calculate_vwap
+
+        vwap = float(calculate_vwap(bars))
+        latest_close = float(closes.iloc[-1])
+        ema_cross_down = float(ema9.iloc[-1]) < float(ema21.iloc[-1])
+        ema_cross_up = float(ema9.iloc[-1]) > float(ema21.iloc[-1])
+        if direction_lc == "call" and (latest_close < vwap or ema_cross_down):
+            return "underlying_direction_invalidated"
+        if direction_lc == "put" and (latest_close > vwap or ema_cross_up):
+            return "underlying_direction_invalidated"
+    except Exception as exc:  # noqa: BLE001
+        print(f"[{ts(now_et)}] {ticker}: underlying invalidation check unavailable: {exc}")
+    return ""
 
 
 def _buy_fill_slippage_vs_ask_pct(ask_price: float | None, fill_price: float | None) -> float:
@@ -7811,7 +7865,17 @@ def main():
             if not ticker_for_pos:
                 parsed_ticker, _parsed_dir = _parse_option_symbol(symbol)
                 ticker_for_pos = parsed_ticker.upper()
-            if ticker_for_pos:
+            if exit_reason is None:
+                invalidation_reason = _early_underlying_invalidation_reason(
+                    data_client,
+                    ticker=ticker_for_pos,
+                    direction=str(meta.get("direction", "") or ""),
+                    entry_time=entry_time,
+                    now_et=now_et,
+                )
+                if invalidation_reason:
+                    exit_reason = invalidation_reason
+            if exit_reason is None and ticker_for_pos:
                 total_qty_for_ticker = int(ticker_total_qty.get(ticker_for_pos, qty))
                 keep_symbol = str(ticker_first_symbol.get(ticker_for_pos, symbol))
                 max_contracts_per_ticker = int(

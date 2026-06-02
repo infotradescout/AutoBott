@@ -126,7 +126,7 @@ def _contract_quality_reject_reason(
 
     spread_pct = ((ask - bid) / midpoint) * 100.0
     quality["contract_spread_pct"] = round(spread_pct, 4)
-    max_spread = 1.5 if (now_et.hour, now_et.minute) >= (13, 30) else 2.5
+    max_spread = 2.0 if _is_index_etf(underlying_symbol) else 2.5
     if spread_pct > max_spread:
         return "contract_quality_spread_too_wide", quality
 
@@ -134,7 +134,7 @@ def _contract_quality_reject_reason(
         return "contract_quality_strike_too_far", quality
     strike_distance_pct = abs(float(strike) - float(underlying_price)) / float(underlying_price) * 100.0
     quality["contract_strike_distance_pct"] = round(strike_distance_pct, 4)
-    max_strike_distance = 2.5 if _is_index_etf(underlying_symbol) else 5.0
+    max_strike_distance = 1.5 if _is_index_etf(underlying_symbol) else 3.0
     if strike_distance_pct > max_strike_distance:
         return "contract_quality_strike_too_far", quality
 
@@ -142,15 +142,14 @@ def _contract_quality_reject_reason(
     if premium_pct > 8.0:
         return "contract_quality_premium_too_large", quality
 
-    excellent_quote = spread_pct <= 1.0
-    if open_interest <= 0 and daily_volume <= 0 and not excellent_quote:
+    if open_interest <= 0 and daily_volume <= 0:
         return "contract_quality_illiquid", quality
 
     if expiration == now_et.date() and (now_et.hour, now_et.minute) >= (13, 30):
         if not (_is_index_etf(underlying_symbol) and spread_pct <= 1.5):
             return "contract_quality_late_0dte_block", quality
 
-    if delta_abs is not None and not (0.35 <= delta_abs <= 0.60):
+    if delta_abs is not None and not (0.40 <= delta_abs <= 0.60):
         return "contract_quality_bad_delta", quality
 
     return None, quality
@@ -396,18 +395,8 @@ def select_atm_option_contract_with_reason(
         return None, reason
 
     scored: list[dict[str, Any]] = []
-    avoid_0dte_minutes = int(getattr(config, "AVOID_0DTE_ENTRY_WITHIN_CLOSE_MINUTES", 0) or 0)
-    minutes_to_close = _minutes_until_entry_expiry_cutoff(now_et)
-    avoid_0dte_now = (
-        avoid_0dte_minutes > 0
-        and minutes_to_close is not None
-        and minutes_to_close <= avoid_0dte_minutes
-    )
     for contract in filtered:
         exp_date = _safe_date(contract.get("expiration_date"))
-        if exp_date == today and avoid_0dte_now and not _is_index_etf(underlying_symbol):
-            fail_counts["expires_too_soon"] = fail_counts.get("expires_too_soon", 0) + 1
-            continue
         open_interest = _safe_float(contract.get("open_interest")) or 0.0
         if (
             (not config.EMERGENCY_EXECUTION_MODE)
@@ -450,11 +439,7 @@ def select_atm_option_contract_with_reason(
     if not scored:
         # Fail-open fallback: if stricter 0DTE quality checks empty the pool,
         # fall back to the already-liquidity-filtered set so entries can proceed.
-        scored = [
-            contract
-            for contract in filtered
-            if not (avoid_0dte_now and _safe_date(contract.get("expiration_date")) == today)
-        ]
+        scored = list(filtered)
         for contract in scored:
             strike_val = _contract_strike(contract)
             if strike_val is None:
@@ -462,8 +447,6 @@ def select_atm_option_contract_with_reason(
             strike_gap = abs(float(strike_val) - underlying_price)
             contract["_select_score"] = strike_gap * 0.05
         if not scored:
-            if avoid_0dte_now:
-                return None, f"no eligible non-0DTE contracts within {avoid_0dte_minutes}m of close"
             return None, "no eligible contracts after 0DTE/quality checks"
 
     scored.sort(key=lambda c: (float(c.get("_select_score", 99.0)), c.get("expiration_date", "")))
