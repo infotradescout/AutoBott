@@ -590,6 +590,29 @@ def _current_open_premium_usd(option_positions: list, open_trade_meta: dict[str,
     return round(total, 4)
 
 
+def _liquid_etf_lane_symbols() -> set[str]:
+    return {str(symbol).upper() for symbol in getattr(config, "LIQUID_ETF_OPTIONS_LANE_SYMBOLS", ("SPY", "QQQ", "IWM"))}
+
+
+def _liquid_etf_lane_reject_reason(ticker: str) -> str:
+    return "" if str(ticker or "").upper() in _liquid_etf_lane_symbols() else "liquid_etf_lane_only"
+
+
+def _open_option_position_count(option_positions: list, open_trade_meta: dict[str, dict]) -> int:
+    open_symbols: set[str] = set()
+    for pos in option_positions or []:
+        symbol = str(getattr(pos, "symbol", "") or "").upper()
+        qty = position_qty_as_int(getattr(pos, "qty", 0))
+        if symbol and qty > 0:
+            open_symbols.add(symbol)
+    for symbol, meta in (open_trade_meta or {}).items():
+        symbol_text = str(symbol or "").upper()
+        qty = int(meta.get("qty", 0) or 0)
+        if symbol_text and qty > 0:
+            open_symbols.add(symbol_text)
+    return len(open_symbols)
+
+
 def _direction_exposure_counts(option_positions: list, open_trade_meta: dict[str, dict]) -> tuple[int, int]:
     call_symbols: set[str] = set()
     put_symbols: set[str] = set()
@@ -1129,6 +1152,8 @@ def _direction_engine_from_bars(
     ema21_now = float(ema21.iloc[-1])
     ema9_prev = float(ema9.iloc[-3])
     ema9_slope = ema9_now - ema9_prev
+    last_3_rising = bool(float(closes.iloc[-3]) < float(closes.iloc[-2]) < latest_close)
+    last_3_falling = bool(float(closes.iloc[-3]) > float(closes.iloc[-2]) > latest_close)
     move3 = _pct_change(latest_close, float(closes.iloc[-4]))
     move5 = _pct_change(latest_close, float(closes.iloc[-6]))
     roc_fast = _pct_change(latest_close, float(closes.iloc[-4]))
@@ -1149,36 +1174,28 @@ def _direction_engine_from_bars(
     put_votes += int(ema9_now < ema21_now)
     call_votes += int(ema9_slope > 0)
     put_votes += int(ema9_slope < 0)
-    call_votes += int(move3 > 0)
-    put_votes += int(move3 < 0)
+    call_votes += int(last_3_rising)
+    put_votes += int(last_3_falling)
     call_votes += int(move5 > 0)
     put_votes += int(move5 < 0)
-    call_votes += int(candle_move >= 0 and latest_close >= prior_3bar_low and signal_roc >= 0.15 and rvol >= 0.40)
-    put_votes += int(candle_move <= 0 and latest_close <= prior_3bar_high and signal_roc <= -0.15 and rvol >= 0.40)
+    call_votes += int(candle_move >= 0 and preferred_direction == "call")
+    put_votes += int(candle_move <= 0 and preferred_direction == "put")
 
     call_hard_ok = (
         vwap > 0
         and latest_close > vwap
         and ema9_now > ema21_now
-        and ema9_slope > 0
-        and move3 > 0
-        and move5 > 0
+        and last_3_rising
         and candle_move >= 0
-        and latest_close >= prior_3bar_low
-        and signal_roc >= 0.15
-        and rvol >= 0.40
+        and preferred_direction == "call"
     )
     put_hard_ok = (
         vwap > 0
         and latest_close < vwap
         and ema9_now < ema21_now
-        and ema9_slope < 0
-        and move3 < 0
-        and move5 < 0
+        and last_3_falling
         and candle_move <= 0
-        and latest_close <= prior_3bar_high
-        and signal_roc <= -0.15
-        and rvol >= 0.40
+        and preferred_direction == "put"
     )
     call_valid = call_hard_ok and call_votes >= 4 and call_votes > put_votes
     put_valid = put_hard_ok and put_votes >= 4 and put_votes > call_votes
@@ -1190,7 +1207,7 @@ def _direction_engine_from_bars(
         direction = "put"
     confidence = max(call_votes, put_votes)
     if direction == "no_trade":
-        reason = "direction_not_clean"
+        reason = "etf_direction_not_clean"
     else:
         reason = f"strict_template_{direction}_pass"
     reason += (
@@ -1219,6 +1236,8 @@ def _direction_engine_from_bars(
         "ema9": round(ema9_now, 4),
         "ema21": round(ema21_now, 4),
         "ema9_slope": round(ema9_slope, 6),
+        "last_3_rising": last_3_rising,
+        "last_3_falling": last_3_falling,
         "prior_3bar_low": round(prior_3bar_low, 4),
         "prior_3bar_high": round(prior_3bar_high, 4),
     }
@@ -1241,7 +1260,7 @@ def _apply_direction_engine(
     engine_direction = str(engine.get("direction", "") or "").lower()
     _scanner_direction = str(scanner_direction or "").lower()
     if engine_direction not in {"call", "put"}:
-        return False, "direction_not_clean", str(engine.get("reason", "direction_not_clean") or "")
+        return False, "etf_direction_not_clean", str(engine.get("reason", "etf_direction_not_clean") or "")
     signal["direction"] = engine_direction
     if _scanner_direction != engine_direction:
         signal["direction_engine_override_from"] = _scanner_direction
@@ -1337,9 +1356,9 @@ def _early_underlying_invalidation_reason(
         ema_cross_down = float(ema9.iloc[-1]) < float(ema21.iloc[-1])
         ema_cross_up = float(ema9.iloc[-1]) > float(ema21.iloc[-1])
         if direction_lc == "call" and (latest_close < vwap or ema_cross_down):
-            return "underlying_direction_invalidated"
+            return "etf_underlying_invalidated_exit"
         if direction_lc == "put" and (latest_close > vwap or ema_cross_up):
-            return "underlying_direction_invalidated"
+            return "etf_underlying_invalidated_exit"
     except Exception as exc:  # noqa: BLE001
         print(f"[{ts(now_et)}] {ticker}: underlying invalidation check unavailable: {exc}")
     return ""
@@ -5909,6 +5928,11 @@ def main():
             "strict_template_put_pass": 0,
             "strict_template_no_trade": 0,
             "contract_quality_reject": 0,
+            "liquid_etf_lane_only": 0,
+            "etf_direction_not_clean": 0,
+            "etf_contract_reject": 0,
+            "etf_contract_selected": 0,
+            "etf_underlying_invalidated_exit": 0,
             "spread_to_move_gate": 0,
             "high_spread_requires_strong_direction": 0,
             "accepted_low_spread_entry": 0,
@@ -6954,6 +6978,19 @@ def main():
                     continue
     
                 existing_qty_for_ticker = _ticker_open_qty(option_positions, open_trade_meta, ticker)
+                lane_reject_reason = _liquid_etf_lane_reject_reason(ticker)
+                if lane_reject_reason:
+                    entry_debug["liquid_etf_lane_only"] = int(entry_debug.get("liquid_etf_lane_only", 0) or 0) + 1
+                    _mark_skip(lane_reject_reason)
+                    _mark_stage4_reject(reason=lane_reject_reason, ticker=ticker)
+                    print(f"[{ts(now_et)}] {ticker}: skip (liquid ETF options lane only).")
+                    continue
+                open_position_count = _open_option_position_count(option_positions, open_trade_meta)
+                if open_position_count > 0:
+                    _mark_skip("one_open_position_max")
+                    _mark_stage4_reject(reason="one_open_position_max", ticker=ticker)
+                    print(f"[{ts(now_et)}] {ticker}: skip (one open option position max; {open_position_count} already open).")
+                    continue
                 same_direction_qty, same_direction_pnl = _ticker_same_direction_live_pnl(
                     option_positions,
                     open_trade_meta,
@@ -7037,7 +7074,7 @@ def main():
     
                     direction_bars = data_client.get_stock_bars(
                         symbol=ticker,
-                        timeframe=str(getattr(config, "BAR_TIMEFRAME", "5Min") or "5Min"),
+                        timeframe="1Min",
                         limit=30,
                     )
                     direction_engine = _direction_engine_from_bars(
@@ -7058,6 +7095,7 @@ def main():
                     if not engine_ok:
                         _append_direction_engine_scan_log(now_et, signal, result=engine_direction)
                         entry_debug["strict_template_no_trade"] = int(entry_debug.get("strict_template_no_trade", 0) or 0) + 1
+                        entry_debug["etf_direction_not_clean"] = int(entry_debug.get("etf_direction_not_clean", 0) or 0) + 1
                         _mark_skip(engine_direction)
                         _mark_stage4_reject(reason=engine_direction, ticker=ticker, detail=engine_reason)
                         print(f"[{ts(now_et)}] {ticker}: skip ({engine_reason}).")
@@ -7103,6 +7141,7 @@ def main():
                         if "contract_quality_" in str(contract_reason or ""):
                             entry_debug["contract_quality_reject"] = int(entry_debug.get("contract_quality_reject", 0) or 0) + 1
                             _bump_counter_bucket("contract_rejected_count_by_reason", "contract_quality_reject")
+                        entry_debug["etf_contract_reject"] = int(entry_debug.get("etf_contract_reject", 0) or 0) + 1
                         _bump_counter_bucket(
                             "contract_rejected_count_by_reason",
                             f"no_eligible_option_contract:{str(contract_reason or 'unknown')}",
@@ -7112,6 +7151,7 @@ def main():
                         continue
     
                     entry_debug["contract_selected_count"] = int(entry_debug.get("contract_selected_count", 0) or 0) + 1
+                    entry_debug["etf_contract_selected"] = int(entry_debug.get("etf_contract_selected", 0) or 0) + 1
                     option_symbol = contract["symbol"]
                     if not _option_symbol_matches_direction(option_symbol, direction):
                         _mark_skip("contract_direction_mismatch")
@@ -7898,6 +7938,10 @@ def main():
                 )
                 if invalidation_reason:
                     exit_reason = invalidation_reason
+                    if invalidation_reason == "etf_underlying_invalidated_exit":
+                        entry_debug["etf_underlying_invalidated_exit"] = int(
+                            entry_debug.get("etf_underlying_invalidated_exit", 0) or 0
+                        ) + 1
             if exit_reason is None and ticker_for_pos:
                 total_qty_for_ticker = int(ticker_total_qty.get(ticker_for_pos, qty))
                 keep_symbol = str(ticker_first_symbol.get(ticker_for_pos, symbol))

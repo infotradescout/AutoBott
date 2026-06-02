@@ -144,6 +144,60 @@ class OptionSelectionTests(unittest.TestCase):
         self.assertIsNone(contract)
         self.assertIn("contract_quality_spread_too_wide=1", reason)
 
+    def test_etf_contract_quality_rejects_spread_over_one_point_five(self):
+        data = FakeOptionData(
+            contracts=[
+                {
+                    "symbol": "SPY260515C00500000",
+                    "expiration_date": "2026-05-15",
+                    "strike_price": 500.0,
+                    "open_interest": 100,
+                    "volume": 50,
+                }
+            ],
+            quotes={
+                "SPY260515C00500000": {"bid": 1.00, "ask": 1.02},
+            },
+        )
+
+        contract, reason = options.select_atm_option_contract_with_reason(
+            data_client=data,
+            underlying_symbol="SPY",
+            direction="call",
+            underlying_price=500.0,
+            now_et=self.now,
+        )
+
+        self.assertIsNone(contract)
+        self.assertIn("contract_quality_spread_too_wide=1", reason)
+
+    def test_etf_contract_quality_rejects_far_strike(self):
+        data = FakeOptionData(
+            contracts=[
+                {
+                    "symbol": "QQQ260515P00445000",
+                    "expiration_date": "2026-05-15",
+                    "strike_price": 445.0,
+                    "open_interest": 100,
+                    "volume": 50,
+                }
+            ],
+            quotes={
+                "QQQ260515P00445000": {"bid": 1.00, "ask": 1.01},
+            },
+        )
+
+        contract, reason = options.select_atm_option_contract_with_reason(
+            data_client=data,
+            underlying_symbol="QQQ",
+            direction="put",
+            underlying_price=450.0,
+            now_et=self.now,
+        )
+
+        self.assertIsNone(contract)
+        self.assertIn("contract_quality_strike_too_far=1", reason)
+
     def test_contract_quality_selects_tight_atm_over_farther_contract(self):
         data = FakeOptionData(
             contracts=[
@@ -182,6 +236,70 @@ class OptionSelectionTests(unittest.TestCase):
         self.assertEqual(contract["symbol"], "AAPL260515C00181000")
         self.assertEqual(contract["contract_quality_reason"], "contract_quality_selected")
         self.assertEqual(contract["selected_contract_rank"], 1)
+
+    def test_etf_contract_quality_selects_tight_atm_over_farther_contract(self):
+        data = FakeOptionData(
+            contracts=[
+                {
+                    "symbol": "IWM260515C00202000",
+                    "expiration_date": "2026-05-15",
+                    "strike_price": 202.0,
+                    "open_interest": 300,
+                    "volume": 80,
+                    "delta": 0.50,
+                },
+                {
+                    "symbol": "IWM260515C00200000",
+                    "expiration_date": "2026-05-15",
+                    "strike_price": 200.0,
+                    "open_interest": 100,
+                    "volume": 50,
+                    "delta": 0.50,
+                },
+            ],
+            quotes={
+                "IWM260515C00202000": {"bid": 1.00, "ask": 1.005},
+                "IWM260515C00200000": {"bid": 1.00, "ask": 1.005},
+            },
+        )
+
+        contract, reason = options.select_atm_option_contract_with_reason(
+            data_client=data,
+            underlying_symbol="IWM",
+            direction="call",
+            underlying_price=200.0,
+            now_et=self.now,
+        )
+
+        self.assertEqual(reason, "ok(strict)")
+        self.assertEqual(contract["symbol"], "IWM260515C00200000")
+
+    def test_etf_contract_quality_rejects_stale_quote(self):
+        data = FakeOptionData(
+            contracts=[
+                {
+                    "symbol": "SPY260515C00500000",
+                    "expiration_date": "2026-05-15",
+                    "strike_price": 500.0,
+                    "open_interest": 100,
+                    "volume": 50,
+                }
+            ],
+            quotes={
+                "SPY260515C00500000": {"bid": 1.00, "ask": 1.005, "timestamp": "2026-05-14T09:30:00-04:00"},
+            },
+        )
+
+        contract, reason = options.select_atm_option_contract_with_reason(
+            data_client=data,
+            underlying_symbol="SPY",
+            direction="call",
+            underlying_price=500.0,
+            now_et=self.now,
+        )
+
+        self.assertIsNone(contract)
+        self.assertIn("contract_quality_bad_quote=1", reason)
 
     def test_contract_quality_allows_missing_liquidity_only_with_excellent_quote(self):
         data = FakeOptionData(

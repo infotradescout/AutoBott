@@ -93,6 +93,25 @@ def _is_index_etf(symbol: str) -> bool:
     return str(symbol or "").upper() in {"SPY", "QQQ", "IWM"}
 
 
+def _quote_is_stale(quote: dict[str, Any], now_et: datetime) -> bool:
+    raw_timestamp = (
+        quote.get("timestamp")
+        or quote.get("t")
+        or quote.get("time")
+        or quote.get("quote_time")
+        or quote.get("updated_at")
+    )
+    if not raw_timestamp:
+        return False
+    try:
+        quote_time = datetime.fromisoformat(str(raw_timestamp).replace("Z", "+00:00"))
+        if quote_time.tzinfo is None:
+            quote_time = pytz.timezone(config.EASTERN_TZ).localize(quote_time)
+        return (now_et - quote_time.astimezone(now_et.tzinfo)).total_seconds() > 120
+    except Exception:
+        return True
+
+
 def _contract_quality_reject_reason(
     *,
     contract: dict[str, Any],
@@ -100,6 +119,7 @@ def _contract_quality_reject_reason(
     underlying_price: float,
     bid: float | None,
     ask: float | None,
+    quote: dict[str, Any] | None = None,
     now_et: datetime,
 ) -> tuple[str | None, dict[str, Any]]:
     strike = _contract_strike(contract)
@@ -119,6 +139,8 @@ def _contract_quality_reject_reason(
 
     if bid is None or ask is None or bid <= 0 or ask <= 0 or ask < bid:
         return "contract_quality_bad_quote", quality
+    if _is_index_etf(underlying_symbol) and _quote_is_stale(dict(quote or {}), now_et):
+        return "contract_quality_bad_quote", quality
 
     midpoint = (bid + ask) / 2.0
     if midpoint <= 0:
@@ -126,19 +148,21 @@ def _contract_quality_reject_reason(
 
     spread_pct = ((ask - bid) / midpoint) * 100.0
     quality["contract_spread_pct"] = round(spread_pct, 4)
-    if spread_pct > 2.0:
+    max_spread_pct = 1.5 if _is_index_etf(underlying_symbol) else 2.0
+    if spread_pct > max_spread_pct:
         return "contract_quality_spread_too_wide", quality
 
     if strike is None or underlying_price <= 0:
         return "contract_quality_strike_too_far", quality
     strike_distance_pct = abs(float(strike) - float(underlying_price)) / float(underlying_price) * 100.0
     quality["contract_strike_distance_pct"] = round(strike_distance_pct, 4)
-    max_strike_distance = 1.0 if _is_index_etf(underlying_symbol) else 2.5
+    max_strike_distance = 0.75 if _is_index_etf(underlying_symbol) else 2.5
     if strike_distance_pct > max_strike_distance:
         return "contract_quality_strike_too_far", quality
 
     premium_pct = (ask / float(underlying_price)) * 100.0
-    if premium_pct > 5.0:
+    max_premium_pct = 2.5 if _is_index_etf(underlying_symbol) else 5.0
+    if premium_pct > max_premium_pct:
         return "contract_quality_premium_too_large", quality
 
     if open_interest <= 0 and daily_volume <= 0 and spread_pct > 1.0:
@@ -165,6 +189,20 @@ def _contract_quality_rank(contract: dict[str, Any], underlying_price: float) ->
     premium_pct = (ask / underlying_price * 100.0) if underlying_price > 0 else 999.0
     liquidity_rank = -(open_interest + daily_volume)
     return (spread_pct, strike_distance, delta_gap, liquidity_rank, premium_pct, float(contract.get("_select_score", 999.0) or 999.0))
+
+
+def _nearest_strike_lane_candidates(candidates: list[dict[str, Any]], underlying_price: float) -> list[dict[str, Any]]:
+    strikes = sorted({float(strike) for item in candidates if (strike := _contract_strike(item)) is not None})
+    if not strikes:
+        return candidates
+    below = [strike for strike in strikes if strike <= underlying_price]
+    above = [strike for strike in strikes if strike >= underlying_price]
+    allowed = {min(strikes, key=lambda strike: abs(strike - underlying_price))}
+    if below:
+        allowed.add(max(below))
+    if above:
+        allowed.add(min(above))
+    return [item for item in candidates if float(_contract_strike(item) or -1.0) in allowed]
 
 
 def _contract_symbol(contract: dict[str, Any]) -> str:
@@ -392,6 +430,10 @@ def select_atm_option_contract_with_reason(
             f"low_vol={fail_counts['low_volume']}<=min({config.MIN_OPTION_DAILY_VOLUME})"
         )
         return None, reason
+    if _is_index_etf(underlying_symbol):
+        filtered = _nearest_strike_lane_candidates(filtered, float(underlying_price))
+        if not filtered:
+            return None, "no ETF lane contracts at nearest strikes"
 
     scored: list[dict[str, Any]] = []
     for contract in filtered:
@@ -480,6 +522,7 @@ def select_atm_option_contract_with_reason(
             underlying_price=float(underlying_price),
             bid=bid,
             ask=ask,
+            quote=quote,
             now_et=now_et,
         )
         if quality_reason and not config.EMERGENCY_EXECUTION_MODE:

@@ -619,7 +619,7 @@ class MainOrderGuardTests(unittest.TestCase):
     def test_direction_engine_bullish_bars_produce_call(self):
         bars = direction_bars([100 + (i * 0.12) for i in range(30)])
 
-        engine = main._direction_engine_from_bars(bars, market_context={"signal_roc": 0.30, "signal_rvol": 0.80})
+        engine = main._direction_engine_from_bars(bars, market_context={"preferred_direction": "call"})
 
         self.assertEqual(engine["direction"], "call")
         self.assertGreaterEqual(engine["votes_call"], 4)
@@ -627,7 +627,7 @@ class MainOrderGuardTests(unittest.TestCase):
     def test_direction_engine_bearish_bars_produce_put(self):
         bars = direction_bars([104 - (i * 0.12) for i in range(30)])
 
-        engine = main._direction_engine_from_bars(bars, market_context={"signal_roc": -0.30, "signal_rvol": 0.80})
+        engine = main._direction_engine_from_bars(bars, market_context={"preferred_direction": "put"})
 
         self.assertEqual(engine["direction"], "put")
         self.assertGreaterEqual(engine["votes_put"], 4)
@@ -635,36 +635,36 @@ class MainOrderGuardTests(unittest.TestCase):
     def test_direction_engine_mixed_chop_rejects(self):
         bars = direction_bars([100.0, 100.04, 99.98, 100.03, 99.99, 100.02] * 5)
 
-        engine = main._direction_engine_from_bars(bars, market_context={"signal_roc": 0.30, "signal_rvol": 0.80})
+        engine = main._direction_engine_from_bars(bars, market_context={"preferred_direction": "call"})
 
         self.assertEqual(engine["direction"], "no_trade")
-        self.assertIn("direction_not_clean", engine["reason"])
+        self.assertIn("etf_direction_not_clean", engine["reason"])
 
-    def test_direction_engine_weak_roc_rejects(self):
+    def test_direction_engine_rejects_market_context_disagreement(self):
         bars = direction_bars([100 + (i * 0.12) for i in range(30)])
 
-        engine = main._direction_engine_from_bars(bars, market_context={"signal_roc": 0.05, "signal_rvol": 0.80})
+        engine = main._direction_engine_from_bars(bars, market_context={"preferred_direction": "put"})
 
         self.assertEqual(engine["direction"], "no_trade")
-        self.assertIn("direction_not_clean", engine["reason"])
+        self.assertIn("etf_direction_not_clean", engine["reason"])
 
-    def test_direction_engine_low_rvol_rejects(self):
+    def test_direction_engine_rejects_missing_market_context(self):
         bars = direction_bars([100 + (i * 0.12) for i in range(30)])
 
-        engine = main._direction_engine_from_bars(bars, market_context={"signal_roc": 0.30, "signal_rvol": 0.20})
+        engine = main._direction_engine_from_bars(bars, market_context={"preferred_direction": "both"})
 
         self.assertEqual(engine["direction"], "no_trade")
-        self.assertIn("direction_not_clean", engine["reason"])
+        self.assertIn("etf_direction_not_clean", engine["reason"])
 
     def test_scanner_call_rejected_when_engine_mixed(self):
         signal = {"direction": "call"}
-        engine = {"direction": "no_trade", "confidence": 3, "reason": "direction_not_clean"}
+        engine = {"direction": "no_trade", "confidence": 3, "reason": "etf_direction_not_clean"}
 
         ok, reason, detail = main._apply_direction_engine(signal, scanner_direction="call", engine=engine)
 
         self.assertFalse(ok)
-        self.assertEqual(reason, "direction_not_clean")
-        self.assertIn("direction_not_clean", detail)
+        self.assertEqual(reason, "etf_direction_not_clean")
+        self.assertIn("etf_direction_not_clean", detail)
 
     def test_scanner_call_uses_engine_put_direction(self):
         signal = {"direction": "call"}
@@ -695,7 +695,16 @@ class MainOrderGuardTests(unittest.TestCase):
             now_et=now,
         )
 
-        self.assertEqual(reason, "underlying_direction_invalidated")
+        self.assertEqual(reason, "etf_underlying_invalidated_exit")
+
+    def test_single_name_auto_entry_rejected_by_liquid_etf_lane(self):
+        self.assertEqual(main._liquid_etf_lane_reject_reason("AAPL"), "liquid_etf_lane_only")
+        self.assertEqual(main._liquid_etf_lane_reject_reason("SPY"), "")
+
+    def test_one_open_position_blocks_another_entry(self):
+        meta = {"QQQ260515P00450000": {"ticker": "QQQ", "qty": 1}}
+
+        self.assertEqual(main._open_option_position_count([FakePosition("SPY260515C00500000", qty=1)], meta), 2)
 
     def test_entry_qty_config_caps_to_one(self):
         qty = main._entry_qty_for_budget(
