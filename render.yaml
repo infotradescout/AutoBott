@@ -25,3 +25,15 @@ services:
         value: /data
       - key: AUTO_RESUME_TRADING_ON_BOOT
         value: "false"
+      - key: VIXW_HEAVY_MODE
+        value: "false"
+      - key: ENABLE_REPLAY_AUTO_PROMOTE
+        value: "false"
+      - key: REPLAY_AUTO_PROMOTE_ENABLED
+        value: "false"
+      - key: ENABLE_HISTORICAL_REPLAY_LEARNING
+        value: "false"
+      - key: ENABLE_DECISION_MEMORY_WORKER
+        value: "false"
+      - key: ENABLE_MARKET_CONTEXT_WORKER
+        value: "false"

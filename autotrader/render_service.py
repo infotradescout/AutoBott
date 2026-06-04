@@ -477,6 +477,8 @@ _REPLAY_AUTO_PROMOTE_BASELINE: dict[str, float] = {
 
 
 def _replay_auto_promote_enabled() -> bool:
+    if str(os.getenv("REPLAY_AUTO_PROMOTE_ENABLED", "") or "").strip():
+        return _env_bool("REPLAY_AUTO_PROMOTE_ENABLED", True)
     return _env_bool("ENABLE_REPLAY_AUTO_PROMOTE", True)
 
 
@@ -917,6 +919,12 @@ def _print_startup_readiness() -> None:
     print(f"[render_service] historical_replay_offline={_historical_learning_offline()}")
     print(f"[render_service] replay_auto_promote_enabled={_replay_auto_promote_enabled()}")
     print(f"[render_service] replay_auto_promote_paper_only={_replay_auto_promote_paper_only()}")
+    print(f"[render_service] vix_proxy_enabled={bool(getattr(config, 'VIXW_HEAVY_MODE', True))}")
+    print(f"[render_service] market_context_worker_enabled={bool(getattr(config, 'ENABLE_MARKET_CONTEXT_WORKER', True))}")
+    print(
+        "[render_service] decision_memory_worker_enabled="
+        f"{str(os.getenv('ENABLE_DECISION_MEMORY_WORKER', '') or '').strip().lower() in {'1', 'true', 'yes', 'y', 'on'}}"
+    )
 
 
 def _apply_boot_auto_resume() -> None:

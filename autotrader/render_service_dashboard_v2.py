@@ -29,6 +29,10 @@ os.environ.setdefault("PAPER_TRADE_THROUGH_MODE", "true")
 if _is_render_starter_runtime():
     os.environ.setdefault("VIXW_HEAVY_MODE", "false")
     os.environ.setdefault("ENABLE_REPLAY_AUTO_PROMOTE", "false")
+    os.environ.setdefault("REPLAY_AUTO_PROMOTE_ENABLED", "false")
+    os.environ.setdefault("ENABLE_HISTORICAL_REPLAY_LEARNING", "false")
+    os.environ.setdefault("ENABLE_DECISION_MEMORY_WORKER", "false")
+    os.environ.setdefault("ENABLE_MARKET_CONTEXT_WORKER", "false")
 import dashboard_v2
 import volatility_proxy_boot
 from decision_journal import build_decision_journal
@@ -38,6 +42,14 @@ from quick_links import register_quick_links
 from state_store import load_bot_state
 
 sys.modules["dashboard"] = dashboard_v2
+print(
+    "[render_launcher] sidecars "
+    f"vix_proxy={os.getenv('VIXW_HEAVY_MODE', 'true')} "
+    f"replay_auto_promote={os.getenv('ENABLE_REPLAY_AUTO_PROMOTE', 'true')} "
+    f"historical_replay={os.getenv('ENABLE_HISTORICAL_REPLAY_LEARNING', 'false')} "
+    f"decision_memory_worker={os.getenv('ENABLE_DECISION_MEMORY_WORKER', 'false')} "
+    f"market_context_worker={os.getenv('ENABLE_MARKET_CONTEXT_WORKER', 'true')}"
+)
 volatility_proxy_boot.start()
 register_quick_links(dashboard_v2.app)
 

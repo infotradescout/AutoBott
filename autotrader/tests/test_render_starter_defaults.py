@@ -32,3 +32,18 @@ def test_render_starter_runtime_ignores_local(monkeypatch):
     monkeypatch.delenv("RENDER_SERVICE_TYPE", raising=False)
 
     assert _load_render_helper()() is False
+
+
+def test_render_starter_defaults_disable_nonessential_sidecars():
+    path = Path(__file__).resolve().parent.parent / "render_service_dashboard_v2.py"
+    source = path.read_text(encoding="utf-8")
+
+    for expected in (
+        'os.environ.setdefault("VIXW_HEAVY_MODE", "false")',
+        'os.environ.setdefault("ENABLE_REPLAY_AUTO_PROMOTE", "false")',
+        'os.environ.setdefault("REPLAY_AUTO_PROMOTE_ENABLED", "false")',
+        'os.environ.setdefault("ENABLE_HISTORICAL_REPLAY_LEARNING", "false")',
+        'os.environ.setdefault("ENABLE_DECISION_MEMORY_WORKER", "false")',
+        'os.environ.setdefault("ENABLE_MARKET_CONTEXT_WORKER", "false")',
+    ):
+        assert expected in source
