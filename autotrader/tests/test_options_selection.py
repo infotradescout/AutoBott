@@ -198,6 +198,34 @@ class OptionSelectionTests(unittest.TestCase):
         self.assertIsNone(contract)
         self.assertIn("contract_quality_strike_too_far=1", reason)
 
+    def test_single_name_contract_quality_rejects_strike_over_two_percent(self):
+        data = FakeOptionData(
+            contracts=[
+                {
+                    "symbol": "AMD260515C00113000",
+                    "expiration_date": "2026-05-15",
+                    "strike_price": 113.0,
+                    "open_interest": 100,
+                    "volume": 50,
+                    "delta": 0.50,
+                }
+            ],
+            quotes={
+                "AMD260515C00113000": {"bid": 1.00, "ask": 1.01},
+            },
+        )
+
+        contract, reason = options.select_atm_option_contract_with_reason(
+            data_client=data,
+            underlying_symbol="AMD",
+            direction="call",
+            underlying_price=110.0,
+            now_et=self.now,
+        )
+
+        self.assertIsNone(contract)
+        self.assertIn("contract_quality_strike_too_far=1", reason)
+
     def test_contract_quality_selects_tight_atm_over_farther_contract(self):
         data = FakeOptionData(
             contracts=[

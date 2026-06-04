@@ -156,7 +156,7 @@ def _contract_quality_reject_reason(
         return "contract_quality_strike_too_far", quality
     strike_distance_pct = abs(float(strike) - float(underlying_price)) / float(underlying_price) * 100.0
     quality["contract_strike_distance_pct"] = round(strike_distance_pct, 4)
-    max_strike_distance = 0.75 if _is_index_etf(underlying_symbol) else 2.5
+    max_strike_distance = 0.75 if _is_index_etf(underlying_symbol) else 2.0
     if strike_distance_pct > max_strike_distance:
         return "contract_quality_strike_too_far", quality
 

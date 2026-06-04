@@ -701,6 +701,90 @@ class MainOrderGuardTests(unittest.TestCase):
         self.assertEqual(main._liquid_etf_lane_reject_reason("AAPL"), "liquid_etf_lane_only")
         self.assertEqual(main._liquid_etf_lane_reject_reason("SPY"), "")
 
+    def test_liquidity_rank_selects_etf_when_single_name_contract_is_worse(self):
+        etf = {
+            "ticker": "QQQ",
+            "lane": "etf",
+            "signal": {"symbol": "QQQ", "direction": "call", "roc": 0.4},
+            "direction_engine": {"confidence": 5, "move5_pct": 0.3},
+            "underlying_price": 450.0,
+            "contract": {
+                "symbol": "QQQ260515C00450000",
+                "contract_spread_pct": 0.8,
+                "contract_strike_distance_pct": 0.2,
+                "contract_delta_abs": 0.50,
+                "contract_open_interest": 1000,
+                "contract_daily_volume": 600,
+                "contract_ask": 1.20,
+            },
+        }
+        single_name = {
+            "ticker": "AMD",
+            "lane": "single_name",
+            "signal": {"symbol": "AMD", "direction": "call", "roc": 0.5},
+            "direction_engine": {"confidence": 5, "move5_pct": 0.4},
+            "underlying_price": 110.0,
+            "contract": {
+                "symbol": "AMD260515C00110000",
+                "contract_spread_pct": 1.4,
+                "contract_strike_distance_pct": 0.3,
+                "contract_delta_abs": 0.50,
+                "contract_open_interest": 1500,
+                "contract_daily_volume": 700,
+                "contract_ask": 1.00,
+            },
+        }
+
+        selected, rejected = main._select_liquidity_ranked_candidate([single_name, etf])
+
+        self.assertEqual(selected["ticker"], "QQQ")
+        self.assertEqual(rejected[0]["reason"], "single_name_not_better_than_etf")
+
+    def test_liquidity_rank_selects_single_name_when_contract_beats_etf(self):
+        etf = {
+            "ticker": "IWM",
+            "lane": "etf",
+            "signal": {"symbol": "IWM", "direction": "put", "roc": -0.3},
+            "direction_engine": {"confidence": 5, "move5_pct": -0.2},
+            "underlying_price": 200.0,
+            "contract": {
+                "symbol": "IWM260515P00200000",
+                "contract_spread_pct": 1.0,
+                "contract_strike_distance_pct": 0.3,
+                "contract_delta_abs": 0.50,
+                "contract_open_interest": 900,
+                "contract_daily_volume": 500,
+                "contract_ask": 1.10,
+            },
+        }
+        single_name = {
+            "ticker": "AMD",
+            "lane": "single_name",
+            "signal": {"symbol": "AMD", "direction": "put", "roc": -0.4},
+            "direction_engine": {"confidence": 5, "move5_pct": -0.3},
+            "underlying_price": 110.0,
+            "contract": {
+                "symbol": "AMD260515P00110000",
+                "contract_spread_pct": 0.6,
+                "contract_strike_distance_pct": 0.1,
+                "contract_delta_abs": 0.50,
+                "contract_open_interest": 1200,
+                "contract_daily_volume": 800,
+                "contract_ask": 0.95,
+            },
+        }
+
+        selected, rejected = main._select_liquidity_ranked_candidate([etf, single_name])
+
+        self.assertEqual(selected["ticker"], "AMD")
+        self.assertEqual(rejected, [])
+
+    def test_liquidity_rank_returns_no_trade_without_clean_contracts(self):
+        selected, rejected = main._select_liquidity_ranked_candidate([])
+
+        self.assertIsNone(selected)
+        self.assertEqual(rejected, [])
+
     def test_one_open_position_blocks_another_entry(self):
         meta = {"QQQ260515P00450000": {"ticker": "QQQ", "qty": 1}}
 

@@ -598,6 +598,111 @@ def _liquid_etf_lane_reject_reason(ticker: str) -> str:
     return "" if str(ticker or "").upper() in _liquid_etf_lane_symbols() else "liquid_etf_lane_only"
 
 
+def _core_single_name_lane_symbols() -> set[str]:
+    core = getattr(config, "CORE_TICKERS", getattr(config, "TICKERS", ())) or ()
+    return {str(symbol).upper() for symbol in core} - _liquid_etf_lane_symbols()
+
+
+def _options_liquidity_lane(ticker: str) -> str:
+    symbol = str(ticker or "").upper()
+    if symbol in _liquid_etf_lane_symbols():
+        return "etf"
+    if symbol in _core_single_name_lane_symbols():
+        return "single_name"
+    return "blocked"
+
+
+def _contract_metric_float(contract: dict, key: str, default: float = 999.0) -> float:
+    try:
+        value = contract.get(key)
+        if value in ("", None):
+            return float(default)
+        return float(value)
+    except (TypeError, ValueError):
+        return float(default)
+
+
+def _contract_quality_sort_key(contract: dict, underlying_price: float) -> tuple[float, float, float, float, float]:
+    spread_pct = _contract_metric_float(contract, "contract_spread_pct", _contract_metric_float(contract, "spread_pct", 999.0))
+    strike_distance_pct = _contract_metric_float(contract, "contract_strike_distance_pct", 999.0)
+    delta_abs = _contract_metric_float(contract, "contract_delta_abs", 0.50)
+    delta_gap = abs(delta_abs - 0.50)
+    open_interest = _contract_metric_float(contract, "contract_open_interest", _contract_metric_float(contract, "open_interest", 0.0))
+    daily_volume = _contract_metric_float(contract, "contract_daily_volume", _contract_metric_float(contract, "daily_volume", 0.0))
+    ask = _contract_metric_float(contract, "contract_ask", _contract_metric_float(contract, "ask_price", 999.0))
+    premium_pct = (ask / float(underlying_price) * 100.0) if underlying_price > 0 else 999.0
+    return (spread_pct, strike_distance_pct, delta_gap, -(open_interest + daily_volume), premium_pct)
+
+
+def _liquidity_rank_candidate_sort_key(candidate: dict, market_context: dict | None = None) -> tuple:
+    contract = dict(candidate.get("contract") or {})
+    signal = dict(candidate.get("signal") or {})
+    engine = dict(candidate.get("direction_engine") or {})
+    underlying_price = float(candidate.get("underlying_price", 0.0) or 0.0)
+    preferred = str((market_context or {}).get("preferred_direction", "both") or "both").lower()
+    direction = str(signal.get("direction", candidate.get("direction", "")) or "").lower()
+    alignment_penalty = 0 if preferred not in {"call", "put"} or preferred == direction else 1
+    move_strength = max(
+        abs(float(signal.get("roc", 0.0) or 0.0)),
+        abs(float(signal.get("roc_fast", 0.0) or 0.0)),
+        abs(float(engine.get("move5_pct", 0.0) or 0.0)),
+    )
+    return (
+        -int(engine.get("confidence", 0) or 0),
+        *_contract_quality_sort_key(contract, underlying_price),
+        alignment_penalty,
+        -move_strength,
+    )
+
+
+def _select_liquidity_ranked_candidate(
+    candidates: list[dict],
+    *,
+    market_context: dict | None = None,
+) -> tuple[dict | None, list[dict]]:
+    if not candidates:
+        return None, []
+    etf_candidates = [item for item in candidates if str(item.get("lane", "") or "") == "etf"]
+    single_candidates = [item for item in candidates if str(item.get("lane", "") or "") == "single_name"]
+    best_etf_quality = None
+    if etf_candidates:
+        best_etf = min(
+            etf_candidates,
+            key=lambda item: _contract_quality_sort_key(
+                dict(item.get("contract") or {}),
+                float(item.get("underlying_price", 0.0) or 0.0),
+            ),
+        )
+        best_etf_quality = _contract_quality_sort_key(
+            dict(best_etf.get("contract") or {}),
+            float(best_etf.get("underlying_price", 0.0) or 0.0),
+        )
+
+    rejected: list[dict] = []
+    eligible_singles: list[dict] = []
+    for item in single_candidates:
+        quality = _contract_quality_sort_key(
+            dict(item.get("contract") or {}),
+            float(item.get("underlying_price", 0.0) or 0.0),
+        )
+        if best_etf_quality is not None and quality >= best_etf_quality:
+            rejected.append(
+                {
+                    "ticker": str(item.get("ticker", "") or "").upper(),
+                    "reason": "single_name_not_better_than_etf",
+                    "contract": str((item.get("contract") or {}).get("symbol", "") or ""),
+                }
+            )
+            continue
+        eligible_singles.append(item)
+
+    eligible = etf_candidates + eligible_singles
+    if not eligible:
+        return None, rejected
+    selected = min(eligible, key=lambda item: _liquidity_rank_candidate_sort_key(item, market_context))
+    return selected, rejected
+
+
 def _open_option_position_count(option_positions: list, open_trade_meta: dict[str, dict]) -> int:
     open_symbols: set[str] = set()
     for pos in option_positions or []:
@@ -5932,6 +6037,19 @@ def main():
             "etf_direction_not_clean": 0,
             "etf_contract_reject": 0,
             "etf_contract_selected": 0,
+            "single_name_contract_selected": 0,
+            "etf_candidate_pass": 0,
+            "single_name_candidate_pass": 0,
+            "single_name_contract_quality_reject": 0,
+            "single_name_not_better_than_etf": 0,
+            "liquidity_rank_selected_etf": 0,
+            "liquidity_rank_selected_single_name": 0,
+            "liquidity_rank_evaluated_etf_candidates": [],
+            "liquidity_rank_evaluated_single_name_candidates": [],
+            "liquidity_rank_selected_symbol": "",
+            "liquidity_rank_selected_contract": "",
+            "liquidity_rank_selected_reason": "",
+            "liquidity_rank_rejected_reasons": [],
             "etf_underlying_invalidated_exit": 0,
             "spread_to_move_gate": 0,
             "high_spread_requires_strong_direction": 0,
@@ -6224,6 +6342,12 @@ def main():
                 "max_drawdown_on_allocated_slice_pct": round(max_drawdown_alloc_pct, 4),
                 "loss_cause_breakdown": dict(truth.get("causes", {}) or {}),
                 "pass_means_trade_attempt": bool(getattr(config, "PASS_MEANS_TRADE_ATTEMPT", True)),
+                "selected_symbol": str(entry_debug.get("liquidity_rank_selected_symbol", "") or ""),
+                "selected_contract": str(entry_debug.get("liquidity_rank_selected_contract", "") or ""),
+                "selected_reason": str(entry_debug.get("liquidity_rank_selected_reason", "") or ""),
+                "etf_candidate_pass": int(entry_debug.get("etf_candidate_pass", 0) or 0),
+                "single_name_candidate_pass": int(entry_debug.get("single_name_candidate_pass", 0) or 0),
+                "single_name_not_better_than_etf": int(entry_debug.get("single_name_not_better_than_etf", 0) or 0),
             }
             zero_trade_cycle_reason = ""
             if attempts <= 0:
@@ -6299,6 +6423,176 @@ def main():
                 f"rejections={dict(sorted(reject_reasons.items()))} "
                 f"loss_causes={dict(truth.get('causes', {}) or {})}"
             )
+
+        if (
+            signals
+            and not blocked_day
+            and not vix_blocked
+            and bool(getattr(config, "ENABLE_LIQUIDITY_RANKED_OPTIONS_UNIVERSE", True))
+        ):
+            ranked_candidates: list[dict] = []
+            original_signals = list(signals)
+            evaluated_etfs: list[dict] = []
+            evaluated_single_names: list[dict] = []
+            core_single_symbols = _core_single_name_lane_symbols()
+            for signal in original_signals:
+                ticker = str(signal.get("symbol", "") or "").upper()
+                if not ticker:
+                    continue
+                lane = _options_liquidity_lane(ticker)
+                if lane not in {"etf", "single_name"}:
+                    continue
+                if lane == "single_name" and ticker not in core_single_symbols:
+                    continue
+                try:
+                    stock_price = data_client.get_latest_stock_price(ticker)
+                    if stock_price is None:
+                        continue
+                    direction = str(signal.get("direction", "") or "").lower()
+                    direction_bars = data_client.get_stock_bars(
+                        symbol=ticker,
+                        timeframe="1Min",
+                        limit=30,
+                    )
+                    direction_engine = _direction_engine_from_bars(
+                        direction_bars,
+                        market_context={
+                            **dict(active_market_context or {}),
+                            "signal_roc": signal.get("roc"),
+                            "signal_rvol": signal.get("rvol"),
+                        },
+                        failed_direction_warning=_direction_engine_failed_direction_warning(signal),
+                    )
+                    engine_signal = dict(signal)
+                    engine_ok, engine_direction, engine_reason = _apply_direction_engine(
+                        engine_signal,
+                        scanner_direction=direction,
+                        engine=direction_engine,
+                    )
+                    evaluated_payload = {
+                        "ticker": ticker,
+                        "direction": direction,
+                        "engine_direction": str(direction_engine.get("direction", "") or ""),
+                        "engine_confidence": int(direction_engine.get("confidence", 0) or 0),
+                        "engine_reason": str(direction_engine.get("reason", "") or ""),
+                        "contract": "",
+                        "contract_spread_pct": "",
+                        "contract_strike_distance_pct": "",
+                        "reason": "",
+                    }
+                    target_eval_list = evaluated_etfs if lane == "etf" else evaluated_single_names
+                    if not engine_ok:
+                        evaluated_payload["reason"] = engine_reason
+                        target_eval_list.append(evaluated_payload)
+                        if lane == "etf":
+                            entry_debug["etf_direction_not_clean"] = int(entry_debug.get("etf_direction_not_clean", 0) or 0) + 1
+                        continue
+                    fresh_tape_ok, fresh_tape_reason = _fresh_tape_direction_guard(
+                        data_client=data_client,
+                        ticker=ticker,
+                        direction=engine_direction,
+                        now_et=now_et,
+                    )
+                    if not fresh_tape_ok:
+                        evaluated_payload["reason"] = fresh_tape_reason
+                        target_eval_list.append(evaluated_payload)
+                        continue
+                    contract, contract_reason = select_atm_option_contract_with_reason(
+                        data_client=data_client,
+                        underlying_symbol=ticker,
+                        direction=engine_direction,
+                        underlying_price=stock_price,
+                        now_et=now_et,
+                    )
+                    if not contract:
+                        evaluated_payload["reason"] = f"no_eligible_option_contract:{contract_reason}"
+                        target_eval_list.append(evaluated_payload)
+                        if lane == "single_name":
+                            entry_debug["single_name_contract_quality_reject"] = (
+                                int(entry_debug.get("single_name_contract_quality_reject", 0) or 0) + 1
+                            )
+                            _bump_counter_bucket("contract_rejected_count_by_reason", "single_name_contract_quality_reject")
+                        else:
+                            entry_debug["etf_contract_reject"] = int(entry_debug.get("etf_contract_reject", 0) or 0) + 1
+                        continue
+                    evaluated_payload.update(
+                        {
+                            "direction": engine_direction,
+                            "contract": str(contract.get("symbol", "") or ""),
+                            "contract_spread_pct": contract.get("contract_spread_pct", contract.get("spread_pct", "")),
+                            "contract_strike_distance_pct": contract.get("contract_strike_distance_pct", ""),
+                            "reason": f"candidate_pass:{contract_reason}",
+                        }
+                    )
+                    target_eval_list.append(evaluated_payload)
+                    candidate_signal = dict(engine_signal)
+                    candidate_signal["direction"] = engine_direction
+                    candidate_signal["_liquidity_rank_preselected"] = True
+                    candidate_signal["_liquidity_rank_contract_symbol"] = str(contract.get("symbol", "") or "")
+                    ranked_candidates.append(
+                        {
+                            "ticker": ticker,
+                            "lane": lane,
+                            "signal": candidate_signal,
+                            "direction": engine_direction,
+                            "direction_engine": direction_engine,
+                            "contract": contract,
+                            "underlying_price": float(stock_price),
+                        }
+                    )
+                    if lane == "single_name":
+                        entry_debug["single_name_candidate_pass"] = int(entry_debug.get("single_name_candidate_pass", 0) or 0) + 1
+                    else:
+                        entry_debug["etf_candidate_pass"] = int(entry_debug.get("etf_candidate_pass", 0) or 0) + 1
+                except Exception as exc:  # noqa: BLE001
+                    _record_entry_exception(ticker, exc)
+                    continue
+                finally:
+                    time.sleep(config.RATE_LIMIT_SLEEP_SECONDS)
+
+            selected_candidate, liquidity_rejections = _select_liquidity_ranked_candidate(
+                ranked_candidates,
+                market_context=active_market_context,
+            )
+            entry_debug["liquidity_rank_evaluated_etf_candidates"] = evaluated_etfs[-20:]
+            entry_debug["liquidity_rank_evaluated_single_name_candidates"] = evaluated_single_names[-20:]
+            rejected_reasons = entry_debug.get("liquidity_rank_rejected_reasons", [])
+            if not isinstance(rejected_reasons, list):
+                rejected_reasons = []
+            for item in liquidity_rejections:
+                ticker = str(item.get("ticker", "") or "").upper()
+                reason = str(item.get("reason", "") or "single_name_not_better_than_etf")
+                entry_debug["single_name_not_better_than_etf"] = int(entry_debug.get("single_name_not_better_than_etf", 0) or 0) + 1
+                _mark_skip(reason)
+                _mark_stage4_reject(reason=reason, ticker=ticker, detail="single-name contract quality did not beat best ETF")
+                rejected_reasons.append(item)
+            entry_debug["liquidity_rank_rejected_reasons"] = rejected_reasons[-25:]
+
+            if selected_candidate:
+                selected_signal = dict(selected_candidate.get("signal") or {})
+                selected_ticker = str(selected_candidate.get("ticker", "") or "").upper()
+                selected_contract = str((selected_candidate.get("contract") or {}).get("symbol", "") or "")
+                selected_lane = str(selected_candidate.get("lane", "") or "")
+                signals = [selected_signal]
+                entry_debug["liquidity_rank_selected_symbol"] = selected_ticker
+                entry_debug["liquidity_rank_selected_contract"] = selected_contract
+                entry_debug["liquidity_rank_selected_reason"] = (
+                    f"selected_{selected_lane}_contract_quality_rank direction={selected_signal.get('direction', '')}"
+                )
+                if selected_lane == "single_name":
+                    entry_debug["liquidity_rank_selected_single_name"] = int(
+                        entry_debug.get("liquidity_rank_selected_single_name", 0) or 0
+                    ) + 1
+                else:
+                    entry_debug["liquidity_rank_selected_etf"] = int(entry_debug.get("liquidity_rank_selected_etf", 0) or 0) + 1
+                print(
+                    f"[{ts(now_et)}] Liquidity-ranked universe selected {selected_ticker} "
+                    f"{selected_contract} lane={selected_lane}."
+                )
+            else:
+                signals = []
+                entry_debug["liquidity_rank_selected_reason"] = "no_clean_option_contract_candidates"
+                print(f"[{ts(now_et)}] Liquidity-ranked universe found no clean option contract candidates.")
 
         if blocked_day and bool(getattr(config, "ALLOW_AUTOMATIC_TRADING_PAUSES", False)):
             print("[{0}] EXECUTION BRIDGE BLOCKED reason=event_day_block".format(ts(now_et)))
@@ -6979,7 +7273,9 @@ def main():
     
                 existing_qty_for_ticker = _ticker_open_qty(option_positions, open_trade_meta, ticker)
                 lane_reject_reason = _liquid_etf_lane_reject_reason(ticker)
-                if lane_reject_reason:
+                liquidity_preselected = bool(signal.get("_liquidity_rank_preselected", False))
+                liquidity_lane = _options_liquidity_lane(ticker)
+                if lane_reject_reason and not (liquidity_preselected and liquidity_lane == "single_name"):
                     entry_debug["liquid_etf_lane_only"] = int(entry_debug.get("liquid_etf_lane_only", 0) or 0) + 1
                     _mark_skip(lane_reject_reason)
                     _mark_stage4_reject(reason=lane_reject_reason, ticker=ticker)
@@ -7151,7 +7447,10 @@ def main():
                         continue
     
                     entry_debug["contract_selected_count"] = int(entry_debug.get("contract_selected_count", 0) or 0) + 1
-                    entry_debug["etf_contract_selected"] = int(entry_debug.get("etf_contract_selected", 0) or 0) + 1
+                    if liquidity_lane == "single_name":
+                        entry_debug["single_name_contract_selected"] = int(entry_debug.get("single_name_contract_selected", 0) or 0) + 1
+                    else:
+                        entry_debug["etf_contract_selected"] = int(entry_debug.get("etf_contract_selected", 0) or 0) + 1
                     option_symbol = contract["symbol"]
                     if not _option_symbol_matches_direction(option_symbol, direction):
                         _mark_skip("contract_direction_mismatch")
