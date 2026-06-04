@@ -785,6 +785,30 @@ class MainOrderGuardTests(unittest.TestCase):
         self.assertIsNone(selected)
         self.assertEqual(rejected, [])
 
+    def test_liquidity_rank_preflight_limits_render_candidate_fanout(self):
+        old_total = config.LIQUIDITY_RANK_MAX_CANDIDATES_PER_CYCLE
+        old_etfs = config.LIQUIDITY_RANK_MAX_ETF_CANDIDATES_PER_CYCLE
+        old_singles = config.LIQUIDITY_RANK_MAX_SINGLE_NAME_CANDIDATES_PER_CYCLE
+        try:
+            config.LIQUIDITY_RANK_MAX_CANDIDATES_PER_CYCLE = 3
+            config.LIQUIDITY_RANK_MAX_ETF_CANDIDATES_PER_CYCLE = 2
+            config.LIQUIDITY_RANK_MAX_SINGLE_NAME_CANDIDATES_PER_CYCLE = 1
+            signals = [
+                {"symbol": "SPY"},
+                {"symbol": "QQQ"},
+                {"symbol": "IWM"},
+                {"symbol": "AMD"},
+                {"symbol": "AAPL"},
+            ]
+
+            selected = main._liquidity_rank_preflight_signals(signals)
+
+            self.assertEqual([item["symbol"] for item in selected], ["SPY", "QQQ", "AMD"])
+        finally:
+            config.LIQUIDITY_RANK_MAX_CANDIDATES_PER_CYCLE = old_total
+            config.LIQUIDITY_RANK_MAX_ETF_CANDIDATES_PER_CYCLE = old_etfs
+            config.LIQUIDITY_RANK_MAX_SINGLE_NAME_CANDIDATES_PER_CYCLE = old_singles
+
     def test_one_open_position_blocks_another_entry(self):
         meta = {"QQQ260515P00450000": {"ticker": "QQQ", "qty": 1}}
 

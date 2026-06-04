@@ -703,6 +703,32 @@ def _select_liquidity_ranked_candidate(
     return selected, rejected
 
 
+def _liquidity_rank_preflight_signals(signals: list[dict]) -> list[dict]:
+    max_total = max(1, int(getattr(config, "LIQUIDITY_RANK_MAX_CANDIDATES_PER_CYCLE", 5) or 5))
+    max_etfs = max(0, int(getattr(config, "LIQUIDITY_RANK_MAX_ETF_CANDIDATES_PER_CYCLE", 3) or 3))
+    max_singles = max(0, int(getattr(config, "LIQUIDITY_RANK_MAX_SINGLE_NAME_CANDIDATES_PER_CYCLE", 2) or 2))
+    selected: list[dict] = []
+    etf_count = 0
+    single_count = 0
+    for signal in signals or []:
+        ticker = str(signal.get("symbol", "") or "").upper()
+        lane = _options_liquidity_lane(ticker)
+        if lane == "etf":
+            if etf_count >= max_etfs:
+                continue
+            etf_count += 1
+        elif lane == "single_name":
+            if single_count >= max_singles:
+                continue
+            single_count += 1
+        else:
+            continue
+        selected.append(signal)
+        if len(selected) >= max_total:
+            break
+    return selected
+
+
 def _open_option_position_count(option_positions: list, open_trade_meta: dict[str, dict]) -> int:
     open_symbols: set[str] = set()
     for pos in option_positions or []:
@@ -6431,7 +6457,7 @@ def main():
             and bool(getattr(config, "ENABLE_LIQUIDITY_RANKED_OPTIONS_UNIVERSE", True))
         ):
             ranked_candidates: list[dict] = []
-            original_signals = list(signals)
+            original_signals = _liquidity_rank_preflight_signals(list(signals))
             evaluated_etfs: list[dict] = []
             evaluated_single_names: list[dict] = []
             core_single_symbols = _core_single_name_lane_symbols()
@@ -6529,6 +6555,9 @@ def main():
                     candidate_signal["direction"] = engine_direction
                     candidate_signal["_liquidity_rank_preselected"] = True
                     candidate_signal["_liquidity_rank_contract_symbol"] = str(contract.get("symbol", "") or "")
+                    candidate_signal["_liquidity_rank_contract"] = dict(contract)
+                    candidate_signal["_liquidity_rank_underlying_price"] = float(stock_price)
+                    candidate_signal["_liquidity_rank_direction_engine"] = dict(direction_engine)
                     ranked_candidates.append(
                         {
                             "ticker": ticker,
@@ -7360,28 +7389,43 @@ def main():
                         or getattr(config, "MAX_HOLD_MINUTES", 90)
                     )
     
-                    stock_price = data_client.get_latest_stock_price(ticker)
+                    liquidity_preselected = bool(signal.get("_liquidity_rank_preselected", False))
+                    preselected_contract = signal.get("_liquidity_rank_contract") if isinstance(signal.get("_liquidity_rank_contract"), dict) else None
+                    stock_price = None
+                    if liquidity_preselected:
+                        try:
+                            stock_price = float(signal.get("_liquidity_rank_underlying_price", 0.0) or 0.0)
+                        except (TypeError, ValueError):
+                            stock_price = None
+                    if not stock_price or stock_price <= 0:
+                        stock_price = data_client.get_latest_stock_price(ticker)
                     if stock_price is None:
                         _mark_skip("no_stock_quote")
                         _mark_stage4_reject(reason="no_stock_quote", ticker=ticker)
                         print(f"[{ts(now_et)}] {ticker}: skip (no stock quote).")
                         time.sleep(config.RATE_LIMIT_SLEEP_SECONDS)
                         continue
-    
-                    direction_bars = data_client.get_stock_bars(
-                        symbol=ticker,
-                        timeframe="1Min",
-                        limit=30,
+
+                    direction_engine = (
+                        signal.get("_liquidity_rank_direction_engine")
+                        if liquidity_preselected and isinstance(signal.get("_liquidity_rank_direction_engine"), dict)
+                        else None
                     )
-                    direction_engine = _direction_engine_from_bars(
-                        direction_bars,
-                        market_context={
-                            **dict(active_market_context or {}),
-                            "signal_roc": signal.get("roc"),
-                            "signal_rvol": signal.get("rvol"),
-                        },
-                        failed_direction_warning=_direction_engine_failed_direction_warning(signal),
-                    )
+                    if not isinstance(direction_engine, dict):
+                        direction_bars = data_client.get_stock_bars(
+                            symbol=ticker,
+                            timeframe="1Min",
+                            limit=30,
+                        )
+                        direction_engine = _direction_engine_from_bars(
+                            direction_bars,
+                            market_context={
+                                **dict(active_market_context or {}),
+                                "signal_roc": signal.get("roc"),
+                                "signal_rvol": signal.get("rvol"),
+                            },
+                            failed_direction_warning=_direction_engine_failed_direction_warning(signal),
+                        )
                     _persist_direction_engine_fields(signal, direction_engine)
                     engine_ok, engine_direction, engine_reason = _apply_direction_engine(
                         signal,
@@ -7424,13 +7468,17 @@ def main():
                         time.sleep(config.RATE_LIMIT_SLEEP_SECONDS)
                         continue
     
-                    contract, contract_reason = select_atm_option_contract_with_reason(
-                        data_client=data_client,
-                        underlying_symbol=ticker,
-                        direction=direction,
-                        underlying_price=stock_price,
-                        now_et=now_et,
-                    )
+                    if preselected_contract:
+                        contract = dict(preselected_contract)
+                        contract_reason = "ok(liquidity_rank_preselected)"
+                    else:
+                        contract, contract_reason = select_atm_option_contract_with_reason(
+                            data_client=data_client,
+                            underlying_symbol=ticker,
+                            direction=direction,
+                            underlying_price=stock_price,
+                            now_et=now_et,
+                        )
                     if not contract:
                         _mark_skip("no_eligible_option_contract")
                         _mark_stage4_reject(reason="no_eligible_option_contract", ticker=ticker)
