@@ -595,7 +595,7 @@ def _liquid_etf_lane_symbols() -> set[str]:
 
 
 def _liquid_etf_lane_reject_reason(ticker: str) -> str:
-    return "" if str(ticker or "").upper() in _liquid_etf_lane_symbols() else "liquid_etf_lane_only"
+    return "" if str(ticker or "").upper() in _configured_symbol_set("CORE_TICKERS", tuple(getattr(config, "TICKERS", ()))) else "non_core_ticker"
 
 
 def _core_single_name_lane_symbols() -> set[str]:
@@ -662,45 +662,8 @@ def _select_liquidity_ranked_candidate(
 ) -> tuple[dict | None, list[dict]]:
     if not candidates:
         return None, []
-    etf_candidates = [item for item in candidates if str(item.get("lane", "") or "") == "etf"]
-    single_candidates = [item for item in candidates if str(item.get("lane", "") or "") == "single_name"]
-    best_etf_quality = None
-    if etf_candidates:
-        best_etf = min(
-            etf_candidates,
-            key=lambda item: _contract_quality_sort_key(
-                dict(item.get("contract") or {}),
-                float(item.get("underlying_price", 0.0) or 0.0),
-            ),
-        )
-        best_etf_quality = _contract_quality_sort_key(
-            dict(best_etf.get("contract") or {}),
-            float(best_etf.get("underlying_price", 0.0) or 0.0),
-        )
-
-    rejected: list[dict] = []
-    eligible_singles: list[dict] = []
-    for item in single_candidates:
-        quality = _contract_quality_sort_key(
-            dict(item.get("contract") or {}),
-            float(item.get("underlying_price", 0.0) or 0.0),
-        )
-        if best_etf_quality is not None and quality >= best_etf_quality:
-            rejected.append(
-                {
-                    "ticker": str(item.get("ticker", "") or "").upper(),
-                    "reason": "single_name_not_better_than_etf",
-                    "contract": str((item.get("contract") or {}).get("symbol", "") or ""),
-                }
-            )
-            continue
-        eligible_singles.append(item)
-
-    eligible = etf_candidates + eligible_singles
-    if not eligible:
-        return None, rejected
-    selected = min(eligible, key=lambda item: _liquidity_rank_candidate_sort_key(item, market_context))
-    return selected, rejected
+    selected = min(candidates, key=lambda item: _liquidity_rank_candidate_sort_key(item, market_context))
+    return selected, []
 
 
 def _liquidity_rank_preflight_signals(signals: list[dict]) -> list[dict]:
@@ -1295,7 +1258,6 @@ def _direction_engine_from_bars(
     rvol = _safe_signal_float((market_context or {}).get("signal_rvol"), 0.0)
     signal_roc = _safe_signal_float((market_context or {}).get("signal_roc"), roc_slow)
 
-    preferred_direction = str((market_context or {}).get("preferred_direction", "") or "").lower()
     call_votes = 0
     put_votes = 0
 
@@ -1309,24 +1271,28 @@ def _direction_engine_from_bars(
     put_votes += int(last_3_falling)
     call_votes += int(move5 > 0)
     put_votes += int(move5 < 0)
-    call_votes += int(candle_move >= 0 and preferred_direction == "call")
-    put_votes += int(candle_move <= 0 and preferred_direction == "put")
+    call_votes += int(candle_move >= -0.03)
+    put_votes += int(candle_move <= 0.03)
 
     call_hard_ok = (
         vwap > 0
         and latest_close > vwap
         and ema9_now > ema21_now
-        and last_3_rising
-        and candle_move >= 0
-        and preferred_direction == "call"
+        and ema9_slope > 0
+        and move3 >= 0.03
+        and move5 >= 0.05
+        and candle_move >= -0.03
+        and rvol >= 0.30
     )
     put_hard_ok = (
         vwap > 0
         and latest_close < vwap
         and ema9_now < ema21_now
-        and last_3_falling
-        and candle_move <= 0
-        and preferred_direction == "put"
+        and ema9_slope < 0
+        and move3 <= -0.03
+        and move5 <= -0.05
+        and candle_move <= 0.03
+        and rvol >= 0.30
     )
     call_valid = call_hard_ok and call_votes >= 4 and call_votes > put_votes
     put_valid = put_hard_ok and put_votes >= 4 and put_votes > call_votes
@@ -1338,7 +1304,7 @@ def _direction_engine_from_bars(
         direction = "put"
     confidence = max(call_votes, put_votes)
     if direction == "no_trade":
-        reason = "etf_direction_not_clean"
+        reason = "direction_not_clean"
     else:
         reason = f"strict_template_{direction}_pass"
     reason += (
@@ -1347,8 +1313,6 @@ def _direction_engine_from_bars(
         f"ema9_vs_21={ema9_now - ema21_now:+.4f} ema9_slope={ema9_slope:+.4f} "
         f"roc={signal_roc:+.2f}% rvol={rvol:.2f}"
     )
-    if preferred_direction in {"call", "put"}:
-        reason += f" market_preferred={preferred_direction}"
     if failed_direction_warning:
         reason += f" failed_direction_warning={failed_direction_warning}"
 
@@ -1391,7 +1355,7 @@ def _apply_direction_engine(
     engine_direction = str(engine.get("direction", "") or "").lower()
     _scanner_direction = str(scanner_direction or "").lower()
     if engine_direction not in {"call", "put"}:
-        return False, "etf_direction_not_clean", str(engine.get("reason", "etf_direction_not_clean") or "")
+        return False, "direction_not_clean", str(engine.get("reason", "direction_not_clean") or "")
     signal["direction"] = engine_direction
     if _scanner_direction != engine_direction:
         signal["direction_engine_override_from"] = _scanner_direction
@@ -6059,15 +6023,16 @@ def main():
             "strict_template_put_pass": 0,
             "strict_template_no_trade": 0,
             "contract_quality_reject": 0,
-            "liquid_etf_lane_only": 0,
-            "etf_direction_not_clean": 0,
+            "direction_not_clean": 0,
             "etf_contract_reject": 0,
             "etf_contract_selected": 0,
             "single_name_contract_selected": 0,
+            "contract_quality_selected": 0,
+            "selected_core_ticker": "",
+            "qty_capped_to_one": 0,
             "etf_candidate_pass": 0,
             "single_name_candidate_pass": 0,
             "single_name_contract_quality_reject": 0,
-            "single_name_not_better_than_etf": 0,
             "liquidity_rank_selected_etf": 0,
             "liquidity_rank_selected_single_name": 0,
             "liquidity_rank_evaluated_etf_candidates": [],
@@ -6080,7 +6045,6 @@ def main():
             "spread_to_move_gate": 0,
             "high_spread_requires_strong_direction": 0,
             "accepted_low_spread_entry": 0,
-            "position_size_capped_to_one": 0,
             "trade_resting_count": 0,
             "trade_filled_count": 0,
             "signal_outcomes": {},
@@ -6373,7 +6337,6 @@ def main():
                 "selected_reason": str(entry_debug.get("liquidity_rank_selected_reason", "") or ""),
                 "etf_candidate_pass": int(entry_debug.get("etf_candidate_pass", 0) or 0),
                 "single_name_candidate_pass": int(entry_debug.get("single_name_candidate_pass", 0) or 0),
-                "single_name_not_better_than_etf": int(entry_debug.get("single_name_not_better_than_etf", 0) or 0),
             }
             zero_trade_cycle_reason = ""
             if attempts <= 0:
@@ -6510,8 +6473,7 @@ def main():
                     if not engine_ok:
                         evaluated_payload["reason"] = engine_reason
                         target_eval_list.append(evaluated_payload)
-                        if lane == "etf":
-                            entry_debug["etf_direction_not_clean"] = int(entry_debug.get("etf_direction_not_clean", 0) or 0) + 1
+                        entry_debug["direction_not_clean"] = int(entry_debug.get("direction_not_clean", 0) or 0) + 1
                         continue
                     fresh_tape_ok, fresh_tape_reason = _fresh_tape_direction_guard(
                         data_client=data_client,
@@ -6590,10 +6552,9 @@ def main():
                 rejected_reasons = []
             for item in liquidity_rejections:
                 ticker = str(item.get("ticker", "") or "").upper()
-                reason = str(item.get("reason", "") or "single_name_not_better_than_etf")
-                entry_debug["single_name_not_better_than_etf"] = int(entry_debug.get("single_name_not_better_than_etf", 0) or 0) + 1
+                reason = str(item.get("reason", "") or "liquidity_rank_rejected")
                 _mark_skip(reason)
-                _mark_stage4_reject(reason=reason, ticker=ticker, detail="single-name contract quality did not beat best ETF")
+                _mark_stage4_reject(reason=reason, ticker=ticker, detail="liquidity-ranked candidate rejected")
                 rejected_reasons.append(item)
             entry_debug["liquidity_rank_rejected_reasons"] = rejected_reasons[-25:]
 
@@ -7304,11 +7265,10 @@ def main():
                 lane_reject_reason = _liquid_etf_lane_reject_reason(ticker)
                 liquidity_preselected = bool(signal.get("_liquidity_rank_preselected", False))
                 liquidity_lane = _options_liquidity_lane(ticker)
-                if lane_reject_reason and not (liquidity_preselected and liquidity_lane == "single_name"):
-                    entry_debug["liquid_etf_lane_only"] = int(entry_debug.get("liquid_etf_lane_only", 0) or 0) + 1
+                if lane_reject_reason:
                     _mark_skip(lane_reject_reason)
                     _mark_stage4_reject(reason=lane_reject_reason, ticker=ticker)
-                    print(f"[{ts(now_et)}] {ticker}: skip (liquid ETF options lane only).")
+                    print(f"[{ts(now_et)}] {ticker}: skip ({lane_reject_reason}).")
                     continue
                 open_position_count = _open_option_position_count(option_positions, open_trade_meta)
                 if open_position_count > 0:
@@ -7435,7 +7395,7 @@ def main():
                     if not engine_ok:
                         _append_direction_engine_scan_log(now_et, signal, result=engine_direction)
                         entry_debug["strict_template_no_trade"] = int(entry_debug.get("strict_template_no_trade", 0) or 0) + 1
-                        entry_debug["etf_direction_not_clean"] = int(entry_debug.get("etf_direction_not_clean", 0) or 0) + 1
+                        entry_debug["direction_not_clean"] = int(entry_debug.get("direction_not_clean", 0) or 0) + 1
                         _mark_skip(engine_direction)
                         _mark_stage4_reject(reason=engine_direction, ticker=ticker, detail=engine_reason)
                         print(f"[{ts(now_et)}] {ticker}: skip ({engine_reason}).")
@@ -7495,6 +7455,8 @@ def main():
                         continue
     
                     entry_debug["contract_selected_count"] = int(entry_debug.get("contract_selected_count", 0) or 0) + 1
+                    entry_debug["contract_quality_selected"] = int(entry_debug.get("contract_quality_selected", 0) or 0) + 1
+                    entry_debug["selected_core_ticker"] = ticker
                     if liquidity_lane == "single_name":
                         entry_debug["single_name_contract_selected"] = int(entry_debug.get("single_name_contract_selected", 0) or 0) + 1
                     else:
@@ -7576,8 +7538,8 @@ def main():
                         )
                         continue
                     if qty != 1:
-                        entry_debug["position_size_capped_to_one"] = int(entry_debug.get("position_size_capped_to_one", 0) or 0) + 1
-                        _mark_skip("position_size_capped_to_one")
+                        entry_debug["qty_capped_to_one"] = int(entry_debug.get("qty_capped_to_one", 0) or 0) + 1
+                        _mark_skip("qty_capped_to_one")
                         qty = 1
                     trade_premium_usd = ask_price * qty * 100.0
                     contract_cap_text = str(max_contracts_per_ticker) if max_contracts_per_ticker > 0 else "unlimited"

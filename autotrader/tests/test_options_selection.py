@@ -175,15 +175,15 @@ class OptionSelectionTests(unittest.TestCase):
         data = FakeOptionData(
             contracts=[
                 {
-                    "symbol": "QQQ260515P00445000",
+                    "symbol": "QQQ260515P00440000",
                     "expiration_date": "2026-05-15",
-                    "strike_price": 445.0,
+                    "strike_price": 440.0,
                     "open_interest": 100,
                     "volume": 50,
                 }
             ],
             quotes={
-                "QQQ260515P00445000": {"bid": 1.00, "ask": 1.01},
+                "QQQ260515P00440000": {"bid": 1.00, "ask": 1.01},
             },
         )
 
@@ -198,20 +198,20 @@ class OptionSelectionTests(unittest.TestCase):
         self.assertIsNone(contract)
         self.assertIn("contract_quality_strike_too_far=1", reason)
 
-    def test_single_name_contract_quality_rejects_strike_over_two_percent(self):
+    def test_single_name_contract_quality_rejects_strike_over_two_point_five_percent(self):
         data = FakeOptionData(
             contracts=[
                 {
-                    "symbol": "AMD260515C00113000",
+                    "symbol": "AMD260515C00114000",
                     "expiration_date": "2026-05-15",
-                    "strike_price": 113.0,
+                    "strike_price": 114.0,
                     "open_interest": 100,
                     "volume": 50,
                     "delta": 0.50,
                 }
             ],
             quotes={
-                "AMD260515C00113000": {"bid": 1.00, "ask": 1.01},
+                "AMD260515C00114000": {"bid": 1.00, "ask": 1.01},
             },
         )
 
@@ -247,8 +247,8 @@ class OptionSelectionTests(unittest.TestCase):
                 },
             ],
             quotes={
-                "AAPL260515C00185000": {"bid": 1.00, "ask": 1.02},
-                "AAPL260515C00181000": {"bid": 1.00, "ask": 1.02},
+                "AAPL260515C00185000": {"bid": 1.00, "ask": 1.01},
+                "AAPL260515C00181000": {"bid": 1.00, "ask": 1.01},
             },
         )
 

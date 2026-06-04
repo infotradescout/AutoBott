@@ -148,7 +148,7 @@ def _contract_quality_reject_reason(
 
     spread_pct = ((ask - bid) / midpoint) * 100.0
     quality["contract_spread_pct"] = round(spread_pct, 4)
-    max_spread_pct = 1.5 if _is_index_etf(underlying_symbol) else 2.0
+    max_spread_pct = 1.5
     if spread_pct > max_spread_pct:
         return "contract_quality_spread_too_wide", quality
 
@@ -156,7 +156,7 @@ def _contract_quality_reject_reason(
         return "contract_quality_strike_too_far", quality
     strike_distance_pct = abs(float(strike) - float(underlying_price)) / float(underlying_price) * 100.0
     quality["contract_strike_distance_pct"] = round(strike_distance_pct, 4)
-    max_strike_distance = 0.75 if _is_index_etf(underlying_symbol) else 2.0
+    max_strike_distance = 1.5 if _is_index_etf(underlying_symbol) else 2.5
     if strike_distance_pct > max_strike_distance:
         return "contract_quality_strike_too_far", quality
 
