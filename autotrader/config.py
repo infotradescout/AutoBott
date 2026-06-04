@@ -403,7 +403,7 @@ VIX_MAX                    = 80.0
 
 # Volatility proxy sidecar (VIX -> VIXY/VXX/UVXY options). Keep it active, but
 # make duplicate/exposure mistakes impossible instead of using a global pause.
-VIXW_HEAVY_MODE                       = True
+VIXW_HEAVY_MODE                       = _env_bool("VIXW_HEAVY_MODE", True)
 VIXW_ONLY_PAPER_MODE                  = True
 VIXW_REQUIRE_TRADING_CONTROL_CLEAR    = False
 VIXW_SIGNAL_SOURCE_SYMBOL             = "^VIX"

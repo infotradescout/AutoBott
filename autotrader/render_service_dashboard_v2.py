@@ -20,7 +20,15 @@ from pathlib import Path
 
 from flask import jsonify, render_template_string, request
 
+
+def _is_render_starter_runtime() -> bool:
+    return bool(os.getenv("RENDER")) and str(os.getenv("RENDER_SERVICE_TYPE", "web") or "web").lower() == "web"
+
+
 os.environ.setdefault("PAPER_TRADE_THROUGH_MODE", "true")
+if _is_render_starter_runtime():
+    os.environ.setdefault("VIXW_HEAVY_MODE", "false")
+    os.environ.setdefault("ENABLE_REPLAY_AUTO_PROMOTE", "false")
 import dashboard_v2
 import volatility_proxy_boot
 from decision_journal import build_decision_journal
