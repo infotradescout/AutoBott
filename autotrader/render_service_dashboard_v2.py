@@ -29,6 +29,27 @@ def _env_enabled(name: str) -> bool:
     return str(os.getenv(name, "") or "").strip().lower() in {"1", "true", "yes", "y", "on"}
 
 
+def _vixw_runtime_enablement_snapshot() -> dict[str, object]:
+    env_var = "VIXW_HEAVY_MODE"
+    raw_value = os.getenv(env_var, "")
+    resolved = _env_enabled(env_var)
+    paper_only_value = os.getenv("VIXW_ONLY_PAPER_MODE", "")
+    reachable = False
+    try:
+        from vixw_regime import run_vixw_regime_forever  # noqa: F401
+
+        reachable = True
+    except Exception:
+        reachable = False
+    return {
+        "env_var": env_var,
+        "raw_value": raw_value,
+        "runtime_enabled": resolved,
+        "paper_only": paper_only_value,
+        "run_vixw_regime_forever_reachable": reachable,
+    }
+
+
 def _apply_vixw_paper_smoke_profile() -> None:
     profile = str(os.getenv("AUTOBOTT_RUNTIME_PROFILE", "") or "").strip().lower()
     enabled = _env_enabled("VIXW_PAPER_SMOKE_PROFILE") or profile == "vixw_paper_smoke"
@@ -88,7 +109,16 @@ print(
     f"decision_memory_worker={os.getenv('ENABLE_DECISION_MEMORY_WORKER', 'false')} "
     f"market_context_worker={os.getenv('ENABLE_MARKET_CONTEXT_WORKER', 'true')}"
 )
-runtime_telemetry.set_worker("vixw_regime_sidecar", str(os.getenv("VIXW_HEAVY_MODE", "true")).lower() in {"1", "true", "yes", "y", "on"})
+vixw_snapshot = _vixw_runtime_enablement_snapshot()
+print(
+    "[render_launcher] VIXW runtime enabled: "
+    f"{vixw_snapshot['runtime_enabled']} "
+    f"env_var={vixw_snapshot['env_var']} "
+    f"raw={vixw_snapshot['raw_value']!r} "
+    f"VIXW_ONLY_PAPER_MODE={vixw_snapshot['paper_only']!r} "
+    f"run_vixw_regime_forever reachable: {vixw_snapshot['run_vixw_regime_forever_reachable']}"
+)
+runtime_telemetry.set_worker("vixw_regime_sidecar", bool(vixw_snapshot["runtime_enabled"]))
 volatility_proxy_boot.start()
 register_quick_links(dashboard_v2.app)
 

@@ -80,6 +80,10 @@ _REPLAY_OVERRIDE_KEYS = {
     "IMMEDIATE_TAKE_PROFIT_PCT",
     "TRAIL_PULLBACK_PCT",
 }
+
+_ORPHANED_OPTION_CLOSE_SUPPRESS: set[str] = set()
+_OPTION_CLOSE_REJECT_COOLDOWN_UNTIL: dict[str, datetime] = {}
+_OPTION_CLOSE_REJECT_COOLDOWN_MINUTES = 60
 _RUNTIME_OVERRIDE_MTIMES: dict[str, float] = {}
 _RUNTIME_OVERRIDE_VALUES: dict[str, dict[str, float]] = {}
 
@@ -1702,6 +1706,96 @@ def _cancel_open_exit_orders(
             )
 
 
+def _close_reject_text(exc: Exception) -> str:
+    return str(exc or "")[:500]
+
+
+def _is_uncovered_close_rejection(exc: Exception) -> bool:
+    text = _close_reject_text(exc).lower()
+    return "403" in text or "40310000" in text or "uncovered option contracts" in text
+
+
+def _active_option_close_reject_cooldown(symbol: str, now_et: datetime) -> datetime | None:
+    key = str(symbol or "").upper()
+    until = _OPTION_CLOSE_REJECT_COOLDOWN_UNTIL.get(key)
+    if until is None:
+        return None
+    if until <= now_et:
+        _OPTION_CLOSE_REJECT_COOLDOWN_UNTIL.pop(key, None)
+        return None
+    return until
+
+
+def _arm_option_close_reject_cooldown(symbol: str, now_et: datetime, *, reason: str) -> datetime:
+    key = str(symbol or "").upper()
+    until = now_et + timedelta(minutes=_OPTION_CLOSE_REJECT_COOLDOWN_MINUTES)
+    prior = _OPTION_CLOSE_REJECT_COOLDOWN_UNTIL.get(key)
+    if prior is None or prior < until:
+        _OPTION_CLOSE_REJECT_COOLDOWN_UNTIL[key] = until
+    print(
+        f"[{ts(now_et)}] {key}: close rejection cooldown armed for "
+        f"{_OPTION_CLOSE_REJECT_COOLDOWN_MINUTES}m until {ts(_OPTION_CLOSE_REJECT_COOLDOWN_UNTIL[key])}; "
+        f"reason={reason}"
+    )
+    return _OPTION_CLOSE_REJECT_COOLDOWN_UNTIL[key]
+
+
+def _broker_confirmed_close_qty(
+    *,
+    broker: AlpacaBroker,
+    symbol: str,
+    local_qty: int,
+    now_et: datetime,
+    execution_meta: dict[str, object],
+) -> int:
+    key = str(symbol or "").upper().strip()
+    local_qty = max(0, int(local_qty or 0))
+    execution_meta["local_qty"] = local_qty
+    execution_meta["broker_qty"] = 0
+    execution_meta["broker_position_confirmed"] = False
+    execution_meta["orphaned_local_position"] = False
+
+    cooldown_until = _active_option_close_reject_cooldown(key, now_et)
+    if cooldown_until is not None:
+        execution_meta["reason"] = "close_blocked_broker_rejected_with_cooldown"
+        execution_meta["cooldown_until"] = cooldown_until.isoformat()
+        print(f"[{ts(now_et)}] {key}: close skipped during broker rejection cooldown until {ts(cooldown_until)}.")
+        return 0
+
+    try:
+        broker_qty = _confirmed_long_option_qty(broker, key)
+    except Exception as exc:  # noqa: BLE001
+        broker_qty = 0
+        execution_meta["broker_position_lookup_error"] = str(exc)[:250]
+    execution_meta["broker_qty"] = broker_qty
+
+    if broker_qty <= 0:
+        _ORPHANED_OPTION_CLOSE_SUPPRESS.add(key)
+        execution_meta["reason"] = "close_skipped_broker_position_not_found"
+        execution_meta["orphaned_local_position"] = True
+        execution_meta["status"] = "orphaned_local_position"
+        print(
+            f"[{ts(now_et)}] {key}: close skipped; broker position not found "
+            f"(local_qty={local_qty}, broker_qty={broker_qty})."
+        )
+        return 0
+
+    if key in _ORPHANED_OPTION_CLOSE_SUPPRESS:
+        _ORPHANED_OPTION_CLOSE_SUPPRESS.discard(key)
+        print(f"[{ts(now_et)}] {key}: broker position confirmed again; clearing orphan close suppression.")
+
+    execution_meta["broker_position_confirmed"] = True
+    if broker_qty < local_qty:
+        execution_meta["reason"] = "position_qty_mismatch"
+        execution_meta["position_qty_mismatch"] = True
+        print(
+            f"[{ts(now_et)}] {key}: position qty mismatch; closing broker-confirmed qty only "
+            f"(local_qty={local_qty}, broker_qty={broker_qty})."
+        )
+        return broker_qty
+    return local_qty
+
+
 def _close_position_with_confirmation(
     *,
     broker: AlpacaBroker,
@@ -1788,6 +1882,21 @@ def _close_position_with_confirmation(
         except Exception as exc:  # noqa: BLE001
             print(f"[{ts(now_et)}] {label} {symbol}: orphan close order scan failed: {exc}")
         return 0, None, execution_meta
+
+    broker_confirmed_qty = _broker_confirmed_close_qty(
+        broker=broker,
+        symbol=symbol,
+        local_qty=request_position_qty,
+        now_et=now_et,
+        execution_meta=execution_meta,
+    )
+    if broker_confirmed_qty <= 0:
+        execution_meta["uncovered_close_qty"] = 0
+        return 0, None, execution_meta
+    request_qty = min(request_qty, broker_confirmed_qty)
+    request_position_qty = broker_confirmed_qty
+    execution_meta["position_qty"] = request_position_qty
+    execution_meta["uncovered_close_qty"] = request_position_qty
 
     if poll_seconds_override is None:
         poll_seconds = max(1, int(config.EXIT_ORDER_STATUS_POLL_SECONDS))
@@ -2104,6 +2213,22 @@ def _close_position_with_confirmation(
 
         return 0, None, execution_meta
     except Exception as exc:  # noqa: BLE001
+        if _is_uncovered_close_rejection(exc):
+            cooldown_until = _arm_option_close_reject_cooldown(
+                symbol,
+                now_et,
+                reason=_close_reject_text(exc),
+            )
+            execution_meta["reason"] = "close_blocked_broker_rejected_with_cooldown"
+            execution_meta["status"] = "broker_rejected"
+            execution_meta["reject_message"] = _close_reject_text(exc)
+            execution_meta["cooldown_until"] = cooldown_until.isoformat()
+            print(
+                f"[{ts(now_et)}] {label} {symbol} qty={request_qty}: "
+                f"close blocked by broker rejection; cooldown_until={ts(cooldown_until)}; "
+                f"reject={_close_reject_text(exc)}"
+            )
+            return 0, None, execution_meta
         print(f"[{ts(now_et)}] {label} {symbol} qty={request_qty}: close error: {exc}")
         return 0, None, execution_meta
 
@@ -8545,6 +8670,26 @@ def main():
                         retry_attempts_override=close_retry_override,
                     )
                     if filled_close_qty <= 0 or close_fill_price is None or close_fill_price <= 0:
+                        close_reason = str(close_execution.get("reason", "") or "")
+                        if close_reason in {
+                            "close_skipped_broker_position_not_found",
+                            "close_blocked_broker_rejected_with_cooldown",
+                        }:
+                            meta = open_trade_meta.get(symbol, {})
+                            meta["close_suppressed_reason"] = close_reason
+                            meta["close_suppressed_at"] = now_et.isoformat()
+                            meta["broker_qty"] = close_execution.get("broker_qty", "")
+                            meta["local_qty"] = close_execution.get("local_qty", close_qty)
+                            if close_execution.get("cooldown_until"):
+                                meta["close_cooldown_until"] = close_execution.get("cooldown_until")
+                            if bool(close_execution.get("orphaned_local_position", False)):
+                                meta["orphaned_local_position"] = True
+                                meta["orphaned_local_position_at"] = now_et.isoformat()
+                            open_trade_meta[symbol] = meta
+                            last_exit_debug["result"] = close_reason
+                            last_exit_debug.update(close_execution)
+                            _save_runtime_state()
+                            continue
                         last_exit_debug["result"] = "pending_or_not_filled"
                         _save_runtime_state()
                         continue

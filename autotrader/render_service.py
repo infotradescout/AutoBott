@@ -118,7 +118,14 @@ from broker import AlpacaBroker
 from data import AlpacaDataClient
 from dashboard import app
 import desk_state
-from main import main as trader_main
+from main import (
+    _active_option_close_reject_cooldown,
+    _arm_option_close_reject_cooldown,
+    _close_reject_text,
+    _confirmed_long_option_qty,
+    _is_uncovered_close_rejection,
+    main as trader_main,
+)
 import market_context
 import replay_farm
 import runtime_telemetry
@@ -1095,6 +1102,43 @@ def _run_independent_stoploss_guard() -> None:
                     continue
                 if broker.has_open_order_for_symbol(symbol=symbol, side="sell"):
                     continue
+                cooldown_until = _active_option_close_reject_cooldown(symbol, now_et)
+                if cooldown_until is not None:
+                    _patch_runtime_state(
+                        {
+                            "independent_stoploss_last_skipped_et": now_et.isoformat(),
+                            "independent_stoploss_last_skipped_symbol": symbol,
+                            "independent_stoploss_last_skip_reason": "close_blocked_broker_rejected_with_cooldown",
+                            "independent_stoploss_last_cooldown_until": cooldown_until.isoformat(),
+                        }
+                    )
+                    print(
+                        f"[render_service] INDEPENDENT_STOPLOSS skipped {symbol}: "
+                        f"broker rejection cooldown until {cooldown_until.isoformat()}"
+                    )
+                    continue
+                broker_confirmed_qty = _confirmed_long_option_qty(broker, symbol)
+                if broker_confirmed_qty <= 0:
+                    _patch_runtime_state(
+                        {
+                            "independent_stoploss_last_skipped_et": now_et.isoformat(),
+                            "independent_stoploss_last_skipped_symbol": symbol,
+                            "independent_stoploss_last_skip_reason": "close_skipped_broker_position_not_found",
+                            "independent_stoploss_last_local_qty": qty,
+                            "independent_stoploss_last_broker_qty": broker_confirmed_qty,
+                        }
+                    )
+                    print(
+                        f"[render_service] INDEPENDENT_STOPLOSS skipped {symbol}: "
+                        f"broker position not found (local_qty={qty}, broker_qty={broker_confirmed_qty})."
+                    )
+                    continue
+                if broker_confirmed_qty < qty:
+                    print(
+                        f"[render_service] INDEPENDENT_STOPLOSS {symbol}: position_qty_mismatch "
+                        f"local_qty={qty} broker_qty={broker_confirmed_qty}; closing broker-confirmed qty."
+                    )
+                    qty = broker_confirmed_qty
 
                 try:
                     broker.close_option_market(symbol, qty)
@@ -1120,6 +1164,26 @@ def _run_independent_stoploss_guard() -> None:
                         dedupe_key=f"independent-stoploss-{symbol}-{int(time.time() // 30)}",
                     )
                 except Exception as exc:  # noqa: BLE001
+                    if _is_uncovered_close_rejection(exc):
+                        cooldown_until = _arm_option_close_reject_cooldown(
+                            symbol,
+                            now_et,
+                            reason=_close_reject_text(exc),
+                        )
+                        _patch_runtime_state(
+                            {
+                                "independent_stoploss_last_skipped_et": now_et.isoformat(),
+                                "independent_stoploss_last_skipped_symbol": symbol,
+                                "independent_stoploss_last_skip_reason": "close_blocked_broker_rejected_with_cooldown",
+                                "independent_stoploss_last_reject_message": _close_reject_text(exc),
+                                "independent_stoploss_last_cooldown_until": cooldown_until.isoformat(),
+                            }
+                        )
+                        print(
+                            f"[render_service] independent stop-loss close rejected for {symbol}; "
+                            f"cooldown_until={cooldown_until.isoformat()}; reject={_close_reject_text(exc)}"
+                        )
+                        continue
                     print(f"[render_service] independent stop-loss close failed for {symbol}: {exc}")
         except Exception as exc:  # noqa: BLE001
             print(f"[render_service] independent stop-loss guard error: {exc}")

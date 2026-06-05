@@ -47,3 +47,23 @@ def test_render_starter_defaults_disable_nonessential_sidecars():
         'os.environ.setdefault("ENABLE_MARKET_CONTEXT_WORKER", "false")',
     ):
         assert expected in source
+
+
+def test_vixw_smoke_profile_enables_exact_runtime_flag():
+    path = Path(__file__).resolve().parent.parent / "render_service_dashboard_v2.py"
+    source = path.read_text(encoding="utf-8")
+
+    assert '"VIXW_HEAVY_MODE": "true"' in source
+    assert '"VIXW_ONLY_PAPER_MODE": "true"' in source
+    assert 'profile == "vixw_paper_smoke"' in source
+
+
+def test_vixw_enablement_snapshot_logs_runtime_flag_and_reachability():
+    path = Path(__file__).resolve().parent.parent / "render_service_dashboard_v2.py"
+    source = path.read_text(encoding="utf-8")
+
+    assert 'env_var = "VIXW_HEAVY_MODE"' in source
+    assert "VIXW runtime enabled:" in source
+    assert "VIXW_ONLY_PAPER_MODE=" in source
+    assert "run_vixw_regime_forever reachable:" in source
+    assert 'runtime_telemetry.set_worker("vixw_regime_sidecar", bool(vixw_snapshot["runtime_enabled"]))' in source

@@ -156,12 +156,33 @@ class FakeCloseDataClient(FakeDataClient):
         return {"bid": self.bid, "ask": self.ask}
 
 
+class FakePosition:
+    def __init__(self, symbol: str, qty: int):
+        self.symbol = symbol
+        self.qty = qty
+
+
 class FakeExitBroker:
-    def __init__(self, open_orders: list[FakeOrder] | None = None):
+    def __init__(
+        self,
+        open_orders: list[FakeOrder] | None = None,
+        *,
+        position_symbol: str = "ORCL260515C00195000",
+        position_qty: int | None = 1000,
+        reject_market_close: bool = False,
+    ):
         self._open_orders = list(open_orders or [])
         self._status_by_id: dict[str, object] = {order.id: order for order in self._open_orders}
         self.canceled_order_ids: list[str] = []
         self.actions: list[tuple] = []
+        self.position_symbol = position_symbol
+        self.position_qty = position_qty
+        self.reject_market_close = reject_market_close
+
+    def get_open_option_positions(self):
+        if self.position_qty is None or self.position_qty <= 0:
+            return []
+        return [FakePosition(self.position_symbol, self.position_qty)]
 
     def get_open_orders_for_symbol(self, symbol: str, side: str):
         return [order for order in self._open_orders if str(getattr(order, "side", "")).lower() == str(side).lower()]
@@ -199,6 +220,8 @@ class FakeExitBroker:
         return order
 
     def close_option_market(self, symbol: str, qty: int):
+        if self.reject_market_close:
+            raise RuntimeError('{"code":40310000,"message":"account not eligible to trade uncovered option contracts"}')
         order = FakeOrder(
             symbol,
             "sell",
@@ -298,11 +321,15 @@ class MainOrderGuardTests(unittest.TestCase):
         config.NORMAL_EXIT_ORDER_MIN_HOLD_SECONDS = 30
         config.NORMAL_EXIT_ORDER_STALE_SECONDS = 180
         config.NORMAL_EXIT_REPRICE_DRIFT_PCT = 0.06
+        main._ORPHANED_OPTION_CLOSE_SUPPRESS.clear()
+        main._OPTION_CLOSE_REJECT_COOLDOWN_UNTIL.clear()
         self.now = EASTERN.localize(datetime(2026, 5, 11, 9, 55, 0))
 
     def tearDown(self):
         for key, value in self._config_values.items():
             setattr(config, key, value)
+        main._ORPHANED_OPTION_CLOSE_SUPPRESS.clear()
+        main._OPTION_CLOSE_REJECT_COOLDOWN_UNTIL.clear()
 
     def test_recent_same_day_canceled_buy_counts_during_cooldown(self):
         broker = FakeBroker(
@@ -1294,6 +1321,119 @@ class MainOrderGuardTests(unittest.TestCase):
         self.assertEqual(len(broker.actions), 3)
         self.assertEqual(broker.actions[0][0], "cancel")
         self.assertEqual(broker.actions[2][0], "market")
+
+    def test_missing_broker_position_skips_close_and_marks_orphan(self):
+        broker = FakeExitBroker(position_qty=0)
+
+        filled_qty, fill_price, close_meta = main._close_position_with_confirmation(
+            broker=broker,
+            data_client=FakeCloseDataClient(bid=None, ask=None),
+            symbol="ORCL260515C00195000",
+            qty=1,
+            now_et=self.now,
+            label="TEST CLOSE",
+            exit_reason="stop_loss",
+            poll_seconds_override=1,
+            max_wait_seconds_override=1,
+        )
+
+        self.assertEqual(filled_qty, 0)
+        self.assertIsNone(fill_price)
+        self.assertEqual(close_meta.get("reason"), "close_skipped_broker_position_not_found")
+        self.assertTrue(close_meta.get("orphaned_local_position"))
+        self.assertEqual(close_meta.get("local_qty"), 1)
+        self.assertEqual(close_meta.get("broker_qty"), 0)
+        self.assertEqual(broker.actions, [])
+        self.assertIn("ORCL260515C00195000", main._ORPHANED_OPTION_CLOSE_SUPPRESS)
+
+    def test_orphaned_position_repeat_close_stays_suppressed(self):
+        broker = FakeExitBroker(position_qty=0)
+
+        for _ in range(2):
+            filled_qty, fill_price, close_meta = main._close_position_with_confirmation(
+                broker=broker,
+                data_client=FakeCloseDataClient(bid=None, ask=None),
+                symbol="ORCL260515C00195000",
+                qty=1,
+                now_et=self.now,
+                label="TEST CLOSE",
+                exit_reason="stop_loss",
+                poll_seconds_override=1,
+                max_wait_seconds_override=1,
+            )
+            self.assertEqual(filled_qty, 0)
+            self.assertIsNone(fill_price)
+            self.assertEqual(close_meta.get("reason"), "close_skipped_broker_position_not_found")
+
+        self.assertEqual(broker.actions, [])
+        self.assertIn("ORCL260515C00195000", main._ORPHANED_OPTION_CLOSE_SUPPRESS)
+
+    def test_broker_qty_mismatch_closes_only_confirmed_qty(self):
+        broker = FakeExitBroker(position_qty=1)
+
+        filled_qty, fill_price, close_meta = main._close_position_with_confirmation(
+            broker=broker,
+            data_client=FakeCloseDataClient(bid=None, ask=None),
+            symbol="ORCL260515C00195000",
+            qty=3,
+            now_et=self.now,
+            label="TEST CLOSE",
+            exit_reason="stop_loss",
+            poll_seconds_override=1,
+            max_wait_seconds_override=1,
+        )
+
+        self.assertEqual(filled_qty, 1)
+        self.assertEqual(fill_price, 10.0)
+        self.assertEqual(close_meta.get("reason"), "position_qty_mismatch")
+        self.assertEqual(close_meta.get("local_qty"), 3)
+        self.assertEqual(close_meta.get("broker_qty"), 1)
+        self.assertEqual(broker.actions[-1][0], "market")
+        self.assertEqual(broker.actions[-1][3], 1)
+
+    def test_uncovered_close_rejection_applies_fixed_cooldown(self):
+        broker = FakeExitBroker(position_qty=1, reject_market_close=True)
+
+        filled_qty, fill_price, close_meta = main._close_position_with_confirmation(
+            broker=broker,
+            data_client=FakeCloseDataClient(bid=None, ask=None),
+            symbol="ORCL260515C00195000",
+            qty=1,
+            now_et=self.now,
+            label="TEST CLOSE",
+            exit_reason="stop_loss",
+            poll_seconds_override=1,
+            max_wait_seconds_override=1,
+        )
+
+        self.assertEqual(filled_qty, 0)
+        self.assertIsNone(fill_price)
+        self.assertEqual(close_meta.get("reason"), "close_blocked_broker_rejected_with_cooldown")
+        cooldown_until = main._OPTION_CLOSE_REJECT_COOLDOWN_UNTIL.get("ORCL260515C00195000")
+        self.assertIsNotNone(cooldown_until)
+        self.assertEqual(cooldown_until, self.now + timedelta(minutes=60))
+        self.assertIn("uncovered option contracts", str(close_meta.get("reject_message", "")))
+
+    def test_future_loop_during_close_rejection_cooldown_skips_close(self):
+        main._OPTION_CLOSE_REJECT_COOLDOWN_UNTIL["ORCL260515C00195000"] = self.now + timedelta(minutes=60)
+        broker = FakeExitBroker(position_qty=1)
+
+        filled_qty, fill_price, close_meta = main._close_position_with_confirmation(
+            broker=broker,
+            data_client=FakeCloseDataClient(bid=None, ask=None),
+            symbol="ORCL260515C00195000",
+            qty=1,
+            now_et=self.now + timedelta(minutes=5),
+            label="TEST CLOSE",
+            exit_reason="stop_loss",
+            poll_seconds_override=1,
+            max_wait_seconds_override=1,
+        )
+
+        self.assertEqual(filled_qty, 0)
+        self.assertIsNone(fill_price)
+        self.assertEqual(close_meta.get("reason"), "close_blocked_broker_rejected_with_cooldown")
+        self.assertEqual(broker.actions, [])
 
     def test_position_zero_with_orphan_active_close_orders_canceled(self):
         orphan_order = FakeOrder(
