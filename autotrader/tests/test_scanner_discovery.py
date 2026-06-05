@@ -64,11 +64,11 @@ def test_growth_frequency_config_keeps_trading_through_day():
     assert config.MAX_SAME_DIRECTION_POSITIONS == 0
     assert config.OPENING_MAX_SIGNAL_CANDIDATES == 10
     assert config.MAX_ENTRIES_PER_TICKER_PER_DAY == 0
-    assert config.TICKER_ROUNDTRIP_COOLDOWN_MINUTES == 0
+    assert config.TICKER_ROUNDTRIP_COOLDOWN_MINUTES == 45
     assert config.MAX_ALPACA_TRUTH_ROUNDTRIPS_PER_TICKER_PER_DAY == 0
     assert config.ENTRY_LIMIT_ATTEMPTS == 2
     assert config.CANCEL_UNFILLED_ENTRY_BEFORE_RETRY is True
-    assert config.ENABLE_ENTRY_MARKET_FALLBACK is True
+    assert config.ENABLE_ENTRY_MARKET_FALLBACK is False
     assert config.LOOP_INTERVAL_SECONDS == 5
     assert config.MAX_POSITIONS == 0
     assert config.MAX_POSITION_SIZE_USD == 0.0
@@ -83,7 +83,7 @@ def test_growth_frequency_config_keeps_trading_through_day():
     assert config.BLOCK_NON_SCALP_0DTE_ENTRIES is True
     assert config.ZERO_DTE_MAX_ENTRY_ATTEMPTS == 3
     assert config.ZERO_DTE_MAX_HOLD_MINUTES == 5
-    assert config.ZERO_DTE_MAX_REALIZED_LOSSES == 3
+    assert config.ZERO_DTE_MAX_REALIZED_LOSSES == 0
     assert config.MAX_0DTE_PREMIUM_PCT_EQUITY == 0.02
     assert config.MAX_WEEKLY_SINGLE_NAME_PREMIUM_PCT_EQUITY == 0.05
     assert config.MAX_SINGLE_TICKER_PREMIUM_PCT_EQUITY == 0.02
@@ -94,13 +94,13 @@ def test_growth_frequency_config_keeps_trading_through_day():
     assert config.ATR_MIN_PERIOD == 2
     assert config.MAX_OPTION_PREMIUM_TO_UNDERLYING_PCT == 20.0
     assert config.MAX_OPTION_STRIKE_DISTANCE_PCT == 15.0
-    assert config.EXECUTION_MIN_RVOL_AFTER_IGNORE == 0.50
-    assert config.ENABLE_ENTRY_CONFIRMATION is True
-    assert config.ENTRY_CONFIRM_BYPASS_MIN_SIGNAL_SCORE == 12.0
-    assert config.ENABLE_FRESH_TAPE_DIRECTION_GUARD is False
+    assert config.EXECUTION_MIN_RVOL_AFTER_IGNORE == 0.25
+    assert config.ENABLE_ENTRY_CONFIRMATION is False
+    assert config.ENTRY_CONFIRM_BYPASS_MIN_SIGNAL_SCORE == 999.0
+    assert config.ENABLE_FRESH_TAPE_DIRECTION_GUARD is True
     assert config.FRESH_TAPE_FAIL_CLOSED is True
-    assert config.ENABLE_SIGNAL_PATTERN_MEMORY is False
-    assert config.ENABLE_PRE_EXECUTION_HISTORY_CHECK is False
+    assert config.ENABLE_SIGNAL_PATTERN_MEMORY is True
+    assert config.ENABLE_PRE_EXECUTION_HISTORY_CHECK is True
     assert config.ENABLE_EXECUTION_EVIDENCE_GATE is False
     assert config.EVIDENCE_GATE_MIN_SAMPLES == 3
     assert config.EVIDENCE_GATE_MIN_LOSSES == 2
@@ -109,20 +109,20 @@ def test_growth_frequency_config_keeps_trading_through_day():
     assert config.MARKET_CONTEXT_ENFORCE_BLOCKED_PROFILES is True
     assert config.MARKET_CONTEXT_BLOCKED_PROFILE_MODE == "off"
     assert config.ENABLE_CANDIDATE_QUEUE is True
-    assert config.ADAPTIVE_BLOCK_LOSING_TICKERS is False
-    assert config.ALPACA_TRUTH_ADAPT_AFTER_LOSS_USD == 0.0
-    assert config.LOSS_THROTTLE_AFTER_CONSEC_LOSSES == 999
+    assert config.ADAPTIVE_BLOCK_LOSING_TICKERS is True
+    assert config.ALPACA_TRUTH_ADAPT_AFTER_LOSS_USD == 1.0
+    assert config.LOSS_THROTTLE_AFTER_CONSEC_LOSSES == 1
     assert config.EARLY_RED_GUARD_ENABLED is False
     assert config.EARLY_RED_GUARD_MAX_NET_PNL_USD == -150.0
     assert config.DAILY_LOSS_LIMIT_USD == 0.0
     assert config.WEEKLY_LOSS_LIMIT_USD == 0.0
     assert config.INTRADAY_NET_LOSS_LIMIT_USD == 0.0
-    assert config.ENABLE_ALPACA_TRUTH_LOSS_GUARD is False
+    assert config.ENABLE_ALPACA_TRUTH_LOSS_GUARD is True
     assert config.MAX_ALPACA_BUY_ORDERS_PER_TICKER_PER_DAY == 0
-    assert config.MAX_OPEN_ENTRY_BUY_ORDERS == 0
+    assert config.MAX_OPEN_ENTRY_BUY_ORDERS == 25
     assert config.ALLOW_OPENING_REENTRIES is True
-    assert config.ENABLE_FILL_SLIPPAGE_IMMEDIATE_CLOSE is False
-    assert config.MAX_FILL_SLIPPAGE_PCT == 999.0
+    assert config.ENABLE_FILL_SLIPPAGE_IMMEDIATE_CLOSE is True
+    assert config.MAX_FILL_SLIPPAGE_PCT == 2.5
     assert config.NO_NEW_TRADES_AFTER == "14:45"
     assert config.AVOID_0DTE_ENTRY_WITHIN_CLOSE_MINUTES == 120
     assert config.INDEPENDENT_STOPLOSS_REQUIRE_STALE_LOOP is True

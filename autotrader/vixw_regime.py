@@ -44,6 +44,30 @@ VIX_PROXY_LOG_COLUMNS = [
     "bid",
     "spread_pct",
     "qty",
+    "profit_target_price",
+    "profit_order_id",
+    "profit_order_status",
+    "ticker",
+    "underlying_price",
+    "vix_level_regime",
+    "vix_1m_roc",
+    "vix_5m_roc",
+    "vix_15m_roc",
+    "vxx_5m_roc",
+    "vix_momentum_state",
+    "upper_wick_ratio",
+    "failed_breakout",
+    "close_back_inside_range",
+    "option_bid",
+    "option_ask",
+    "option_mark",
+    "dte",
+    "volume",
+    "open_interest",
+    "quote_age_seconds",
+    "entry_allowed",
+    "entry_reason",
+    "skip_reason",
 ]
 LEGACY_VIX_PROXY_LOG_COLUMNS = [
     "timestamp",
@@ -117,6 +141,260 @@ def _order_submitted_at_et(order: Any) -> datetime | None:
     if dt.tzinfo is None:
         dt = EASTERN.localize(dt)
     return dt.astimezone(EASTERN)
+
+
+def _as_et(dt: datetime) -> datetime:
+    if dt.tzinfo is None:
+        return EASTERN.localize(dt)
+    return dt.astimezone(EASTERN)
+
+
+def _time_from_config(value: Any, default: str) -> tuple[int, int]:
+    raw = str(value or default).strip()
+    try:
+        hour_text, minute_text = raw.split(":", 1)
+        return int(hour_text), int(minute_text)
+    except Exception:
+        hour_text, minute_text = str(default).split(":", 1)
+        return int(hour_text), int(minute_text)
+
+
+def _market_minutes(hour: int, minute: int) -> int:
+    return int(hour) * 60 + int(minute)
+
+
+def _vix_level_regime(vix_level: float) -> str:
+    if vix_level < 14:
+        return "low"
+    if vix_level < 20:
+        return "normal"
+    if vix_level < 28:
+        return "elevated"
+    return "stressed"
+
+
+def _roc_from_closes(closes: list[float], periods: int) -> float:
+    if len(closes) <= periods:
+        return 0.0
+    current = _safe_float(closes[-1], 0.0)
+    previous = _safe_float(closes[-1 - periods], 0.0)
+    if current <= 0 or previous <= 0:
+        return 0.0
+    return ((current - previous) / previous) * 100.0
+
+
+def _bar_value(bar: Any, field: str) -> float:
+    if isinstance(bar, dict):
+        return _safe_float(bar.get(field), 0.0)
+    return _safe_float(getattr(bar, field, None), 0.0)
+
+
+def _bar_closes(bars: list[Any]) -> list[float]:
+    return [_bar_value(bar, "close") for bar in bars if _bar_value(bar, "close") > 0]
+
+
+def _wick_metrics(bars: list[Any]) -> dict[str, Any]:
+    if len(bars) < 2:
+        return {
+            "upper_wick_ratio": 0.0,
+            "failed_breakout": False,
+            "close_back_inside_range": False,
+        }
+    current = bars[-1]
+    previous = bars[-2]
+    open_price = _bar_value(current, "open")
+    high = _bar_value(current, "high")
+    low = _bar_value(current, "low")
+    close = _bar_value(current, "close")
+    prior_high = _bar_value(previous, "high")
+    candle_range = max(0.0, high - low)
+    body_top = max(open_price, close)
+    upper_wick = max(0.0, high - body_top)
+    upper_wick_ratio = (upper_wick / candle_range) if candle_range > 0 else 0.0
+    failed_breakout = bool(high > prior_high and close < prior_high)
+    return {
+        "upper_wick_ratio": round(upper_wick_ratio, 4),
+        "failed_breakout": failed_breakout,
+        "close_back_inside_range": bool(close < prior_high),
+    }
+
+
+def _safe_option_mark(quote: dict[str, Any]) -> tuple[float, str]:
+    bid = _safe_float(quote.get("bid"), 0.0)
+    ask = _safe_float(quote.get("ask"), 0.0)
+    mark = _safe_float(quote.get("mark"), 0.0)
+    if mark > 0:
+        return mark, "mark"
+    if bid > 0 and ask > bid:
+        return (bid + ask) / 2.0, "midpoint_fallback"
+    return 0.0, "missing"
+
+
+def _quote_age_seconds(quote: dict[str, Any], now_et: datetime) -> float:
+    raw = quote.get("updated_at") or quote.get("timestamp") or quote.get("t")
+    if raw is None:
+        return 0.0
+    if isinstance(raw, datetime):
+        quote_dt = raw
+    else:
+        try:
+            quote_dt = datetime.fromisoformat(str(raw).replace("Z", "+00:00"))
+        except Exception:
+            return 999999.0
+    quote_dt = _as_et(quote_dt)
+    return max(0.0, (_as_et(now_et) - quote_dt).total_seconds())
+
+
+def _contract_dte(contract: dict[str, Any], now_et: datetime) -> int:
+    raw = _contract_expiration(contract)
+    if not raw:
+        return -1
+    try:
+        expiry = date.fromisoformat(raw[:10])
+    except Exception:
+        return -1
+    return max(0, (expiry - _as_et(now_et).date()).days)
+
+
+def _entry_time_skip_reason(now_et: datetime) -> str | None:
+    now_et = _as_et(now_et)
+    open_minutes = _market_minutes(9, 30)
+    current_minutes = _market_minutes(now_et.hour, now_et.minute)
+    block_after_open = int(_cfg("VIXW_ENTRY_BLOCK_AFTER_OPEN_MINUTES", 30) or 30)
+    if open_minutes <= current_minutes < open_minutes + block_after_open:
+        return "BLOCKED_OPENING_WINDOW"
+    cutoff_hour, cutoff_minute = _time_from_config(_cfg("VIXW_NO_NEW_ENTRIES_AFTER", "15:45"), "15:45")
+    if current_minutes >= _market_minutes(cutoff_hour, cutoff_minute):
+        return "BLOCKED_LATE_SESSION"
+    return None
+
+
+def _build_vixw_entry_telemetry(
+    *,
+    ticker: str,
+    underlying_price: float,
+    vix_bars: list[Any],
+    vxx_bars: list[Any],
+    option_contract: dict[str, Any],
+    option_quote: dict[str, Any],
+    now_et: datetime,
+    macro_blocked: bool = False,
+) -> dict[str, Any]:
+    now_et = _as_et(now_et)
+    closes = _bar_closes(vix_bars)
+    vxx_closes = _bar_closes(vxx_bars)
+    vix_level = closes[-1] if closes else 0.0
+    wick = _wick_metrics(vix_bars)
+    mark, mark_source = _safe_option_mark(option_quote)
+    bid = _safe_float(option_quote.get("bid"), 0.0)
+    ask = _safe_float(option_quote.get("ask"), 0.0)
+    midpoint = mark if mark > 0 else ((bid + ask) / 2.0 if bid > 0 and ask > bid else 0.0)
+    spread_pct = ((ask - bid) / midpoint) * 100.0 if midpoint > 0 and ask >= bid else 999.0
+    dte = _contract_dte(option_contract, now_et)
+    quote_age = _quote_age_seconds(option_quote, now_et)
+    vix_1m_roc = _roc_from_closes(closes, 1)
+    vix_5m_roc = _roc_from_closes(closes, 5)
+    vix_15m_roc = _roc_from_closes(closes, 15)
+    vxx_5m_roc = _roc_from_closes(vxx_closes, 5)
+    acceleration_min = float(_cfg("VIXW_ACCELERATING_ROC_MIN", 0.05) or 0.05)
+    decel_tolerance = float(_cfg("VIXW_DECELERATION_TOLERANCE", 0.02) or 0.02)
+    vix_5m_pace = vix_5m_roc / 5.0
+    if vix_1m_roc > vix_5m_pace + acceleration_min and vix_5m_roc > 0:
+        momentum_state = "accelerating"
+    elif vix_1m_roc <= vix_5m_pace + decel_tolerance:
+        momentum_state = "decelerating"
+    else:
+        momentum_state = "flat"
+
+    telemetry = {
+        "ticker": ticker,
+        "underlying_price": round(float(underlying_price), 4) if underlying_price else 0.0,
+        "vix_level": round(vix_level, 4),
+        "vix_level_regime": _vix_level_regime(vix_level),
+        "vix_1m_roc": round(vix_1m_roc, 4),
+        "vix_5m_roc": round(vix_5m_roc, 4),
+        "vix_15m_roc": round(vix_15m_roc, 4),
+        "vxx_5m_roc": round(vxx_5m_roc, 4),
+        "vix_momentum_state": momentum_state,
+        "upper_wick_ratio": wick["upper_wick_ratio"],
+        "failed_breakout": wick["failed_breakout"],
+        "close_back_inside_range": wick["close_back_inside_range"],
+        "option_symbol": _contract_symbol(option_contract),
+        "option_bid": bid,
+        "option_ask": ask,
+        "option_mark": round(mark, 4),
+        "option_mark_source": mark_source,
+        "spread_pct": round(spread_pct, 4),
+        "dte": dte,
+        "volume": _safe_int(option_contract.get("volume", option_quote.get("volume", 0)), 0),
+        "open_interest": _safe_int(option_contract.get("open_interest", option_quote.get("open_interest", 0)), 0),
+        "quote_age_seconds": round(quote_age, 2),
+        "entry_allowed": False,
+        "entry_reason": "",
+        "skip_reason": "",
+    }
+
+    time_skip = _entry_time_skip_reason(now_et)
+    max_spread = float(_cfg("VIXW_MAX_OPTION_SPREAD_PCT", 3.0) or 3.0)
+    min_dte = int(_cfg("VIXW_MIN_DTE_TRADING_DAYS", 3) or 3)
+    max_dte = int(_cfg("VIXW_MAX_DTE_TRADING_DAYS", 7) or 7)
+    max_quote_age = float(_cfg("VIXW_MAX_QUOTE_AGE_SECONDS", 60) or 60)
+    min_volume = int(_cfg("VIXW_MIN_OPTION_VOLUME", 0) or 0)
+    min_oi = int(_cfg("VIXW_MIN_OPTION_OPEN_INTEREST", 0) or 0)
+
+    if macro_blocked:
+        telemetry["skip_reason"] = "BLOCKED_MACRO_NEWS_EVENT"
+    elif time_skip:
+        telemetry["skip_reason"] = time_skip
+    elif vix_level >= 28:
+        telemetry["skip_reason"] = "BLOCKED_STRESSED_VIX"
+    elif vix_5m_roc > 0 and momentum_state == "accelerating":
+        telemetry["skip_reason"] = "BLOCKED_ACCELERATING_VIX_SPIKE"
+    elif not (wick["failed_breakout"] and wick["close_back_inside_range"] and momentum_state == "decelerating"):
+        telemetry["skip_reason"] = "BLOCKED_NO_WICK_FAILURE_DECELERATION"
+    elif bid <= 0 or ask <= bid or mark <= 0:
+        telemetry["skip_reason"] = "BLOCKED_OPTION_QUOTE_INVALID"
+    elif spread_pct > max_spread:
+        telemetry["skip_reason"] = "BLOCKED_OPTION_SPREAD_WIDE"
+    elif dte < min_dte or dte > max_dte:
+        telemetry["skip_reason"] = "BLOCKED_DTE_OUT_OF_RANGE"
+    elif quote_age > max_quote_age:
+        telemetry["skip_reason"] = "BLOCKED_STALE_OPTION_QUOTE"
+    elif min_volume > 0 and telemetry["volume"] < min_volume:
+        telemetry["skip_reason"] = "BLOCKED_OPTION_VOLUME_LOW"
+    elif min_oi > 0 and telemetry["open_interest"] < min_oi:
+        telemetry["skip_reason"] = "BLOCKED_OPTION_OPEN_INTEREST_LOW"
+    else:
+        telemetry["entry_allowed"] = True
+        telemetry["entry_reason"] = "VIX_DECELERATION_WICK_FAILURE"
+        telemetry["skip_reason"] = ""
+    return telemetry
+
+
+def _position_exit_decision(
+    *,
+    entry_price: float,
+    mark: float,
+    bid: float,
+    held_minutes: float,
+) -> dict[str, Any]:
+    entry_price = _safe_float(entry_price, 0.0)
+    mark = _safe_float(mark, 0.0)
+    bid = _safe_float(bid, 0.0)
+    if entry_price <= 0:
+        return {"action": "hold", "reason": "missing_entry_price"}
+    pnl_pct = ((mark - entry_price) / entry_price) if mark > 0 else -1.0
+    if bid > 0 and bid <= entry_price * float(_cfg("VIXW_EMERGENCY_BID_COLLAPSE_PCT", 0.50) or 0.50):
+        return {"action": "close", "reason": "EMERGENCY_LIQUIDITY_COLLAPSE", "pnl_pct": pnl_pct}
+    if mark > 0 and pnl_pct >= (float(_cfg("VIXW_PROFIT_TARGET_MULTIPLIER", 1.25) or 1.25) - 1.0):
+        return {"action": "profit", "reason": "PROFIT_TRAP_MARK_REACHED", "pnl_pct": pnl_pct}
+    if mark > 0 and pnl_pct <= -abs(float(_cfg("VIXW_STOP_LOSS_PCT", 0.15) or 0.15)):
+        return {"action": "close", "reason": "MARK_STOP_LOSS", "pnl_pct": pnl_pct}
+    max_hold = float(_cfg("VIXW_MAX_HOLD_MINUTES", 15) or 15)
+    min_progress = float(_cfg("VIXW_TIME_STOP_MIN_PROGRESS_PCT", 0.05) or 0.05)
+    if held_minutes >= max_hold and pnl_pct < min_progress:
+        return {"action": "close", "reason": "HARD_TIME_STOP", "pnl_pct": pnl_pct}
+    return {"action": "hold", "reason": "POSITION_WITHIN_RISK_BOX", "pnl_pct": pnl_pct}
 
 
 def _proxy_prefixes() -> tuple[str, ...]:
@@ -226,6 +504,142 @@ def _proxy_position_exposure_reason(broker: AlpacaBroker) -> str | None:
     if count >= max_positions:
         return f"existing volatility proxy position exposure ({count}/{max_positions})"
     return None
+
+
+def _position_avg_entry_price(position: Any) -> float:
+    for field in ("avg_entry_price", "average_entry_price", "cost_basis"):
+        value = _safe_float(getattr(position, field, None), 0.0)
+        if value <= 0:
+            continue
+        if field == "cost_basis":
+            qty = _safe_int(getattr(position, "qty", 0), 0)
+            if qty > 0:
+                return value / (qty * 100.0)
+            continue
+        return value
+    return 0.0
+
+
+def _position_opened_at_et(position: Any) -> datetime | None:
+    raw = (
+        getattr(position, "opened_at", None)
+        or getattr(position, "created_at", None)
+        or getattr(position, "asset_created_at", None)
+    )
+    if raw is None:
+        return None
+    if isinstance(raw, datetime):
+        return _as_et(raw)
+    try:
+        return _as_et(datetime.fromisoformat(str(raw).replace("Z", "+00:00")))
+    except Exception:
+        return None
+
+
+def _cancel_open_proxy_sell_orders(broker: AlpacaBroker, symbol: str) -> int:
+    canceled = 0
+    try:
+        orders = broker.get_open_orders_for_symbol(symbol=symbol, side="sell")
+    except Exception as exc:  # noqa: BLE001
+        print(f"[vix_proxy] open sell lookup failed for {symbol}: {exc}")
+        return canceled
+    for order in orders or []:
+        order_id = str(getattr(order, "id", "") or "")
+        if not order_id:
+            continue
+        try:
+            broker.cancel_order(order_id)
+            canceled += 1
+        except Exception as exc:  # noqa: BLE001
+            print(f"[vix_proxy] cancel profit trap failed for {symbol}/{order_id}: {exc}")
+    return canceled
+
+
+def _manage_proxy_stop_losses(
+    broker: AlpacaBroker,
+    data_client: AlpacaDataClient,
+    now_et: datetime,
+) -> list[dict[str, Any]]:
+    if not bool(_cfg("VIXW_MANAGE_OPEN_POSITIONS", True)):
+        return []
+    stop_loss_pct = abs(float(_cfg("VIXW_STOP_LOSS_PCT", 0.15) or 0.0))
+    if stop_loss_pct <= 0:
+        return []
+
+    try:
+        positions = broker.get_open_option_positions()
+    except Exception as exc:  # noqa: BLE001
+        print(f"[vix_proxy] stop-loss position lookup failed: {exc}")
+        return []
+
+    actions: list[dict[str, Any]] = []
+    for pos in positions or []:
+        symbol = str(getattr(pos, "symbol", "") or "").upper()
+        qty = _safe_int(getattr(pos, "qty", 0), 0)
+        entry_price = _position_avg_entry_price(pos)
+        if qty <= 0 or not _is_proxy_symbol(symbol) or entry_price <= 0:
+            continue
+
+        try:
+            quote = data_client.get_latest_option_quote(symbol)
+        except Exception as exc:  # noqa: BLE001
+            print(f"[vix_proxy] stop-loss quote lookup failed for {symbol}: {exc}")
+            continue
+        bid = _safe_float(quote.get("bid"), 0.0)
+        mark, mark_source = _safe_option_mark(quote)
+        if bid <= 0 or mark <= 0:
+            continue
+
+        opened_at = _position_opened_at_et(pos)
+        held_minutes = (
+            max(0.0, (_as_et(now_et) - opened_at).total_seconds() / 60.0)
+            if opened_at is not None else 0.0
+        )
+        exit_decision = _position_exit_decision(
+            entry_price=entry_price,
+            mark=mark,
+            bid=bid,
+            held_minutes=held_minutes,
+        )
+        if str(exit_decision.get("action")) not in {"close"}:
+            continue
+
+        canceled = _cancel_open_proxy_sell_orders(broker, symbol)
+        try:
+            order = broker.close_option_market(symbol, qty)
+            order_id = str(getattr(order, "id", "") or "")
+            status = _order_field_text(order, "status") or "submitted"
+            decision = "stop_loss_exit_submitted"
+            reason = (
+                f"{exit_decision.get('reason')}: mark {mark:.2f} ({mark_source}) "
+                f"bid {bid:.2f} from entry {entry_price:.2f}; "
+                f"held_minutes={held_minutes:.1f}; canceled_sell_orders={canceled}"
+            )
+        except Exception as exc:  # noqa: BLE001
+            order_id = ""
+            status = f"submit_failed:{type(exc).__name__}"
+            decision = "stop_loss_exit_failed"
+            reason = (
+                f"{exit_decision.get('reason')}: mark {mark:.2f} ({mark_source}) "
+                f"bid {bid:.2f} from entry {entry_price:.2f}; "
+                f"close failed: {str(exc)[:180]}"
+            )
+
+        action = {
+            "timestamp": now_et.isoformat(),
+            "decision": decision,
+            "reason": reason,
+            "option_symbol": symbol,
+            "bid": bid,
+            "option_bid": bid,
+            "option_mark": mark,
+            "qty": qty,
+            "profit_order_id": order_id,
+            "profit_order_status": status,
+        }
+        _log_decision(action)
+        actions.append(action)
+    return actions
 
 
 def _proxy_entry_block_reason(broker: AlpacaBroker, now_et: datetime) -> str | None:
@@ -379,20 +793,42 @@ def _select_proxy_contract(
         quote = data_client.get_latest_option_quote(symbol)
         bid = _safe_float(quote.get("bid"), 0.0)
         ask = _safe_float(quote.get("ask"), 0.0)
-        if bid <= 0 or ask <= 0 or ask < bid:
+        mark, mark_source = _safe_option_mark(quote)
+        quote_age = _quote_age_seconds(quote, now_et)
+        max_quote_age = float(_cfg("VIXW_MAX_QUOTE_AGE_SECONDS", 60) or 60)
+        volume = _safe_int(contract.get("volume", quote.get("volume", 0)), 0)
+        open_interest = _safe_int(contract.get("open_interest", quote.get("open_interest", 0)), 0)
+        min_volume = int(_cfg("VIXW_MIN_OPTION_VOLUME", 0) or 0)
+        min_open_interest = int(_cfg("VIXW_MIN_OPTION_OPEN_INTEREST", 0) or 0)
+        if bid <= 0 or ask <= 0 or ask <= bid or mark <= 0:
             continue
-        midpoint = (bid + ask) / 2.0
+        if quote_age > max_quote_age:
+            continue
+        if min_volume > 0 and volume < min_volume:
+            continue
+        if min_open_interest > 0 and open_interest < min_open_interest:
+            continue
+        midpoint = mark
         spread_pct = ((ask - bid) / midpoint) * 100.0 if midpoint > 0 else 999.0
         if spread_pct > max_spread:
             continue
         contract["bid_price"] = bid
         contract["ask_price"] = ask
+        contract["mark_price"] = round(mark, 4)
+        contract["mark_source"] = mark_source
+        contract["quote_age_seconds"] = round(quote_age, 2)
+        contract["volume"] = volume
+        contract["open_interest"] = open_interest
+        contract["dte"] = _contract_dte(contract, now_et)
         contract["spread_pct"] = round(spread_pct, 2)
         contract["underlying_price"] = round(float(underlying_price), 4)
         contract["proxy_underlying"] = underlying
         return contract, "ok"
 
-    return None, f"no proxy contract passed quote/spread gate max_spread={max_spread:.2f}%"
+    return None, (
+        f"no proxy contract passed quote/spread/liquidity gate "
+        f"max_spread={max_spread:.2f}%"
+    )
 
 
 def _order_fill_snapshot(order: Any) -> tuple[int, float | None, str]:
@@ -490,6 +926,45 @@ def _submit_proxy_limit_buy(
     return result
 
 
+def _profit_target_price(fill_price: float) -> float:
+    target_multiplier = float(_cfg("VIXW_PROFIT_TARGET_MULTIPLIER", 1.25) or 1.25)
+    min_increment = float(_cfg("VIXW_MIN_PROFIT_TARGET_INCREMENT", 0.01) or 0.01)
+    raw_target = float(fill_price) * target_multiplier
+    if min_increment > 0:
+        raw_target = max(raw_target, float(fill_price) + min_increment)
+    return round(raw_target, 2)
+
+
+def _submit_proxy_profit_trap(
+    broker: AlpacaBroker,
+    *,
+    symbol: str,
+    qty: int,
+    fill_price: float,
+) -> dict[str, Any]:
+    if not bool(_cfg("VIXW_PLACE_PROFIT_TRAP_AFTER_FILL", True)):
+        return {"submitted": False, "status": "disabled", "target_price": ""}
+    if qty <= 0 or fill_price <= 0:
+        return {"submitted": False, "status": "invalid_fill", "target_price": ""}
+
+    target_price = _profit_target_price(fill_price)
+    try:
+        order = broker.place_option_limit_sell(symbol, qty, target_price)
+    except Exception as exc:  # noqa: BLE001
+        return {
+            "submitted": False,
+            "status": f"submit_failed:{type(exc).__name__}",
+            "target_price": target_price,
+            "error": str(exc)[:250],
+        }
+    return {
+        "submitted": True,
+        "status": _order_field_text(order, "status") or "submitted",
+        "target_price": target_price,
+        "order_id": str(getattr(order, "id", "") or ""),
+    }
+
+
 def _coerce_legacy_row(row: dict[str, Any]) -> dict[str, Any]:
     payload = {key: row.get(key, "") for key in VIX_PROXY_LOG_COLUMNS}
     if not payload.get("proxy_underlying"):
@@ -585,6 +1060,11 @@ def run_vixw_regime_forever(api_key: str, secret_key: str) -> None:
                 time.sleep(sleep_seconds)
                 continue
 
+            stop_actions = _manage_proxy_stop_losses(broker, data_client, now_et)
+            if stop_actions:
+                time.sleep(sleep_seconds)
+                continue
+
             if last_entry_at is not None and (now_et - last_entry_at).total_seconds() < cooldown_seconds:
                 time.sleep(sleep_seconds)
                 continue
@@ -592,6 +1072,17 @@ def run_vixw_regime_forever(api_key: str, secret_key: str) -> None:
             entry_block_reason = _proxy_entry_block_reason(broker, now_et)
             if entry_block_reason:
                 _log_decision({"timestamp": now_et.isoformat(), "decision": "skip", "reason": entry_block_reason})
+                time.sleep(sleep_seconds)
+                continue
+
+            if bool(_cfg("VIXW_MACRO_BLOCKED", False)):
+                _log_decision({
+                    "timestamp": now_et.isoformat(),
+                    "decision": "skip",
+                    "reason": "BLOCKED_MACRO_NEWS_EVENT",
+                    "entry_allowed": False,
+                    "skip_reason": "BLOCKED_MACRO_NEWS_EVENT",
+                })
                 time.sleep(sleep_seconds)
                 continue
 
@@ -642,6 +1133,23 @@ def run_vixw_regime_forever(api_key: str, secret_key: str) -> None:
                 decision = "filled_buy"
                 reason = regime_reason
                 log_qty = filled_qty or qty
+                profit_result = _submit_proxy_profit_trap(
+                    broker,
+                    symbol=symbol,
+                    qty=log_qty,
+                    fill_price=filled_price,
+                )
+                profit_status = str(profit_result.get("status", "") or "")
+                profit_target = profit_result.get("target_price", "")
+                profit_order_id = str(profit_result.get("order_id", "") or "")
+                if bool(profit_result.get("submitted")):
+                    decision = "filled_buy_profit_trap"
+                    reason = f"{reason}; profit trap submitted at {float(profit_target):.2f}"
+                else:
+                    reason = f"{reason}; profit trap {profit_status}"
+                    error = str(profit_result.get("error", "") or "").strip()
+                    if error:
+                        reason = f"{reason}: {error}"
                 print(
                     f"[vix_proxy] filled {direction.upper()} buy {symbol} qty={log_qty} "
                     f"limit={limit_price:.2f} fill={filled_price:.2f} vix={vix_level:.2f} order={order_id}"
@@ -653,6 +1161,9 @@ def run_vixw_regime_forever(api_key: str, secret_key: str) -> None:
                 if cancel_note:
                     reason = f"{reason}; {cancel_note}"
                 log_qty = qty
+                profit_status = ""
+                profit_target = ""
+                profit_order_id = ""
                 print(
                     f"[vix_proxy] submitted but not filled {direction.upper()} buy {symbol} "
                     f"qty={qty} limit={limit_price:.2f} status={status} order={order_id}"
@@ -671,8 +1182,18 @@ def run_vixw_regime_forever(api_key: str, secret_key: str) -> None:
                 "expiration": contract.get("expiration_date", ""),
                 "ask": ask,
                 "bid": contract.get("bid_price", ""),
+                "option_bid": contract.get("bid_price", ""),
+                "option_ask": ask,
+                "option_mark": contract.get("mark_price", ""),
                 "spread_pct": contract.get("spread_pct", ""),
+                "dte": contract.get("dte", ""),
+                "volume": contract.get("volume", ""),
+                "open_interest": contract.get("open_interest", ""),
+                "quote_age_seconds": contract.get("quote_age_seconds", ""),
                 "qty": log_qty,
+                "profit_target_price": profit_target,
+                "profit_order_id": profit_order_id,
+                "profit_order_status": profit_status,
             })
         except Exception as exc:  # noqa: BLE001
             print(f"[vix_proxy] sidecar error: {exc}")
