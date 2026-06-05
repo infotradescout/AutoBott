@@ -382,19 +382,104 @@ def _position_exit_decision(
     mark = _safe_float(mark, 0.0)
     bid = _safe_float(bid, 0.0)
     if entry_price <= 0:
-        return {"action": "hold", "reason": "missing_entry_price"}
+        return {"action": "hold", "reason": "HOLD_POSITION"}
     pnl_pct = ((mark - entry_price) / entry_price) if mark > 0 else -1.0
     if bid > 0 and bid <= entry_price * float(_cfg("VIXW_EMERGENCY_BID_COLLAPSE_PCT", 0.50) or 0.50):
-        return {"action": "close", "reason": "EMERGENCY_LIQUIDITY_COLLAPSE", "pnl_pct": pnl_pct}
+        return {
+            "action": "close",
+            "reason": "EMERGENCY_LIQUIDITY_COLLAPSE_PROTECTION_TRIGGERED",
+            "pnl_pct": pnl_pct,
+        }
     if mark > 0 and pnl_pct >= (float(_cfg("VIXW_PROFIT_TARGET_MULTIPLIER", 1.25) or 1.25) - 1.0):
-        return {"action": "profit", "reason": "PROFIT_TRAP_MARK_REACHED", "pnl_pct": pnl_pct}
+        return {"action": "profit", "reason": "PROFIT_TRAP_TARGET_REACHED", "pnl_pct": pnl_pct}
     if mark > 0 and pnl_pct <= -abs(float(_cfg("VIXW_STOP_LOSS_PCT", 0.15) or 0.15)):
-        return {"action": "close", "reason": "MARK_STOP_LOSS", "pnl_pct": pnl_pct}
+        return {"action": "close", "reason": "PRIMARY_MARK_STOP_LOSS_TRIGGERED", "pnl_pct": pnl_pct}
     max_hold = float(_cfg("VIXW_MAX_HOLD_MINUTES", 15) or 15)
     min_progress = float(_cfg("VIXW_TIME_STOP_MIN_PROGRESS_PCT", 0.05) or 0.05)
     if held_minutes >= max_hold and pnl_pct < min_progress:
-        return {"action": "close", "reason": "HARD_TIME_STOP", "pnl_pct": pnl_pct}
-    return {"action": "hold", "reason": "POSITION_WITHIN_RISK_BOX", "pnl_pct": pnl_pct}
+        return {"action": "close", "reason": "HARD_TIME_STOP_EXPIRED", "pnl_pct": pnl_pct}
+    return {"action": "hold", "reason": "HOLD_POSITION", "pnl_pct": pnl_pct}
+
+
+def _frame_to_bar_records(frame: Any) -> list[dict[str, Any]]:
+    try:
+        if frame is None or bool(getattr(frame, "empty", True)):
+            return []
+        columns = {str(col).lower(): col for col in getattr(frame, "columns", [])}
+        required = ("open", "high", "low", "close")
+        if not all(col in columns for col in required):
+            return []
+        records: list[dict[str, Any]] = []
+        for _, row in frame.iterrows():
+            records.append({
+                "open": row[columns["open"]],
+                "high": row[columns["high"]],
+                "low": row[columns["low"]],
+                "close": row[columns["close"]],
+                "volume": row[columns["volume"]] if "volume" in columns else 0,
+            })
+        return records
+    except Exception:
+        return []
+
+
+def _latest_yfinance_bars(symbol: str, *, limit: int = 30, interval: str = "1m") -> list[dict[str, Any]]:
+    try:
+        frame = yf.Ticker(symbol).history(period="5d", interval=interval, auto_adjust=False)
+    except Exception as exc:  # noqa: BLE001
+        print(f"[vix_proxy] yfinance bars failed for {symbol}: {exc}")
+        return []
+    return _frame_to_bar_records(frame.tail(limit) if frame is not None else frame)
+
+
+def _runtime_entry_telemetry(
+    data_client: AlpacaDataClient,
+    *,
+    contract: dict[str, Any],
+    now_et: datetime,
+) -> dict[str, Any]:
+    proxy_underlying = str(contract.get("proxy_underlying") or _cfg("VIXW_OPTION_UNDERLYING_SYMBOL", "VIXY")).upper()
+    vix_bars = _latest_yfinance_bars(str(_cfg("VIXW_SIGNAL_SOURCE_SYMBOL", "^VIX") or "^VIX"), limit=30, interval="1m")
+    try:
+        proxy_frame = data_client.get_stock_bars(proxy_underlying, limit=30, timeframe="1m")
+    except Exception as exc:  # noqa: BLE001
+        print(f"[vix_proxy] proxy bars failed for {proxy_underlying}: {exc}")
+        proxy_frame = None
+    proxy_bars = _frame_to_bar_records(proxy_frame)
+    quote_age_seconds = _safe_float(contract.get("quote_age_seconds"), 0.0)
+    quote = {
+        "bid": contract.get("bid_price"),
+        "ask": contract.get("ask_price"),
+        "mark": contract.get("mark_price"),
+        "updated_at": (_as_et(now_et) - timedelta(seconds=quote_age_seconds)).isoformat(),
+        "volume": contract.get("volume", 0),
+        "open_interest": contract.get("open_interest", 0),
+    }
+    if len(vix_bars) < 16 or len(proxy_bars) < 6:
+        telemetry = _build_vixw_entry_telemetry(
+            ticker=proxy_underlying,
+            underlying_price=_safe_float(contract.get("underlying_price"), 0.0),
+            vix_bars=vix_bars,
+            vxx_bars=proxy_bars,
+            option_contract=contract,
+            option_quote=quote,
+            now_et=now_et,
+            macro_blocked=bool(_cfg("VIXW_MACRO_BLOCKED", False)),
+        )
+        telemetry["entry_allowed"] = False
+        telemetry["entry_reason"] = ""
+        telemetry["skip_reason"] = "BLOCKED_MARKET_BARS_UNAVAILABLE"
+        return telemetry
+    return _build_vixw_entry_telemetry(
+        ticker=proxy_underlying,
+        underlying_price=_safe_float(contract.get("underlying_price"), 0.0),
+        vix_bars=vix_bars,
+        vxx_bars=proxy_bars,
+        option_contract=contract,
+        option_quote=quote,
+        now_et=now_et,
+        macro_blocked=bool(_cfg("VIXW_MACRO_BLOCKED", False)),
+    )
 
 
 def _proxy_prefixes() -> tuple[str, ...]:
@@ -601,7 +686,24 @@ def _manage_proxy_stop_losses(
             bid=bid,
             held_minutes=held_minutes,
         )
-        if str(exit_decision.get("action")) not in {"close"}:
+        action = str(exit_decision.get("action") or "")
+        if action in {"hold", "profit"}:
+            decision = "position_hold" if action == "hold" else "profit_target_observed"
+            action_row = {
+                "timestamp": now_et.isoformat(),
+                "decision": decision,
+                "reason": str(exit_decision.get("reason") or ""),
+                "option_symbol": symbol,
+                "bid": bid,
+                "option_bid": bid,
+                "option_mark": mark,
+                "qty": qty,
+                "profit_order_status": action,
+            }
+            _log_decision(action_row)
+            actions.append(action_row)
+            continue
+        if action != "close":
             continue
 
         canceled = _cancel_open_proxy_sell_orders(broker, symbol)
@@ -1105,6 +1207,29 @@ def run_vixw_regime_forever(api_key: str, secret_key: str) -> None:
                 time.sleep(sleep_seconds)
                 continue
 
+            telemetry = _runtime_entry_telemetry(data_client, contract=contract, now_et=now_et)
+            if not bool(telemetry.get("entry_allowed")):
+                skip_reason = str(telemetry.get("skip_reason") or "BLOCKED_VIXW_ENTRY_GATE")
+                _log_decision({
+                    "timestamp": now_et.isoformat(),
+                    "average_level": _cfg("VIXW_REGIME_AVERAGE_LEVEL", 19.0),
+                    "direction": direction,
+                    "decision": "skip",
+                    "reason": skip_reason,
+                    **telemetry,
+                })
+                print(
+                    f"[vix_proxy] skip {contract.get('symbol', '')}: {skip_reason} "
+                    f"vix={telemetry.get('vix_level', '')} "
+                    f"roc1={telemetry.get('vix_1m_roc', '')} "
+                    f"roc5={telemetry.get('vix_5m_roc', '')} "
+                    f"wick={telemetry.get('upper_wick_ratio', '')} "
+                    f"spread={telemetry.get('spread_pct', '')} "
+                    f"dte={telemetry.get('dte', '')}"
+                )
+                time.sleep(sleep_seconds)
+                continue
+
             ask = _safe_float(contract.get("ask_price"), 0.0)
             if ask <= 0:
                 time.sleep(sleep_seconds)
@@ -1190,6 +1315,7 @@ def run_vixw_regime_forever(api_key: str, secret_key: str) -> None:
                 "volume": contract.get("volume", ""),
                 "open_interest": contract.get("open_interest", ""),
                 "quote_age_seconds": contract.get("quote_age_seconds", ""),
+                **telemetry,
                 "qty": log_qty,
                 "profit_target_price": profit_target,
                 "profit_order_id": profit_order_id,

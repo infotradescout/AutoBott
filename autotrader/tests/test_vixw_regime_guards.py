@@ -282,7 +282,7 @@ class VixwRegimeGuardTests(unittest.TestCase):
 
         self.assertEqual(len(actions), 1)
         self.assertEqual(actions[0]["decision"], "stop_loss_exit_submitted")
-        self.assertIn("MARK_STOP_LOSS", actions[0]["reason"])
+        self.assertIn("PRIMARY_MARK_STOP_LOSS_TRIGGERED", actions[0]["reason"])
         self.assertEqual(broker.canceled_orders, ["profit-1"])
         self.assertEqual(broker.market_closes, [(symbol, 1)])
 
@@ -293,7 +293,8 @@ class VixwRegimeGuardTests(unittest.TestCase):
 
         actions = vixw_regime._manage_proxy_stop_losses(broker, data_client, self.now)
 
-        self.assertEqual(actions, [])
+        self.assertEqual(len(actions), 1)
+        self.assertEqual(actions[0]["reason"], "HOLD_POSITION")
         self.assertEqual(broker.market_closes, [])
 
     def test_absolute_high_vix_alone_blocks_entry(self):
@@ -362,7 +363,7 @@ class VixwRegimeGuardTests(unittest.TestCase):
         )
 
         self.assertEqual(decision["action"], "close")
-        self.assertEqual(decision["reason"], "MARK_STOP_LOSS")
+        self.assertEqual(decision["reason"], "PRIMARY_MARK_STOP_LOSS_TRIGGERED")
 
     def test_profit_trap_decision_triggers_at_25_percent(self):
         decision = vixw_regime._position_exit_decision(
@@ -373,7 +374,7 @@ class VixwRegimeGuardTests(unittest.TestCase):
         )
 
         self.assertEqual(decision["action"], "profit")
-        self.assertEqual(decision["reason"], "PROFIT_TRAP_MARK_REACHED")
+        self.assertEqual(decision["reason"], "PROFIT_TRAP_TARGET_REACHED")
 
     def test_hard_time_stop_triggers_after_max_hold_window(self):
         decision = vixw_regime._position_exit_decision(
@@ -384,7 +385,7 @@ class VixwRegimeGuardTests(unittest.TestCase):
         )
 
         self.assertEqual(decision["action"], "close")
-        self.assertEqual(decision["reason"], "HARD_TIME_STOP")
+        self.assertEqual(decision["reason"], "HARD_TIME_STOP_EXPIRED")
 
     def test_macro_blocked_flag_blocks_entry(self):
         decision = self._entry_decision(macro_blocked=True)
