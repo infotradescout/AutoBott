@@ -68,6 +68,40 @@ Export grouped CSV breakdowns for comparisons or downstream tooling:
 python autotrader/review.py --export-csv-dir autotrader\reports
 ```
 
+## VIXW Wick-Catcher Scalp
+
+The VIX-derived sidecar has a mechanical profit-trap rule for short volatility-index proxy scalps:
+
+- Buy the selected VIX proxy option only when the VIXW sidecar entry guards allow a new position.
+- Classify VIX as low (`<14`), normal (`14-20`), elevated (`20-28`), or stressed (`>=28`); stressed VIX blocks new entries.
+- Prefer exhaustion entries: VIX spike deceleration plus a failed breakout wick where the current high exceeds the prior high but closes back below that prior high.
+- Block first 30 minutes after the 9:30 AM ET open, and block new entries at or after 3:45 PM ET.
+- Block macro/news risk by setting `VIXW_MACRO_BLOCKED=True`.
+- Require clean option quotes: `bid > 0`, `ask > bid`, safe mark or midpoint fallback, spread within config, 3-7 DTE, non-stale quote, and optional volume/open-interest floors.
+- After the buy fills, calculate the sell target from the actual fill cost basis, not the current tape.
+- Default target: `fill_price * 1.25`, rounded to the nearest cent. A fill at `0.27` places the sell limit at `0.34`.
+- Immediately place a resting sell limit for the full filled quantity and let the market spike into it.
+- On each sidecar cycle, monitor open VIX proxy positions. If the executable bid falls to the stop threshold, cancel any resting profit sell first, then close the long option position.
+- Default stop: `fill_price * 0.85`, rounded to the nearest cent. A fill at `0.27` stops when bid is at or below about `0.23`.
+- Keep size controlled with `VIXW_MAX_CONTRACTS_PER_ENTRY=1` and `VIXW_MAX_OPEN_POSITIONS=1` by default.
+
+Relevant config in `autotrader/config.py`:
+
+```python
+VIXW_PLACE_PROFIT_TRAP_AFTER_FILL = True
+VIXW_PROFIT_TARGET_MULTIPLIER = 1.25
+VIXW_MIN_PROFIT_TARGET_INCREMENT = 0.01
+VIXW_MANAGE_OPEN_POSITIONS = True
+VIXW_STOP_LOSS_PCT = 0.15
+VIXW_MAX_HOLD_MINUTES = 15
+VIXW_ENTRY_BLOCK_AFTER_OPEN_MINUTES = 30
+VIXW_NO_NEW_ENTRIES_AFTER = "15:45"
+VIXW_MAX_QUOTE_AGE_SECONDS = 60
+VIXW_MACRO_BLOCKED = False
+```
+
+This is paper-mode only by default (`VIXW_ONLY_PAPER_MODE=True`) and uses Alpaca-supported proxy options such as VIXY/VXX/UVXY, while the signal source remains `^VIX`.
+
 ## Historical Replay Trainer
 
 Replay historical stock bars through the live scanner logic without placing orders or writing to the live scan log:

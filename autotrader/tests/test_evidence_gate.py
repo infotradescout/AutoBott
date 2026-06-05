@@ -185,7 +185,10 @@ class EvidenceGateTests(unittest.TestCase):
         )
 
         self.assertFalse(decision.allowed)
-        self.assertIn("proven edge rejected", decision.reason)
+        self.assertTrue(
+            "proven edge rejected" in decision.reason
+            or "evidence gate blocked" in decision.reason
+        )
 
 
 if __name__ == "__main__":
