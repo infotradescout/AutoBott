@@ -121,6 +121,7 @@ import desk_state
 from main import main as trader_main
 import market_context
 import replay_farm
+import runtime_telemetry
 from replay_promotion import build_promotion_snapshot
 from state_store import load_bot_state, save_bot_state
 from trading_control import load_trading_control, set_manual_stop
@@ -341,6 +342,10 @@ def _watchdog_check_seconds() -> int:
     except ValueError:
         value = default
     return max(10, min(600, value))
+
+
+def _independent_stoploss_guard_enabled() -> bool:
+    return _env_bool("ENABLE_INDEPENDENT_STOPLOSS_GUARD", True)
 
 
 def _env_bool(name: str, default: bool) -> bool:
@@ -925,6 +930,30 @@ def _print_startup_readiness() -> None:
         "[render_service] decision_memory_worker_enabled="
         f"{str(os.getenv('ENABLE_DECISION_MEMORY_WORKER', '') or '').strip().lower() in {'1', 'true', 'yes', 'y', 'on'}}"
     )
+    print(f"[render_service] memory_telemetry={json.dumps(runtime_telemetry.snapshot(), sort_keys=True)}")
+
+
+def _record_startup_worker_plan() -> None:
+    runtime_telemetry.set_worker("dashboard", True, detail="flask")
+    runtime_telemetry.set_worker("trader", True, detail="main paper runtime")
+    runtime_telemetry.set_worker("independent_stoploss_guard", _independent_stoploss_guard_enabled())
+    runtime_telemetry.set_worker("trader_watchdog", True)
+    runtime_telemetry.set_worker("memory_telemetry_logger", True)
+    runtime_telemetry.set_worker(
+        "market_context_worker",
+        bool(getattr(config, "ENABLE_MARKET_CONTEXT_WORKER", True)),
+        detail=f"refresh_seconds={getattr(config, 'MARKET_CONTEXT_REFRESH_SECONDS', '')}",
+    )
+    runtime_telemetry.set_worker(
+        "historical_replay_supervisor",
+        _historical_learning_enabled(),
+        detail=f"during_market_hours={_historical_learning_allowed_during_market_hours()}",
+    )
+    runtime_telemetry.set_worker(
+        "replay_auto_promote",
+        _replay_auto_promote_enabled(),
+        detail=f"paper_only={_replay_auto_promote_paper_only()}",
+    )
 
 
 def _apply_boot_auto_resume() -> None:
@@ -951,6 +980,7 @@ def _apply_boot_auto_resume() -> None:
 def _run_trader_forever() -> None:
     restart_count = 0
     while True:
+        runtime_telemetry.set_last_loop("trader")
         restart_count += 1
         _patch_runtime_state(
             {
@@ -986,6 +1016,7 @@ def _run_independent_stoploss_guard() -> None:
     require_stale_loop = bool(getattr(config, "INDEPENDENT_STOPLOSS_REQUIRE_STALE_LOOP", False))
     broker_missing_warned = False
     while True:
+        runtime_telemetry.set_last_loop("independent_stoploss_guard")
         try:
             runtime_state = load_bot_state()
             if not isinstance(runtime_state, dict):
@@ -1103,6 +1134,7 @@ def _run_trader_watchdog(trader_thread: threading.Thread) -> None:
         f"(check_every={check_seconds}s, hard_stale={hard_stale_seconds}s)."
     )
     while True:
+        runtime_telemetry.set_last_loop("trader_watchdog")
         try:
             if not trader_thread.is_alive():
                 _patch_runtime_state(
@@ -1165,6 +1197,7 @@ def _run_market_context_worker() -> None:
 
     sleep_seconds = max(5, int(getattr(config, "MARKET_CONTEXT_REFRESH_SECONDS", 10) or 10))
     while True:
+        runtime_telemetry.set_last_loop("market_context_worker")
         try:
             now_et = _now_et_dt()
             vix_value = _fetch_vix_level()
@@ -1172,6 +1205,16 @@ def _run_market_context_worker() -> None:
             desk_state.save_market_context(context)
         except Exception as exc:  # noqa: BLE001
             print(f"[render_service] market context worker error: {exc}")
+        time.sleep(sleep_seconds)
+
+
+def _run_memory_telemetry_logger() -> None:
+    sleep_seconds = int(_env_float("MEMORY_TELEMETRY_LOG_SECONDS", 60, minimum=10, maximum=3600))
+    while True:
+        try:
+            print(f"[render_service] memory_telemetry={json.dumps(runtime_telemetry.snapshot(), sort_keys=True)}")
+        except Exception as exc:  # noqa: BLE001
+            print(f"[render_service] memory telemetry error: {exc}")
         time.sleep(sleep_seconds)
 
 
@@ -1188,11 +1231,16 @@ if __name__ == "__main__":
     os.environ.setdefault("ENABLE_AUTO_SYMBOL_SUPPRESSION_FROM_LEARNING", "false")
     os.environ.setdefault("ADAPTIVE_LOSS_MIN_DIRECTION_SCORE", "0.55")
     _apply_boot_auto_resume()
+    _record_startup_worker_plan()
     _print_startup_readiness()
     trader_thread = threading.Thread(target=_run_trader_forever, daemon=True, name="autobott-trader")
     trader_thread.start()
-    stoploss_guard_thread = threading.Thread(target=_run_independent_stoploss_guard, daemon=True, name="autobott-stoploss")
-    stoploss_guard_thread.start()
+    if _independent_stoploss_guard_enabled():
+        stoploss_guard_thread = threading.Thread(target=_run_independent_stoploss_guard, daemon=True, name="autobott-stoploss")
+        stoploss_guard_thread.start()
+    else:
+        runtime_telemetry.set_worker("independent_stoploss_guard", False, detail="ENABLE_INDEPENDENT_STOPLOSS_GUARD=false")
+        print("[render_service] Independent stop-loss guard disabled by ENABLE_INDEPENDENT_STOPLOSS_GUARD=false.")
     watchdog_thread = threading.Thread(
         target=_run_trader_watchdog,
         args=(trader_thread,),
@@ -1200,7 +1248,14 @@ if __name__ == "__main__":
         name="autobott-trader-watchdog",
     )
     watchdog_thread.start()
+    memory_thread = threading.Thread(
+        target=_run_memory_telemetry_logger,
+        daemon=True,
+        name="autobott-memory-telemetry",
+    )
+    memory_thread.start()
     if bool(getattr(config, "ENABLE_MARKET_CONTEXT_WORKER", True)):
+        runtime_telemetry.set_worker("market_context_worker", True)
         market_context_thread = threading.Thread(
             target=_run_market_context_worker,
             daemon=True,
@@ -1208,8 +1263,10 @@ if __name__ == "__main__":
         )
         market_context_thread.start()
     else:
+        runtime_telemetry.set_worker("market_context_worker", False, detail="ENABLE_MARKET_CONTEXT_WORKER=false")
         print("[render_service] Market context worker disabled by ENABLE_MARKET_CONTEXT_WORKER=false.")
     if _historical_learning_enabled():
+        runtime_telemetry.set_worker("historical_replay_supervisor", True)
         historical_learning_thread = threading.Thread(
             target=_run_historical_learning_supervisor,
             daemon=True,
@@ -1217,6 +1274,7 @@ if __name__ == "__main__":
         )
         historical_learning_thread.start()
     else:
+        runtime_telemetry.set_worker("historical_replay_supervisor", False, detail="ENABLE_HISTORICAL_REPLAY_LEARNING=false")
         print("[render_service] Historical replay supervisor disabled by ENABLE_HISTORICAL_REPLAY_LEARNING=false.")
 
     port = _resolve_dashboard_port()

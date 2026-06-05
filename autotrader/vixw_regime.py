@@ -23,6 +23,7 @@ import pytz
 import yfinance as yf
 
 import config
+import runtime_telemetry
 from broker import AlpacaBroker
 from data import AlpacaDataClient
 from trading_control import load_trading_control
@@ -1140,6 +1141,7 @@ def _log_decision(row: dict[str, Any]) -> None:
 
 
 def run_vixw_regime_forever(api_key: str, secret_key: str) -> None:
+    runtime_telemetry.set_worker("vixw_regime_sidecar", True)
     if not bool(_cfg("VIXW_HEAVY_MODE", True)):
         print("[vix_proxy] VIXW_HEAVY_MODE disabled.")
         return
@@ -1155,6 +1157,7 @@ def run_vixw_regime_forever(api_key: str, secret_key: str) -> None:
 
     print("[vix_proxy] VIX-derived proxy sidecar started.")
     while True:
+        runtime_telemetry.set_last_loop("vixw_regime_loop")
         now_et = _now_et()
         try:
             clock = broker.get_clock()
@@ -1208,6 +1211,7 @@ def run_vixw_regime_forever(api_key: str, secret_key: str) -> None:
                 continue
 
             telemetry = _runtime_entry_telemetry(data_client, contract=contract, now_et=now_et)
+            runtime_telemetry.set_last_candidate(str(telemetry.get("option_symbol") or contract.get("symbol") or ""))
             if not bool(telemetry.get("entry_allowed")):
                 skip_reason = str(telemetry.get("skip_reason") or "BLOCKED_VIXW_ENTRY_GATE")
                 _log_decision({

@@ -36,6 +36,7 @@ from state_store import get_state_health, load_bot_state, save_bot_state
 from trading_control import load_trading_control, set_dry_run, set_manual_stop
 from watchlist_control import load_watchlist_control, update_watchlist_control
 from data import AlpacaDataClient
+import runtime_telemetry
 
 API_KEY = str(os.getenv("ALPACA_API_KEY") or "").strip()
 SECRET_KEY = str(os.getenv("ALPACA_SECRET_KEY") or "").strip()
@@ -721,6 +722,7 @@ def _compact_order(order: dict[str, Any]) -> dict[str, Any]:
 
 
 def _truth_payload() -> dict[str, Any]:
+    runtime_telemetry.set_last_loop("dashboard_truth_payload")
     embedded_boot = _start_embedded_trader_if_stale("api_truth")
     all_orders = _all_orders_today()
     filled_orders = [o for o in all_orders if str(o.get("status", "") or "").lower() == "filled"]
@@ -753,6 +755,7 @@ def _truth_payload() -> dict[str, Any]:
         "source_of_truth": "alpaca_orders_positions",
         **get_state_health(),
         "deployment": _deployment_meta(),
+        "memory": runtime_telemetry.snapshot(),
         "embedded_trader_fallback": embedded_boot,
         "account": _account(),
         "clock": _clock(),
@@ -969,6 +972,7 @@ def healthz():
             "alpaca_secret_present": bool(SECRET_KEY),
             "runtime": runtime,
             "deployment": _deployment_meta(),
+            "memory": runtime_telemetry.snapshot(),
             "embedded_trader_fallback": embedded_boot,
         }
     )

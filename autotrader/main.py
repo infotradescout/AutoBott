@@ -22,6 +22,7 @@ import config
 import desk_state
 import evidence_gate
 import market_context
+import runtime_telemetry
 from alerts import AlertManager
 from broker import AlpacaBroker
 from data import AlpacaDataClient
@@ -3666,6 +3667,7 @@ def _flatten_positions_for_killswitch(broker: AlpacaBroker, now_et: datetime, *,
 
 
 def main():
+    runtime_telemetry.set_last_loop("main_startup")
     api_key = get_required_env("ALPACA_API_KEY")
     secret_key = get_required_env("ALPACA_SECRET_KEY")
 
@@ -5282,6 +5284,7 @@ def main():
     )
 
     while True:
+        runtime_telemetry.set_last_loop("market_loop")
         now_et = datetime.now(tz)
         now_ct = datetime.now(pytz.timezone(config.CENTRAL_TZ))
         last_trader_heartbeat_et = datetime.now(tz).isoformat()
@@ -6605,6 +6608,8 @@ def main():
             evidence_rows = evidence_gate.load_recent_trade_rows()
     
             for signal in signals:
+                runtime_telemetry.set_last_loop("execution_candidate_loop")
+                runtime_telemetry.set_last_candidate(str(signal.get("symbol", "") or ""))
                 now_et = datetime.now(tz)
                 _touch_heartbeat()
                 entry_debug["signals_considered"] = int(entry_debug.get("signals_considered", 0)) + 1

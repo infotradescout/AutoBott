@@ -25,7 +25,33 @@ services:
         value: /data
       - key: AUTO_RESUME_TRADING_ON_BOOT
         value: "false"
+      - key: AUTOBOTT_RUNTIME_PROFILE
+        value: vixw_paper_smoke
+      - key: PAPER
+        value: "true"
+      - key: PAPER_TRADING
+        value: "true"
       - key: VIXW_HEAVY_MODE
+        value: "true"
+      - key: VIXW_ONLY_PAPER_MODE
+        value: "true"
+      - key: VIXW_MAX_OPEN_POSITIONS
+        value: "1"
+      - key: VIXW_MAX_CONTRACTS_PER_ENTRY
+        value: "1"
+      - key: VIXW_DECISION_CSV_FLUSH_EVERY_ROWS
+        value: "1"
+      - key: OPTION_ENRICHMENT_MAX_ATTEMPTS_PER_CYCLE
+        value: "1"
+      - key: DASHBOARD_TRUTH_CACHE_SECONDS
+        value: "20"
+      - key: MARKET_CONTEXT_REFRESH_SECONDS
+        value: "60"
+      - key: UNIVERSE_MODE
+        value: core
+      - key: AUTO_EXPAND_UNIVERSE_WITH_MOVERS
+        value: "false"
+      - key: ENABLE_HISTORICAL_REPLAY_DURING_MARKET_HOURS
         value: "false"
       - key: ENABLE_REPLAY_AUTO_PROMOTE
         value: "false"
@@ -36,4 +62,6 @@ services:
       - key: ENABLE_DECISION_MEMORY_WORKER
         value: "false"
       - key: ENABLE_MARKET_CONTEXT_WORKER
+        value: "false"
+      - key: ENABLE_INDEPENDENT_STOPLOSS_GUARD
         value: "false"

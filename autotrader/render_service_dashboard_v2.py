@@ -25,6 +25,43 @@ def _is_render_starter_runtime() -> bool:
     return bool(os.getenv("RENDER")) and str(os.getenv("RENDER_SERVICE_TYPE", "web") or "web").lower() == "web"
 
 
+def _env_enabled(name: str) -> bool:
+    return str(os.getenv(name, "") or "").strip().lower() in {"1", "true", "yes", "y", "on"}
+
+
+def _apply_vixw_paper_smoke_profile() -> None:
+    profile = str(os.getenv("AUTOBOTT_RUNTIME_PROFILE", "") or "").strip().lower()
+    enabled = _env_enabled("VIXW_PAPER_SMOKE_PROFILE") or profile == "vixw_paper_smoke"
+    if not enabled:
+        return
+    smoke_defaults = {
+        "PAPER": "true",
+        "PAPER_TRADING": "true",
+        "VIXW_ONLY_PAPER_MODE": "true",
+        "VIXW_HEAVY_MODE": "true",
+        "ENABLE_HISTORICAL_REPLAY_DURING_MARKET_HOURS": "false",
+        "ENABLE_HISTORICAL_REPLAY_LEARNING": "false",
+        "ENABLE_REPLAY_AUTO_PROMOTE": "false",
+        "REPLAY_AUTO_PROMOTE_ENABLED": "false",
+        "ENABLE_DECISION_MEMORY_WORKER": "false",
+        "ENABLE_MARKET_CONTEXT_WORKER": "false",
+        "ENABLE_INDEPENDENT_STOPLOSS_GUARD": "false",
+        "ENABLE_EMBEDDED_TRADER_FALLBACK": "false",
+        "UNIVERSE_MODE": "core",
+        "AUTO_EXPAND_UNIVERSE_WITH_MOVERS": "false",
+        "OPTION_ENRICHMENT_MAX_ATTEMPTS_PER_CYCLE": "1",
+        "DASHBOARD_TRUTH_CACHE_SECONDS": "20",
+        "MARKET_CONTEXT_REFRESH_SECONDS": "60",
+        "VIXW_MAX_OPEN_POSITIONS": "1",
+        "VIXW_MAX_CONTRACTS_PER_ENTRY": "1",
+        "VIXW_DECISION_CSV_FLUSH_EVERY_ROWS": "1",
+    }
+    for key, value in smoke_defaults.items():
+        os.environ.setdefault(key, value)
+    print("[render_launcher] VIXW paper smoke profile enabled.")
+
+
+_apply_vixw_paper_smoke_profile()
 os.environ.setdefault("PAPER_TRADE_THROUGH_MODE", "true")
 if _is_render_starter_runtime():
     os.environ.setdefault("VIXW_HEAVY_MODE", "false")
@@ -34,6 +71,7 @@ if _is_render_starter_runtime():
     os.environ.setdefault("ENABLE_DECISION_MEMORY_WORKER", "false")
     os.environ.setdefault("ENABLE_MARKET_CONTEXT_WORKER", "false")
 import dashboard_v2
+import runtime_telemetry
 import volatility_proxy_boot
 from decision_journal import build_decision_journal
 from decision_memory import build_learning_summary, run_learning_memory_forever, update_decision_memory
@@ -50,6 +88,7 @@ print(
     f"decision_memory_worker={os.getenv('ENABLE_DECISION_MEMORY_WORKER', 'false')} "
     f"market_context_worker={os.getenv('ENABLE_MARKET_CONTEXT_WORKER', 'true')}"
 )
+runtime_telemetry.set_worker("vixw_regime_sidecar", str(os.getenv("VIXW_HEAVY_MODE", "true")).lower() in {"1", "true", "yes", "y", "on"})
 volatility_proxy_boot.start()
 register_quick_links(dashboard_v2.app)
 
@@ -57,11 +96,13 @@ register_quick_links(dashboard_v2.app)
 def _start_learning_memory_worker() -> None:
     enabled = str(os.getenv("ENABLE_DECISION_MEMORY_WORKER", "") or "").strip().lower() in {"1", "true", "yes", "y", "on"}
     if not enabled:
+        runtime_telemetry.set_worker("decision_memory_worker", False, detail="ENABLE_DECISION_MEMORY_WORKER=false")
         print("[decision_memory] background worker disabled (set ENABLE_DECISION_MEMORY_WORKER=true to enable).")
         return
     try:
         worker = threading.Thread(target=run_learning_memory_forever, daemon=True)
         worker.start()
+        runtime_telemetry.set_worker("decision_memory_worker", True)
         print("[decision_memory] background worker thread started")
     except Exception as exc:  # noqa: BLE001
         print(f"[decision_memory] background worker failed to start: {exc}")

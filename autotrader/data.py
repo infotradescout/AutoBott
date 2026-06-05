@@ -13,6 +13,11 @@ import yfinance as yf
 
 import config
 
+try:
+    import runtime_telemetry
+except Exception:  # pragma: no cover
+    runtime_telemetry = None
+
 _EARNINGS_SKIP_SYMBOLS = {str(s).upper() for s in config.EARNINGS_SKIP_SYMBOLS}
 
 # Options contract data is ONLY available on the live API endpoint.
@@ -138,6 +143,8 @@ class AlpacaDataClient:
     ) -> dict[str, Any]:
         last_exc: Exception | None = None
         endpoint = str(url.split("?", 1)[0] if "?" in str(url) else url)
+        if runtime_telemetry is not None:
+            runtime_telemetry.set_last_api_path(endpoint)
         for attempt in range(1, max(1, attempts) + 1):
             shared_cooldown_until = float(self._shared_rate_limit.get("cooldown_until_epoch", 0.0) or 0.0)
             if shared_cooldown_until > time.time():

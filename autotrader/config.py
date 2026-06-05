@@ -34,6 +34,31 @@ def _env_bool(name: str, default: bool) -> bool:
     return raw in {"1", "true", "yes", "y", "on"}
 
 
+def _env_int(name: str, default: int) -> int:
+    raw = str(os.getenv(name, "") or "").strip()
+    if not raw:
+        return int(default)
+    try:
+        return int(float(raw))
+    except ValueError:
+        return int(default)
+
+
+def _env_float(name: str, default: float) -> float:
+    raw = str(os.getenv(name, "") or "").strip()
+    if not raw:
+        return float(default)
+    try:
+        return float(raw)
+    except ValueError:
+        return float(default)
+
+
+def _env_str(name: str, default: str) -> str:
+    raw = str(os.getenv(name, "") or "").strip()
+    return raw if raw else str(default)
+
+
 def _resolve_data_dir() -> Path:
     env_path = os.getenv("DATA_DIR")
     candidates: list[Path] = []
@@ -67,8 +92,8 @@ TICKERS = [
 ]
 CORE_TICKERS = TICKERS[:]
 
-UNIVERSE_MODE = "movers"  # options: core, movers, all_optionable
-AUTO_EXPAND_UNIVERSE_WITH_MOVERS = True
+UNIVERSE_MODE = _env_str("UNIVERSE_MODE", "movers")  # options: core, movers, all_optionable
+AUTO_EXPAND_UNIVERSE_WITH_MOVERS = _env_bool("AUTO_EXPAND_UNIVERSE_WITH_MOVERS", True)
 UNIVERSE_MOVER_TOP                = 120
 UNIVERSE_MAX_TICKERS              = 300
 SCREENER_TOP_N                    = 120
@@ -175,7 +200,7 @@ ENABLE_MARKET_CONTEXT_WORKER       = _env_bool("ENABLE_MARKET_CONTEXT_WORKER", T
 MARKET_CONTEXT_SYMBOLS             = ("SPY", "QQQ", "IWM")
 MARKET_CONTEXT_TIMEFRAME           = "5m"
 MARKET_CONTEXT_LOOKBACK            = 40
-MARKET_CONTEXT_REFRESH_SECONDS     = 10
+MARKET_CONTEXT_REFRESH_SECONDS     = _env_int("MARKET_CONTEXT_REFRESH_SECONDS", 10)
 MARKET_CONTEXT_STALE_SECONDS       = 30
 MARKET_CONTEXT_ENFORCE_BLOCKED_PROFILES = True
 MARKET_CONTEXT_BLOCKED_PROFILE_MODE = "off"
@@ -411,7 +436,7 @@ VIXW_REGIME_AVERAGE_LEVEL             = 19.0
 VIXW_NEUTRAL_BAND                     = 0.0
 VIXW_OPTION_UNDERLYING_SYMBOL         = "VIXY"
 VIXW_POSITION_SYMBOL_PREFIXES         = ("VIXY", "VXX", "UVXY")
-VIXW_MAX_OPEN_POSITIONS               = 1
+VIXW_MAX_OPEN_POSITIONS               = _env_int("VIXW_MAX_OPEN_POSITIONS", 1)
 VIXW_INCLUDE_OPEN_ORDERS_IN_EXPOSURE  = True
 VIXW_MAX_BUY_ORDERS_PER_DAY           = 1
 VIXW_COUNT_CANCELED_ORDERS_IN_DAILY_CAP = True
@@ -420,7 +445,7 @@ VIXW_MIN_DTE_TRADING_DAYS             = 3
 VIXW_MAX_DTE_TRADING_DAYS             = 7
 VIXW_MAX_OPTION_SPREAD_PCT            = 3.0
 VIXW_POSITION_SIZE_USD                = 300.0
-VIXW_MAX_CONTRACTS_PER_ENTRY          = 1
+VIXW_MAX_CONTRACTS_PER_ENTRY          = _env_int("VIXW_MAX_CONTRACTS_PER_ENTRY", 1)
 VIXW_ENTRY_LIMIT_PRICE_MULTIPLIER     = 1.0
 VIXW_ENTRY_ORDER_STATUS_WAIT_SECONDS  = 8
 VIXW_ENTRY_ORDER_POLL_SECONDS         = 1
@@ -471,6 +496,7 @@ MIN_OPTION_DAILY_VOLUME           = 3
 MAX_OPTION_SPREAD_PCT             = 6.0
 ENABLE_OPTION_LIQUIDITY_RELAX     = True
 OPTION_CONTRACTS_ALLOW_LIVE_FALLBACK = False
+OPTION_ENRICHMENT_MAX_ATTEMPTS_PER_CYCLE = _env_int("OPTION_ENRICHMENT_MAX_ATTEMPTS_PER_CYCLE", 3)
 MIN_DTE_TRADING_DAYS              = 0
 MAX_DTE_TRADING_DAYS              = 5
 MIN_OPTION_OPEN_INTEREST_0DTE     = 25
@@ -538,6 +564,7 @@ STOPLOSS_EXIT_CLOSE_RETRY_ATTEMPTS      = 1
 INDEPENDENT_STOPLOSS_INTERVAL_SECONDS    = 2
 INDEPENDENT_STOPLOSS_REQUIRE_STALE_LOOP  = True
 PAPER_EXECUTION_FRICTION_PER_CONTRACT    = 1.0
+DASHBOARD_TRUTH_CACHE_SECONDS            = _env_int("DASHBOARD_TRUTH_CACHE_SECONDS", 10)
 TRADES_MAX_ROWS                    = 5000
 PAPER = True
 
