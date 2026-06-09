@@ -8316,7 +8316,16 @@ def main():
                 )
                 _save_runtime_state()
                 continue
-            if exit_reason is None and _is_in_anti_churn_window(entry_time, now_et):
+            stop_loss_usd_cap = float(meta.get("stop_loss_usd", _runtime_stop_loss_usd()) or _runtime_stop_loss_usd())
+            stop_loss_pct_cap = abs(float(getattr(config, "STOP_LOSS_PCT", 0.0) or 0.0))
+            protective_stop_pending = should_trigger_stop_loss(unrealized_usd, stop_loss_usd_cap) or (
+                stop_loss_pct_cap > 0 and plpc <= -stop_loss_pct_cap
+            )
+            if (
+                exit_reason is None
+                and _is_in_anti_churn_window(entry_time, now_et)
+                and not protective_stop_pending
+            ):
                 held_seconds = max(0, int((now_et - entry_time).total_seconds())) if entry_time else 0
                 min_hold_minutes = float(getattr(config, "ANTI_CHURN_HOLD_MINUTES", 10) or 10)
                 last_exit_debug = {
@@ -8335,10 +8344,8 @@ def main():
                 _save_runtime_state()
                 continue
             # Rule 1: fixed-dollar stop loss
-            stop_loss_usd_cap = float(meta.get("stop_loss_usd", _runtime_stop_loss_usd()) or _runtime_stop_loss_usd())
             if exit_reason is None and should_trigger_stop_loss(unrealized_usd, stop_loss_usd_cap):
                 exit_reason = "stop_loss"
-            stop_loss_pct_cap = abs(float(getattr(config, "STOP_LOSS_PCT", 0.0) or 0.0))
             if exit_reason is None and stop_loss_pct_cap > 0 and plpc <= -stop_loss_pct_cap:
                 exit_reason = "stop_loss_pct"
 

@@ -500,7 +500,11 @@ def _scanner_summary() -> dict[str, Any]:
         dt = _parse_dt(row.get("timestamp", ""))
         if dt is not None and dt.date() == today:
             today_rows.append(row)
-    pass_rows = [r for r in today_rows if str(r.get("result", "") or "").lower() == "pass"]
+    pass_rows = [
+        r
+        for r in today_rows
+        if str(r.get("result", "") or "").lower() in {"candidate", "pass"}
+    ]
     fail_rows = [r for r in today_rows if str(r.get("result", "") or "").lower() == "fail"]
     reason_counts = Counter(str(r.get("reason", "") or "unknown") for r in fail_rows)
     return {"scan_rows_today": len(today_rows), "candidate_passes": len(pass_rows), "passes": 0, "fails": len(fail_rows), "pass_rate_pct": 0.0, "last_scan": str(today_rows[-1].get("timestamp", "") or "") if today_rows else "", "top_fail_reasons": [{"reason": key, "count": value} for key, value in reason_counts.most_common(8)], "recent_rows": list(reversed(today_rows[-20:]))}

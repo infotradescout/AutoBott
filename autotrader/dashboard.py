@@ -304,9 +304,13 @@ def _latest_scan_loop_rows(limit: int = 500) -> tuple[str, list[dict[str, Any]]]
 
 def _scan_row_stage(row: dict[str, Any]) -> str:
   result = str(row.get("result", "") or "").strip().lower()
-  if result == "pass":
+  if result in {"candidate", "pass"}:
     return "setup_pass"
   return _scan_fail_stage(row.get("reason", ""))
+
+
+def _is_setup_valid_scan_result(value: Any) -> bool:
+  return str(value or "").strip().lower() in {"candidate", "pass"}
 
 
 def _timeline_for_symbol(scan_rows: list[dict[str, Any]], symbol: str, *, max_items: int = 5) -> list[str]:
@@ -324,7 +328,7 @@ def _timeline_for_symbol(scan_rows: list[dict[str, Any]], symbol: str, *, max_it
     reason = str(row.get("reason", "") or "")
     if len(reason) > 70:
       reason = reason[:67] + "..."
-    if str(row.get("result", "") or "").lower() == "pass":
+    if _is_setup_valid_scan_result(row.get("result", "")):
       out.append(f"{ts_label} pass ({stage})")
     else:
       out.append(f"{ts_label} fail ({stage}) {reason}")
@@ -535,7 +539,7 @@ def _build_logic_checks(scan_rows: list[dict[str, str]], trade_rows: list[dict[s
     else:
         checks.append({"status": "warn", "name": "Scan Activity", "detail": "No scan rows for today yet."})
 
-    setup_valid_count = sum(1 for r in scan_rows if str(r.get("result", "")).lower() == "pass")
+    setup_valid_count = sum(1 for r in scan_rows if _is_setup_valid_scan_result(r.get("result", "")))
     fail_count = sum(1 for r in scan_rows if str(r.get("result", "")).lower() == "fail")
     total_scans = setup_valid_count + fail_count
     if total_scans > 0:
@@ -681,7 +685,7 @@ def _build_scan_report_summary(scan_rows: list[dict[str, str]]) -> dict[str, Any
         if symbol:
             symbols.add(symbol)
         result = str(row.get("result", "") or "").lower()
-        if result == "pass":
+        if _is_setup_valid_scan_result(result):
             direction = str(row.get("direction", "") or "").upper()
             if direction:
                 direction_counts[direction] = direction_counts.get(direction, 0) + 1
@@ -1221,7 +1225,7 @@ def _build_price_intelligence_signals(
                 "last_rvol": 0.0,
             },
         )
-        is_pass = str(row.get("result", "") or "").lower() == "pass"
+        is_pass = _is_setup_valid_scan_result(row.get("result", ""))
         if is_pass:
             stats["pass_count"] = int(stats["pass_count"]) + 1
         else:
@@ -1388,7 +1392,7 @@ def _synthesize_lisa_signals() -> dict[str, Any]:
     fail_rows: list[dict[str, Any]] = []
     for row in scan_rows:
         result = str(row.get("result", "") or "").lower()
-        if result == "pass":
+        if _is_setup_valid_scan_result(result):
             pass_rows.append(row)
         elif result == "fail":
             fail_rows.append(row)
@@ -2024,7 +2028,7 @@ def _build_public_livestream_layer() -> dict[str, Any]:
 
     for symbol in symbol_candidates:
       matching = [r for r in scan_rows if _scan_symbol(r) == symbol]
-      pass_n = sum(1 for r in matching if str(r.get("result", "") or "").lower() == "pass")
+      pass_n = sum(1 for r in matching if _is_setup_valid_scan_result(r.get("result", "")))
       fail_n = sum(1 for r in matching if str(r.get("result", "") or "").lower() == "fail")
       latest_row = matching[-1] if matching else {}
       score = _safe_float((latest_row or {}).get("signal_score"), 0.0)
@@ -2223,7 +2227,7 @@ def _build_lisa_ingestion_layer(public_layer: dict[str, Any], internal_layer: di
       result = str(row.get("result", "") or "").lower()
       direction = str(row.get("direction", "") or "").upper()
       d = symbol_direction.setdefault(symbol, {"CALL": 0, "PUT": 0, "PASS": 0, "FAIL": 0})
-      if result == "pass":
+      if _is_setup_valid_scan_result(result):
         d["PASS"] += 1
         if direction in ("CALL", "PUT"):
           d[direction] += 1
@@ -3353,7 +3357,7 @@ def api_scansummary():
                 }
             )
 
-        pass_rows = [r for r in same_loop if str(r.get("result", "") or "").lower() == "pass"]
+        pass_rows = [r for r in same_loop if _is_setup_valid_scan_result(r.get("result", ""))]
         fail_rows = [r for r in same_loop if str(r.get("result", "") or "").lower() == "fail"]
         pass_count = len(pass_rows)
         fail_count = len(fail_rows)

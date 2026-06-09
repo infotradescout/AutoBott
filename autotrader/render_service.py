@@ -1210,7 +1210,8 @@ if __name__ == "__main__":
     config.SIGNAL_PATTERN_MEMORY_HISTORY_ROWS = 0
     config.ENABLE_SIGNAL_PATTERN_MEMORY = False
     config.ENABLE_PRE_EXECUTION_HISTORY_CHECK = False
-    config.WRITE_SCAN_LOG = False
+    # Keep scan lifecycle evidence on by default in hosted runtime.
+    config.WRITE_SCAN_LOG = _env_bool("WRITE_SCAN_LOG", bool(getattr(config, "WRITE_SCAN_LOG", True)))
     config.ENABLE_LOOP_GC = True
     _apply_boot_auto_resume()
     _print_startup_readiness()
