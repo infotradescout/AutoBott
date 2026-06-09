@@ -110,8 +110,10 @@ def test_growth_frequency_config_keeps_trading_through_day():
     assert config.MARKET_CONTEXT_BLOCKED_PROFILE_MODE == "off"
     assert config.ENABLE_CANDIDATE_QUEUE is True
     assert config.ADAPTIVE_BLOCK_LOSING_TICKERS is True
-    assert config.ALPACA_TRUTH_ADAPT_AFTER_LOSS_USD == 1.0
-    assert config.LOSS_THROTTLE_AFTER_CONSEC_LOSSES == 1
+    assert config.ENABLE_ADAPTIVE_LOSS_ENTRY_GATES is False
+    assert config.ALPACA_TRUTH_ADAPT_AFTER_LOSS_USD == 0.0
+    assert config.SIGNAL_PATTERN_MEMORY_MIN_LOSSES == 4
+    assert config.LOSS_THROTTLE_AFTER_CONSEC_LOSSES == 999
     assert config.EARLY_RED_GUARD_ENABLED is False
     assert config.EARLY_RED_GUARD_MAX_NET_PNL_USD == -150.0
     assert config.DAILY_LOSS_LIMIT_USD == 0.0
