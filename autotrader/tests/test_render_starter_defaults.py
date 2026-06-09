@@ -47,3 +47,17 @@ def test_render_starter_defaults_disable_nonessential_sidecars():
         'os.environ.setdefault("ENABLE_MARKET_CONTEXT_WORKER", "false")',
     ):
         assert expected in source
+
+
+def test_render_service_applies_memory_controls_after_config_import():
+    path = Path(__file__).resolve().parent.parent / "render_service.py"
+    source = path.read_text(encoding="utf-8")
+
+    for expected in (
+        "config.LOOP_INTERVAL_SECONDS = max(15,",
+        "config.CONTINUOUS_ENTRY_SEARCH_SLEEP_SECONDS = max(",
+        "config.WRITE_SCAN_LOG = False",
+        "config.ENABLE_LOOP_GC = True",
+        "config.ENABLE_SIGNAL_PATTERN_MEMORY = False",
+    ):
+        assert expected in source

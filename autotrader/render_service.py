@@ -1187,6 +1187,31 @@ if __name__ == "__main__":
     os.environ.setdefault("CONSECUTIVE_LOSS_COOLDOWN_MINUTES", "0")
     os.environ.setdefault("ENABLE_AUTO_SYMBOL_SUPPRESSION_FROM_LEARNING", "false")
     os.environ.setdefault("ADAPTIVE_LOSS_MIN_DIRECTION_SCORE", "0.55")
+    # Apply hosted memory controls directly; config has already been imported.
+    config.LOOP_INTERVAL_SECONDS = max(15, int(getattr(config, "LOOP_INTERVAL_SECONDS", 5) or 5))
+    config.CONTINUOUS_ENTRY_SEARCH_SLEEP_SECONDS = max(
+        10,
+        int(getattr(config, "CONTINUOUS_ENTRY_SEARCH_SLEEP_SECONDS", 1) or 1),
+    )
+    config.RATE_LIMIT_SLEEP_SECONDS = max(0.15, float(getattr(config, "RATE_LIMIT_SLEEP_SECONDS", 0.05) or 0.05))
+    config.LIQUIDITY_RANK_MAX_CANDIDATES_PER_CYCLE = min(
+        4,
+        max(1, int(getattr(config, "LIQUIDITY_RANK_MAX_CANDIDATES_PER_CYCLE", 4) or 4)),
+    )
+    config.LIQUIDITY_RANK_MAX_ETF_CANDIDATES_PER_CYCLE = min(
+        2,
+        max(1, int(getattr(config, "LIQUIDITY_RANK_MAX_ETF_CANDIDATES_PER_CYCLE", 2) or 2)),
+    )
+    config.LIQUIDITY_RANK_MAX_SINGLE_NAME_CANDIDATES_PER_CYCLE = min(
+        2,
+        max(1, int(getattr(config, "LIQUIDITY_RANK_MAX_SINGLE_NAME_CANDIDATES_PER_CYCLE", 2) or 2)),
+    )
+    config.SCAN_INTRADAY_BARS = min(40, max(10, int(getattr(config, "SCAN_INTRADAY_BARS", 40) or 40)))
+    config.SIGNAL_PATTERN_MEMORY_HISTORY_ROWS = 0
+    config.ENABLE_SIGNAL_PATTERN_MEMORY = False
+    config.ENABLE_PRE_EXECUTION_HISTORY_CHECK = False
+    config.WRITE_SCAN_LOG = False
+    config.ENABLE_LOOP_GC = True
     _apply_boot_auto_resume()
     _print_startup_readiness()
     trader_thread = threading.Thread(target=_run_trader_forever, daemon=True, name="autobott-trader")

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import csv
+import gc
 import json
 import os
 import time
@@ -8928,6 +8929,8 @@ def main():
                     f"[{ts(now_et)}] No executable entry found; continuing search in "
                     f"{loop_sleep_seconds}s across {len(watchlist)} tickers."
                 )
+        if bool(getattr(config, "ENABLE_LOOP_GC", False)):
+            gc.collect()
         time.sleep(loop_sleep_seconds)
 
     print(f"[{ts()}] Trader stopped.")

@@ -1462,7 +1462,11 @@ class IntradayScanner:
 
 def initialize_scanner(data_client: AlpacaDataClient) -> None:
     global _DEFAULT_SCANNER
-    _DEFAULT_SCANNER = IntradayScanner(data_client, source_label="main_runtime")
+    _DEFAULT_SCANNER = IntradayScanner(
+        data_client,
+        source_label="main_runtime",
+        write_scan_log=bool(getattr(config, "WRITE_SCAN_LOG", True)),
+    )
 
 
 def build_watchlist() -> list[str]:
