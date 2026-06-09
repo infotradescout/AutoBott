@@ -76,6 +76,7 @@ def test_growth_frequency_config_keeps_trading_through_day():
     assert config.MAX_CONTRACTS_PER_TICKER == 0
     assert config.MAX_PREMIUM_PER_TRADE_USD == 0.0
     assert config.MAX_TOTAL_OPEN_PREMIUM_USD == 0.0
+    assert config.LIQUIDITY_RANK_FALLBACK_TO_UNRANKED is True
     assert config.OPENING_MAX_FRESH_PREMIUM_USD == 0.0
     assert config.ENABLE_EXPOSURE_BUCKET_GUARDS is True
     assert config.EXPOSURE_BUCKET_SEPARATE_0DTE_AND_WEEKLY is True
