@@ -1865,6 +1865,25 @@ def _close_position_with_confirmation(
         active_close_qty = sum(_exit_order_remaining_qty(o) for o in coverage_orders)
         execution_meta["active_close_qty"] = active_close_qty
         execution_meta["uncovered_close_qty"] = max(request_position_qty - active_close_qty, 0)
+        broker_confirmed_qty = _confirmed_long_option_qty(broker, symbol)
+        execution_meta["broker_confirmed_long_qty"] = broker_confirmed_qty
+        if broker_confirmed_qty <= 0:
+            execution_meta["reason"] = "close_skipped_broker_position_not_found"
+            execution_meta["uncovered_close_qty"] = 0
+            print(
+                f"[{ts(now_et)}] {label} {symbol} qty={request_position_qty}: "
+                "skipping close; broker no longer confirms a long option position."
+            )
+            return 0, None, execution_meta
+        if request_position_qty > broker_confirmed_qty:
+            print(
+                f"[{ts(now_et)}] {label} {symbol}: capping close qty "
+                f"{request_position_qty}->{broker_confirmed_qty} from broker-confirmed long position."
+            )
+            request_position_qty = broker_confirmed_qty
+            request_qty = min(request_qty, broker_confirmed_qty)
+            execution_meta["position_qty"] = request_position_qty
+            execution_meta["uncovered_close_qty"] = max(request_position_qty - active_close_qty, 0)
 
         selected_order, selected_qty, selection_mode = _select_matching_exit_order(
             coverage_orders,
@@ -1923,6 +1942,35 @@ def _close_position_with_confirmation(
                     request_qty=request_qty,
                     execution_meta=execution_meta,
                 )
+                remaining_sells = [
+                    o for o in broker.get_open_orders_for_symbol(symbol=symbol, side="sell")
+                    if _exit_order_qty(o) > 0 and _is_coverage_order(_order_status(o))
+                ]
+                remaining_sell_qty = sum(_exit_order_remaining_qty(o) for o in remaining_sells)
+                if remaining_sell_qty > 0:
+                    execution_meta["reason"] = "critical_exit_waiting_for_sell_cancel"
+                    execution_meta["active_close_qty"] = remaining_sell_qty
+                    execution_meta["uncovered_close_qty"] = 0
+                    print(
+                        f"[{ts(now_et)}] {label} {symbol} qty={request_qty}: "
+                        f"waiting for existing sell order cancellation before new close "
+                        f"(active_sell_qty={remaining_sell_qty})."
+                    )
+                    return 0, None, execution_meta
+                broker_confirmed_qty = _confirmed_long_option_qty(broker, symbol)
+                execution_meta["broker_confirmed_long_qty"] = broker_confirmed_qty
+                if broker_confirmed_qty <= 0:
+                    execution_meta["reason"] = "critical_exit_skipped_broker_position_not_found_after_cancel"
+                    execution_meta["uncovered_close_qty"] = 0
+                    print(
+                        f"[{ts(now_et)}] {label} {symbol} qty={request_qty}: "
+                        "skipping new close after cancel; broker no longer confirms a long position."
+                    )
+                    return 0, None, execution_meta
+                if request_qty > broker_confirmed_qty:
+                    request_qty = broker_confirmed_qty
+                    request_position_qty = broker_confirmed_qty
+                    execution_meta["position_qty"] = request_position_qty
         else:
             # In normal exit flow we prefer a single valid match and avoid touching
             # unrelated sell orders unless they block a clean replacement.

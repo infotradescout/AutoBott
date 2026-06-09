@@ -157,11 +157,26 @@ class FakeCloseDataClient(FakeDataClient):
 
 
 class FakeExitBroker:
-    def __init__(self, open_orders: list[FakeOrder] | None = None):
+    def __init__(
+        self,
+        open_orders: list[FakeOrder] | None = None,
+        *,
+        position_symbol: str = "ORCL260515C00195000",
+        position_qty: int = 1000,
+        cancel_removes_order: bool = True,
+    ):
         self._open_orders = list(open_orders or [])
         self._status_by_id: dict[str, object] = {order.id: order for order in self._open_orders}
         self.canceled_order_ids: list[str] = []
         self.actions: list[tuple] = []
+        self.position_symbol = position_symbol
+        self.position_qty = int(position_qty)
+        self.cancel_removes_order = bool(cancel_removes_order)
+
+    def get_open_option_positions(self):
+        if self.position_qty <= 0:
+            return []
+        return [FakePosition(self.position_symbol, qty=self.position_qty)]
 
     def get_open_orders_for_symbol(self, symbol: str, side: str):
         return [order for order in self._open_orders if str(getattr(order, "side", "")).lower() == str(side).lower()]
@@ -181,7 +196,8 @@ class FakeExitBroker:
     def cancel_order(self, order_id: str):
         self.canceled_order_ids.append(order_id)
         self.actions.append(("cancel", order_id))
-        self._open_orders = [order for order in self._open_orders if str(order.id) != str(order_id)]
+        if self.cancel_removes_order:
+            self._open_orders = [order for order in self._open_orders if str(order.id) != str(order_id)]
 
     def place_option_limit_sell(self, symbol: str, qty: int, limit_price: float):
         order = FakeOrder(
@@ -1374,6 +1390,37 @@ class MainOrderGuardTests(unittest.TestCase):
     def test_exit_reprice_drift_normalizes_percent_like_inputs(self):
         self.assertAlmostEqual(main._normalize_exit_reprice_drift_pct(0.06), 0.06)
         self.assertAlmostEqual(main._normalize_exit_reprice_drift_pct(6.0), 0.06)
+
+    def test_critical_exit_waits_when_existing_sell_cancel_is_still_active(self):
+        existing_sell = FakeOrder(
+            "ORCL260515C00195000",
+            "sell",
+            "new",
+            self.now - timedelta(minutes=1),
+            qty=1,
+            limit_price=4.98,
+        )
+        broker = FakeExitBroker([existing_sell], position_qty=1, cancel_removes_order=False)
+
+        filled_qty, fill_price, close_meta = main._close_position_with_confirmation(
+            broker=broker,
+            data_client=FakeCloseDataClient(),
+            symbol="ORCL260515C00195000",
+            qty=1,
+            now_et=self.now,
+            label="TEST CLOSE",
+            exit_reason="stop_loss_pct",
+            poll_seconds_override=1,
+            max_wait_seconds_override=1,
+        )
+
+        self.assertEqual(filled_qty, 0)
+        self.assertIsNone(fill_price)
+        self.assertEqual(close_meta.get("reason"), "critical_exit_waiting_for_sell_cancel")
+        self.assertEqual(close_meta.get("active_close_qty"), 1)
+        self.assertEqual(close_meta.get("uncovered_close_qty"), 0)
+        self.assertEqual(len(broker.canceled_order_ids), 1)
+        self.assertEqual([action[0] for action in broker.actions], ["cancel"])
 
 
 if __name__ == "__main__":  # pragma: no cover
