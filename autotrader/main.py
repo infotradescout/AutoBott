@@ -6847,7 +6847,11 @@ def main():
                     print(f"[{ts(now_et)}] {ticker}: skip ({evidence_decision.reason}).")
                     continue
     
-                if adaptive_loss_active and (not bool(getattr(config, "PAPER_TRADE_THROUGH_MODE", False))):
+                if (
+                    adaptive_loss_active
+                    and bool(getattr(config, "ENABLE_ADAPTIVE_LOSS_ENTRY_GATES", True))
+                    and (not bool(getattr(config, "PAPER_TRADE_THROUGH_MODE", False)))
+                ):
                     profile = adaptive_loss_profile if isinstance(adaptive_loss_profile, dict) else {}
                     ticker_losses = dict(profile.get("ticker_losses") or {})
                     block_after = max(1, int(getattr(config, "ADAPTIVE_LOSS_BLOCK_TICKER_AFTER_LOSSES", 1)))
