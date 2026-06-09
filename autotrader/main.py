@@ -6708,9 +6708,18 @@ def main():
                     f"{selected_contract} lane={selected_lane}."
                 )
             else:
-                signals = []
-                entry_debug["liquidity_rank_selected_reason"] = "no_clean_option_contract_candidates"
-                print(f"[{ts(now_et)}] Liquidity-ranked universe found no clean option contract candidates.")
+                if bool(getattr(config, "LIQUIDITY_RANK_FALLBACK_TO_UNRANKED", True)):
+                    signals = list(original_signals)
+                    entry_debug["liquidity_rank_fallback_unranked"] = len(signals)
+                    entry_debug["liquidity_rank_selected_reason"] = "no_clean_option_contract_candidates_fallback_unranked"
+                    print(
+                        f"[{ts(now_et)}] Liquidity-ranked universe found no clean option contract candidates; "
+                        f"falling back to {len(signals)} unranked signal(s)."
+                    )
+                else:
+                    signals = []
+                    entry_debug["liquidity_rank_selected_reason"] = "no_clean_option_contract_candidates"
+                    print(f"[{ts(now_et)}] Liquidity-ranked universe found no clean option contract candidates.")
 
         if blocked_day and bool(getattr(config, "ALLOW_AUTOMATIC_TRADING_PAUSES", False)):
             print("[{0}] EXECUTION BRIDGE BLOCKED reason=event_day_block".format(ts(now_et)))
