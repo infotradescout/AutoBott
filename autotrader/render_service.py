@@ -927,6 +927,10 @@ def _print_startup_readiness() -> None:
     print(f"[render_service] replay_auto_promote_paper_only={_replay_auto_promote_paper_only()}")
     print(f"[render_service] vix_proxy_enabled={bool(getattr(config, 'VIXW_HEAVY_MODE', True))}")
     print(f"[render_service] market_context_worker_enabled={bool(getattr(config, 'ENABLE_MARKET_CONTEXT_WORKER', True))}")
+    print(f"[render_service] render_instance_type={str(os.getenv('RENDER_INSTANCE_TYPE', '') or os.getenv('RENDER_PLAN', '') or 'unknown')}")
+    print(f"[render_service] pythonmalloc={str(os.getenv('PYTHONMALLOC', '') or 'default')}")
+    print(f"[render_service] malloc_arena_max={str(os.getenv('MALLOC_ARENA_MAX', '') or 'default')}")
+    print(f"[render_service] yfinance_fallback_enabled={bool(getattr(config, 'ENABLE_YFINANCE_FALLBACK', True))}")
     print(
         "[render_service] decision_memory_worker_enabled="
         f"{str(os.getenv('ENABLE_DECISION_MEMORY_WORKER', '') or '').strip().lower() in {'1', 'true', 'yes', 'y', 'on'}}"
