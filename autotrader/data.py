@@ -9,7 +9,6 @@ from typing import Any
 import pandas as pd
 import pytz
 import requests
-import yfinance as yf
 
 import config
 
@@ -19,6 +18,12 @@ _EARNINGS_SKIP_SYMBOLS = {str(s).upper() for s in config.EARNINGS_SKIP_SYMBOLS}
 # Paper trading accounts submit orders via paper-api but must fetch
 # contracts, quotes, and chain data from the live API.
 _LIVE_TRADE_BASE_URL = "https://api.alpaca.markets"
+
+
+def _yfinance_ticker(symbol: str):
+    import yfinance as yf
+
+    return yf.Ticker(symbol)
 
 
 class AlpacaDataClient:
@@ -286,7 +291,7 @@ class AlpacaDataClient:
             else:
                 period = f"{limit + 10}d"
 
-            ticker = yf.Ticker(symbol)
+            ticker = _yfinance_ticker(symbol)
             df = ticker.history(period=period, interval=yf_interval, auto_adjust=True)
 
             if df is None or df.empty:
@@ -405,7 +410,7 @@ class AlpacaDataClient:
 
         # Fallback: yfinance
         try:
-            ticker = yf.Ticker(symbol)
+            ticker = _yfinance_ticker(symbol)
             interval = "1m" if timeframe == "1Min" else "5m"
             df = ticker.history(period="5d", interval=interval, auto_adjust=True)
 
@@ -515,7 +520,7 @@ class AlpacaDataClient:
 
         # Fallback: yfinance
         try:
-            ticker = yf.Ticker(symbol)
+            ticker = _yfinance_ticker(symbol)
             interval = "1m" if timeframe == "1Min" else "5m"
             df = ticker.history(period="5d", interval=interval, auto_adjust=True, prepost=True)
 
@@ -567,7 +572,7 @@ class AlpacaDataClient:
             print(f"[data] latest quote lookup failed for {symbol}: {exc}")
 
         try:
-            ticker = yf.Ticker(symbol)
+            ticker = _yfinance_ticker(symbol)
             info = ticker.fast_info
             price = float(info.last_price)
             return price if price and price > 0 else None
@@ -798,9 +803,7 @@ class AlpacaDataClient:
         if str(symbol).upper() in _EARNINGS_SKIP_SYMBOLS:
             return False
         try:
-            import yfinance as yf
-
-            ticker = yf.Ticker(symbol)
+            ticker = _yfinance_ticker(symbol)
             cal = ticker.calendar  # dict with keys like 'Earnings Date'
             if cal is None:
                 return False
@@ -838,7 +841,7 @@ class AlpacaDataClient:
         Uses yfinance news feed as a lightweight proxy.
         """
         try:
-            ticker = yf.Ticker(symbol)
+            ticker = _yfinance_ticker(symbol)
             news_items = getattr(ticker, "news", None) or []
             if not isinstance(news_items, list):
                 return False, ""

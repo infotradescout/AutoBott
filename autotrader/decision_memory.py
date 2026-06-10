@@ -24,7 +24,7 @@ import json
 import math
 import os
 import time
-from collections import Counter, defaultdict
+from collections import Counter, defaultdict, deque
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -35,11 +35,6 @@ try:
     from autotrader import config
 except ImportError:
     import config  # type: ignore
-
-try:
-    from decision_outcomes import build_decision_outcomes
-except ImportError:
-    from autotrader.decision_outcomes import build_decision_outcomes  # type: ignore
 
 EASTERN = pytz.timezone(str(getattr(config, "EASTERN_TZ", "US/Eastern") or "US/Eastern"))
 
@@ -160,7 +155,8 @@ def _read_memory(path: Path) -> dict[str, dict[str, str]]:
         return {}
     try:
         with path.open("r", newline="", encoding="utf-8") as handle:
-            rows = csv.DictReader(handle)
+            max_rows = max(100, int(getattr(config, "DECISION_MEMORY_MAX_ROWS", 5000) or 5000))
+            rows = deque(csv.DictReader(handle), maxlen=max_rows)
             return {str(row.get("decision_id", "")): {key: row.get(key, "") for key in MEMORY_COLUMNS} for row in rows if row.get("decision_id")}
     except Exception as exc:  # noqa: BLE001
         print(f"[decision_memory] read failed: {exc}")
@@ -511,6 +507,11 @@ def build_learning_summary() -> dict[str, Any]:
 
 
 def update_decision_memory(*, journal_limit: int = 300, horizons: tuple[int, ...] = (15, 30, 60)) -> dict[str, Any]:
+    try:
+        from decision_outcomes import build_decision_outcomes
+    except ImportError:
+        from autotrader.decision_outcomes import build_decision_outcomes  # type: ignore
+
     path = Path(memory_paths()["memory_csv"])
     rows_by_id = _read_memory(path)
     before = len(rows_by_id)

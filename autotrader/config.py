@@ -34,6 +34,16 @@ def _env_bool(name: str, default: bool) -> bool:
     return raw in {"1", "true", "yes", "y", "on"}
 
 
+def _env_int(name: str, default: int) -> int:
+    raw = str(os.getenv(name, "") or "").strip()
+    if not raw:
+        return int(default)
+    try:
+        return int(float(raw))
+    except ValueError:
+        return int(default)
+
+
 def _resolve_data_dir() -> Path:
     env_path = os.getenv("DATA_DIR")
     candidates: list[Path] = []
@@ -556,6 +566,7 @@ SYNTHETIC_TRADES_CSV_PATH = _DATA_DIR / "synthetic_trades.csv"
 ENTRY_EDGE_MODEL_PATH = _DATA_DIR / "entry_edge_model.json"
 TRADE_OUTCOME_SEMANTICS_CSV_PATH = _DATA_DIR / "trade_outcome_semantics.csv"
 TRADE_OUTCOME_SEMANTICS_SUMMARY_PATH = _DATA_DIR / "trade_outcome_semantics_summary.json"
+DECISION_MEMORY_MAX_ROWS = _env_int("DECISION_MEMORY_MAX_ROWS", 5000)
 TRADING_CONTROL_PATH     = _DATA_DIR / "trading_control.json"
 WATCHLIST_CONTROL_PATH   = _DATA_DIR / "watchlist_control.json"
 

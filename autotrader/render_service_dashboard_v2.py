@@ -37,7 +37,6 @@ import dashboard_v2
 import volatility_proxy_boot
 from decision_journal import build_decision_journal
 from decision_memory import build_learning_summary, run_learning_memory_forever, update_decision_memory
-from decision_outcomes import build_decision_outcomes
 from trade_outcome_semantics import (
     load_trade_outcome_semantics_summary,
     update_trade_outcome_semantics,
@@ -88,6 +87,8 @@ def api_decision_journal():
 @dashboard_v2.app.get("/api/decision-outcomes")
 def api_decision_outcomes():
     """Read-only after-the-fact scoring of whether decisions were good or bad."""
+    from decision_outcomes import build_decision_outcomes
+
     try:
         limit = int(str(request.args.get("limit", "200") or "200"))
     except ValueError:

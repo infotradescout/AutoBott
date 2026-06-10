@@ -11,7 +11,6 @@ import sys
 import threading
 import time
 import traceback
-import yfinance as yf
 from datetime import datetime
 from pathlib import Path
 import math
@@ -120,8 +119,6 @@ from dashboard import app
 import desk_state
 from main import main as trader_main
 import market_context
-import replay_farm
-from replay_promotion import build_promotion_snapshot
 from state_store import load_bot_state, save_bot_state
 from trading_control import load_trading_control, set_manual_stop
 
@@ -254,6 +251,8 @@ def _as_et_datetime(value) -> datetime | None:
 
 def _fetch_vix_level() -> float | None:
     try:
+        import yfinance as yf
+
         ticker = yf.Ticker("^VIX")
         fast = getattr(ticker, "fast_info", None)
         if fast is not None:
@@ -624,6 +623,9 @@ def _append_replay_auto_promote_event(status: dict[str, Any]) -> None:
 
 
 def _evaluate_replay_auto_promotion(*, output_root: Path, worker_names: set[str], current_signature: str) -> tuple[dict[str, Any], str]:
+    import replay_farm
+    from replay_promotion import build_promotion_snapshot
+
     status: dict[str, Any] = {
         "enabled": _replay_auto_promote_enabled(),
         "paper_mode": bool(getattr(config, "PAPER", True)),
@@ -697,6 +699,8 @@ def _evaluate_replay_auto_promotion(*, output_root: Path, worker_names: set[str]
 
 
 def _load_historical_learning_specs() -> tuple[dict[str, replay_farm.FarmWorkerSpec], str]:
+    import replay_farm
+
     workers_file = _historical_learning_workers_file()
     if workers_file is not None:
         try:
@@ -709,6 +713,8 @@ def _load_historical_learning_specs() -> tuple[dict[str, replay_farm.FarmWorkerS
 
 
 def _run_historical_learning_supervisor() -> None:
+    import replay_farm
+
     output_root = _historical_learning_output_root()
     cache_dir = _historical_learning_cache_dir()
     python_exe = _historical_learning_python_exe()

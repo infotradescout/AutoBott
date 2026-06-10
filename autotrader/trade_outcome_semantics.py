@@ -11,7 +11,7 @@ import csv
 import hashlib
 import json
 import math
-from collections import Counter, defaultdict
+from collections import Counter, defaultdict, deque
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -399,8 +399,7 @@ def _read_csv(path: Path, limit: int = 5000) -> list[dict[str, str]]:
         return []
     try:
         with path.open("r", newline="", encoding="utf-8") as handle:
-            rows = list(csv.DictReader(handle))
-        return rows[-max(1, int(limit)) :]
+            return list(deque(csv.DictReader(handle), maxlen=max(1, int(limit))))
     except Exception:
         return []
 

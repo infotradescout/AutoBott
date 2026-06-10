@@ -13,7 +13,6 @@ import math
 from pathlib import Path
 
 import pytz
-import yfinance as yf
 
 from env_config import get_required_env, load_runtime_env
 load_runtime_env()
@@ -2473,6 +2472,8 @@ def _is_news_block_day(now_et: datetime) -> bool:
 
 def _fetch_vix_level() -> float | None:
     try:
+        import yfinance as yf
+
         ticker = yf.Ticker("^VIX")
         fast = getattr(ticker, "fast_info", None)
         if fast is not None:
