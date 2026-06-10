@@ -108,28 +108,28 @@ def _build_cycle_diagnosis(
     rate_limit_status: dict[str, object],
     execution_loop_entered: bool,
 ) -> dict[str, object]:
-    scanner_passed = int(trade_kpi.get("scanner_candidate_count", 0) or 0)
+    scanner_candidates = int(trade_kpi.get("scanner_candidate_count", 0) or 0)
     exec_candidates = int(trade_kpi.get("execution_candidate_count", 0) or 0)
+    tradable_passes = int(trade_kpi.get("tradable_pass_count", 0) or 0)
     contract_selected = int(trade_kpi.get("contract_selected_count", 0) or 0)
     attempts = int(trade_kpi.get("order_attempted_count", 0) or 0)
     fills = int(trade_kpi.get("trade_filled_count", 0) or 0)
     blocked_unclassified_count = int(reject_reasons.get("blocked_unclassified", 0) or 0)
+    bug_pass_without_trade_count = int(trade_kpi.get("bug_pass_without_trade_count", 0) or 0)
     rate_degraded = bool(rate_limit_status.get("data_source_degraded", False))
     had_429 = bool(int(rate_limit_status.get("recent_429_count", 0) or 0) > 0)
 
     stage = "candidate_rejected_all"
-    if scanner_passed <= 0:
+    if scanner_candidates <= 0:
         stage = "scanner_empty"
     elif exec_candidates <= 0:
         stage = "scanner_rejected_all"
     elif not execution_loop_entered:
         stage = "execution_not_entered"
+    elif bug_pass_without_trade_count > 0 or _reason_any(reject_reasons, ("BUG_PASS_WITHOUT_TRADE",)):
+        stage = "pass_contract_broken"
     elif _reason_any(reject_reasons, ("after_entry_window", "before_entry_window")) and attempts <= 0:
         stage = "entry_window_closed"
-    elif contract_selected <= 0 and _reason_any(contract_reject_reasons, ("no_eligible_option_contract", "no_option_ask")):
-        stage = "options_chain_empty"
-    elif contract_selected <= 0:
-        stage = "contract_selection_failed"
     elif _reason_any(reject_reasons, ("quote_spread_too_wide", "entry_slippage_too_high", "no_option_ask")):
         stage = "quote_gate_failed"
     elif _reason_any(
@@ -141,6 +141,8 @@ def _build_cycle_diagnosis(
             "max_positions_reached",
             "same_direction_exposure_cap",
             "ticker_contract_cap",
+            "one_open_position_max",
+            "open_option_position_cap",
             "premium_per_trade_cap",
             "total_open_premium_cap",
             "opening_concurrent_position_cap",
@@ -148,6 +150,10 @@ def _build_cycle_diagnosis(
         ),
     ):
         stage = "risk_gate_failed"
+    elif contract_selected <= 0 and _reason_any(contract_reject_reasons, ("no_eligible_option_contract", "no_option_ask")):
+        stage = "options_chain_empty"
+    elif contract_selected <= 0:
+        stage = "contract_selection_failed"
     elif attempts <= 0 and exec_candidates > 0:
         stage = "candidate_rejected_all"
     elif attempts > 0 and fills <= 0 and _reason_any(order_reject_reasons, ("rejected", "invalid", "denied", "broker")):
@@ -167,7 +173,7 @@ def _build_cycle_diagnosis(
         if "alpaca_429_cooldown" != primary_blocker and "alpaca_429_cooldown" not in secondary_blockers:
             secondary_blockers.append("alpaca_429_cooldown")
 
-    system_fault = blocked_unclassified_count > 0
+    system_fault = blocked_unclassified_count > 0 or bug_pass_without_trade_count > 0
     data_fault = rate_degraded or had_429 or _reason_any(reject_reasons, ("429", "cooldown"))
     rule_fault = _reason_any(
         reject_reasons,
@@ -183,7 +189,12 @@ def _build_cycle_diagnosis(
     learning_skip_reason = ""
     recommended_next_action = "continue strategy learning from filled trades"
 
-    if blocked_unclassified_count > 0:
+    if bug_pass_without_trade_count > 0:
+        system_fault = True
+        learning_eligible = False
+        learning_skip_reason = "system_fault_bug_pass_without_trade"
+        recommended_next_action = "patch pass-means-trade contract violation"
+    elif blocked_unclassified_count > 0:
         system_fault = True
         learning_eligible = False
         learning_skip_reason = "system_fault_blocked_unclassified"
@@ -206,12 +217,14 @@ def _build_cycle_diagnosis(
 
     return {
         "cycle_id": str(cycle_id or ""),
-        "scanner_passed_count": scanner_passed,
+        "scanner_candidate_count": scanner_candidates,
         "execution_candidate_count": exec_candidates,
+        "tradable_pass_count": tradable_passes,
         "execution_loop_entered": bool(execution_loop_entered),
         "contract_selected_count": contract_selected,
         "order_attempted_count": attempts,
         "trade_filled_count": fills,
+        "bug_pass_without_trade_count": bug_pass_without_trade_count,
         "pipeline_stage": stage,
         "primary_blocker": str(primary_blocker or ""),
         "secondary_blockers": list(secondary_blockers),
@@ -224,6 +237,41 @@ def _build_cycle_diagnosis(
         "learning_skip_reason": str(learning_skip_reason or ""),
         "recommended_next_action": str(recommended_next_action or ""),
     }
+
+
+def _apply_pass_means_trade_contract(entry_debug: dict, reject_reasons: dict[str, int]) -> dict[str, int]:
+    """Enforce that final/tradable candidates cannot vanish without an order attempt."""
+    if not isinstance(reject_reasons, dict):
+        reject_reasons = {}
+    tradable = int(
+        entry_debug.get(
+            "tradable_pass_count",
+            entry_debug.get("entry_stage4_eligible_count", 0),
+        )
+        or 0
+    )
+    attempts = int(
+        entry_debug.get(
+            "order_attempted_count",
+            entry_debug.get("entry_orders_submitted", 0),
+        )
+        or 0
+    )
+    bug_count = max(0, tradable - attempts)
+    entry_debug["tradable_pass_count"] = tradable
+    entry_debug["bug_pass_without_trade_count"] = bug_count
+    entry_debug["pass_means_trade_contract_ok"] = bug_count <= 0
+    if bug_count > 0:
+        reject_reasons["BUG_PASS_WITHOUT_TRADE"] = int(reject_reasons.get("BUG_PASS_WITHOUT_TRADE", 0)) + bug_count
+    if reject_reasons:
+        top_reason = sorted(
+            ((str(k), int(v)) for k, v in reject_reasons.items()),
+            key=lambda item: (-item[1], item[0]),
+        )[0][0]
+    else:
+        top_reason = ""
+    entry_debug["top_missed_reason"] = top_reason
+    return reject_reasons
 
 
 def _apply_runtime_overrides_from_path(path: Path | None, label: str) -> None:
@@ -706,6 +754,19 @@ def _open_option_position_count(option_positions: list, open_trade_meta: dict[st
         if symbol_text and qty > 0:
             open_symbols.add(symbol_text)
     return len(open_symbols)
+
+
+def _effective_open_option_position_cap() -> int:
+    """Return the configured cap for distinct open option positions."""
+    max_positions_cap = int(getattr(config, "MAX_POSITIONS", 0) or 0)
+    concurrent_cap = int(getattr(config, "MAX_CONCURRENT_TRADES", 0) or 0)
+    if max_positions_cap > 0 and concurrent_cap > 0:
+        return min(max_positions_cap, concurrent_cap)
+    if max_positions_cap > 0:
+        return max_positions_cap
+    if concurrent_cap > 0:
+        return concurrent_cap
+    return 0
 
 
 def _direction_exposure_counts(option_positions: list, open_trade_meta: dict[str, dict]) -> tuple[int, int]:
@@ -4500,7 +4561,7 @@ def main():
 
             if not pass_detail:
                 pass_detail = (
-                    f"history check passed before order: {normalized_direction.upper()} "
+                    f"history check cleared before order: {normalized_direction.upper()} "
                     f"{current_wins}W/{current_losses}L"
                 )
                 if opposite:
@@ -6053,13 +6114,14 @@ def main():
             "watchlist_mode": watchlist_mode,
             "watchlist_tickers": list(watchlist_control_state.get("tickers") or []),
             "signal_detected_count": len(signals),
-            "scan_pass_count": 0,
             "signals_considered": 0,
             "entry_eligible_count": 0,
             "entry_stage4_eligible_count": 0,
+            "tradable_pass_count": 0,
             "entry_stage4_reject_count": 0,
             "entry_stage4_reject_reasons": {},
             "entry_stage4_eligible_symbols": [],
+            "tradable_pass_symbols": [],
             "entry_stage4_rejected_symbols": [],
             "entry_orders_submitted": 0,
             "entry_order_events": [],
@@ -6096,6 +6158,9 @@ def main():
             "accepted_low_spread_entry": 0,
             "trade_resting_count": 0,
             "trade_filled_count": 0,
+            "bug_pass_without_trade_count": 0,
+            "top_missed_reason": "",
+            "pass_means_trade_contract_ok": True,
             "signal_outcomes": {},
             "skips": {},
             "exceptions": [],
@@ -6176,15 +6241,22 @@ def main():
 
         def _mark_stage4_eligible(*, ticker: str) -> None:
             entry_debug["entry_stage4_eligible_count"] = int(entry_debug.get("entry_stage4_eligible_count", 0)) + 1
+            entry_debug["tradable_pass_count"] = int(entry_debug.get("tradable_pass_count", 0)) + 1
             entry_debug["entry_eligible_count"] = int(entry_debug.get("entry_stage4_eligible_count", 0))
             eligible_symbols = entry_debug.get("entry_stage4_eligible_symbols", [])
             if not isinstance(eligible_symbols, list):
                 eligible_symbols = []
+            tradable_symbols = entry_debug.get("tradable_pass_symbols", [])
+            if not isinstance(tradable_symbols, list):
+                tradable_symbols = []
             symbol_upper = str(ticker or "").upper()
             if symbol_upper and symbol_upper not in eligible_symbols:
                 eligible_symbols.append(symbol_upper)
+            if symbol_upper and symbol_upper not in tradable_symbols:
+                tradable_symbols.append(symbol_upper)
             entry_debug["entry_stage4_eligible_symbols"] = eligible_symbols
-            _set_signal_outcome(ticker=ticker, disposition="entry_eligible")
+            entry_debug["tradable_pass_symbols"] = tradable_symbols
+            _set_signal_outcome(ticker=ticker, disposition="tradable_pass")
 
         def _record_entry_exception(ticker: str, exc: Exception) -> None:
             exceptions = entry_debug.get("exceptions", [])
@@ -6294,7 +6366,7 @@ def main():
                     continue
                 payload = outcomes.get(symbol, {}) if isinstance(outcomes.get(symbol), dict) else {}
                 disposition = str(payload.get("disposition", "") or "").strip().lower()
-                if disposition in {"", "scanner_candidate", "entry_eligible"}:
+                if disposition in {"", "scanner_candidate"}:
                     skips = entry_debug.get("skips", {})
                     top_skip_reason = ""
                     if isinstance(skips, dict) and skips:
@@ -6308,11 +6380,15 @@ def main():
                     reject_reasons[fallback_reason] = int(reject_reasons.get(fallback_reason, 0)) + 1
 
             entry_debug["signal_outcomes"] = outcomes
+            reject_reasons = _apply_pass_means_trade_contract(entry_debug, reject_reasons)
             entry_debug["entry_stage4_reject_reasons"] = reject_reasons
 
             candidates = int(entry_debug.get("signals_considered", 0) or 0)
             attempts = int(entry_debug.get("order_attempted_count", entry_debug.get("entry_orders_submitted", 0)) or 0)
             fills = int(entry_debug.get("trade_filled_count", entry_debug.get("entries_filled", 0)) or 0)
+            tradable_passes = int(entry_debug.get("tradable_pass_count", 0) or 0)
+            bug_pass_without_trade = int(entry_debug.get("bug_pass_without_trade_count", 0) or 0)
+            top_missed_reason = str(entry_debug.get("top_missed_reason", "") or "")
             events = entry_debug.get("entry_order_events", [])
             resting = 0
             if isinstance(events, list):
@@ -6351,6 +6427,8 @@ def main():
                 "scanner_candidate_count": int(entry_debug.get("scanner_candidate_count", 0) or 0),
                 "scanner_failed_count": int(entry_debug.get("scanner_failed_count", 0) or 0),
                 "execution_candidate_count": int(entry_debug.get("execution_candidate_count", 0) or 0),
+                "tradable_pass_count": tradable_passes,
+                "blocked_by_reason": dict(sorted(reject_reasons.items())),
                 "execution_rejected_count_by_reason": dict(sorted(reject_reasons.items())),
                 "execution_rejected_count": int(sum(int(v) for v in reject_reasons.values())),
                 "contract_selected_count": int(entry_debug.get("contract_selected_count", 0) or 0),
@@ -6367,6 +6445,10 @@ def main():
                 "trade_resting_count": int(resting),
                 "trade_filled_count": fills,
                 "fills": fills,
+                "fill_count": fills,
+                "bug_pass_without_trade_count": bug_pass_without_trade,
+                "top_missed_reason": top_missed_reason,
+                "pass_means_trade_contract_ok": bool(entry_debug.get("pass_means_trade_contract_ok", True)),
                 "total_account_equity": round(total_account_equity, 2),
                 "allocated_strategy_capital_pct": allocation_pct,
                 "allocated_strategy_capital_usd": allocated_capital_usd,
@@ -6389,7 +6471,9 @@ def main():
             }
             zero_trade_cycle_reason = ""
             if attempts <= 0:
-                if int(entry_debug.get("execution_candidate_count", 0) or 0) <= 0:
+                if bug_pass_without_trade > 0:
+                    zero_trade_cycle_reason = "BUG_PASS_WITHOUT_TRADE"
+                elif int(entry_debug.get("execution_candidate_count", 0) or 0) <= 0:
                     zero_trade_cycle_reason = "no_execution_candidates_after_filters"
                 elif int(entry_debug.get("contract_selected_count", 0) or 0) <= 0 and dict(
                     entry_debug.get("contract_rejected_count_by_reason") or {}
@@ -6447,13 +6531,16 @@ def main():
                 f"skip_reason={cycle_diag.get('learning_skip_reason')}"
             )
             print(
-                f"[{ts(now_et)}] TRADE-THROUGH KPI scanner_passed_count={int(entry_debug.get('scanner_candidate_count', 0) or 0)} "
+                f"[{ts(now_et)}] TRADE-THROUGH KPI scanner_candidate_count={int(entry_debug.get('scanner_candidate_count', 0) or 0)} "
                 f"execution_candidate_count={int(entry_debug.get('execution_candidate_count', 0) or 0)} "
+                f"tradable_pass_count={tradable_passes} "
                 f"contract_selected_count={int(entry_debug.get('contract_selected_count', 0) or 0)} "
                 f"contract_rejected_count_by_reason={dict(entry_debug.get('contract_rejected_count_by_reason', {}) or {})} "
                 f"order_attempted_count={attempts} "
                 f"order_rejected_count_by_reason={dict(entry_debug.get('order_rejected_count_by_reason', {}) or {})} "
                 f"trade_resting_count={resting} trade_filled_count={fills} "
+                f"bug_pass_without_trade_count={bug_pass_without_trade} "
+                f"top_missed_reason={top_missed_reason or 'n/a'} "
                 f"zero_reason={zero_trade_cycle_reason or 'n/a'} day_pnl=${trade_telemetry_total_pnl_usd:.2f} "
                 f"premium_deployed=${premium_deployed_usd:.2f} premium_return={premium_return_pct:.2f}% "
                 f"portfolio_return={portfolio_return_pct:.2f}% "
@@ -7333,10 +7420,14 @@ def main():
                     print(f"[{ts(now_et)}] {ticker}: skip ({lane_reject_reason}).")
                     continue
                 open_position_count = _open_option_position_count(option_positions, open_trade_meta)
-                if open_position_count > 0:
-                    _mark_skip("one_open_position_max")
-                    _mark_stage4_reject(reason="one_open_position_max", ticker=ticker)
-                    print(f"[{ts(now_et)}] {ticker}: skip (one open option position max; {open_position_count} already open).")
+                open_position_cap = _effective_open_option_position_cap()
+                if open_position_cap > 0 and open_position_count >= open_position_cap:
+                    _mark_skip("open_option_position_cap")
+                    _mark_stage4_reject(reason="open_option_position_cap", ticker=ticker)
+                    print(
+                        f"[{ts(now_et)}] {ticker}: skip "
+                        f"(open option position cap {open_position_count}/{open_position_cap})."
+                    )
                     continue
                 same_direction_qty, same_direction_pnl = _ticker_same_direction_live_pnl(
                     option_positions,
@@ -7942,7 +8033,6 @@ def main():
                         initial_quote=entry_quote,
                     )
                     entry_debug["entry_orders_submitted"] = int(entry_debug.get("entry_orders_submitted", 0)) + int(entry_result.get("attempts", 0) or 0)
-                    entry_debug["scan_pass_count"] = int(entry_debug.get("scan_pass_count", 0) or 0) + int(entry_result.get("attempts", 0) or 0)
                     entry_debug["order_attempted_count"] = int(entry_debug.get("order_attempted_count", 0) or 0) + int(entry_result.get("attempts", 0) or 0)
                     _record_entry_order_event(ticker, option_symbol, entry_result)
                     _set_signal_outcome(

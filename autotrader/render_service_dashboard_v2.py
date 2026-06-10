@@ -38,6 +38,10 @@ import volatility_proxy_boot
 from decision_journal import build_decision_journal
 from decision_memory import build_learning_summary, run_learning_memory_forever, update_decision_memory
 from decision_outcomes import build_decision_outcomes
+from trade_outcome_semantics import (
+    load_trade_outcome_semantics_summary,
+    update_trade_outcome_semantics,
+)
 from quick_links import register_quick_links
 from state_store import load_bot_state
 
@@ -113,6 +117,18 @@ def decision_learning_dashboard():
 def api_decision_learning_update():
     """Force a read-only learning memory refresh."""
     return jsonify(update_decision_memory())
+
+
+@dashboard_v2.app.get("/api/trade-outcome-semantics")
+def api_trade_outcome_semantics():
+    """Semantic truth layer for closed trades and skipped signals."""
+    return jsonify(load_trade_outcome_semantics_summary())
+
+
+@dashboard_v2.app.post("/api/trade-outcome-semantics/update")
+def api_trade_outcome_semantics_update():
+    """Rebuild the durable trade outcome semantics ledger from local trade logs."""
+    return jsonify(update_trade_outcome_semantics())
 
 
 def _replay_auto_promote_events(limit: int) -> list[dict[str, str]]:

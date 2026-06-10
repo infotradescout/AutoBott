@@ -2,7 +2,7 @@
 
 This module is read-only. It does not trade, mutate state, or tune strategy.
 It consolidates the app's decision surfaces into one explanation stream:
-- scanner pass/reject decisions
+- scanner candidate/reject decisions
 - entry accuracy decisions
 - VIX-derived proxy sidecar decisions
 - runtime/control decisions
@@ -122,9 +122,9 @@ def _classify_scan(row: dict[str, str]) -> dict[str, Any]:
     symbol = str(row.get("symbol", "") or row.get("ticker", "") or "").upper()
     direction = str(row.get("direction", "") or "").upper()
     reason = str(row.get("reason", "") or "")
-    passed = result in {"pass", "submitted"}
-    if passed:
-        summary = f"{symbol} {direction or 'SETUP'} passed scanner: {reason}"
+    is_candidate = result in {"pass", "submitted"}
+    if is_candidate:
+        summary = f"{symbol} {direction or 'SETUP'} became scanner candidate: {reason}"
         action = "candidate sent to entry filters"
     else:
         stage = _stage_from_reason(reason)
@@ -135,8 +135,8 @@ def _classify_scan(row: dict[str, str]) -> dict[str, Any]:
         "timestamp": str(row.get("timestamp", "") or ""),
         "symbol": symbol,
         "direction": direction,
-        "decision": "pass" if passed else "reject",
-        "stage": "scanner_pass" if passed else _stage_from_reason(reason),
+        "decision": "scanner_candidate" if is_candidate else "reject",
+        "stage": "scanner_candidate" if is_candidate else _stage_from_reason(reason),
         "summary": summary,
         "action": action,
         "reason": reason,
@@ -264,7 +264,7 @@ def _runtime_decisions() -> list[dict[str, Any]]:
             "decision": "manual_stop_on" if manual_stop else "manual_stop_off",
             "stage": "trading_control",
             "summary": "Manual stop is ON, so new entries should be blocked." if manual_stop else "Manual stop is OFF, so new entries are allowed by this control.",
-            "action": "do not enter trades" if manual_stop else "entry allowed if all other gates pass",
+            "action": "do not enter trades" if manual_stop else "entry allowed if all other gates clear",
             "reason": str(control.get("reason", "") or ""),
             "metrics": {"manual_stop": manual_stop, "dry_run": dry_run, "heartbeat_age_seconds": heartbeat_age},
         }

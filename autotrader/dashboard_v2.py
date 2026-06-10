@@ -36,6 +36,7 @@ from state_store import get_state_health, load_bot_state, save_bot_state
 from trading_control import load_trading_control, set_dry_run, set_manual_stop
 from watchlist_control import load_watchlist_control, update_watchlist_control
 from data import AlpacaDataClient
+from trade_outcome_semantics import load_trade_outcome_semantics_summary
 
 API_KEY = str(os.getenv("ALPACA_API_KEY") or "").strip()
 SECRET_KEY = str(os.getenv("ALPACA_SECRET_KEY") or "").strip()
@@ -500,14 +501,14 @@ def _scanner_summary() -> dict[str, Any]:
         dt = _parse_dt(row.get("timestamp", ""))
         if dt is not None and dt.date() == today:
             today_rows.append(row)
-    pass_rows = [
+    candidate_rows = [
         r
         for r in today_rows
         if str(r.get("result", "") or "").lower() in {"candidate", "pass"}
     ]
     fail_rows = [r for r in today_rows if str(r.get("result", "") or "").lower() == "fail"]
     reason_counts = Counter(str(r.get("reason", "") or "unknown") for r in fail_rows)
-    return {"scan_rows_today": len(today_rows), "candidate_passes": len(pass_rows), "passes": 0, "fails": len(fail_rows), "pass_rate_pct": 0.0, "last_scan": str(today_rows[-1].get("timestamp", "") or "") if today_rows else "", "top_fail_reasons": [{"reason": key, "count": value} for key, value in reason_counts.most_common(8)], "recent_rows": list(reversed(today_rows[-20:]))}
+    return {"scan_rows_today": len(today_rows), "scanner_candidates": len(candidate_rows), "candidate_passes": len(candidate_rows), "passes": 0, "fails": len(fail_rows), "pass_rate_pct": 0.0, "last_scan": str(today_rows[-1].get("timestamp", "") or "") if today_rows else "", "top_fail_reasons": [{"reason": key, "count": value} for key, value in reason_counts.most_common(8)], "recent_rows": list(reversed(today_rows[-20:]))}
 
 
 def _as_dict(value: Any) -> dict[str, Any]:
@@ -536,9 +537,12 @@ def _entry_debug_summary(state: dict[str, Any]) -> dict[str, Any]:
         "loop_ts_et": str(debug.get("loop_ts_et", "") or ""),
         "signals_considered": _int_value(debug.get("signals_considered")),
         "entry_stage4_eligible_count": _int_value(debug.get("entry_stage4_eligible_count")),
+        "tradable_pass_count": _int_value(debug.get("tradable_pass_count", debug.get("entry_stage4_eligible_count"))),
         "entry_stage4_reject_count": _int_value(debug.get("entry_stage4_reject_count")),
         "entry_orders_submitted": _int_value(debug.get("entry_orders_submitted")),
         "entries_filled": _int_value(debug.get("entries_filled")),
+        "bug_pass_without_trade_count": _int_value(debug.get("bug_pass_without_trade_count")),
+        "top_missed_reason": str(debug.get("top_missed_reason", "") or ""),
         "top_reject_reason": top_label,
         "top_reject_reasons": top_reasons,
         "trade_through_kpi": _as_dict(debug.get("trade_through_kpi")),
@@ -626,6 +630,7 @@ def _runtime() -> dict[str, Any]:
     trainer_status_path = Path(str(getattr(config, "SYNTHETIC_TRAINER_STATUS_PATH", Path(getattr(config, "DATA_DIR")) / "synthetic_trainer_status.json")))
     tuner_status_path = Path(str(getattr(config, "SYNTHETIC_TUNER_STATUS_PATH", Path(getattr(config, "DATA_DIR")) / "synthetic_tuner_status.json")))
     learning_summary_path = Path(getattr(config, "DATA_DIR")) / "decision_learning_summary.json"
+    semantic_summary = load_trade_outcome_semantics_summary()
     trainer_status = _read_json_file(trainer_status_path)
     tuner_status = _read_json_file(tuner_status_path)
     learning_summary = _read_json_file(learning_summary_path)
@@ -689,6 +694,7 @@ def _runtime() -> dict[str, Any]:
             "persisted_decisions": _int_value(_as_dict(learning_summary.get("totals")).get("persisted_decisions")),
             "score_total": _int_value(_as_dict(learning_summary.get("totals")).get("score_total")),
         },
+        "trade_outcome_semantics": _as_dict(semantic_summary),
         "pattern_guard": {
             "override_disabled_until_iso": str(state.get("pattern_override_disabled_until_iso", "") or ""),
             "override_disable_reason": str(state.get("pattern_override_disable_reason", "") or ""),
@@ -766,7 +772,9 @@ def _truth_payload() -> dict[str, Any]:
             "scanner_candidate_count": _int_value(trade_kpi.get("scanner_candidate_count")),
             "scanner_failed_count": _int_value(trade_kpi.get("scanner_failed_count")),
             "execution_candidate_count": _int_value(trade_kpi.get("execution_candidate_count")),
+            "tradable_pass_count": _int_value(trade_kpi.get("tradable_pass_count")),
             "execution_rejected_count": _int_value(trade_kpi.get("execution_rejected_count")),
+            "blocked_by_reason": _as_dict(trade_kpi.get("blocked_by_reason", trade_kpi.get("execution_rejected_count_by_reason"))),
             "execution_rejected_count_by_reason": _as_dict(trade_kpi.get("execution_rejected_count_by_reason")),
             "contract_selected_count": _int_value(trade_kpi.get("contract_selected_count")),
             "contract_rejected_count_by_reason": _as_dict(trade_kpi.get("contract_rejected_count_by_reason")),
@@ -774,7 +782,10 @@ def _truth_payload() -> dict[str, Any]:
             "order_rejected_count_by_reason": _as_dict(trade_kpi.get("order_rejected_count_by_reason")),
             "trade_resting_count": _int_value(trade_kpi.get("trade_resting_count")),
             "trade_filled_count": _int_value(trade_kpi.get("trade_filled_count", trade_kpi.get("fills"))),
+            "fill_count": _int_value(trade_kpi.get("fill_count", trade_kpi.get("trade_filled_count", trade_kpi.get("fills")))),
             "zero_trade_cycle_reason": str(trade_kpi.get("zero_trade_cycle_reason", "") or ""),
+            "bug_pass_without_trade_count": _int_value(trade_kpi.get("bug_pass_without_trade_count")),
+            "top_missed_reason": str(trade_kpi.get("top_missed_reason", "") or ""),
             "primary_blocker": str(trade_kpi.get("primary_blocker", cycle_diag.get("primary_blocker", "")) or ""),
             "secondary_blockers": list(trade_kpi.get("secondary_blockers", cycle_diag.get("secondary_blockers", [])) or []),
             "learning_eligible": bool(trade_kpi.get("learning_eligible", cycle_diag.get("learning_eligible", False))),
@@ -1442,9 +1453,12 @@ async function loadAll(force=false){
     row("scanner_candidate_count", bus.scanner_candidate_count||0)+
     row("scanner_failed_count", bus.scanner_failed_count||0)+
     row("execution_candidate_count", bus.execution_candidate_count||0)+
+    row("tradable_pass_count", bus.tradable_pass_count||0)+
     row("trade_attempted_count", bus.trade_attempted_count||0)+
     row("trade_resting_count", bus.trade_resting_count||0)+
-    row("trade_filled_count", bus.trade_filled_count||0)+
+    row("fill_count", bus.fill_count||bus.trade_filled_count||0)+
+    row("BUG_PASS_WITHOUT_TRADE", bus.bug_pass_without_trade_count||0)+
+    row("top_missed_reason", bus.top_missed_reason||"n/a")+
     row("zero_trade_cycle_reason", bus.zero_trade_cycle_reason||"n/a");
   $("truthRows").innerHTML=
     row("Equity", money(acct.equity||0))+

@@ -80,7 +80,7 @@ class CycleDiagnosisTests(unittest.TestCase):
         self.assertFalse(diag["learning_eligible"])
         self.assertEqual(diag["learning_skip_reason"], "data_fault_429_cooldown")
 
-    def test_scanner_pass_zero_orders_yields_concrete_primary_blocker(self):
+    def test_scanner_candidate_zero_orders_yields_concrete_primary_blocker(self):
         diag = self._build(
             trade_kpi={
                 "scanner_candidate_count": 8,
@@ -108,7 +108,74 @@ class CycleDiagnosisTests(unittest.TestCase):
         self.assertTrue(diag["learning_eligible"])
         self.assertEqual(diag["pipeline_stage"], "order_filled")
 
+    def test_open_option_position_cap_is_risk_gate(self):
+        diag = self._build(
+            trade_kpi={
+                "scanner_candidate_count": 5,
+                "execution_candidate_count": 5,
+                "contract_selected_count": 0,
+                "order_attempted_count": 0,
+                "trade_filled_count": 0,
+            },
+            reject={"open_option_position_cap": 5},
+        )
+        self.assertEqual(diag["pipeline_stage"], "risk_gate_failed")
+        self.assertEqual(diag["primary_blocker"], "open_option_position_cap")
+        self.assertFalse(diag["learning_eligible"])
+
+    def test_tradable_pass_without_trade_is_system_fault(self):
+        diag = self._build(
+            trade_kpi={
+                "scanner_candidate_count": 3,
+                "execution_candidate_count": 2,
+                "tradable_pass_count": 1,
+                "contract_selected_count": 1,
+                "order_attempted_count": 0,
+                "trade_filled_count": 0,
+                "bug_pass_without_trade_count": 1,
+            },
+            reject={"BUG_PASS_WITHOUT_TRADE": 1},
+        )
+        self.assertEqual(diag["pipeline_stage"], "pass_contract_broken")
+        self.assertTrue(diag["system_fault"])
+        self.assertEqual(diag["learning_skip_reason"], "system_fault_bug_pass_without_trade")
+
+    def test_pass_means_trade_contract_marks_bug_when_tradable_has_no_trade(self):
+        debug = {
+            "tradable_pass_count": 1,
+            "order_attempted_count": 0,
+        }
+
+        reasons = main._apply_pass_means_trade_contract(debug, {})
+
+        self.assertEqual(debug["bug_pass_without_trade_count"], 1)
+        self.assertFalse(debug["pass_means_trade_contract_ok"])
+        self.assertEqual(reasons["BUG_PASS_WITHOUT_TRADE"], 1)
+
+    def test_pass_means_trade_contract_ok_when_order_attempted(self):
+        debug = {
+            "tradable_pass_count": 1,
+            "order_attempted_count": 1,
+        }
+
+        reasons = main._apply_pass_means_trade_contract(debug, {})
+
+        self.assertEqual(debug["bug_pass_without_trade_count"], 0)
+        self.assertTrue(debug["pass_means_trade_contract_ok"])
+        self.assertEqual(reasons, {})
+
+    def test_broker_reject_after_order_attempt_satisfies_pass_equals_trade(self):
+        debug = {
+            "tradable_pass_count": 1,
+            "order_attempted_count": 1,
+        }
+
+        reasons = main._apply_pass_means_trade_contract(debug, {"broker_reject": 1})
+
+        self.assertEqual(debug["bug_pass_without_trade_count"], 0)
+        self.assertTrue(debug["pass_means_trade_contract_ok"])
+        self.assertEqual(reasons, {"broker_reject": 1})
+
 
 if __name__ == "__main__":
     unittest.main()
-

@@ -258,6 +258,8 @@ class MainOrderGuardTests(unittest.TestCase):
             "ALPACA_CANCELED_BUY_ORDER_COOLDOWN_MINUTES": config.ALPACA_CANCELED_BUY_ORDER_COOLDOWN_MINUTES,
             "ANTI_CHURN_HOLD_MINUTES": config.ANTI_CHURN_HOLD_MINUTES,
             "MIN_HOLD_EXIT_BYPASS_REASONS": config.MIN_HOLD_EXIT_BYPASS_REASONS,
+            "MAX_POSITIONS": config.MAX_POSITIONS,
+            "MAX_CONCURRENT_TRADES": config.MAX_CONCURRENT_TRADES,
             "ENTRY_ORDER_STATUS_WAIT_SECONDS": config.ENTRY_ORDER_STATUS_WAIT_SECONDS,
             "ENTRY_LIMIT_ATTEMPTS": config.ENTRY_LIMIT_ATTEMPTS,
             "CANCEL_UNFILLED_ENTRY_BEFORE_RETRY": config.CANCEL_UNFILLED_ENTRY_BEFORE_RETRY,
@@ -1421,6 +1423,18 @@ class MainOrderGuardTests(unittest.TestCase):
         self.assertEqual(close_meta.get("uncovered_close_qty"), 0)
         self.assertEqual(len(broker.canceled_order_ids), 1)
         self.assertEqual([action[0] for action in broker.actions], ["cancel"])
+
+    def test_effective_open_option_position_cap_uses_configured_concurrent_limit(self):
+        config.MAX_POSITIONS = 3
+        config.MAX_CONCURRENT_TRADES = 3
+
+        self.assertEqual(main._effective_open_option_position_cap(), 3)
+
+    def test_effective_open_option_position_cap_uses_lower_positive_limit(self):
+        config.MAX_POSITIONS = 3
+        config.MAX_CONCURRENT_TRADES = 1
+
+        self.assertEqual(main._effective_open_option_position_cap(), 1)
 
 
 if __name__ == "__main__":  # pragma: no cover

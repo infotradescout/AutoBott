@@ -554,6 +554,8 @@ SYNTHETIC_TUNER_OVERRIDES_PATH = _DATA_DIR / "synthetic_tuner_overrides.json"
 SYNTHETIC_TUNER_STATUS_PATH = _DATA_DIR / "synthetic_tuner_status.json"
 SYNTHETIC_TRADES_CSV_PATH = _DATA_DIR / "synthetic_trades.csv"
 ENTRY_EDGE_MODEL_PATH = _DATA_DIR / "entry_edge_model.json"
+TRADE_OUTCOME_SEMANTICS_CSV_PATH = _DATA_DIR / "trade_outcome_semantics.csv"
+TRADE_OUTCOME_SEMANTICS_SUMMARY_PATH = _DATA_DIR / "trade_outcome_semantics_summary.json"
 TRADING_CONTROL_PATH     = _DATA_DIR / "trading_control.json"
 WATCHLIST_CONTROL_PATH   = _DATA_DIR / "watchlist_control.json"
 
