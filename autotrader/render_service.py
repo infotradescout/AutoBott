@@ -906,6 +906,9 @@ def _patch_runtime_state(updates: dict) -> None:
 def _print_startup_readiness() -> None:
     data_dir = Path(str(getattr(config, "DATA_DIR", "") or os.getenv("DATA_DIR", "")).strip() or "/tmp/autotrader-data")
     token_enabled = bool(str(getattr(config, "DASHBOARD_CONTROL_TOKEN", "") or "").strip())
+    alpaca_key_present = bool(str(os.getenv("ALPACA_API_KEY", "")).strip())
+    alpaca_secret_present = bool(str(os.getenv("ALPACA_SECRET_KEY", "")).strip())
+    trader_env_ready = alpaca_key_present and alpaca_secret_present
     live_options_keys = bool(
         str(getattr(config, "ALPACA_LIVE_API_KEY", "") or "").strip()
         and str(getattr(config, "ALPACA_LIVE_SECRET_KEY", "") or "").strip()
@@ -915,8 +918,11 @@ def _print_startup_readiness() -> None:
     print("[render_service] STARTUP READINESS")
     print(f"[render_service] AUTOBOTT_BUILD_SHA={str(os.getenv('RENDER_GIT_COMMIT', '') or 'local')}")
     print(f"[render_service] paper_mode={bool(getattr(config, 'PAPER', True))}")
-    print(f"[render_service] alpaca_key_present={bool(str(os.getenv('ALPACA_API_KEY', '')).strip())}")
-    print(f"[render_service] alpaca_secret_present={bool(str(os.getenv('ALPACA_SECRET_KEY', '')).strip())}")
+    print(f"[render_service] alpaca_key_present={alpaca_key_present}")
+    print(f"[render_service] alpaca_secret_present={alpaca_secret_present}")
+    print(f"[render_service] trader_env_ready={trader_env_ready}")
+    if not trader_env_ready:
+        print("[render_service] TRADER_DISABLED_MISSING_ENV=ALPACA_API_KEY/ALPACA_SECRET_KEY")
     print(f"[render_service] live_options_keys_present={live_options_keys}")
     print(f"[render_service] data_dir={data_dir} writable={data_dir.exists() and os.access(data_dir, os.W_OK)}")
     print(f"[render_service] dashboard_control_auth_enabled={token_enabled}")
@@ -963,7 +969,7 @@ def _apply_boot_auto_resume() -> None:
                 f"updated_at={str(updated.get('updated_at_et', '') or '')!r})."
             )
     except Exception as exc:  # noqa: BLE001
-            print(f"[render_service] boot auto-resume failed: {exc}")
+        print(f"[render_service] boot auto-resume failed: {exc}")
 
 
 def _apply_render_starter_safe_mode() -> None:
