@@ -913,6 +913,7 @@ def _print_startup_readiness() -> None:
     control = load_trading_control()
 
     print("[render_service] STARTUP READINESS")
+    print(f"[render_service] AUTOBOTT_BUILD_SHA={str(os.getenv('RENDER_GIT_COMMIT', '') or 'local')}")
     print(f"[render_service] paper_mode={bool(getattr(config, 'PAPER', True))}")
     print(f"[render_service] alpaca_key_present={bool(str(os.getenv('ALPACA_API_KEY', '')).strip())}")
     print(f"[render_service] alpaca_secret_present={bool(str(os.getenv('ALPACA_SECRET_KEY', '')).strip())}")
@@ -928,9 +929,16 @@ def _print_startup_readiness() -> None:
     print(f"[render_service] vix_proxy_enabled={bool(getattr(config, 'VIXW_HEAVY_MODE', True))}")
     print(f"[render_service] market_context_worker_enabled={bool(getattr(config, 'ENABLE_MARKET_CONTEXT_WORKER', True))}")
     print(f"[render_service] render_instance_type={str(os.getenv('RENDER_INSTANCE_TYPE', '') or os.getenv('RENDER_PLAN', '') or 'unknown')}")
+    print(f"[render_service] render_starter_safe_mode={bool(getattr(config, 'RENDER_STARTER_SAFE_MODE', False))}")
     print(f"[render_service] pythonmalloc={str(os.getenv('PYTHONMALLOC', '') or 'default')}")
     print(f"[render_service] malloc_arena_max={str(os.getenv('MALLOC_ARENA_MAX', '') or 'default')}")
     print(f"[render_service] yfinance_fallback_enabled={bool(getattr(config, 'ENABLE_YFINANCE_FALLBACK', True))}")
+    print(f"[render_service] universe_mode={str(getattr(config, 'UNIVERSE_MODE', '') or '')}")
+    print(f"[render_service] auto_expand_universe_with_movers={bool(getattr(config, 'AUTO_EXPAND_UNIVERSE_WITH_MOVERS', True))}")
+    print(f"[render_service] option_enrichment_max_attempts_per_cycle={int(getattr(config, 'OPTION_ENRICHMENT_MAX_ATTEMPTS_PER_CYCLE', 0) or 0)}")
+    print(f"[render_service] max_contracts_per_ticker_per_hour={int(getattr(config, 'MAX_CONTRACTS_PER_TICKER_PER_HOUR', 0) or 0)}")
+    print(f"[render_service] dashboard_truth_cache_seconds={int(getattr(config, 'DASHBOARD_TRUTH_CACHE_SECONDS', 0) or 0)}")
+    print(f"[render_service] disable_verbose_market_diagnostics={bool(getattr(config, 'DISABLE_VERBOSE_MARKET_DIAGNOSTICS', False))}")
     print(
         "[render_service] decision_memory_worker_enabled="
         f"{str(os.getenv('ENABLE_DECISION_MEMORY_WORKER', '') or '').strip().lower() in {'1', 'true', 'yes', 'y', 'on'}}"
@@ -955,7 +963,33 @@ def _apply_boot_auto_resume() -> None:
                 f"updated_at={str(updated.get('updated_at_et', '') or '')!r})."
             )
     except Exception as exc:  # noqa: BLE001
-        print(f"[render_service] boot auto-resume failed: {exc}")
+            print(f"[render_service] boot auto-resume failed: {exc}")
+
+
+def _apply_render_starter_safe_mode() -> None:
+    config.RENDER_STARTER_SAFE_MODE = _env_bool(
+        "RENDER_STARTER_SAFE_MODE",
+        bool(getattr(config, "RENDER_STARTER_SAFE_MODE", False)),
+    )
+    if not bool(getattr(config, "RENDER_STARTER_SAFE_MODE", False)):
+        return
+
+    config.UNIVERSE_MODE = "core"
+    config.AUTO_EXPAND_UNIVERSE_WITH_MOVERS = False
+    config.ENABLE_YFINANCE_FALLBACK = False
+    config.OPTION_ENRICHMENT_MAX_ATTEMPTS_PER_CYCLE = min(
+        2,
+        max(0, int(getattr(config, "OPTION_ENRICHMENT_MAX_ATTEMPTS_PER_CYCLE", 3) or 3)),
+    )
+    config.MAX_CONTRACTS_PER_TICKER_PER_HOUR = min(
+        1,
+        max(0, int(getattr(config, "MAX_CONTRACTS_PER_TICKER_PER_HOUR", 1) or 1)),
+    )
+    config.DASHBOARD_TRUTH_CACHE_SECONDS = max(
+        30,
+        int(getattr(config, "DASHBOARD_TRUTH_CACHE_SECONDS", 10) or 10),
+    )
+    config.DISABLE_VERBOSE_MARKET_DIAGNOSTICS = True
 
 
 def _run_trader_forever() -> None:
@@ -1187,6 +1221,7 @@ def _run_market_context_worker() -> None:
 
 if __name__ == "__main__":
     # Render's starter instance is memory-constrained; keep single trader loop ownership in render_service.
+    os.environ.setdefault("RENDER_STARTER_SAFE_MODE", "true")
     os.environ.setdefault("ENABLE_EMBEDDED_TRADER_FALLBACK", "false")
     # Prefer stable, option-liquid core symbols in constrained hosted runtime.
     os.environ.setdefault("UNIVERSE_MODE", "core")
@@ -1228,6 +1263,7 @@ if __name__ == "__main__":
     # Keep scan lifecycle evidence on by default in hosted runtime.
     config.WRITE_SCAN_LOG = _env_bool("WRITE_SCAN_LOG", bool(getattr(config, "WRITE_SCAN_LOG", True)))
     config.ENABLE_LOOP_GC = True
+    _apply_render_starter_safe_mode()
     _apply_boot_auto_resume()
     _print_startup_readiness()
     trader_thread = threading.Thread(target=_run_trader_forever, daemon=True, name="autobott-trader")

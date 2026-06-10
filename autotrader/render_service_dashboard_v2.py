@@ -27,6 +27,9 @@ def _is_render_starter_runtime() -> bool:
 
 os.environ.setdefault("PAPER_TRADE_THROUGH_MODE", "true")
 if _is_render_starter_runtime():
+    os.environ.setdefault("RENDER_STARTER_SAFE_MODE", "true")
+    os.environ.setdefault("DASHBOARD_TRUTH_CACHE_SECONDS", "30")
+    os.environ.setdefault("ENABLE_YFINANCE_FALLBACK", "false")
     os.environ.setdefault("VIXW_HEAVY_MODE", "false")
     os.environ.setdefault("ENABLE_REPLAY_AUTO_PROMOTE", "false")
     os.environ.setdefault("REPLAY_AUTO_PROMOTE_ENABLED", "false")

@@ -2,7 +2,7 @@ services:
   - type: web
     name: autobott
     env: python
-    plan: standard
+    plan: starter
     buildCommand: pip install -r autotrader/requirements.txt
     startCommand: python -u autotrader/render_service_dashboard_v2.py
     healthCheckPath: /healthz
@@ -29,6 +29,10 @@ services:
         value: "2"
       - key: ENABLE_YFINANCE_FALLBACK
         value: "false"
+      - key: RENDER_STARTER_SAFE_MODE
+        value: "true"
+      - key: DASHBOARD_TRUTH_CACHE_SECONDS
+        value: "30"
       - key: AUTO_RESUME_TRADING_ON_BOOT
         value: "false"
       - key: VIXW_HEAVY_MODE

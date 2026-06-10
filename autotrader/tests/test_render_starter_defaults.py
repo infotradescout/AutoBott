@@ -39,12 +39,54 @@ def test_render_starter_defaults_disable_nonessential_sidecars():
     source = path.read_text(encoding="utf-8")
 
     for expected in (
+        'os.environ.setdefault("RENDER_STARTER_SAFE_MODE", "true")',
+        'os.environ.setdefault("DASHBOARD_TRUTH_CACHE_SECONDS", "30")',
+        'os.environ.setdefault("ENABLE_YFINANCE_FALLBACK", "false")',
         'os.environ.setdefault("VIXW_HEAVY_MODE", "false")',
         'os.environ.setdefault("ENABLE_REPLAY_AUTO_PROMOTE", "false")',
         'os.environ.setdefault("REPLAY_AUTO_PROMOTE_ENABLED", "false")',
         'os.environ.setdefault("ENABLE_HISTORICAL_REPLAY_LEARNING", "false")',
         'os.environ.setdefault("ENABLE_DECISION_MEMORY_WORKER", "false")',
         'os.environ.setdefault("ENABLE_MARKET_CONTEXT_WORKER", "false")',
+    ):
+        assert expected in source
+
+
+def test_render_blueprint_stays_on_starter_with_no_cost_memory_controls():
+    path = Path(__file__).resolve().parents[2] / "render.yaml"
+    source = path.read_text(encoding="utf-8")
+
+    for expected in (
+        "plan: starter",
+        "key: PYTHONMALLOC",
+        "value: malloc",
+        "key: MALLOC_ARENA_MAX",
+        'value: "2"',
+        "key: ENABLE_YFINANCE_FALLBACK",
+        'value: "false"',
+        "key: RENDER_STARTER_SAFE_MODE",
+        'value: "true"',
+        "key: DASHBOARD_TRUTH_CACHE_SECONDS",
+        'value: "30"',
+    ):
+        assert expected in source
+
+
+def test_render_service_applies_starter_safe_mode_clamps():
+    path = Path(__file__).resolve().parent.parent / "render_service.py"
+    source = path.read_text(encoding="utf-8")
+
+    for expected in (
+        'os.environ.setdefault("RENDER_STARTER_SAFE_MODE", "true")',
+        "def _apply_render_starter_safe_mode()",
+        'config.UNIVERSE_MODE = "core"',
+        "config.AUTO_EXPAND_UNIVERSE_WITH_MOVERS = False",
+        "config.ENABLE_YFINANCE_FALLBACK = False",
+        "config.OPTION_ENRICHMENT_MAX_ATTEMPTS_PER_CYCLE = min(",
+        "config.MAX_CONTRACTS_PER_TICKER_PER_HOUR = min(",
+        "config.DASHBOARD_TRUTH_CACHE_SECONDS = max(",
+        "config.DISABLE_VERBOSE_MARKET_DIAGNOSTICS = True",
+        "_apply_render_starter_safe_mode()",
     ):
         assert expected in source
 
