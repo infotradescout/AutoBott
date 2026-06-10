@@ -26,6 +26,10 @@ def _yfinance_ticker(symbol: str):
     return yf.Ticker(symbol)
 
 
+def _yfinance_fallback_enabled() -> bool:
+    return bool(getattr(config, "ENABLE_YFINANCE_FALLBACK", True))
+
+
 class AlpacaDataClient:
     _shared_rate_limit: dict[str, Any] = {
         "recent_429_count": 0,
@@ -272,6 +276,8 @@ class AlpacaDataClient:
                 print(f"[data] get_stock_bars Alpaca failed for {symbol} tf={timeframe}: {exc}")
 
         # Fallback: yfinance
+        if not _yfinance_fallback_enabled():
+            return pd.DataFrame()
         try:
             # Choose a safe period based on timeframe
             yf_interval = {
@@ -409,6 +415,8 @@ class AlpacaDataClient:
             print(f"[data] get_intraday_bars_since_open Alpaca failed for {symbol}: {exc}")
 
         # Fallback: yfinance
+        if not _yfinance_fallback_enabled():
+            return pd.DataFrame()
         try:
             ticker = _yfinance_ticker(symbol)
             interval = "1m" if timeframe == "1Min" else "5m"
@@ -519,6 +527,8 @@ class AlpacaDataClient:
             print(f"[data] get_intraday_bars_window Alpaca failed for {symbol}: {exc}")
 
         # Fallback: yfinance
+        if not _yfinance_fallback_enabled():
+            return pd.DataFrame()
         try:
             ticker = _yfinance_ticker(symbol)
             interval = "1m" if timeframe == "1Min" else "5m"
@@ -572,6 +582,8 @@ class AlpacaDataClient:
             print(f"[data] latest quote lookup failed for {symbol}: {exc}")
 
         try:
+            if not _yfinance_fallback_enabled():
+                return None
             ticker = _yfinance_ticker(symbol)
             info = ticker.fast_info
             price = float(info.last_price)
@@ -802,6 +814,8 @@ class AlpacaDataClient:
         """
         if str(symbol).upper() in _EARNINGS_SKIP_SYMBOLS:
             return False
+        if not _yfinance_fallback_enabled():
+            return False
         try:
             ticker = _yfinance_ticker(symbol)
             cal = ticker.calendar  # dict with keys like 'Earnings Date'
@@ -840,6 +854,8 @@ class AlpacaDataClient:
         Returns (blocked, reason) if recent high-impact headlines are detected.
         Uses yfinance news feed as a lightweight proxy.
         """
+        if not _yfinance_fallback_enabled():
+            return False, ""
         try:
             ticker = _yfinance_ticker(symbol)
             news_items = getattr(ticker, "news", None) or []

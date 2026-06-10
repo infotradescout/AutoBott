@@ -57,6 +57,27 @@ def ts_ct(now_ct: datetime | None = None) -> str:
     return now_ct.strftime("%Y-%m-%d %H:%M:%S %Z")
 
 
+def _process_rss_mb() -> float | None:
+    try:
+        import resource
+
+        usage = resource.getrusage(resource.RUSAGE_SELF)
+        # Linux reports ru_maxrss in KiB; macOS reports bytes. Render runs Linux.
+        rss = float(getattr(usage, "ru_maxrss", 0.0) or 0.0)
+        if rss <= 0:
+            return None
+        if rss > 10_000_000:
+            return round(rss / (1024.0 * 1024.0), 1)
+        return round(rss / 1024.0, 1)
+    except Exception:
+        return None
+
+
+def _memory_label() -> str:
+    rss_mb = _process_rss_mb()
+    return f"rss_mb={rss_mb:.1f}" if rss_mb is not None else "rss_mb=unknown"
+
+
 _REPLAY_OVERRIDE_KEYS = {
     "MIN_SIGNAL_SCORE",
     "DIRECTION_CONVICTION_MIN",
@@ -5926,9 +5947,9 @@ def main():
             signals = []
         else:
             vix_block_notice = None
-            print(f"[{ts(now_et)}] MAIN LOOP SCAN INVOKE watchlist_count={len(watchlist)}")
+            print(f"[{ts(now_et)}] MAIN LOOP SCAN INVOKE watchlist_count={len(watchlist)} {_memory_label()}")
             signals = run_scan(watchlist) if watchlist else []
-            print(f"[{ts(now_et)}] SCAN CALL RETURNED signals_count={len(signals)}")
+            print(f"[{ts(now_et)}] SCAN CALL RETURNED signals_count={len(signals)} {_memory_label()}")
             print(f"[{ts(now_et)}] EXECUTION BRIDGE CHECKPOINT A post_scan_return")
             _touch_heartbeat()
         raw_scan_rows_count = len(watchlist)
@@ -6549,6 +6570,7 @@ def main():
                 f"rejections={dict(sorted(reject_reasons.items()))} "
                 f"loss_causes={dict(truth.get('causes', {}) or {})}"
             )
+            print(f"[{ts(now_et)}] LOOP MEMORY AFTER KPI {_memory_label()}")
 
         if (
             signals
@@ -9077,6 +9099,7 @@ def main():
                 )
         if bool(getattr(config, "ENABLE_LOOP_GC", False)):
             gc.collect()
+            print(f"[{ts()}] LOOP MEMORY AFTER GC {_memory_label()}")
         time.sleep(loop_sleep_seconds)
 
     print(f"[{ts()}] Trader stopped.")

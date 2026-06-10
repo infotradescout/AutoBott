@@ -1187,6 +1187,7 @@ if __name__ == "__main__":
     # Prefer stable, option-liquid core symbols in constrained hosted runtime.
     os.environ.setdefault("UNIVERSE_MODE", "core")
     os.environ.setdefault("AUTO_EXPAND_UNIVERSE_WITH_MOVERS", "false")
+    os.environ.setdefault("ENABLE_YFINANCE_FALLBACK", "false")
     # Learning-first mode: keep trading after losses and adapt, rather than hard-blocking.
     os.environ.setdefault("LOSS_THROTTLE_AFTER_CONSEC_LOSSES", "999")
     os.environ.setdefault("ADAPTIVE_LOSS_BLOCK_TICKER_AFTER_LOSSES", "999")
@@ -1194,9 +1195,9 @@ if __name__ == "__main__":
     os.environ.setdefault("ENABLE_AUTO_SYMBOL_SUPPRESSION_FROM_LEARNING", "false")
     os.environ.setdefault("ADAPTIVE_LOSS_MIN_DIRECTION_SCORE", "0.55")
     # Apply hosted memory controls directly; config has already been imported.
-    config.LOOP_INTERVAL_SECONDS = max(15, int(getattr(config, "LOOP_INTERVAL_SECONDS", 5) or 5))
+    config.LOOP_INTERVAL_SECONDS = max(60, int(getattr(config, "LOOP_INTERVAL_SECONDS", 5) or 5))
     config.CONTINUOUS_ENTRY_SEARCH_SLEEP_SECONDS = max(
-        10,
+        60,
         int(getattr(config, "CONTINUOUS_ENTRY_SEARCH_SLEEP_SECONDS", 1) or 1),
     )
     config.RATE_LIMIT_SLEEP_SECONDS = max(0.15, float(getattr(config, "RATE_LIMIT_SLEEP_SECONDS", 0.05) or 0.05))
@@ -1212,7 +1213,11 @@ if __name__ == "__main__":
         2,
         max(1, int(getattr(config, "LIQUIDITY_RANK_MAX_SINGLE_NAME_CANDIDATES_PER_CYCLE", 2) or 2)),
     )
-    config.SCAN_INTRADAY_BARS = min(40, max(10, int(getattr(config, "SCAN_INTRADAY_BARS", 40) or 40)))
+    config.SCAN_INTRADAY_BARS = min(25, max(10, int(getattr(config, "SCAN_INTRADAY_BARS", 40) or 40)))
+    config.ENABLE_YFINANCE_FALLBACK = _env_bool(
+        "ENABLE_YFINANCE_FALLBACK",
+        bool(getattr(config, "ENABLE_YFINANCE_FALLBACK", False)),
+    )
     config.SIGNAL_PATTERN_MEMORY_HISTORY_ROWS = 0
     config.ENABLE_SIGNAL_PATTERN_MEMORY = False
     config.ENABLE_PRE_EXECUTION_HISTORY_CHECK = False

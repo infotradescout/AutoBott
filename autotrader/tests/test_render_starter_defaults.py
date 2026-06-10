@@ -54,9 +54,11 @@ def test_render_service_applies_memory_controls_after_config_import():
     source = path.read_text(encoding="utf-8")
 
     for expected in (
-        "config.LOOP_INTERVAL_SECONDS = max(15,",
+        'os.environ.setdefault("ENABLE_YFINANCE_FALLBACK", "false")',
+        "config.LOOP_INTERVAL_SECONDS = max(60,",
         "config.CONTINUOUS_ENTRY_SEARCH_SLEEP_SECONDS = max(",
-        "config.WRITE_SCAN_LOG = False",
+        "config.SCAN_INTRADAY_BARS = min(25,",
+        "config.ENABLE_YFINANCE_FALLBACK = _env_bool(",
         "config.ENABLE_LOOP_GC = True",
         "config.ENABLE_SIGNAL_PATTERN_MEMORY = False",
     ):
