@@ -15,6 +15,8 @@
 
 ## P2 Risk Gate
 
+Prerequisite: Purpose lock must be present and accepted in docs/AUTOBOTT_V2_PURPOSE_LOCK.md.
+
 - Expand risk policy checks.
 - Add rule-level metrics and audit fields.
 
