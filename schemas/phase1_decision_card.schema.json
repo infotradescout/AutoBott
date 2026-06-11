@@ -1,0 +1,50 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "AutoBott Phase 1 Decision Card",
+  "type": "object",
+  "required": [
+    "ticker",
+    "timestamp",
+    "regime",
+    "direction",
+    "volatility",
+    "selected_contract",
+    "decision",
+    "blocked_reason",
+    "confidence_score",
+    "explanation",
+    "forward_outcomes"
+  ],
+  "properties": {
+    "ticker": { "type": "string", "minLength": 1 },
+    "timestamp": { "type": "string", "format": "date-time" },
+    "decision": {
+      "type": "string",
+      "enum": [
+        "TRADE_CANDIDATE",
+        "NO_TRADE",
+        "BLOCKED_BY_REGIME",
+        "BLOCKED_BY_VOLATILITY",
+        "BLOCKED_BY_SPREAD",
+        "BLOCKED_BY_RISK"
+      ]
+    },
+    "blocked_reason": { "type": ["string", "null"] },
+    "confidence_score": { "type": "number", "minimum": 0, "maximum": 1 },
+    "explanation": { "type": "string" },
+    "forward_outcomes": {
+      "type": "object",
+      "required": ["after_5m", "after_15m", "after_30m", "after_1h"],
+      "properties": {
+        "after_5m": { "type": ["object", "null"] },
+        "after_15m": { "type": ["object", "null"] },
+        "after_30m": { "type": ["object", "null"] },
+        "after_1h": { "type": ["object", "null"] }
+      }
+    },
+    "regime": { "type": "object" },
+    "direction": { "type": "object" },
+    "volatility": { "type": "object" },
+    "selected_contract": { "type": ["object", "null"] }
+  }
+}

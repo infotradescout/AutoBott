@@ -1,0 +1,145 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "AutoBott Phase 1 Market Snapshot",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "source",
+    "captured_at",
+    "ticker",
+    "timestamp",
+    "underlying_quote",
+    "market_bars",
+    "option_chain",
+    "context",
+    "iv_history"
+  ],
+  "properties": {
+    "schema_version": { "type": "string", "minLength": 1 },
+    "source": {
+      "type": "object",
+      "required": ["name", "environment", "latency_assumption"],
+      "properties": {
+        "name": { "type": "string", "minLength": 1 },
+        "environment": { "type": "string", "minLength": 1 },
+        "latency_assumption": { "type": "string", "minLength": 1 }
+      }
+    },
+    "captured_at": { "type": "string", "format": "date-time" },
+    "ticker": { "type": "string", "minLength": 1 },
+    "timestamp": { "type": "string", "format": "date-time" },
+    "underlying_quote": {
+      "type": "object",
+      "required": ["symbol", "bid", "ask", "last", "spread", "spread_pct", "quote_timestamp"],
+      "properties": {
+        "symbol": { "type": "string", "minLength": 1 },
+        "bid": { "type": "number", "exclusiveMinimum": 0 },
+        "ask": { "type": "number", "exclusiveMinimum": 0 },
+        "last": { "type": "number", "exclusiveMinimum": 0 },
+        "spread": { "type": "number", "minimum": 0 },
+        "spread_pct": { "type": "number", "minimum": 0 },
+        "quote_timestamp": { "type": "string", "format": "date-time" }
+      }
+    },
+    "market_bars": {
+      "type": "array",
+      "minItems": 30,
+      "items": { "$ref": "#/$defs/market_bar" }
+    },
+    "option_chain": {
+      "type": "array",
+      "minItems": 1,
+      "items": { "$ref": "#/$defs/option_contract" }
+    },
+    "context": {
+      "type": "object",
+      "required": ["spy_bars", "qqq_bars", "vix_bars", "blackout_event", "event_labels"],
+      "properties": {
+        "spy_bars": {
+          "type": "array",
+          "minItems": 1,
+          "items": { "$ref": "#/$defs/market_bar" }
+        },
+        "qqq_bars": {
+          "type": "array",
+          "minItems": 1,
+          "items": { "$ref": "#/$defs/market_bar" }
+        },
+        "vix_bars": {
+          "type": "array",
+          "minItems": 1,
+          "items": { "$ref": "#/$defs/market_bar" }
+        },
+        "blackout_event": { "type": "boolean" },
+        "event_labels": {
+          "type": "array",
+          "items": { "type": "string" }
+        }
+      }
+    },
+    "iv_history": {
+      "type": "array",
+      "minItems": 1,
+      "items": { "type": "number", "minimum": 0 }
+    }
+  },
+  "$defs": {
+    "market_bar": {
+      "type": "object",
+      "required": ["timestamp", "open", "high", "low", "close", "volume"],
+      "properties": {
+        "timestamp": { "type": "string", "format": "date-time" },
+        "open": { "type": "number", "exclusiveMinimum": 0 },
+        "high": { "type": "number", "exclusiveMinimum": 0 },
+        "low": { "type": "number", "exclusiveMinimum": 0 },
+        "close": { "type": "number", "exclusiveMinimum": 0 },
+        "volume": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "option_contract": {
+      "type": "object",
+      "required": [
+        "option_symbol",
+        "underlying",
+        "expiration",
+        "strike",
+        "option_type",
+        "bid",
+        "ask",
+        "last",
+        "spread",
+        "spread_pct",
+        "quote_timestamp",
+        "volume",
+        "open_interest",
+        "delta",
+        "theta",
+        "vega",
+        "implied_volatility",
+        "iv_percentile",
+        "realized_volatility"
+      ],
+      "properties": {
+        "option_symbol": { "type": "string", "minLength": 1 },
+        "underlying": { "type": "string", "minLength": 1 },
+        "expiration": { "type": "string", "format": "date" },
+        "strike": { "type": "number", "exclusiveMinimum": 0 },
+        "option_type": { "type": "string", "enum": ["call", "put"] },
+        "bid": { "type": "number", "minimum": 0 },
+        "ask": { "type": "number", "minimum": 0 },
+        "last": { "type": ["number", "null"], "minimum": 0 },
+        "spread": { "type": "number", "minimum": 0 },
+        "spread_pct": { "type": "number", "minimum": 0 },
+        "quote_timestamp": { "type": "string", "format": "date-time" },
+        "volume": { "type": "integer", "minimum": 0 },
+        "open_interest": { "type": "integer", "minimum": 0 },
+        "delta": { "type": "number" },
+        "theta": { "type": "number" },
+        "vega": { "type": "number" },
+        "implied_volatility": { "type": "number", "minimum": 0 },
+        "iv_percentile": { "type": ["number", "null"], "minimum": 0 },
+        "realized_volatility": { "type": ["number", "null"], "minimum": 0 }
+      }
+    }
+  }
+}
