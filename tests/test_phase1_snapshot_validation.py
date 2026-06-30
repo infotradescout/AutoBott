@@ -68,6 +68,27 @@ def _valid_snapshot() -> dict[str, object]:
                 "implied_volatility": 0.25,
                 "iv_percentile": 0.40,
                 "realized_volatility": 0.20,
+            },
+            {
+                "option_symbol": "AAPL260619P00215000",
+                "underlying": "AAPL",
+                "expiration": "2026-06-19",
+                "strike": 215.0,
+                "option_type": "put",
+                "bid": 4.90,
+                "ask": 5.10,
+                "last": 5.0,
+                "spread": 0.20,
+                "spread_pct": 0.04,
+                "quote_timestamp": BASE_TIME.isoformat(),
+                "volume": 50,
+                "open_interest": 500,
+                "delta": -0.48,
+                "theta": -0.04,
+                "vega": 0.08,
+                "implied_volatility": 0.25,
+                "iv_percentile": 0.40,
+                "realized_volatility": 0.20,
             }
         ],
         "context": {
@@ -78,6 +99,11 @@ def _valid_snapshot() -> dict[str, object]:
             "event_labels": [],
         },
         "iv_history": [0.18, 0.20, 0.23, 0.27, 0.31],
+        "cycle_profile": {
+            "expected_holding_days": 6,
+            "cycle_confidence": "unknown",
+            "last_pivot_type": "unknown"
+        },
     }
 
 
@@ -114,6 +140,20 @@ def test_phase1_validate_refuses_incomplete_snapshot_input(tmp_path, capsys) -> 
     assert "$.market_bars: expected at least 30 items" in captured.err
 
 
+def test_invalid_cycle_profile_rejected_by_snapshot_validator() -> None:
+    snapshot = _valid_snapshot()
+    snapshot["cycle_profile"]["cycle_confidence"] = "bad_value"  # type: ignore[index]
+
+    try:
+        validate_market_snapshot(snapshot)
+    except SnapshotValidationError as exc:
+        message = str(exc)
+    else:
+        raise AssertionError("Expected cycle profile validation to fail.")
+
+    assert "$.cycle_profile.cycle_confidence: expected one of ['unknown', 'low', 'medium', 'high']" in message
+
+
 def test_phase1_validate_writes_ledger_with_empty_forward_outcomes(tmp_path) -> None:
     snapshot_path = tmp_path / "snapshot.json"
     ledger_path = tmp_path / "ledger.jsonl"
@@ -124,7 +164,14 @@ def test_phase1_validate_writes_ledger_with_empty_forward_outcomes(tmp_path) -> 
 
     assert exit_code == 0
     assert row["validation_status"] == "SNAPSHOT_VALID"
+    assert row["snapshot_schema_version"] == "phase1.snapshot.v1"
+    assert row["schema_version"] == "phase1_decision_card.v1"
     assert row["snapshot_path"] == str(snapshot_path)
+    assert row["ticker"] == "AAPL"
+    assert row["decision"] == "TRADE_CANDIDATE"
+    assert row["selected_contract"]["option_symbol"] == "AAPL260619C00215000"
+    assert row["trade_setup"] == "bullish_continuation"
+    assert row["cycle"]["status"] == "unknown"
     assert row["forward_outcomes"] == {
         "after_5m": None,
         "after_15m": None,

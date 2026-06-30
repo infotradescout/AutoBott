@@ -2,11 +2,11 @@
 
 ## One-Sentence Purpose
 
-AutoBott exists to evaluate and paper-execute risk-gated intraday stock signals for Thomas using deterministic decision records and replayable scorecards while avoiding live execution, connector lock-in, and undocumented discretionary overrides.
+AutoBott exists to evaluate regime-first, read-only intraday options trade candidates for Thomas using deterministic decision cards and replayable ledgers while avoiding live execution, connector lock-in, and undocumented discretionary overrides.
 
 ## 1. Primary Purpose
 
-Provide a disciplined, fail-closed paper trading engine that can prove whether a repeatable signal process has edge under controlled risk constraints.
+Provide a disciplined, fail-closed options decision system that can prove whether a repeatable regime, direction, volatility, and contract-selection process has edge before any broker order path exists.
 
 ## 2. Primary User
 
@@ -14,31 +14,31 @@ Thomas as the owner-operator and reviewer of decision records, replay outputs, a
 
 ## 3. Market Scope
 
-US listed equities during regular market sessions, with optional premarket data in replay only.
+US listed equities and listed equity options during regular market sessions, with optional premarket underlying context in replay only.
 
 ## 4. Instrument Scope
 
-Primary instrument: stocks (shares) for paper execution in v2 foundation phases.
+Primary instrument: long calls and long puts for read-only decision cards in Phase 1.
 
-Out of scope in this lock phase: options, crypto, futures, sports, and multi-asset routing.
+Out of scope in this lock phase: market making, naked option selling, crypto, futures, sports, multi-asset routing, and live broker orders.
 
 ## 5. Time Horizon
 
-Intraday decisioning and same-session paper position lifecycle, with replay windows used for historical evaluation.
+Intraday decisioning with replay windows used for historical evaluation.
 
 ## 6. Automation Level
 
-Automated paper decision engine with deterministic rules. No live order routing.
+Automated read-only decision engine with deterministic rules. No live order routing.
 
 ## 7. Decision Authority Model
 
-Engine authority: may approve or reject paper trades.
+Engine authority: may classify decision cards as trade candidates or rejected/no-trade records.
 
 Human authority: final gate for any future live enablement. Live authority remains disabled until explicit approval gate criteria are met.
 
 ## 8. Signal/Edge Source
 
-Structured technical/state-based signals with risk asymmetry filters and strict reject reasons.
+Structured regime, direction, volatility, and option-contract signals with risk asymmetry filters and strict reject reasons.
 
 Signal complexity is secondary to decision quality and replay transparency.
 
@@ -52,8 +52,8 @@ Risk objective: preserve paper capital assumptions through fail-closed rejection
 
 Initial control KPIs (must hold before expansion):
 
-- 100% of approved paper trades have decision records.
-- 100% of rejected trades have reason codes.
+- 100% of trade candidates have decision cards.
+- 100% of rejected candidates have blocked reasons.
 - 0 trades bypass risk gate.
 - 0 live orders before approval gate.
 
@@ -71,14 +71,14 @@ Evaluation KPIs (after control KPIs are stable):
 
 - Live trading execution.
 - Broker connector integration for live order placement.
-- Credential-gated runtime requirements.
+- Credential-gated runtime requirements for local validation.
 - External monetization/integration surface (SaaS/Discord/Stripe) in foundation phases.
 - Emotional or undocumented manual overrides.
 
 ## 12. Build Implications for P2/P3/P4
 
-- P2 (Risk Gate): implement only stock-focused, intraday, fail-closed risk rules aligned to this purpose lock.
-- P3 (Signal Intake): intake contracts must preserve deterministic, replayable signal context and strategy identity.
-- P4 (Replay Harness): replay output must support KPI auditing and reason-code attribution for every decision.
+- P2 (Paper Execution): only after decision cards are stable, add paper-only limit-order lifecycle simulation.
+- P3 (Learning): persist accepted and rejected candidates with future-window outcomes.
+- P4 (Replay Harness): replay output must support KPI auditing and blocked-reason attribution for every decision.
 
 No P2 expansion is valid if it conflicts with this purpose lock.
