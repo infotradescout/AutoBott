@@ -1,5 +1,6 @@
 import json
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 
 from autobott_v2.phase1_alpaca_capture_now import capture_now
 from autobott_v2.phase1_alpaca_client import AlpacaPaperClient
@@ -119,3 +120,31 @@ def test_capture_does_not_mutate_active_gate(tmp_path) -> None:
     )
 
     assert json.loads(active_gate.read_text(encoding="utf-8")) == {"sentinel": True}
+
+
+def test_capture_uses_env_roots_when_paths_are_omitted(monkeypatch, tmp_path) -> None:
+    data_root = tmp_path / "durable-data"
+    gate_path = data_root / "PHASE1_CYCLE_GATE.json"
+    gate_path.parent.mkdir(parents=True, exist_ok=True)
+    gate_path.write_text(json.dumps({"sentinel": True}, sort_keys=True), encoding="utf-8")
+    monkeypatch.setenv("AUTOBOTT_DATA_ROOT", str(data_root))
+    monkeypatch.setenv("AUTOBOTT_GATE_PATH", str(gate_path))
+
+    result = capture_now(
+        symbols=["SPY"],
+        minutes=1,
+        interval_seconds=60,
+        client=FakeAlpacaClient(),
+        config=_paper_config(),
+        now_fn=_now_sequence(
+            datetime(2026, 6, 30, 14, 30, tzinfo=UTC),
+            datetime(2026, 6, 30, 14, 30, tzinfo=UTC),
+            datetime(2026, 6, 30, 14, 31, tzinfo=UTC),
+        ),
+        sleep_fn=lambda _: None,
+    )
+
+    manifest_path = data_root / "phase1_snapshots" / "2026-06-30" / "SPY" / "manifest.json"
+    assert manifest_path.exists()
+    assert Path(result["corpus_root"]) == data_root / "phase1_snapshots"
+    assert json.loads(gate_path.read_text(encoding="utf-8")) == {"sentinel": True}

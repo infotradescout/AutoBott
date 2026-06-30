@@ -12,6 +12,7 @@ from .phase1_exit_engine import ExitRules, evaluate_exit
 from .phase1_models import LifecycleStatus
 from .phase1_scorecard import load_phase1_gate, update_phase1_gate
 from .phase1_validate import _decision_input_from_snapshot, _load_snapshot, _parse_datetime
+from .runtime_paths import artifacts_root as default_artifacts_root
 
 
 def run_replay(
@@ -24,7 +25,7 @@ def run_replay(
     active_gate_path: str | Path | None = None,
 ) -> dict[str, Any]:
     snapshot_paths = _snapshot_paths(snapshots)
-    artifact_dir = (Path(artifacts_root) if artifacts_root is not None else Path("artifacts") / "phase1_replay") / run_id
+    artifact_dir = (Path(artifacts_root) if artifacts_root is not None else default_artifacts_root() / "phase1_replay") / run_id
     artifact_dir.mkdir(parents=True, exist_ok=True)
 
     decisions_path = artifact_dir / "decisions.jsonl"

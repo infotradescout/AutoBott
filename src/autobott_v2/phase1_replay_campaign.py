@@ -16,6 +16,8 @@ from .phase1_bucket_eligibility import (
     build_gate_candidate_report,
 )
 from .phase1_replay import run_replay
+from .runtime_paths import gate_path as default_gate_path
+from .runtime_paths import phase1_replay_campaign_root
 
 
 def run_replay_campaign(
@@ -28,11 +30,11 @@ def run_replay_campaign(
     campaign_context: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     snapshots_label = snapshot_source_label or _snapshot_source_label(snapshots)
-    campaign_dir = (Path(artifacts_root) if artifacts_root is not None else Path("artifacts") / "phase1_replay_campaign") / campaign_run_id
+    campaign_dir = (Path(artifacts_root) if artifacts_root is not None else phase1_replay_campaign_root()) / campaign_run_id
     fill_model_results_dir = campaign_dir / "fill_model_results"
     fill_model_results_dir.mkdir(parents=True, exist_ok=True)
 
-    gate_target = Path(active_gate_path) if active_gate_path is not None else Path(__file__).resolve().parents[2] / "data" / "PHASE1_CYCLE_GATE.json"
+    gate_target = Path(active_gate_path) if active_gate_path is not None else default_gate_path()
     gate_before = _file_hash(gate_target)
 
     replay_runs: dict[str, Any] = {}
@@ -347,7 +349,7 @@ def _apply_campaign_safety_overrides(gate_candidate_report: dict[str, Any], camp
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Run a low-level Phase 1 replay campaign from raw replayable snapshots.")
     parser.add_argument("--snapshots", required=True, help="Path to a directory of replayable snapshot JSON files.")
-    parser.add_argument("--out", help="Artifacts root directory. Defaults to artifacts/phase1_replay_campaign.")
+    parser.add_argument("--out", help=f"Artifacts root directory. Defaults to {phase1_replay_campaign_root()}.")
     parser.add_argument("--campaign-run-id", default="default", help="Stable campaign identifier for artifact output.")
     args = parser.parse_args(argv)
     result = run_replay_campaign(

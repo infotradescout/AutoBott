@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Any
 
 from .phase1_models import CycleStatus, ExecutionLayer, LegRole, LifecycleStatus, Phase1LedgerEvent, TradeSetup
+from .runtime_paths import gate_path as default_gate_path
 
 DEFAULT_PHASE1_GATE = {
     "trading_enabled": False,
@@ -82,7 +83,7 @@ class GateEvaluation:
 def gate_path(path: str | Path | None = None) -> Path:
     if path is not None:
         return Path(path)
-    return Path(__file__).resolve().parents[2] / "data" / "PHASE1_CYCLE_GATE.json"
+    return default_gate_path()
 
 
 def load_phase1_gate(path: str | Path | None = None) -> GateEvaluation:

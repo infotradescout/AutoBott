@@ -12,6 +12,8 @@ from .phase1_alpaca_capture_now import capture_now
 from .phase1_alpaca_client import AlpacaPaperClient
 from .phase1_alpaca_config import load_alpaca_paper_config
 from .phase1_campaign_runner import run_phase1_campaign
+from .runtime_paths import gate_path as default_gate_path
+from .runtime_paths import phase1_replay_campaign_root, phase1_snapshots_root
 
 
 JsonDict = dict[str, Any]
@@ -370,15 +372,15 @@ def _reason(status_code: int) -> str:
 
 
 def _corpus_root() -> Path:
-    return Path(os.getenv("AUTOBOTT_DATA_ROOT", Path(__file__).resolve().parents[2] / "data")) / "phase1_snapshots"
+    return phase1_snapshots_root()
 
 
 def _artifacts_root() -> Path:
-    return Path(os.getenv("AUTOBOTT_ARTIFACTS_ROOT", Path(__file__).resolve().parents[2] / "artifacts")) / "phase1_replay_campaign"
+    return phase1_replay_campaign_root()
 
 
 def _gate_path() -> Path:
-    return Path(os.getenv("AUTOBOTT_GATE_PATH", Path(__file__).resolve().parents[2] / "data" / "PHASE1_CYCLE_GATE.json"))
+    return default_gate_path()
 
 
 def _latest_manifest(root: Path) -> Path | None:

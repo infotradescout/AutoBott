@@ -227,6 +227,10 @@ def test_latest_bucket_edge_report_loads_without_mutating_gate(monkeypatch, tmp_
 def test_render_config_has_health_check() -> None:
     render_config = Path("render.yaml").read_text(encoding="utf-8")
     assert "healthCheckPath: /api/health" in render_config
+    assert "mountPath: /var/data/autobott" in render_config
+    assert "key: AUTOBOTT_DATA_ROOT" in render_config
+    assert "key: AUTOBOTT_ARTIFACTS_ROOT" in render_config
+    assert "key: AUTOBOTT_GATE_PATH" in render_config
 
 
 def test_frontend_contains_paper_only_live_locked_orders_disabled() -> None:

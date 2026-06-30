@@ -7,6 +7,7 @@ from typing import Any
 
 from .phase1_replay_campaign import run_replay_campaign
 from .phase1_snapshot_corpus import SnapshotCorpusQualityRules, load_snapshot_corpus
+from .runtime_paths import phase1_replay_campaign_root
 
 
 def run_phase1_campaign(
@@ -52,7 +53,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--start-date", help="Inclusive YYYY-MM-DD start date filter.")
     parser.add_argument("--end-date", help="Inclusive YYYY-MM-DD end date filter.")
     parser.add_argument("--exit-policy", default="fixed_v1", help="Replay exit policy version.")
-    parser.add_argument("--out", help="Artifacts root directory. Defaults to artifacts/phase1_replay_campaign.")
+    parser.add_argument("--out", help=f"Artifacts root directory. Defaults to {phase1_replay_campaign_root()}.")
     parser.add_argument("--campaign-run-id", default="default", help="Stable campaign identifier for artifact output.")
     args = parser.parse_args(argv)
 

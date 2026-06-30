@@ -11,6 +11,8 @@ from typing import Any
 
 from .phase1_alpaca_client import AlpacaPaperClient
 from .phase1_alpaca_config import AlpacaPaperConfig, require_alpaca_paper_config
+from .runtime_paths import gate_path as default_gate_path
+from .runtime_paths import phase1_snapshots_root
 
 
 def capture_now(
@@ -18,7 +20,7 @@ def capture_now(
     symbols: list[str],
     minutes: int,
     interval_seconds: int,
-    corpus_root: str | Path = Path("data") / "phase1_snapshots",
+    corpus_root: str | Path | None = None,
     client: Any | None = None,
     config: AlpacaPaperConfig | None = None,
     active_gate_path: str | Path | None = None,
@@ -34,8 +36,8 @@ def capture_now(
 
     resolved_config = (config or require_alpaca_paper_config()).validate()
     resolved_client = client or AlpacaPaperClient(resolved_config)
-    target_root = Path(corpus_root)
-    gate_target = Path(active_gate_path) if active_gate_path is not None else Path(__file__).resolve().parents[2] / "data" / "PHASE1_CYCLE_GATE.json"
+    target_root = Path(corpus_root) if corpus_root is not None else phase1_snapshots_root()
+    gate_target = Path(active_gate_path) if active_gate_path is not None else default_gate_path()
     gate_before = _file_hash(gate_target)
     iterations = max(1, math.ceil((minutes * 60) / interval_seconds))
     snapshots_written: dict[str, int] = {symbol.upper(): 0 for symbol in symbols}
@@ -137,7 +139,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--symbols", nargs="+", required=True, help="Ticker list, for example: SPY QQQ")
     parser.add_argument("--minutes", type=int, required=True, help="Total capture duration in whole minutes.")
     parser.add_argument("--interval-seconds", type=int, default=60, help="Capture cadence in seconds.")
-    parser.add_argument("--corpus-root", default=str(Path("data") / "phase1_snapshots"), help="Output root for raw and normalized snapshots.")
+    parser.add_argument("--corpus-root", default=str(phase1_snapshots_root()), help="Output root for raw and normalized snapshots.")
     args = parser.parse_args(argv)
 
     result = capture_now(

@@ -5,6 +5,7 @@ from pathlib import Path
 from typing import Any
 
 from .phase1_replay import run_replay
+from .runtime_paths import artifacts_root as default_artifacts_root
 
 
 FILL_MODELS = ("optimistic_mid", "realistic_mid_penalty", "conservative", "stress")
@@ -16,7 +17,7 @@ def run_slippage_sweep(
     artifacts_root: str | Path | None = None,
     run_id: str = "default",
 ) -> dict[str, Any]:
-    artifact_dir = (Path(artifacts_root) if artifacts_root is not None else Path("artifacts") / "phase1_replay") / run_id
+    artifact_dir = (Path(artifacts_root) if artifacts_root is not None else default_artifacts_root() / "phase1_replay") / run_id
     artifact_dir.mkdir(parents=True, exist_ok=True)
     results: dict[str, Any] = {}
 

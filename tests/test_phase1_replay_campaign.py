@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 
 from autobott_v2.phase1_replay_campaign import run_replay_campaign
 
@@ -171,3 +172,20 @@ def test_same_campaign_inputs_produce_same_bucket_edge_report(tmp_path) -> None:
     report_b = json.loads((tmp_path / "artifacts" / "campaignB" / "bucket_edge_report.json").read_text(encoding="utf-8"))
 
     assert {key: value for key, value in report_a.items() if key != "campaign_run_id"} == {key: value for key, value in report_b.items() if key != "campaign_run_id"}
+
+
+def test_replay_campaign_uses_env_artifacts_and_gate_paths(monkeypatch, tmp_path) -> None:
+    snapshots_dir = _campaign_fixture(tmp_path)
+    artifacts_root = tmp_path / "durable-artifacts"
+    gate_path = tmp_path / "durable-data" / "PHASE1_CYCLE_GATE.json"
+    gate_path.parent.mkdir(parents=True, exist_ok=True)
+    gate_path.write_text(json.dumps({"sentinel": True}, sort_keys=True), encoding="utf-8")
+    monkeypatch.setenv("AUTOBOTT_ARTIFACTS_ROOT", str(artifacts_root))
+    monkeypatch.setenv("AUTOBOTT_GATE_PATH", str(gate_path))
+
+    result = run_replay_campaign(snapshots_dir, campaign_run_id="campaign1")
+
+    campaign_dir = artifacts_root / "phase1_replay_campaign" / "campaign1"
+    assert campaign_dir.exists()
+    assert Path(result["artifact_dir"]) == campaign_dir
+    assert json.loads(gate_path.read_text(encoding="utf-8")) == {"sentinel": True}

@@ -5,6 +5,10 @@ services:
     buildCommand: pip install .
     startCommand: python -m autobott_v2.dashboard_app
     healthCheckPath: /api/health
+    disks:
+      - name: autobott-runtime
+        mountPath: /var/data/autobott
+        sizeGB: 1
     envVars:
       - key: ALPACA_ENV
         sync: false
@@ -24,3 +28,9 @@ services:
         sync: false
       - key: AUTOBOTT_DASHBOARD_AUTH_TOKEN
         sync: false
+      - key: AUTOBOTT_DATA_ROOT
+        value: /var/data/autobott/data
+      - key: AUTOBOTT_ARTIFACTS_ROOT
+        value: /var/data/autobott/artifacts
+      - key: AUTOBOTT_GATE_PATH
+        value: /var/data/autobott/data/PHASE1_CYCLE_GATE.json
