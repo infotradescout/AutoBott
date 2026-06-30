@@ -13,6 +13,8 @@
 - Add regime, direction, volatility, and contract-selection engines.
 - Add fail-closed checks and blocked reasons.
 - Add replayable JSON decision-card output and JSONL learning ledger.
+- Add paper-only Alpaca status/capture plumbing for real snapshot collection.
+- Add a paper-only operator dashboard for safe capture, replay, and report inspection.
 
 ## P2 Paper Execution
 
@@ -38,6 +40,10 @@ Prerequisite: Phase 1 decision cards must be stable and auditable.
 
 - Add interface-only adapter preview.
 - Keep execution disabled.
+
+## Deployment Constraint
+
+- Render or other hosted surfaces may read from `data/` and `artifacts/`, but must not be treated as durable until persistent disk or external storage is configured.
 
 ## P6 Live Adapter Gate
 

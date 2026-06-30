@@ -6,7 +6,7 @@ AutoBott exists to evaluate regime-first, read-only intraday options trade candi
 
 ## 1. Primary Purpose
 
-Provide a disciplined, fail-closed options decision system that can prove whether a repeatable regime, direction, volatility, and contract-selection process has edge before any broker order path exists.
+Provide a disciplined, fail-closed options decision system that can prove whether a repeatable regime, direction, volatility, and contract-selection process has edge before any broker order placement path exists.
 
 ## 2. Primary User
 
@@ -28,7 +28,7 @@ Intraday decisioning with replay windows used for historical evaluation.
 
 ## 6. Automation Level
 
-Automated read-only decision engine with deterministic rules. No live order routing.
+Automated read-only decision engine with deterministic rules plus paper-only market/status/capture connectivity. No live order routing and no order placement.
 
 ## 7. Decision Authority Model
 
@@ -71,9 +71,18 @@ Evaluation KPIs (after control KPIs are stable):
 
 - Live trading execution.
 - Broker connector integration for live order placement.
+- Paper or live order placement from AutoBott runtime surfaces.
 - Credential-gated runtime requirements for local validation.
 - External monetization/integration surface (SaaS/Discord/Stripe) in foundation phases.
 - Emotional or undocumented manual overrides.
+
+## 11A. Allowed Phase 1F/1G Connectivity
+
+- Paper-only Alpaca connectivity for account/status checks, market-data reads, and snapshot capture.
+- Operator-console workflows that start paper capture, run advisory replay campaigns, and read reports.
+- Server-side secret storage only. Browser clients must never receive Alpaca credentials.
+
+These allowances do not permit live trading, order placement, or discretionary execution controls.
 
 ## 12. Build Implications for P2/P3/P4
 

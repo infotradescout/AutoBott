@@ -6,6 +6,7 @@ This dashboard is an operator console for Phase 1 only.
 - Live trading locked
 - Order placement disabled
 - Advisory artifacts only
+- Not an execution console
 
 ## Render Service
 
@@ -42,6 +43,8 @@ Do not expose Alpaca credentials in frontend code.
 - Start a paper capture
 - Run an advisory replay campaign
 - Refresh corpus and report summaries
+
+The dashboard is allowed to read status, start paper-only capture, and run advisory replay. It must never expose Alpaca secrets, submit orders, enable live trading, or act as a broker execution console.
 
 ## Safety Checks
 
