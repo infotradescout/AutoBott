@@ -26,6 +26,9 @@
       }
     },
     "captured_at": { "type": "string", "format": "date-time" },
+    "market_timezone": { "type": "string", "minLength": 1 },
+    "timestamp_utc": { "type": "string", "format": "date-time" },
+    "timestamp_market": { "type": "string", "format": "date-time" },
     "ticker": { "type": "string", "minLength": 1 },
     "timestamp": { "type": "string", "format": "date-time" },
     "underlying_quote": {
@@ -81,6 +84,18 @@
       "type": "array",
       "minItems": 1,
       "items": { "type": "number", "minimum": 0 }
+    },
+    "cycle_profile": {
+      "type": "object",
+      "properties": {
+        "median_valley_to_peak_bars": { "type": ["integer", "null"], "minimum": 1 },
+        "median_peak_to_valley_bars": { "type": ["integer", "null"], "minimum": 1 },
+        "bars_since_last_valley": { "type": ["integer", "null"], "minimum": 0 },
+        "bars_since_last_peak": { "type": ["integer", "null"], "minimum": 0 },
+        "expected_holding_days": { "type": ["integer", "null"], "minimum": 1 },
+        "cycle_confidence": { "type": "string", "enum": ["unknown", "low", "medium", "high"] },
+        "last_pivot_type": { "type": "string", "enum": ["valley", "peak", "unknown"] }
+      }
     }
   },
   "$defs": {
