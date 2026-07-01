@@ -237,6 +237,8 @@ def test_frontend_contains_paper_only_live_locked_orders_disabled() -> None:
     status, body = _invoke_app("GET", "/")
     assert status.startswith("200")
     assert "PAPER ONLY | LIVE TRADING LOCKED | ORDERS DISABLED" in body
+    assert "AutoBott Phase 1 Operator Console" in body
+    assert "LOCKED" in body
 
 
 def test_frontend_contains_no_buy_sell_submit_order_controls() -> None:
@@ -245,3 +247,10 @@ def test_frontend_contains_no_buy_sell_submit_order_controls() -> None:
     assert "buy button" not in lowered
     assert "sell button" not in lowered
     assert "submit order" not in lowered
+
+
+def test_frontend_contains_clean_locked_state_copy() -> None:
+    status, body = _invoke_app("GET", "/")
+    assert status.startswith("200")
+    assert "Dashboard token required" in body
+    assert "Set token to view this panel." in body

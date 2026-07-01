@@ -247,86 +247,734 @@ def _dashboard_html() -> str:
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>AutoBott Phase 1 Operator Console</title>
   <style>
-    :root { --bg:#f5efe1; --ink:#132a13; --card:#fffdf6; --accent:#2d6a4f; --warn:#bc4749; --line:#d8cdb8; }
-    body { margin:0; font-family: Georgia, 'Times New Roman', serif; background: linear-gradient(180deg, #efe7d6, #f8f4ea); color:var(--ink); }
-    header { padding:24px; background: radial-gradient(circle at top left, #fefae0, #dde5b6); border-bottom:1px solid var(--line); }
-    .banner { font-weight:bold; letter-spacing:0.04em; color:#fff; background:linear-gradient(90deg, var(--accent), #40916c); padding:12px 16px; display:inline-block; border-radius:999px; }
-    main { padding:24px; display:grid; gap:18px; }
-    .grid { display:grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap:16px; }
-    .card { background:var(--card); border:1px solid var(--line); border-radius:18px; padding:16px; box-shadow:0 12px 30px rgba(19,42,19,0.08); }
-    button { border:0; border-radius:999px; padding:12px 16px; background:var(--accent); color:#fff; cursor:pointer; margin-right:8px; margin-bottom:8px; }
-    button.secondary { background:#6c757d; }
-    pre { white-space:pre-wrap; word-break:break-word; background:#fbf8f1; padding:12px; border-radius:12px; border:1px solid var(--line); }
-    table { width:100%; border-collapse:collapse; font-size:14px; }
-    th, td { text-align:left; padding:8px; border-bottom:1px solid var(--line); }
+    :root {
+      --bg:#0b0f14;
+      --bg-alt:#121821;
+      --panel:#151d28;
+      --panel-2:#192230;
+      --panel-3:#0f151d;
+      --text:#e7edf5;
+      --muted:#97a6ba;
+      --line:#243244;
+      --accent:#3ddc97;
+      --accent-dim:#204636;
+      --warn:#f4b860;
+      --danger:#ff6b6b;
+      --info:#6ec1ff;
+      --shadow:0 16px 40px rgba(0,0,0,0.28);
+      --radius:18px;
+    }
+    * { box-sizing:border-box; }
+    body {
+      margin:0;
+      font-family: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      background:
+        radial-gradient(circle at top right, rgba(61,220,151,0.10), transparent 24rem),
+        radial-gradient(circle at top left, rgba(110,193,255,0.08), transparent 22rem),
+        linear-gradient(180deg, #0b0f14, #111824 55%, #0b0f14);
+      color:var(--text);
+      min-height:100vh;
+    }
+    .shell { max-width:1440px; margin:0 auto; padding:20px; }
+    .topbar {
+      display:grid;
+      gap:18px;
+      grid-template-columns: minmax(0, 1.4fr) minmax(320px, 1fr);
+      align-items:stretch;
+    }
+    .hero, .meta-card, .panel {
+      background:linear-gradient(180deg, rgba(21,29,40,0.98), rgba(15,21,29,0.98));
+      border:1px solid var(--line);
+      border-radius:var(--radius);
+      box-shadow:var(--shadow);
+    }
+    .hero { padding:22px; }
+    .hero-top, .meta-top, .section-head, .group-head, .panel-head {
+      display:flex;
+      align-items:center;
+      justify-content:space-between;
+      gap:12px;
+      flex-wrap:wrap;
+    }
+    .eyebrow {
+      color:var(--accent);
+      letter-spacing:0.16em;
+      text-transform:uppercase;
+      font-size:12px;
+      font-weight:700;
+    }
+    h1 {
+      margin:10px 0 8px;
+      font-size:clamp(28px, 4vw, 40px);
+      line-height:1.05;
+      letter-spacing:-0.03em;
+    }
+    .hero p, .meta-note, .section-note, .muted { color:var(--muted); }
+    .chip-row, .status-row, .action-row { display:flex; flex-wrap:wrap; gap:10px; }
+    .chip, .badge {
+      display:inline-flex;
+      align-items:center;
+      gap:8px;
+      border-radius:999px;
+      padding:8px 12px;
+      font-size:12px;
+      font-weight:700;
+      letter-spacing:0.06em;
+      text-transform:uppercase;
+      border:1px solid var(--line);
+      background:rgba(255,255,255,0.03);
+    }
+    .badge.safe, .chip.safe { color:var(--accent); border-color:#275640; background:rgba(61,220,151,0.10); }
+    .badge.warn, .chip.warn { color:var(--warn); border-color:#5b4423; background:rgba(244,184,96,0.10); }
+    .badge.danger, .chip.danger { color:var(--danger); border-color:#5a2b2b; background:rgba(255,107,107,0.12); }
+    .badge.info, .chip.info { color:var(--info); border-color:#244767; background:rgba(110,193,255,0.10); }
+    .meta-card { padding:18px; display:grid; gap:16px; }
+    .meta-grid {
+      display:grid;
+      grid-template-columns:repeat(2, minmax(0, 1fr));
+      gap:12px;
+    }
+    .mini {
+      background:rgba(255,255,255,0.02);
+      border:1px solid var(--line);
+      border-radius:14px;
+      padding:12px;
+    }
+    .mini-label {
+      font-size:11px;
+      color:var(--muted);
+      text-transform:uppercase;
+      letter-spacing:0.10em;
+      margin-bottom:8px;
+    }
+    .mono {
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      word-break:break-word;
+    }
+    main { display:grid; gap:18px; margin-top:18px; }
+    .section {
+      display:grid;
+      gap:14px;
+    }
+    .grid {
+      display:grid;
+      grid-template-columns:repeat(auto-fit, minmax(250px, 1fr));
+      gap:14px;
+    }
+    .panel { padding:16px; min-height:190px; }
+    .panel-head h2, .group-head h2, .section-head h2 {
+      margin:0;
+      font-size:15px;
+      text-transform:uppercase;
+      letter-spacing:0.08em;
+    }
+    .panel-head h3 { margin:0; font-size:16px; }
+    .panel-body { margin-top:14px; display:grid; gap:12px; }
+    .metrics { display:grid; gap:10px; }
+    .metric {
+      display:flex;
+      justify-content:space-between;
+      gap:16px;
+      border-bottom:1px solid rgba(255,255,255,0.05);
+      padding-bottom:8px;
+    }
+    .metric:last-child { border-bottom:0; padding-bottom:0; }
+    .metric-label { color:var(--muted); font-size:13px; }
+    .metric-value { text-align:right; font-weight:600; }
+    .metric-value.compact { font-size:13px; }
+    .operator-layout {
+      display:grid;
+      grid-template-columns:minmax(0, 1.2fr) minmax(320px, 0.8fr);
+      gap:18px;
+    }
+    .group-grid {
+      display:grid;
+      grid-template-columns:repeat(auto-fit, minmax(210px, 1fr));
+      gap:12px;
+      margin-top:14px;
+    }
+    .group {
+      border:1px solid var(--line);
+      background:rgba(255,255,255,0.02);
+      border-radius:14px;
+      padding:14px;
+      display:grid;
+      gap:12px;
+    }
+    .group-title {
+      font-size:13px;
+      font-weight:700;
+      letter-spacing:0.08em;
+      text-transform:uppercase;
+      color:var(--muted);
+    }
+    button {
+      border:1px solid transparent;
+      border-radius:12px;
+      padding:11px 13px;
+      font-weight:700;
+      font-size:13px;
+      cursor:pointer;
+      background:#203146;
+      color:var(--text);
+      transition:transform 120ms ease, border-color 120ms ease, background 120ms ease, opacity 120ms ease;
+      text-align:left;
+    }
+    button:hover:not(:disabled) { transform:translateY(-1px); border-color:#32506f; }
+    button:disabled { cursor:not-allowed; opacity:0.45; }
+    button.primary { background:linear-gradient(180deg, #1c6e4a, #124b32); border-color:#2d7f59; }
+    button.secondary { background:#1d2a39; border-color:#2f4157; }
+    button.ghost { background:transparent; border-color:#2a394c; }
+    .button-note { color:var(--muted); font-size:12px; }
+    .log {
+      min-height:260px;
+      background:#091019;
+      border:1px solid #1e2a38;
+      border-radius:14px;
+      padding:14px;
+      display:grid;
+      gap:10px;
+      align-content:start;
+    }
+    .log-entry {
+      border-left:3px solid #2d7f59;
+      background:rgba(255,255,255,0.02);
+      border-radius:10px;
+      padding:10px 12px;
+    }
+    .log-entry.warn { border-left-color:var(--warn); }
+    .log-entry.danger { border-left-color:var(--danger); }
+    .log-label {
+      font-size:11px;
+      text-transform:uppercase;
+      letter-spacing:0.08em;
+      color:var(--muted);
+      margin-bottom:4px;
+    }
+    .locked, .empty, .error-state {
+      min-height:110px;
+      display:grid;
+      align-content:center;
+      gap:6px;
+      border:1px dashed var(--line);
+      border-radius:14px;
+      padding:16px;
+      background:rgba(255,255,255,0.02);
+    }
+    .locked strong, .error-state strong, .empty strong { font-size:15px; }
+    .locked strong { color:var(--warn); }
+    .error-state strong { color:var(--danger); }
+    details {
+      border-top:1px solid rgba(255,255,255,0.06);
+      padding-top:10px;
+    }
+    summary {
+      cursor:pointer;
+      color:var(--muted);
+      font-size:12px;
+      text-transform:uppercase;
+      letter-spacing:0.08em;
+      font-weight:700;
+    }
+    pre {
+      margin:10px 0 0;
+      white-space:pre-wrap;
+      word-break:break-word;
+      background:#0a1118;
+      border:1px solid #1d2b3a;
+      color:#c8d5e5;
+      border-radius:12px;
+      padding:12px;
+      font-size:12px;
+      max-height:260px;
+      overflow:auto;
+    }
+    .table {
+      width:100%;
+      border-collapse:collapse;
+      font-size:13px;
+    }
+    .table th, .table td {
+      text-align:left;
+      padding:8px 0;
+      border-bottom:1px solid rgba(255,255,255,0.05);
+      vertical-align:top;
+    }
+    .table th { color:var(--muted); font-weight:600; }
+    .foot-note { color:var(--muted); font-size:12px; }
+    @media (max-width: 1080px) {
+      .topbar, .operator-layout { grid-template-columns:1fr; }
+    }
+    @media (max-width: 720px) {
+      .shell { padding:14px; }
+      .meta-grid, .group-grid { grid-template-columns:1fr; }
+      .grid { grid-template-columns:1fr; }
+    }
   </style>
 </head>
 <body>
-  <header>
-    <h1>AutoBott Phase 1 Operator Console</h1>
-    <div class="banner">PAPER ONLY | LIVE TRADING LOCKED | ORDERS DISABLED</div>
-    <p>Safe operator console for paper capture, advisory campaigns, and report inspection.</p>
-  </header>
-  <main>
-    <section class="grid">
-      <div class="card"><h2>Alpaca Paper Config</h2><pre id="alpaca-status">Loading...</pre></div>
-      <div class="card"><h2>Latest Capture</h2><pre id="corpus-status">Loading...</pre></div>
-      <div class="card"><h2>Latest Campaign</h2><pre id="campaign-status">Loading...</pre></div>
-      <div class="card"><h2>Active Gate Safety</h2><pre id="safety-status">Loading...</pre></div>
-    </section>
-    <section class="card">
-      <h2>Actions</h2>
-      <button onclick="setToken()">Set Dashboard Token</button>
-      <button onclick="refreshAll()" class="secondary">Refresh</button>
-      <button onclick="startCapture(5)">Run 5-minute capture</button>
-      <button onclick="startCapture(30)">Run 30-minute capture</button>
-      <button onclick="runCampaign()">Run campaign from latest corpus</button>
-      <pre id="action-log">Idle.</pre>
-    </section>
-    <section class="card">
-      <h2>Bucket Edge Summary</h2>
-      <pre id="bucket-report">Loading...</pre>
-    </section>
-    <section class="card">
-      <h2>Gate Candidate Summary</h2>
-      <pre id="gate-report">Loading...</pre>
-    </section>
-    <section class="card">
-      <h2>Operator Notes</h2>
-      <p>Trading controls are intentionally omitted. This console is limited to paper capture, advisory replay, and report inspection.</p>
-    </section>
-  </main>
+  <div class="shell">
+    <header class="topbar">
+      <section class="hero">
+        <div class="hero-top">
+          <span class="eyebrow">AutoBott / Trader's Corner</span>
+          <div class="status-row">
+            <span class="badge safe">PAPER ONLY</span>
+            <span class="badge warn">LIVE TRADING LOCKED</span>
+            <span class="badge danger">ORDERS DISABLED</span>
+          </div>
+        </div>
+        <h1>AutoBott Phase 1 Operator Console</h1>
+        <p>Production operator command center for paper capture, advisory replay, report review, and gate safety verification.</p>
+        <div class="muted mono">PAPER ONLY | LIVE TRADING LOCKED | ORDERS DISABLED</div>
+        <div class="chip-row">
+          <span class="chip info">Current Service <span id="service-name">autobott-phase1-dashboard</span></span>
+          <span class="chip warn" id="auth-badge">LOCKED</span>
+          <span class="chip safe" id="service-badge">BOOT CHECK RUNNING</span>
+        </div>
+      </section>
+
+      <aside class="meta-card">
+        <div class="meta-top">
+          <h2 style="margin:0;">System Status</h2>
+          <span class="badge info mono" id="version-badge">Version loading</span>
+        </div>
+        <div class="meta-grid">
+          <div class="mini">
+            <div class="mini-label">Environment</div>
+            <div class="mono" id="env-value">PAPER ONLY</div>
+          </div>
+          <div class="mini">
+            <div class="mini-label">Auth State</div>
+            <div class="mono" id="auth-state-text">LOCKED</div>
+          </div>
+          <div class="mini">
+            <div class="mini-label">Health</div>
+            <div class="mono" id="health-state-text">Checking</div>
+          </div>
+          <div class="mini">
+            <div class="mini-label">Persistence Root</div>
+            <div class="mono" id="persistence-root-text">Waiting for data</div>
+          </div>
+        </div>
+        <div class="meta-note">Trading controls are intentionally omitted. This surface stays paper-only, live-locked, and order-disabled.</div>
+      </aside>
+    </header>
+
+    <main>
+      <section class="section">
+        <div class="section-head">
+          <div>
+            <h2>Operator Snapshot</h2>
+            <div class="section-note">High-signal status cards for safety, connectivity, capture state, and latest campaign output.</div>
+          </div>
+          <span class="badge info" id="last-refresh">Awaiting refresh</span>
+        </div>
+        <div class="grid">
+          <section class="panel">
+            <div class="panel-head"><h3>Alpaca Paper Config</h3><span class="badge safe">STATUS</span></div>
+            <div class="panel-body" id="alpaca-status"></div>
+          </section>
+          <section class="panel">
+            <div class="panel-head"><h3>Latest Capture</h3><span class="badge info">CAPTURE</span></div>
+            <div class="panel-body" id="corpus-status"></div>
+          </section>
+          <section class="panel">
+            <div class="panel-head"><h3>Latest Campaign</h3><span class="badge info">REPLAY</span></div>
+            <div class="panel-body" id="campaign-status"></div>
+          </section>
+          <section class="panel">
+            <div class="panel-head"><h3>Active Gate Safety</h3><span class="badge warn">SAFETY / GATE</span></div>
+            <div class="panel-body" id="safety-status"></div>
+          </section>
+          <section class="panel">
+            <div class="panel-head"><h3>Bucket Edge Summary</h3><span class="badge info">REPORTS</span></div>
+            <div class="panel-body" id="bucket-report"></div>
+          </section>
+          <section class="panel">
+            <div class="panel-head"><h3>Gate Candidate Summary</h3><span class="badge warn">REPORTS</span></div>
+            <div class="panel-body" id="gate-report"></div>
+          </section>
+          <section class="panel">
+            <div class="panel-head"><h3>Persistence Status</h3><span class="badge info">STORAGE</span></div>
+            <div class="panel-body" id="persistence-status"></div>
+          </section>
+        </div>
+      </section>
+
+      <section class="operator-layout">
+        <section class="panel">
+          <div class="group-head">
+            <div>
+              <h2>Operator Actions</h2>
+              <div class="section-note">Controlled flows only. Token-gated actions stay disabled until authentication succeeds.</div>
+            </div>
+            <span class="badge warn" id="action-state">TOKEN REQUIRED</span>
+          </div>
+          <div class="group-grid">
+            <div class="group">
+              <div class="group-title">Auth</div>
+              <button class="primary" onclick="setToken()">Set Dashboard Token</button>
+              <button class="ghost" onclick="clearToken()">Clear Token</button>
+              <div class="button-note">Locked panels will show “Dashboard token required” until a valid token is accepted.</div>
+            </div>
+            <div class="group">
+              <div class="group-title">Capture</div>
+              <button class="primary protected-action" onclick="startCapture(5)">Run 5-minute capture</button>
+              <button class="secondary protected-action" onclick="startCapture(30)">Run 30-minute capture</button>
+              <div class="button-note">Paper-only snapshot capture. No order placement path exists.</div>
+            </div>
+            <div class="group">
+              <div class="group-title">Campaign</div>
+              <button class="primary protected-action" onclick="runCampaign()">Run campaign from latest corpus</button>
+              <div class="button-note">Advisory replay only. Live trading remains disabled.</div>
+            </div>
+            <div class="group">
+              <div class="group-title">Refresh</div>
+              <button class="secondary" onclick="refreshAll()">Refresh all panels</button>
+              <button class="ghost protected-action" onclick="refreshProtected()">Refresh protected only</button>
+              <div class="button-note">Health is public-by-design. Protected panels still fail closed.</div>
+            </div>
+          </div>
+        </section>
+
+        <aside class="panel">
+          <div class="group-head">
+            <div>
+              <h2>Operator Log</h2>
+              <div class="section-note">Compact console log with plain-English action results.</div>
+            </div>
+            <span class="badge info">LATEST</span>
+          </div>
+          <div class="panel-body">
+            <div class="log" id="action-log">
+              <div class="log-entry">
+                <div class="log-label">Status</div>
+                <div>Console ready. Protected panels are locked until authentication succeeds.</div>
+              </div>
+            </div>
+          </div>
+        </aside>
+      </section>
+    </main>
+  </div>
   <script>
+    const dashboardState = {
+      authState: 'LOCKED',
+      version: 'loading',
+      safety: null,
+      corpus: null,
+      campaign: null
+    };
+
     const apiHeaders = () => {
       const token = sessionStorage.getItem('dashboardToken') || '';
       return token ? { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' } : { 'Content-Type': 'application/json' };
     };
+
     async function callApi(path, options = {}) {
       const response = await fetch(path, { ...options, headers: { ...apiHeaders(), ...(options.headers || {}) } });
-      return response.json();
+      let payload = {};
+      try {
+        payload = await response.json();
+      } catch {
+        payload = {};
+      }
+      return { ok: response.ok, status: response.status, payload };
     }
+
     function setToken() {
       const value = window.prompt('Enter dashboard auth token');
-      if (value) sessionStorage.setItem('dashboardToken', value);
+      if (value) {
+        sessionStorage.setItem('dashboardToken', value);
+        logEntry('Token updated', 'Dashboard token stored in browser session. Refreshing protected panels.', 'warn');
+        refreshAll();
+      }
     }
+
+    function clearToken() {
+      sessionStorage.removeItem('dashboardToken');
+      setAuthState('LOCKED');
+      syncActionState();
+      logEntry('Token cleared', 'Protected panels are locked again until a valid token is set.', 'warn');
+      refreshAll();
+    }
+
+    function setAuthState(state) {
+      dashboardState.authState = state;
+      document.getElementById('auth-badge').textContent = state;
+      document.getElementById('auth-badge').className = `chip ${state === 'AUTHENTICATED' ? 'safe' : 'warn'}`;
+      document.getElementById('auth-state-text').textContent = state;
+      document.getElementById('action-state').textContent = state === 'AUTHENTICATED' ? 'CONTROLLED ACCESS' : 'TOKEN REQUIRED';
+      document.getElementById('action-state').className = `badge ${state === 'AUTHENTICATED' ? 'safe' : 'warn'}`;
+    }
+
+    function syncActionState() {
+      const tokenPresent = !!sessionStorage.getItem('dashboardToken');
+      const enabled = tokenPresent && dashboardState.authState === 'AUTHENTICATED';
+      document.querySelectorAll('.protected-action').forEach((button) => {
+        button.disabled = !enabled;
+      });
+    }
+
+    function updateRefreshStamp() {
+      document.getElementById('last-refresh').textContent = `Refreshed ${new Date().toLocaleTimeString()}`;
+    }
+
+    function statusBadge(text, tone = 'info') {
+      return `<span class="badge ${tone}">${text}</span>`;
+    }
+
+    function detailsBlock(payload) {
+      return `<details><summary>Raw JSON</summary><pre>${escapeHtml(JSON.stringify(payload, null, 2))}</pre></details>`;
+    }
+
+    function escapeHtml(value) {
+      return String(value)
+        .replaceAll('&', '&amp;')
+        .replaceAll('<', '&lt;')
+        .replaceAll('>', '&gt;');
+    }
+
+    function metricList(items) {
+      return `<div class="metrics">${items.map(([label, value]) => `
+        <div class="metric">
+          <div class="metric-label">${escapeHtml(label)}</div>
+          <div class="metric-value compact">${value}</div>
+        </div>`).join('')}
+      </div>`;
+    }
+
+    function lockedState() {
+      return `
+        <div class="locked">
+          <strong>Locked</strong>
+          <div>Dashboard token required</div>
+          <div class="muted">Set token to view this panel.</div>
+        </div>`;
+    }
+
+    function emptyState(title, detail) {
+      return `<div class="empty"><strong>${escapeHtml(title)}</strong><div>${escapeHtml(detail)}</div></div>`;
+    }
+
+    function errorState(title, detail, payload = null) {
+      return `
+        <div class="error-state">
+          <strong>${escapeHtml(title)}</strong>
+          <div>${escapeHtml(detail)}</div>
+        </div>
+        ${payload ? detailsBlock(payload) : ''}`;
+    }
+
+    function logEntry(title, detail, tone = 'safe') {
+      const container = document.getElementById('action-log');
+      const entry = document.createElement('div');
+      entry.className = `log-entry ${tone === 'danger' ? 'danger' : tone === 'warn' ? 'warn' : ''}`;
+      entry.innerHTML = `<div class="log-label">${escapeHtml(new Date().toLocaleTimeString())} · ${escapeHtml(title)}</div><div>${escapeHtml(detail)}</div>`;
+      container.prepend(entry);
+      while (container.children.length > 6) {
+        container.removeChild(container.lastChild);
+      }
+    }
+
+    function renderHealth(payload) {
+      dashboardState.version = payload.version || 'dev';
+      document.getElementById('service-name').textContent = payload.app || 'autobott-phase1-dashboard';
+      document.getElementById('version-badge').textContent = payload.version || 'dev';
+      document.getElementById('health-state-text').textContent = payload.ok ? 'OK' : 'CHECK FAILED';
+      document.getElementById('service-badge').textContent = payload.ok ? 'SERVICE HEALTHY' : 'HEALTH CHECK FAILED';
+      document.getElementById('service-badge').className = `chip ${payload.ok ? 'safe' : 'danger'}`;
+    }
+
+    function renderProtectedPanel(targetId, result, formatter) {
+      const target = document.getElementById(targetId);
+      if (result.status === 401) {
+        target.innerHTML = lockedState();
+        return false;
+      }
+      if (!result.ok) {
+        target.innerHTML = errorState('Request failed', result.payload.detail || result.payload.error || 'Unknown error', result.payload);
+        return false;
+      }
+      setAuthState('AUTHENTICATED');
+      target.innerHTML = formatter(result.payload);
+      return true;
+    }
+
+    function renderSafety(payload) {
+      dashboardState.safety = payload;
+      const gateHash = payload.active_gate_hash ? `${payload.active_gate_hash.slice(0, 12)}...` : 'missing';
+      document.getElementById('env-value').textContent = payload.paper_only ? 'PAPER ONLY' : 'UNKNOWN';
+      return `
+        ${metricList([
+          ['Mode', payload.paper_only ? statusBadge('PAPER ONLY', 'safe') : statusBadge('UNKNOWN', 'warn')],
+          ['Live trading', payload.live_trading_enabled ? statusBadge('ENABLED', 'danger') : statusBadge('LOCKED', 'safe')],
+          ['Order placement', payload.order_placement_enabled ? statusBadge('ENABLED', 'danger') : statusBadge('DISABLED', 'safe')],
+          ['Gate mutations', payload.active_gate_mutation_allowed ? statusBadge('ALLOWED', 'danger') : statusBadge('BLOCKED', 'safe')],
+          ['Order methods', payload.order_methods_present ? statusBadge('PRESENT', 'danger') : statusBadge('ABSENT', 'safe')],
+          ['Gate hash', `<span class="mono">${escapeHtml(gateHash)}</span>`]
+        ])}
+        ${detailsBlock(payload)}`;
+    }
+
+    function renderAlpaca(payload) {
+      const tone = payload.ok ? 'safe' : 'warn';
+      return `
+        ${metricList([
+          ['Environment', statusBadge(payload.paper_only ? 'PAPER' : 'UNKNOWN', tone)],
+          ['Connection', statusBadge(payload.status || 'unknown', payload.ok ? 'safe' : 'warn')],
+          ['Credentials', statusBadge(payload.credentials_present ? 'PRESENT' : 'MISSING', payload.credentials_present ? 'safe' : 'warn')],
+          ['Account status', escapeHtml(payload.account_status || 'not available')],
+          ['Quote checks', `<span class="mono">${escapeHtml(JSON.stringify(payload.quote_checks || {}, null, 0))}</span>`]
+        ])}
+        ${detailsBlock(payload)}`;
+    }
+
+    function renderCorpus(payload) {
+      dashboardState.corpus = payload;
+      if (!payload.ok) {
+        return emptyState('No paper capture found', 'Run a safe capture after authentication to populate this panel.');
+      }
+      return `
+        ${metricList([
+          ['Symbol', escapeHtml(payload.symbol || 'unknown')],
+          ['Trading date', escapeHtml(payload.trading_date || 'unknown')],
+          ['Snapshots', escapeHtml(payload.snapshots_captured ?? '0')],
+          ['Option quotes', escapeHtml(payload.option_quotes_captured ?? '0')],
+          ['Quality flags', escapeHtml((payload.data_quality_flags || []).join(', ') || 'None')]
+        ])}
+        ${detailsBlock(payload)}`;
+    }
+
+    function renderCampaign(payload) {
+      dashboardState.campaign = payload;
+      if (!payload.ok) {
+        return emptyState('No campaign artifacts found', 'Run a campaign from the latest corpus after authentication.');
+      }
+      return `
+        ${metricList([
+          ['Campaign', escapeHtml(payload.campaign_run_id || 'unknown')],
+          ['Corpus type', escapeHtml(payload.corpus_type || 'unknown')],
+          ['Symbols', escapeHtml((payload.symbols || []).join(', ') || 'unknown')],
+          ['Campaign valid', statusBadge(payload.campaign_quality?.campaign_valid ? 'VALID' : 'PENDING', payload.campaign_quality?.campaign_valid ? 'safe' : 'warn')],
+          ['Trading days', escapeHtml(payload.corpus_quality?.trading_days ?? 'unknown')]
+        ])}
+        ${detailsBlock(payload)}`;
+    }
+
+    function renderBucketReport(payload) {
+      if (!payload.ok) {
+        return emptyState('No bucket edge report', 'Run a campaign to generate advisory bucket metrics.');
+      }
+      const rows = (payload.buckets || []).slice(0, 4).map((bucket) => {
+        const primary = bucket.fill_models?.realistic_mid_penalty || {};
+        return `<tr><td>${escapeHtml(bucket.bucket)}</td><td>${escapeHtml(primary.closed_trades ?? '0')}</td><td>${escapeHtml(primary.profit_factor ?? 'n/a')}</td></tr>`;
+      }).join('');
+      return `
+        <table class="table">
+          <thead><tr><th>Bucket</th><th>Closed</th><th>PF</th></tr></thead>
+          <tbody>${rows || '<tr><td colspan="3">No bucket data</td></tr>'}</tbody>
+        </table>
+        ${detailsBlock(payload)}`;
+    }
+
+    function renderGateReport(payload) {
+      if (!payload.ok) {
+        return emptyState('No gate candidate report', 'Run a campaign to generate candidate review output.');
+      }
+      const rows = Object.entries(payload.bucket_candidates || {}).slice(0, 4).map(([bucket, candidate]) => `
+        <tr>
+          <td>${escapeHtml(bucket)}</td>
+          <td>${candidate.eligible_for_paper_forward ? statusBadge('PAPER REVIEW', 'safe') : statusBadge('BLOCKED', 'warn')}</td>
+          <td>${candidate.live_enabled ? statusBadge('LIVE', 'danger') : statusBadge('OFF', 'safe')}</td>
+        </tr>`).join('');
+      return `
+        <table class="table">
+          <thead><tr><th>Bucket</th><th>Paper</th><th>Live</th></tr></thead>
+          <tbody>${rows || '<tr><td colspan="3">No gate candidates</td></tr>'}</tbody>
+        </table>
+        ${detailsBlock(payload)}`;
+    }
+
+    function renderPersistenceStatus() {
+      const safety = dashboardState.safety;
+      const corpus = dashboardState.corpus;
+      const campaign = dashboardState.campaign;
+      if (!safety) {
+        document.getElementById('persistence-status').innerHTML = emptyState('Persistence unknown', 'Authenticate to inspect active runtime paths.');
+        return;
+      }
+      const roots = [safety.active_gate_path, corpus?.manifest_path, campaign?.artifact_dir].filter(Boolean);
+      const durable = roots.some((path) => String(path).startsWith('/var/data/autobott'));
+      document.getElementById('persistence-root-text').textContent = durable ? '/var/data/autobott' : (roots[0] || 'not visible');
+      document.getElementById('persistence-status').innerHTML = `
+        ${metricList([
+          ['Disk-backed path detected', durable ? statusBadge('YES', 'safe') : statusBadge('UNKNOWN', 'warn')],
+          ['Gate path', `<span class="mono">${escapeHtml(safety.active_gate_path || 'unknown')}</span>`],
+          ['Capture path', `<span class="mono">${escapeHtml(corpus?.manifest_path || 'not yet visible')}</span>`],
+          ['Campaign path', `<span class="mono">${escapeHtml(campaign?.artifact_dir || 'not yet visible')}</span>`]
+        ])}
+        <div class="foot-note">Persistent disk proof is strongest after capture/campaign output survives a restart or redeploy.</div>`;
+    }
+
+    async function refreshHealth() {
+      const result = await callApi('/api/health');
+      renderHealth(result.payload);
+      return result;
+    }
+
+    async function refreshProtected() {
+      setAuthState(sessionStorage.getItem('dashboardToken') ? 'LOCKED' : 'LOCKED');
+      const protectedResults = await Promise.all([
+        callApi('/api/safety'),
+        callApi('/api/alpaca/status'),
+        callApi('/api/corpus/latest'),
+        callApi('/api/campaign/latest'),
+        callApi('/api/reports/bucket-edge/latest'),
+        callApi('/api/reports/gate-candidate/latest')
+      ]);
+      renderProtectedPanel('safety-status', protectedResults[0], renderSafety);
+      renderProtectedPanel('alpaca-status', protectedResults[1], renderAlpaca);
+      renderProtectedPanel('corpus-status', protectedResults[2], renderCorpus);
+      renderProtectedPanel('campaign-status', protectedResults[3], renderCampaign);
+      renderProtectedPanel('bucket-report', protectedResults[4], renderBucketReport);
+      renderProtectedPanel('gate-report', protectedResults[5], renderGateReport);
+      renderPersistenceStatus();
+      syncActionState();
+    }
+
     async function refreshAll() {
-      document.getElementById('safety-status').textContent = JSON.stringify(await callApi('/api/safety'), null, 2);
-      document.getElementById('alpaca-status').textContent = JSON.stringify(await callApi('/api/alpaca/status'), null, 2);
-      document.getElementById('corpus-status').textContent = JSON.stringify(await callApi('/api/corpus/latest'), null, 2);
-      document.getElementById('campaign-status').textContent = JSON.stringify(await callApi('/api/campaign/latest'), null, 2);
-      document.getElementById('bucket-report').textContent = JSON.stringify(await callApi('/api/reports/bucket-edge/latest'), null, 2);
-      document.getElementById('gate-report').textContent = JSON.stringify(await callApi('/api/reports/gate-candidate/latest'), null, 2);
+      await refreshHealth();
+      await refreshProtected();
+      updateRefreshStamp();
     }
+
     async function startCapture(minutes) {
-      const payload = await callApi('/api/capture/start', { method:'POST', body: JSON.stringify({ symbols:['SPY','QQQ'], minutes, interval_seconds:60 }) });
-      document.getElementById('action-log').textContent = JSON.stringify(payload, null, 2);
-      refreshAll();
+      const result = await callApi('/api/capture/start', { method:'POST', body: JSON.stringify({ symbols:['SPY','QQQ'], minutes, interval_seconds:60 }) });
+      if (result.ok) {
+        logEntry('Capture completed', `${minutes}-minute paper capture finished without enabling trading or mutating the active gate.`);
+      } else if (result.status === 401) {
+        logEntry('Capture blocked', 'Dashboard token required before protected actions can run.', 'warn');
+      } else {
+        logEntry('Capture failed', result.payload.detail || result.payload.error || 'Unknown capture failure.', 'danger');
+      }
+      await refreshAll();
     }
+
     async function runCampaign() {
-      const payload = await callApi('/api/campaign/run', { method:'POST', body: JSON.stringify({}) });
-      document.getElementById('action-log').textContent = JSON.stringify(payload, null, 2);
-      refreshAll();
+      const result = await callApi('/api/campaign/run', { method:'POST', body: JSON.stringify({}) });
+      if (result.ok) {
+        logEntry('Campaign completed', 'Advisory replay campaign finished. Review report panels for candidate and bucket summaries.');
+      } else if (result.status === 401) {
+        logEntry('Campaign blocked', 'Dashboard token required before protected actions can run.', 'warn');
+      } else {
+        logEntry('Campaign failed', result.payload.detail || result.payload.error || 'Unknown campaign failure.', 'danger');
+      }
+      await refreshAll();
     }
+
+    syncActionState();
     refreshAll();
   </script>
 </body>
