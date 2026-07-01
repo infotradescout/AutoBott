@@ -6,3 +6,9 @@ __pycache__/
 *.egg-info/
 build/
 dist/
+.env
+.env.*
+local.env.ps1
+data/phase1_snapshots/
+data/execution/
+artifacts/

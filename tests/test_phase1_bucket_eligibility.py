@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from autobott_v2.phase1_bucket_eligibility import BucketEligibilityRules, evaluate_bucket_eligibility
+from autobott_v2.phase1_bucket_eligibility import BucketEligibilityRules, build_bucket_edge_report, evaluate_bucket_eligibility
 
 
 def _metrics(
@@ -70,3 +70,80 @@ def test_single_outlier_profit_does_not_unlock_bucket() -> None:
 
     assert result["eligible_for_paper_forward"] is False
     assert "single_outlier_profit_dependency" in result["blocking_reasons"]
+
+
+def test_bucket_edge_report_carries_thesis_quality_metrics() -> None:
+    payloads = {
+        "optimistic_mid": {
+            "decisions": [{"decision_id": "dec-1", "cycle": {"trend_score": 3}}],
+            "orders": [{
+                "decision_id": "dec-1",
+                "ticker": "AAPL",
+                "trade_setup": "bullish_continuation",
+                "execution_layer": "tactical",
+                "leg_role": "tactical",
+                "filled": True,
+                "timestamp": "2026-06-01T15:30:00+00:00",
+                "selected_contract": {"expiration": "2026-06-03"},
+                "entry_spread_pct": 0.04,
+                "cycle_confidence": "high",
+            }],
+            "positions": [],
+            "outcomes": [{
+                "decision_id": "dec-1",
+                "ticker": "AAPL",
+                "trade_setup": "bullish_continuation",
+                "execution_layer": "tactical",
+                "leg_role": "tactical",
+                "timestamp": "2026-06-01T15:50:00+00:00",
+                "pnl": 1.2,
+                "exit_reason": "target_hit",
+            }],
+            "thesis_validation": [{
+                "decision_id": "dec-1",
+                "trade_setup": "bullish_continuation",
+                "contract_dte_days": 2,
+                "passed": True,
+            }],
+        },
+        "realistic_mid_penalty": {
+            "decisions": [{"decision_id": "dec-1", "cycle": {"trend_score": 3}}],
+            "orders": [{
+                "decision_id": "dec-1",
+                "ticker": "AAPL",
+                "trade_setup": "bullish_continuation",
+                "execution_layer": "tactical",
+                "leg_role": "tactical",
+                "filled": True,
+                "timestamp": "2026-06-01T15:30:00+00:00",
+                "selected_contract": {"expiration": "2026-06-03"},
+                "entry_spread_pct": 0.04,
+                "cycle_confidence": "high",
+            }],
+            "positions": [],
+            "outcomes": [{
+                "decision_id": "dec-1",
+                "ticker": "AAPL",
+                "trade_setup": "bullish_continuation",
+                "execution_layer": "tactical",
+                "leg_role": "tactical",
+                "timestamp": "2026-06-01T15:50:00+00:00",
+                "pnl": 1.0,
+                "exit_reason": "target_hit",
+            }],
+            "thesis_validation": [{
+                "decision_id": "dec-1",
+                "trade_setup": "bullish_continuation",
+                "contract_dte_days": 2,
+                "passed": True,
+            }],
+        },
+        "conservative": {"decisions": [], "orders": [], "positions": [], "outcomes": [], "thesis_validation": []},
+        "stress": {"decisions": [], "orders": [], "positions": [], "outcomes": [], "thesis_validation": []},
+    }
+
+    report = build_bucket_edge_report(campaign_run_id="campaign1", fill_model_payloads=payloads)
+    metrics = report["buckets"]["bullish_continuation:tactical:tactical"]["metrics_by_fill_model"]["realistic_mid_penalty"]
+
+    assert metrics["thesis_pass_rate"] == 1.0
+    assert metrics["tactical_2dte_pass_rate"] == 1.0

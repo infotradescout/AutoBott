@@ -12,6 +12,26 @@ from .phase1_alpaca_capture_now import capture_now
 from .phase1_alpaca_client import AlpacaPaperClient
 from .phase1_alpaca_config import load_alpaca_paper_config
 from .phase1_campaign_runner import run_phase1_campaign
+from .paper_readiness import run_paper_readiness_probe
+from .session_supervisor import (
+    SessionSupervisorConfig,
+    maybe_start_session_supervisor,
+    session_supervisor_status,
+    start_session_supervisor,
+)
+from .session_runner import run_trading_session
+from .trading_cycle import load_decision_cards, run_trading_cycle
+from .execution_broker import AlpacaExecutionBroker
+from .execution_reconciler import reconcile_open_positions
+from .exit_orchestrator import cancel_open_order, replace_open_order, submit_exit_for_position
+from .position_store import load_open_positions, position_store_path
+from .runtime_control import (
+    arm_paper_execution,
+    disable_execution,
+    load_runtime_state,
+    runtime_state_path,
+    set_kill_switch,
+)
 from .runtime_paths import gate_path as default_gate_path
 from .runtime_paths import phase1_replay_campaign_root, phase1_snapshots_root
 
@@ -53,18 +73,50 @@ def handle_request(method: str, path: str, headers: dict[str, str], body: bytes)
             return 200, "application/json; charset=utf-8", _safety_payload()
         if path == "/api/alpaca/status" and method == "GET":
             return 200, "application/json; charset=utf-8", _alpaca_status_payload()
+        if path == "/api/paper/readiness" and method == "GET":
+            return 200, "application/json; charset=utf-8", _paper_readiness_payload()
+        if path == "/api/positions/open" and method == "GET":
+            return 200, "application/json; charset=utf-8", _open_positions_payload()
         if path == "/api/corpus/latest" and method == "GET":
             return 200, "application/json; charset=utf-8", _latest_corpus_payload()
         if path == "/api/campaign/latest" and method == "GET":
             return 200, "application/json; charset=utf-8", _latest_campaign_payload()
+        if path == "/api/decisions/latest" and method == "GET":
+            return 200, "application/json; charset=utf-8", _latest_decisions_payload()
+        if path == "/api/execution/state" and method == "GET":
+            return 200, "application/json; charset=utf-8", _execution_state_payload()
+        if path == "/api/session/status" and method == "GET":
+            return 200, "application/json; charset=utf-8", _session_status_payload()
+        if path == "/api/runtime/arm-paper" and method == "POST":
+            return 200, "application/json; charset=utf-8", _runtime_arm_paper_payload(_json_body(body))
+        if path == "/api/runtime/disable-execution" and method == "POST":
+            return 200, "application/json; charset=utf-8", _runtime_disable_execution_payload(_json_body(body))
+        if path == "/api/runtime/kill-switch" and method == "POST":
+            return 200, "application/json; charset=utf-8", _runtime_kill_switch_payload(_json_body(body))
+        if path == "/api/execution/reconcile" and method == "POST":
+            return 200, "application/json; charset=utf-8", _execution_reconcile_payload()
+        if path == "/api/session/start" and method == "POST":
+            return 200, "application/json; charset=utf-8", _session_start_payload(_json_body(body))
         if path == "/api/reports/bucket-edge/latest" and method == "GET":
             return 200, "application/json; charset=utf-8", _latest_bucket_edge_payload()
+        if path == "/api/reports/thesis-failures/latest" and method == "GET":
+            return 200, "application/json; charset=utf-8", _latest_thesis_failures_payload()
         if path == "/api/reports/gate-candidate/latest" and method == "GET":
             return 200, "application/json; charset=utf-8", _latest_gate_candidate_payload()
         if path == "/api/capture/start" and method == "POST":
             return 200, "application/json; charset=utf-8", _capture_start_payload(_json_body(body))
         if path == "/api/campaign/run" and method == "POST":
             return 200, "application/json; charset=utf-8", _campaign_run_payload(_json_body(body))
+        if path == "/api/trading-cycle/run" and method == "POST":
+            return 200, "application/json; charset=utf-8", _trading_cycle_run_payload(_json_body(body))
+        if path == "/api/trading-session/run" and method == "POST":
+            return 200, "application/json; charset=utf-8", _trading_session_run_payload(_json_body(body))
+        if path == "/api/execution/exit" and method == "POST":
+            return 200, "application/json; charset=utf-8", _execution_exit_payload(_json_body(body))
+        if path == "/api/execution/cancel" and method == "POST":
+            return 200, "application/json; charset=utf-8", _execution_cancel_payload(_json_body(body))
+        if path == "/api/execution/replace" and method == "POST":
+            return 200, "application/json; charset=utf-8", _execution_replace_payload(_json_body(body))
     return 404, "application/json; charset=utf-8", {"ok": False, "error": "not_found"}
 
 
@@ -80,16 +132,97 @@ def _health_payload() -> JsonDict:
 def _safety_payload() -> JsonDict:
     config = load_alpaca_paper_config()
     gate_path = _gate_path()
+    runtime_state = load_runtime_state()
+    open_positions = load_open_positions()
     return {
         "alpaca_env": config.env,
         "paper_only": True,
-        "live_trading_enabled": False,
-        "order_placement_enabled": False,
+        "live_trading_enabled": runtime_state.live_mode_enabled,
+        "order_placement_enabled": runtime_state.execution_enabled and not runtime_state.kill_switch_enabled,
         "active_gate_mutation_allowed": False,
         "active_gate_hash": _file_hash(gate_path),
         "active_gate_path": str(gate_path),
         "order_methods_present": _order_methods_present(),
+        "kill_switch_enabled": runtime_state.kill_switch_enabled,
+        "execution_enabled": runtime_state.execution_enabled,
+        "runtime_state_path": str(runtime_state_path()),
+        "position_store_path": str(position_store_path()),
+        "open_position_count": len(open_positions),
         "mode_banner": "PAPER ONLY | LIVE TRADING LOCKED | ORDERS DISABLED",
+    }
+
+
+def _execution_state_payload() -> JsonDict:
+    runtime_state = load_runtime_state()
+    positions = load_open_positions()
+    return {
+        "ok": True,
+        "kill_switch_enabled": runtime_state.kill_switch_enabled,
+        "execution_enabled": runtime_state.execution_enabled,
+        "live_mode_enabled": runtime_state.live_mode_enabled,
+        "runtime_state_path": str(runtime_state_path()),
+        "position_store_path": str(position_store_path()),
+        "open_position_count": len(positions),
+        "updated_at": runtime_state.updated_at.isoformat(),
+        "reason": runtime_state.reason,
+    }
+
+
+def _session_status_payload() -> JsonDict:
+    return {"ok": True, **session_supervisor_status()}
+
+
+def _runtime_arm_paper_payload(payload: JsonDict) -> JsonDict:
+    reason = str(payload.get("reason", "dashboard_arm_paper"))
+    state = arm_paper_execution(reason=reason)
+    return {"ok": True, "runtime_state": state.to_json_dict()}
+
+
+def _runtime_disable_execution_payload(payload: JsonDict) -> JsonDict:
+    reason = str(payload.get("reason", "dashboard_disable_execution"))
+    state = disable_execution(reason=reason)
+    return {"ok": True, "runtime_state": state.to_json_dict()}
+
+
+def _runtime_kill_switch_payload(payload: JsonDict) -> JsonDict:
+    enabled = bool(payload.get("enabled", True))
+    reason = str(payload.get("reason", "dashboard_kill_switch"))
+    state = set_kill_switch(enabled, reason=reason)
+    return {"ok": True, "runtime_state": state.to_json_dict()}
+
+
+def _execution_reconcile_payload() -> JsonDict:
+    summary = reconcile_open_positions(
+        AlpacaExecutionBroker(),
+        journal_path=str(_artifacts_root() / "dashboard_execution_reconcile.jsonl"),
+    )
+    return {
+        "ok": True,
+        "checked": summary.checked,
+        "updated": summary.updated,
+        "unchanged": summary.unchanged,
+        "missing": summary.missing,
+        "open_position_count": len(load_open_positions()),
+    }
+
+
+def _session_start_payload(payload: JsonDict) -> JsonDict:
+    symbols = [str(symbol).upper() for symbol in payload.get("symbols", ["SPY"]) if str(symbol).strip()]
+    config = SessionSupervisorConfig(
+        enabled=True,
+        symbols=symbols,
+        interval_seconds=int(payload.get("interval_seconds", 300)),
+        max_cycles=int(payload["max_cycles"]) if payload.get("max_cycles") is not None else None,
+        quantity=int(payload.get("quantity", 1)),
+        position_count=int(payload.get("position_count", 0)),
+        daily_pnl=float(payload.get("daily_pnl", 0.0)),
+    )
+    started = start_session_supervisor(config)
+    return {
+        "ok": started,
+        "started": started,
+        "status": "started" if started else "already_running",
+        **session_supervisor_status(),
     }
 
 
@@ -126,6 +259,20 @@ def _alpaca_status_payload() -> JsonDict:
     return response
 
 
+def _paper_readiness_payload() -> JsonDict:
+    return run_paper_readiness_probe()
+
+
+def _open_positions_payload() -> JsonDict:
+    positions = [position.to_json_dict() for position in load_open_positions()]
+    return {
+        "ok": True,
+        "count": len(positions),
+        "positions": positions,
+        "position_store_path": str(position_store_path()),
+    }
+
+
 def _latest_corpus_payload() -> JsonDict:
     manifest_path = _latest_manifest(_corpus_root())
     if manifest_path is None:
@@ -152,6 +299,8 @@ def _latest_campaign_payload() -> JsonDict:
     if campaign_dir is None:
         return {"ok": False, "status": "no_campaign_found"}
     manifest = _read_json(campaign_dir / "manifest.json")
+    thesis_by_fill_model = manifest.get("thesis_validation_by_fill_model", {})
+    primary_thesis = thesis_by_fill_model.get("realistic_mid_penalty", {})
     return {
         "ok": True,
         "artifact_dir": str(campaign_dir),
@@ -160,6 +309,17 @@ def _latest_campaign_payload() -> JsonDict:
         "symbols": manifest.get("symbols", []),
         "campaign_quality": manifest.get("campaign_quality", {}),
         "corpus_quality": manifest.get("corpus_quality", {}),
+        "thesis_validation_by_fill_model": thesis_by_fill_model,
+        "primary_thesis_validation": primary_thesis,
+    }
+
+
+def _latest_decisions_payload() -> JsonDict:
+    rows = load_decision_cards(limit=10)
+    return {
+        "ok": True,
+        "count": len(rows),
+        "decisions": rows,
     }
 
 
@@ -180,12 +340,55 @@ def _latest_bucket_edge_payload() -> JsonDict:
                         "profit_factor": values.get("profit_factor"),
                         "expectancy": values.get("expectancy"),
                         "unresolved_position_rate": values.get("unresolved_position_rate"),
+                        "thesis_pass_rate": values.get("thesis_pass_rate"),
+                        "tactical_2dte_pass_rate": values.get("tactical_2dte_pass_rate"),
                     }
                     for fill_model, values in metrics.items()
                 },
             }
         )
     return {"ok": True, "artifact_dir": str(campaign_dir), "bucket_count": len(summary), "buckets": summary}
+
+
+def _latest_thesis_failures_payload() -> JsonDict:
+    campaign_dir = _latest_campaign_dir()
+    if campaign_dir is None:
+        return {"ok": False, "status": "no_campaign_found"}
+    primary_dir = campaign_dir / "fill_model_results" / "realistic_mid_penalty"
+    thesis_rows = _read_jsonl(primary_dir / "thesis_validation.jsonl")
+    decision_rows = {row.get("decision_id"): row for row in _read_jsonl(primary_dir / "decisions.jsonl")}
+    failures = []
+    for row in thesis_rows:
+        if row.get("passed"):
+            continue
+        decision = decision_rows.get(row.get("decision_id"), {})
+        failures.append(
+            {
+                "decision_id": row.get("decision_id"),
+                "ticker": row.get("ticker"),
+                "trade_setup": row.get("trade_setup"),
+                "option_type": row.get("option_type"),
+                "reason": row.get("reason"),
+                "contract_dte_days": row.get("contract_dte_days"),
+                "net_move_pct": row.get("net_move_pct"),
+                "first_move_pct": row.get("first_move_pct"),
+                "adverse_move_pct": row.get("adverse_move_pct"),
+                "followthrough_rate": row.get("followthrough_rate"),
+                "first_move_match": row.get("first_move_match"),
+                "reversal_confirmed": row.get("reversal_confirmed"),
+                "confidence_score": decision.get("confidence_score"),
+                "decision": decision.get("decision"),
+                "reason_codes": decision.get("reason_codes", []),
+            }
+        )
+    ranked = sorted(failures, key=_thesis_failure_sort_key)
+    return {
+        "ok": True,
+        "artifact_dir": str(campaign_dir),
+        "fill_model": "realistic_mid_penalty",
+        "count": len(ranked),
+        "failures": ranked[:8],
+    }
 
 
 def _latest_gate_candidate_payload() -> JsonDict:
@@ -239,6 +442,80 @@ def _campaign_run_payload(payload: JsonDict) -> JsonDict:
     return result
 
 
+def _trading_cycle_run_payload(payload: JsonDict) -> JsonDict:
+    symbols = [str(symbol).upper() for symbol in payload.get("symbols", ["SPY"])]
+    quantity = int(payload.get("quantity", 1))
+    position_count = int(payload.get("position_count", 0))
+    daily_pnl = float(payload.get("daily_pnl", 0.0))
+    result = run_trading_cycle(
+        symbols=symbols,
+        quantity=quantity,
+        position_count=position_count,
+        current_daily_realized_pnl=daily_pnl,
+    )
+    return {"ok": True, **result.to_json_dict()}
+
+
+def _trading_session_run_payload(payload: JsonDict) -> JsonDict:
+    symbols = [str(symbol).upper() for symbol in payload.get("symbols", ["SPY"])]
+    quantity = int(payload.get("quantity", 1))
+    interval_seconds = int(payload.get("interval_seconds", 300))
+    max_cycles = int(payload.get("max_cycles", 1))
+    position_count = int(payload.get("position_count", 0))
+    daily_pnl = float(payload.get("daily_pnl", 0.0))
+    result = run_trading_session(
+        symbols=symbols,
+        interval_seconds=interval_seconds,
+        max_cycles=max_cycles,
+        cycle_kwargs={
+            "quantity": quantity,
+            "position_count": position_count,
+            "current_daily_realized_pnl": daily_pnl,
+        },
+    )
+    return {"ok": True, **result.to_json_dict()}
+
+
+def _execution_exit_payload(payload: JsonDict) -> JsonDict:
+    broker_order_id = str(payload.get("broker_order_id", ""))
+    limit_price = float(payload.get("limit_price", 0))
+    positions = load_open_positions()
+    position = next((item for item in positions if item.broker_order_id == broker_order_id), None)
+    if position is None:
+        raise ValueError("open_position_not_found")
+    order = submit_exit_for_position(
+        position,
+        broker=AlpacaExecutionBroker(),
+        limit_price=limit_price,
+    )
+    return {
+        "ok": True,
+        "broker_order_id": order.broker_order_id,
+        "state": order.state.value,
+        "source_position": broker_order_id,
+    }
+
+
+def _execution_cancel_payload(payload: JsonDict) -> JsonDict:
+    broker_order_id = str(payload.get("broker_order_id", ""))
+    result = cancel_open_order(
+        broker_order_id=broker_order_id,
+        broker=AlpacaExecutionBroker(),
+    )
+    return {"ok": True, "result": result}
+
+
+def _execution_replace_payload(payload: JsonDict) -> JsonDict:
+    broker_order_id = str(payload.get("broker_order_id", ""))
+    limit_price = float(payload.get("limit_price", 0))
+    result = replace_open_order(
+        broker_order_id=broker_order_id,
+        broker=AlpacaExecutionBroker(),
+        limit_price=limit_price,
+    )
+    return {"ok": True, "result": result}
+
+
 def _dashboard_html() -> str:
     return """<!doctype html>
 <html lang="en">
@@ -247,86 +524,900 @@ def _dashboard_html() -> str:
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>AutoBott Phase 1 Operator Console</title>
   <style>
-    :root { --bg:#f5efe1; --ink:#132a13; --card:#fffdf6; --accent:#2d6a4f; --warn:#bc4749; --line:#d8cdb8; }
-    body { margin:0; font-family: Georgia, 'Times New Roman', serif; background: linear-gradient(180deg, #efe7d6, #f8f4ea); color:var(--ink); }
-    header { padding:24px; background: radial-gradient(circle at top left, #fefae0, #dde5b6); border-bottom:1px solid var(--line); }
-    .banner { font-weight:bold; letter-spacing:0.04em; color:#fff; background:linear-gradient(90deg, var(--accent), #40916c); padding:12px 16px; display:inline-block; border-radius:999px; }
-    main { padding:24px; display:grid; gap:18px; }
-    .grid { display:grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap:16px; }
-    .card { background:var(--card); border:1px solid var(--line); border-radius:18px; padding:16px; box-shadow:0 12px 30px rgba(19,42,19,0.08); }
-    button { border:0; border-radius:999px; padding:12px 16px; background:var(--accent); color:#fff; cursor:pointer; margin-right:8px; margin-bottom:8px; }
-    button.secondary { background:#6c757d; }
-    pre { white-space:pre-wrap; word-break:break-word; background:#fbf8f1; padding:12px; border-radius:12px; border:1px solid var(--line); }
-    table { width:100%; border-collapse:collapse; font-size:14px; }
-    th, td { text-align:left; padding:8px; border-bottom:1px solid var(--line); }
+    :root {
+      --bg:#0b0f14;
+      --bg-alt:#121821;
+      --panel:#151d28;
+      --panel-2:#192230;
+      --panel-3:#0f151d;
+      --text:#e7edf5;
+      --muted:#97a6ba;
+      --line:#243244;
+      --accent:#3ddc97;
+      --accent-dim:#204636;
+      --warn:#f4b860;
+      --danger:#ff6b6b;
+      --info:#6ec1ff;
+      --shadow:0 16px 40px rgba(0,0,0,0.28);
+      --radius:18px;
+    }
+    * { box-sizing:border-box; }
+    body {
+      margin:0;
+      font-family: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      background:
+        radial-gradient(circle at top right, rgba(61,220,151,0.10), transparent 24rem),
+        radial-gradient(circle at top left, rgba(110,193,255,0.08), transparent 22rem),
+        linear-gradient(180deg, #0b0f14, #111824 55%, #0b0f14);
+      color:var(--text);
+      min-height:100vh;
+    }
+    .shell { max-width:1440px; margin:0 auto; padding:20px; }
+    .topbar {
+      display:grid;
+      gap:18px;
+      grid-template-columns: minmax(0, 1.4fr) minmax(320px, 1fr);
+      align-items:stretch;
+    }
+    .hero, .meta-card, .panel {
+      background:linear-gradient(180deg, rgba(21,29,40,0.98), rgba(15,21,29,0.98));
+      border:1px solid var(--line);
+      border-radius:var(--radius);
+      box-shadow:var(--shadow);
+    }
+    .hero { padding:22px; }
+    .hero-top, .meta-top, .section-head, .group-head, .panel-head {
+      display:flex;
+      align-items:center;
+      justify-content:space-between;
+      gap:12px;
+      flex-wrap:wrap;
+    }
+    .eyebrow {
+      color:var(--accent);
+      letter-spacing:0.16em;
+      text-transform:uppercase;
+      font-size:12px;
+      font-weight:700;
+    }
+    h1 {
+      margin:10px 0 8px;
+      font-size:clamp(28px, 4vw, 40px);
+      line-height:1.05;
+      letter-spacing:-0.03em;
+    }
+    .hero p, .meta-note, .section-note, .muted { color:var(--muted); }
+    .chip-row, .status-row, .action-row { display:flex; flex-wrap:wrap; gap:10px; }
+    .chip, .badge {
+      display:inline-flex;
+      align-items:center;
+      gap:8px;
+      border-radius:999px;
+      padding:8px 12px;
+      font-size:12px;
+      font-weight:700;
+      letter-spacing:0.06em;
+      text-transform:uppercase;
+      border:1px solid var(--line);
+      background:rgba(255,255,255,0.03);
+    }
+    .badge.safe, .chip.safe { color:var(--accent); border-color:#275640; background:rgba(61,220,151,0.10); }
+    .badge.warn, .chip.warn { color:var(--warn); border-color:#5b4423; background:rgba(244,184,96,0.10); }
+    .badge.danger, .chip.danger { color:var(--danger); border-color:#5a2b2b; background:rgba(255,107,107,0.12); }
+    .badge.info, .chip.info { color:var(--info); border-color:#244767; background:rgba(110,193,255,0.10); }
+    .meta-card { padding:18px; display:grid; gap:16px; }
+    .meta-grid {
+      display:grid;
+      grid-template-columns:repeat(2, minmax(0, 1fr));
+      gap:12px;
+    }
+    .mini {
+      background:rgba(255,255,255,0.02);
+      border:1px solid var(--line);
+      border-radius:14px;
+      padding:12px;
+    }
+    .mini-label {
+      font-size:11px;
+      color:var(--muted);
+      text-transform:uppercase;
+      letter-spacing:0.10em;
+      margin-bottom:8px;
+    }
+    .mono {
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      word-break:break-word;
+    }
+    main { display:grid; gap:18px; margin-top:18px; }
+    .section {
+      display:grid;
+      gap:14px;
+    }
+    .grid {
+      display:grid;
+      grid-template-columns:repeat(auto-fit, minmax(250px, 1fr));
+      gap:14px;
+    }
+    .panel { padding:16px; min-height:190px; }
+    .panel-head h2, .group-head h2, .section-head h2 {
+      margin:0;
+      font-size:15px;
+      text-transform:uppercase;
+      letter-spacing:0.08em;
+    }
+    .panel-head h3 { margin:0; font-size:16px; }
+    .panel-body { margin-top:14px; display:grid; gap:12px; }
+    .metrics { display:grid; gap:10px; }
+    .metric {
+      display:flex;
+      justify-content:space-between;
+      gap:16px;
+      border-bottom:1px solid rgba(255,255,255,0.05);
+      padding-bottom:8px;
+    }
+    .metric:last-child { border-bottom:0; padding-bottom:0; }
+    .metric-label { color:var(--muted); font-size:13px; }
+    .metric-value { text-align:right; font-weight:600; }
+    .metric-value.compact { font-size:13px; }
+    .operator-layout {
+      display:grid;
+      grid-template-columns:minmax(0, 1.2fr) minmax(320px, 0.8fr);
+      gap:18px;
+    }
+    .group-grid {
+      display:grid;
+      grid-template-columns:repeat(auto-fit, minmax(210px, 1fr));
+      gap:12px;
+      margin-top:14px;
+    }
+    .group {
+      border:1px solid var(--line);
+      background:rgba(255,255,255,0.02);
+      border-radius:14px;
+      padding:14px;
+      display:grid;
+      gap:12px;
+    }
+    .group-title {
+      font-size:13px;
+      font-weight:700;
+      letter-spacing:0.08em;
+      text-transform:uppercase;
+      color:var(--muted);
+    }
+    button {
+      border:1px solid transparent;
+      border-radius:12px;
+      padding:11px 13px;
+      font-weight:700;
+      font-size:13px;
+      cursor:pointer;
+      background:#203146;
+      color:var(--text);
+      transition:transform 120ms ease, border-color 120ms ease, background 120ms ease, opacity 120ms ease;
+      text-align:left;
+    }
+    button:hover:not(:disabled) { transform:translateY(-1px); border-color:#32506f; }
+    button:disabled { cursor:not-allowed; opacity:0.45; }
+    button.primary { background:linear-gradient(180deg, #1c6e4a, #124b32); border-color:#2d7f59; }
+    button.secondary { background:#1d2a39; border-color:#2f4157; }
+    button.ghost { background:transparent; border-color:#2a394c; }
+    .button-note { color:var(--muted); font-size:12px; }
+    .log {
+      min-height:260px;
+      background:#091019;
+      border:1px solid #1e2a38;
+      border-radius:14px;
+      padding:14px;
+      display:grid;
+      gap:10px;
+      align-content:start;
+    }
+    .log-entry {
+      border-left:3px solid #2d7f59;
+      background:rgba(255,255,255,0.02);
+      border-radius:10px;
+      padding:10px 12px;
+    }
+    .log-entry.warn { border-left-color:var(--warn); }
+    .log-entry.danger { border-left-color:var(--danger); }
+    .log-label {
+      font-size:11px;
+      text-transform:uppercase;
+      letter-spacing:0.08em;
+      color:var(--muted);
+      margin-bottom:4px;
+    }
+    .locked, .empty, .error-state {
+      min-height:110px;
+      display:grid;
+      align-content:center;
+      gap:6px;
+      border:1px dashed var(--line);
+      border-radius:14px;
+      padding:16px;
+      background:rgba(255,255,255,0.02);
+    }
+    .locked strong, .error-state strong, .empty strong { font-size:15px; }
+    .locked strong { color:var(--warn); }
+    .error-state strong { color:var(--danger); }
+    details {
+      border-top:1px solid rgba(255,255,255,0.06);
+      padding-top:10px;
+    }
+    summary {
+      cursor:pointer;
+      color:var(--muted);
+      font-size:12px;
+      text-transform:uppercase;
+      letter-spacing:0.08em;
+      font-weight:700;
+    }
+    pre {
+      margin:10px 0 0;
+      white-space:pre-wrap;
+      word-break:break-word;
+      background:#0a1118;
+      border:1px solid #1d2b3a;
+      color:#c8d5e5;
+      border-radius:12px;
+      padding:12px;
+      font-size:12px;
+      max-height:260px;
+      overflow:auto;
+    }
+    .table {
+      width:100%;
+      border-collapse:collapse;
+      font-size:13px;
+    }
+    .table th, .table td {
+      text-align:left;
+      padding:8px 0;
+      border-bottom:1px solid rgba(255,255,255,0.05);
+      vertical-align:top;
+    }
+    .table th { color:var(--muted); font-weight:600; }
+    .foot-note { color:var(--muted); font-size:12px; }
+    @media (max-width: 1080px) {
+      .topbar, .operator-layout { grid-template-columns:1fr; }
+    }
+    @media (max-width: 720px) {
+      .shell { padding:14px; }
+      .meta-grid, .group-grid { grid-template-columns:1fr; }
+      .grid { grid-template-columns:1fr; }
+    }
   </style>
 </head>
 <body>
-  <header>
-    <h1>AutoBott Phase 1 Operator Console</h1>
-    <div class="banner">PAPER ONLY | LIVE TRADING LOCKED | ORDERS DISABLED</div>
-    <p>Safe operator console for paper capture, advisory campaigns, and report inspection.</p>
-  </header>
-  <main>
-    <section class="grid">
-      <div class="card"><h2>Alpaca Paper Config</h2><pre id="alpaca-status">Loading...</pre></div>
-      <div class="card"><h2>Latest Capture</h2><pre id="corpus-status">Loading...</pre></div>
-      <div class="card"><h2>Latest Campaign</h2><pre id="campaign-status">Loading...</pre></div>
-      <div class="card"><h2>Active Gate Safety</h2><pre id="safety-status">Loading...</pre></div>
-    </section>
-    <section class="card">
-      <h2>Actions</h2>
-      <button onclick="setToken()">Set Dashboard Token</button>
-      <button onclick="refreshAll()" class="secondary">Refresh</button>
-      <button onclick="startCapture(5)">Run 5-minute capture</button>
-      <button onclick="startCapture(30)">Run 30-minute capture</button>
-      <button onclick="runCampaign()">Run campaign from latest corpus</button>
-      <pre id="action-log">Idle.</pre>
-    </section>
-    <section class="card">
-      <h2>Bucket Edge Summary</h2>
-      <pre id="bucket-report">Loading...</pre>
-    </section>
-    <section class="card">
-      <h2>Gate Candidate Summary</h2>
-      <pre id="gate-report">Loading...</pre>
-    </section>
-    <section class="card">
-      <h2>Operator Notes</h2>
-      <p>Trading controls are intentionally omitted. This console is limited to paper capture, advisory replay, and report inspection.</p>
-    </section>
-  </main>
+  <div class="shell">
+    <header class="topbar">
+      <section class="hero">
+        <div class="hero-top">
+          <span class="eyebrow">AutoBott / Trader's Corner</span>
+          <div class="status-row">
+            <span class="badge safe">PAPER ONLY</span>
+            <span class="badge warn">LIVE TRADING LOCKED</span>
+            <span class="badge danger">ORDERS DISABLED</span>
+          </div>
+        </div>
+        <h1>AutoBott Phase 1 Operator Console</h1>
+        <p>Production operator command center for paper capture, advisory replay, report review, and gate safety verification.</p>
+        <div class="muted mono">PAPER ONLY | LIVE TRADING LOCKED | ORDERS DISABLED</div>
+        <div class="chip-row">
+          <span class="chip info">Current Service <span id="service-name">autobott-phase1-dashboard</span></span>
+          <span class="chip warn" id="auth-badge">LOCKED</span>
+          <span class="chip safe" id="service-badge">BOOT CHECK RUNNING</span>
+        </div>
+      </section>
+
+      <aside class="meta-card">
+        <div class="meta-top">
+          <h2 style="margin:0;">System Status</h2>
+          <span class="badge info mono" id="version-badge">Version loading</span>
+        </div>
+        <div class="meta-grid">
+          <div class="mini">
+            <div class="mini-label">Environment</div>
+            <div class="mono" id="env-value">PAPER ONLY</div>
+          </div>
+          <div class="mini">
+            <div class="mini-label">Auth State</div>
+            <div class="mono" id="auth-state-text">LOCKED</div>
+          </div>
+          <div class="mini">
+            <div class="mini-label">Health</div>
+            <div class="mono" id="health-state-text">Checking</div>
+          </div>
+          <div class="mini">
+            <div class="mini-label">Persistence Root</div>
+            <div class="mono" id="persistence-root-text">Waiting for data</div>
+          </div>
+        </div>
+        <div class="meta-note">Execution is operator-controlled, paper-first, and live-locked until explicitly enabled elsewhere.</div>
+      </aside>
+    </header>
+
+    <main>
+      <section class="section">
+        <div class="section-head">
+          <div>
+            <h2>Operator Snapshot</h2>
+            <div class="section-note">High-signal status cards for safety, connectivity, capture state, and latest campaign output.</div>
+          </div>
+          <span class="badge info" id="last-refresh">Awaiting refresh</span>
+        </div>
+        <div class="grid">
+          <section class="panel">
+            <div class="panel-head"><h3>Alpaca Paper Config</h3><span class="badge safe">STATUS</span></div>
+            <div class="panel-body" id="alpaca-status"></div>
+          </section>
+          <section class="panel">
+            <div class="panel-head"><h3>Paper Readiness</h3><span class="badge info">EXECUTION</span></div>
+            <div class="panel-body" id="paper-readiness"></div>
+          </section>
+          <section class="panel">
+            <div class="panel-head"><h3>Latest Capture</h3><span class="badge info">CAPTURE</span></div>
+            <div class="panel-body" id="corpus-status"></div>
+          </section>
+          <section class="panel">
+            <div class="panel-head"><h3>Latest Campaign</h3><span class="badge info">REPLAY</span></div>
+            <div class="panel-body" id="campaign-status"></div>
+          </section>
+          <section class="panel">
+            <div class="panel-head"><h3>Active Gate Safety</h3><span class="badge warn">SAFETY / GATE</span></div>
+            <div class="panel-body" id="safety-status"></div>
+          </section>
+          <section class="panel">
+            <div class="panel-head"><h3>Session Supervisor</h3><span class="badge info">AUTOMATION</span></div>
+            <div class="panel-body" id="session-status"></div>
+          </section>
+          <section class="panel">
+            <div class="panel-head"><h3>Bucket Edge Summary</h3><span class="badge info">REPORTS</span></div>
+            <div class="panel-body" id="bucket-report"></div>
+          </section>
+          <section class="panel">
+            <div class="panel-head"><h3>Worst Thesis Failures</h3><span class="badge danger">REPORTS</span></div>
+            <div class="panel-body" id="thesis-failures"></div>
+          </section>
+          <section class="panel">
+            <div class="panel-head"><h3>Gate Candidate Summary</h3><span class="badge warn">REPORTS</span></div>
+            <div class="panel-body" id="gate-report"></div>
+          </section>
+          <section class="panel">
+            <div class="panel-head"><h3>Persistence Status</h3><span class="badge info">STORAGE</span></div>
+            <div class="panel-body" id="persistence-status"></div>
+          </section>
+        </div>
+      </section>
+
+      <section class="operator-layout">
+        <section class="panel">
+          <div class="group-head">
+            <div>
+              <h2>Operator Actions</h2>
+              <div class="section-note">Controlled flows only. Token-gated actions stay disabled until authentication succeeds.</div>
+            </div>
+            <span class="badge warn" id="action-state">TOKEN REQUIRED</span>
+          </div>
+          <div class="group-grid">
+            <div class="group">
+              <div class="group-title">Auth</div>
+              <button class="primary" onclick="setToken()">Set Dashboard Token</button>
+              <button class="ghost" onclick="clearToken()">Clear Token</button>
+              <div class="button-note">Locked panels will show “Dashboard token required” until a valid token is accepted.</div>
+            </div>
+            <div class="group">
+              <div class="group-title">Runtime</div>
+              <button class="primary protected-action" onclick="armPaperMode()">Arm paper execution</button>
+              <button class="secondary protected-action" onclick="disableExecution()">Disable execution</button>
+              <button class="ghost protected-action" onclick="engageKillSwitch()">Engage kill switch</button>
+              <div class="button-note">These controls affect paper execution only. Live mode remains locked.</div>
+            </div>
+            <div class="group">
+              <div class="group-title">Capture</div>
+              <button class="primary protected-action" onclick="startCapture(5)">Run 5-minute capture</button>
+              <button class="secondary protected-action" onclick="startCapture(30)">Run 30-minute capture</button>
+              <div class="button-note">Paper-only snapshot capture for evidence and diagnostics.</div>
+            </div>
+            <div class="group">
+              <div class="group-title">Campaign</div>
+              <button class="primary protected-action" onclick="runCampaign()">Run campaign from latest corpus</button>
+              <div class="button-note">Advisory replay only. Live trading remains disabled.</div>
+            </div>
+            <div class="group">
+              <div class="group-title">Trading Cycle</div>
+              <button class="primary protected-action" onclick="runTradingCycle()">Run protected trading cycle</button>
+              <button class="secondary protected-action" onclick="startPaperSession()">Start paper session</button>
+              <button class="ghost protected-action" onclick="reconcileExecution()">Reconcile open orders</button>
+              <div class="button-note">Capture, decision, and broker submit when runtime controls permit.</div>
+            </div>
+            <div class="group">
+              <div class="group-title">Refresh</div>
+              <button class="secondary" onclick="refreshAll()">Refresh all panels</button>
+              <button class="ghost protected-action" onclick="refreshProtected()">Refresh protected only</button>
+              <div class="button-note">Health is public-by-design. Protected panels still fail closed.</div>
+            </div>
+          </div>
+        </section>
+
+        <aside class="panel">
+          <div class="group-head">
+            <div>
+              <h2>Operator Log</h2>
+              <div class="section-note">Compact console log with plain-English action results.</div>
+            </div>
+            <span class="badge info">LATEST</span>
+          </div>
+          <div class="panel-body">
+            <div class="log" id="action-log">
+              <div class="log-entry">
+                <div class="log-label">Status</div>
+                <div>Console ready. Protected panels are locked until authentication succeeds.</div>
+              </div>
+            </div>
+          </div>
+        </aside>
+      </section>
+    </main>
+  </div>
   <script>
+    const dashboardState = {
+      authState: 'LOCKED',
+      version: 'loading',
+      safety: null,
+      corpus: null,
+      campaign: null,
+      session: null
+    };
+
     const apiHeaders = () => {
       const token = sessionStorage.getItem('dashboardToken') || '';
       return token ? { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' } : { 'Content-Type': 'application/json' };
     };
+
     async function callApi(path, options = {}) {
       const response = await fetch(path, { ...options, headers: { ...apiHeaders(), ...(options.headers || {}) } });
-      return response.json();
+      let payload = {};
+      try {
+        payload = await response.json();
+      } catch {
+        payload = {};
+      }
+      return { ok: response.ok, status: response.status, payload };
     }
+
     function setToken() {
       const value = window.prompt('Enter dashboard auth token');
-      if (value) sessionStorage.setItem('dashboardToken', value);
+      if (value) {
+        sessionStorage.setItem('dashboardToken', value);
+        logEntry('Token updated', 'Dashboard token stored in browser session. Refreshing protected panels.', 'warn');
+        refreshAll();
+      }
     }
+
+    function clearToken() {
+      sessionStorage.removeItem('dashboardToken');
+      setAuthState('LOCKED');
+      syncActionState();
+      logEntry('Token cleared', 'Protected panels are locked again until a valid token is set.', 'warn');
+      refreshAll();
+    }
+
+    function setAuthState(state) {
+      dashboardState.authState = state;
+      document.getElementById('auth-badge').textContent = state;
+      document.getElementById('auth-badge').className = `chip ${state === 'AUTHENTICATED' ? 'safe' : 'warn'}`;
+      document.getElementById('auth-state-text').textContent = state;
+      document.getElementById('action-state').textContent = state === 'AUTHENTICATED' ? 'CONTROLLED ACCESS' : 'TOKEN REQUIRED';
+      document.getElementById('action-state').className = `badge ${state === 'AUTHENTICATED' ? 'safe' : 'warn'}`;
+    }
+
+    function syncActionState() {
+      const tokenPresent = !!sessionStorage.getItem('dashboardToken');
+      const enabled = tokenPresent && dashboardState.authState === 'AUTHENTICATED';
+      document.querySelectorAll('.protected-action').forEach((button) => {
+        button.disabled = !enabled;
+      });
+    }
+
+    function updateRefreshStamp() {
+      document.getElementById('last-refresh').textContent = `Refreshed ${new Date().toLocaleTimeString()}`;
+    }
+
+    function statusBadge(text, tone = 'info') {
+      return `<span class="badge ${tone}">${text}</span>`;
+    }
+
+    function detailsBlock(payload) {
+      return `<details><summary>Raw JSON</summary><pre>${escapeHtml(JSON.stringify(payload, null, 2))}</pre></details>`;
+    }
+
+    function escapeHtml(value) {
+      return String(value)
+        .replaceAll('&', '&amp;')
+        .replaceAll('<', '&lt;')
+        .replaceAll('>', '&gt;');
+    }
+
+    function metricList(items) {
+      return `<div class="metrics">${items.map(([label, value]) => `
+        <div class="metric">
+          <div class="metric-label">${escapeHtml(label)}</div>
+          <div class="metric-value compact">${value}</div>
+        </div>`).join('')}
+      </div>`;
+    }
+
+    function lockedState() {
+      return `
+        <div class="locked">
+          <strong>Locked</strong>
+          <div>Dashboard token required</div>
+          <div class="muted">Set token to view this panel.</div>
+        </div>`;
+    }
+
+    function emptyState(title, detail) {
+      return `<div class="empty"><strong>${escapeHtml(title)}</strong><div>${escapeHtml(detail)}</div></div>`;
+    }
+
+    function errorState(title, detail, payload = null) {
+      return `
+        <div class="error-state">
+          <strong>${escapeHtml(title)}</strong>
+          <div>${escapeHtml(detail)}</div>
+        </div>
+        ${payload ? detailsBlock(payload) : ''}`;
+    }
+
+    function logEntry(title, detail, tone = 'safe') {
+      const container = document.getElementById('action-log');
+      const entry = document.createElement('div');
+      entry.className = `log-entry ${tone === 'danger' ? 'danger' : tone === 'warn' ? 'warn' : ''}`;
+      entry.innerHTML = `<div class="log-label">${escapeHtml(new Date().toLocaleTimeString())} · ${escapeHtml(title)}</div><div>${escapeHtml(detail)}</div>`;
+      container.prepend(entry);
+      while (container.children.length > 6) {
+        container.removeChild(container.lastChild);
+      }
+    }
+
+    function renderHealth(payload) {
+      dashboardState.version = payload.version || 'dev';
+      document.getElementById('service-name').textContent = payload.app || 'autobott-phase1-dashboard';
+      document.getElementById('version-badge').textContent = payload.version || 'dev';
+      document.getElementById('health-state-text').textContent = payload.ok ? 'OK' : 'CHECK FAILED';
+      document.getElementById('service-badge').textContent = payload.ok ? 'SERVICE HEALTHY' : 'HEALTH CHECK FAILED';
+      document.getElementById('service-badge').className = `chip ${payload.ok ? 'safe' : 'danger'}`;
+    }
+
+    function renderProtectedPanel(targetId, result, formatter) {
+      const target = document.getElementById(targetId);
+      if (result.status === 401) {
+        target.innerHTML = lockedState();
+        return false;
+      }
+      if (!result.ok) {
+        target.innerHTML = errorState('Request failed', result.payload.detail || result.payload.error || 'Unknown error', result.payload);
+        return false;
+      }
+      setAuthState('AUTHENTICATED');
+      target.innerHTML = formatter(result.payload);
+      return true;
+    }
+
+    function renderSafety(payload) {
+      dashboardState.safety = payload;
+      const gateHash = payload.active_gate_hash ? `${payload.active_gate_hash.slice(0, 12)}...` : 'missing';
+      document.getElementById('env-value').textContent = payload.paper_only ? 'PAPER ONLY' : 'UNKNOWN';
+      return `
+        ${metricList([
+          ['Mode', payload.paper_only ? statusBadge('PAPER ONLY', 'safe') : statusBadge('UNKNOWN', 'warn')],
+          ['Live trading', payload.live_trading_enabled ? statusBadge('ENABLED', 'danger') : statusBadge('LOCKED', 'safe')],
+          ['Order placement', payload.order_placement_enabled ? statusBadge('ENABLED', 'danger') : statusBadge('DISABLED', 'safe')],
+          ['Gate mutations', payload.active_gate_mutation_allowed ? statusBadge('ALLOWED', 'danger') : statusBadge('BLOCKED', 'safe')],
+          ['Order methods', payload.order_methods_present ? statusBadge('PRESENT', 'danger') : statusBadge('ABSENT', 'safe')],
+          ['Gate hash', `<span class="mono">${escapeHtml(gateHash)}</span>`]
+        ])}
+        ${detailsBlock(payload)}`;
+    }
+
+    function renderAlpaca(payload) {
+      const tone = payload.ok ? 'safe' : 'warn';
+      return `
+        ${metricList([
+          ['Environment', statusBadge(payload.paper_only ? 'PAPER' : 'UNKNOWN', tone)],
+          ['Connection', statusBadge(payload.status || 'unknown', payload.ok ? 'safe' : 'warn')],
+          ['Credentials', statusBadge(payload.credentials_present ? 'PRESENT' : 'MISSING', payload.credentials_present ? 'safe' : 'warn')],
+          ['Account status', escapeHtml(payload.account_status || 'not available')],
+          ['Quote checks', `<span class="mono">${escapeHtml(JSON.stringify(payload.quote_checks || {}, null, 0))}</span>`]
+        ])}
+        ${detailsBlock(payload)}`;
+    }
+
+    function renderPaperReadiness(payload) {
+      const tone = payload.ok ? 'safe' : 'warn';
+      return `
+        ${metricList([
+          ['Status', statusBadge(payload.status || 'unknown', tone)],
+          ['Config valid', statusBadge(payload.paper_config_valid ? 'YES' : 'NO', payload.paper_config_valid ? 'safe' : 'warn')],
+          ['Credentials', statusBadge(payload.credentials_present ? 'PRESENT' : 'MISSING', payload.credentials_present ? 'safe' : 'warn')],
+          ['Option snapshots', escapeHtml(payload.option_snapshot_count ?? 'n/a')],
+          ['Option chain', escapeHtml(payload.option_chain_count ?? 'n/a')],
+          ['Decision', escapeHtml(payload.decision_status || 'n/a')],
+          ['Contract', `<span class="mono">${escapeHtml(payload.selected_contract || 'none')}</span>`]
+        ])}
+        ${detailsBlock(payload)}`;
+    }
+
+    function renderCorpus(payload) {
+      dashboardState.corpus = payload;
+      if (!payload.ok) {
+        return emptyState('No paper capture found', 'Run a safe capture after authentication to populate this panel.');
+      }
+      return `
+        ${metricList([
+          ['Symbol', escapeHtml(payload.symbol || 'unknown')],
+          ['Trading date', escapeHtml(payload.trading_date || 'unknown')],
+          ['Snapshots', escapeHtml(payload.snapshots_captured ?? '0')],
+          ['Option quotes', escapeHtml(payload.option_quotes_captured ?? '0')],
+          ['Quality flags', escapeHtml((payload.data_quality_flags || []).join(', ') || 'None')]
+        ])}
+        ${detailsBlock(payload)}`;
+    }
+
+    function renderCampaign(payload) {
+      dashboardState.campaign = payload;
+      if (!payload.ok) {
+        return emptyState('No campaign artifacts found', 'Run a campaign from the latest corpus after authentication.');
+      }
+      const thesis = payload.primary_thesis_validation || {};
+      return `
+        ${metricList([
+          ['Campaign', escapeHtml(payload.campaign_run_id || 'unknown')],
+          ['Corpus type', escapeHtml(payload.corpus_type || 'unknown')],
+          ['Symbols', escapeHtml((payload.symbols || []).join(', ') || 'unknown')],
+          ['Campaign valid', statusBadge(payload.campaign_quality?.campaign_valid ? 'VALID' : 'PENDING', payload.campaign_quality?.campaign_valid ? 'safe' : 'warn')],
+          ['Trading days', escapeHtml(payload.corpus_quality?.trading_days ?? 'unknown')],
+          ['Theory pass', escapeHtml(thesis.pass_rate ?? 'n/a')],
+          ['2DTE pass', escapeHtml(thesis.tactical_2dte_pass_rate ?? 'n/a')],
+          ['Reversal pass', escapeHtml(thesis.reversal_pass_rate ?? 'n/a')]
+        ])}
+        ${detailsBlock(payload)}`;
+    }
+
+    function renderSession(payload) {
+      dashboardState.session = payload;
+      const state = payload.state || {};
+      const config = payload.config || {};
+      const tone = state.last_error ? 'danger' : (state.running ? 'safe' : 'warn');
+      return `
+        ${metricList([
+          ['Autostart', statusBadge(config.enabled ? 'ENABLED' : 'DISABLED', config.enabled ? 'safe' : 'warn')],
+          ['Thread', statusBadge(payload.thread_alive ? 'RUNNING' : 'IDLE', tone)],
+          ['Symbols', `<span class="mono">${escapeHtml((config.symbols || []).join(', ') || 'n/a')}</span>`],
+          ['Interval', escapeHtml(String(config.interval_seconds ?? 'n/a'))],
+          ['Max cycles', escapeHtml(String(config.max_cycles ?? 'continuous'))],
+          ['Last error', state.last_error ? `<span class="mono">${escapeHtml(state.last_error)}</span>` : statusBadge('NONE', 'safe')],
+          ['Last result', state.last_result ? statusBadge(`CYCLES ${state.last_result.cycles_completed ?? 0}`, 'safe') : statusBadge('NONE', 'warn')]
+        ])}
+        ${detailsBlock(payload)}`;
+    }
+
+    function renderBucketReport(payload) {
+      if (!payload.ok) {
+        return emptyState('No bucket edge report', 'Run a campaign to generate advisory bucket metrics.');
+      }
+      const rows = (payload.buckets || []).slice(0, 4).map((bucket) => {
+        const primary = bucket.fill_models?.realistic_mid_penalty || {};
+        return `<tr><td>${escapeHtml(bucket.bucket)}</td><td>${escapeHtml(primary.closed_trades ?? '0')}</td><td>${escapeHtml(primary.profit_factor ?? 'n/a')}</td><td>${escapeHtml(primary.tactical_2dte_pass_rate ?? 'n/a')}</td></tr>`;
+      }).join('');
+      return `
+        <table class="table">
+          <thead><tr><th>Bucket</th><th>Closed</th><th>PF</th><th>2DTE</th></tr></thead>
+          <tbody>${rows || '<tr><td colspan="4">No bucket data</td></tr>'}</tbody>
+        </table>
+        ${detailsBlock(payload)}`;
+    }
+
+    function renderGateReport(payload) {
+      if (!payload.ok) {
+        return emptyState('No gate candidate report', 'Run a campaign to generate candidate review output.');
+      }
+      const rows = Object.entries(payload.bucket_candidates || {}).slice(0, 4).map(([bucket, candidate]) => `
+        <tr>
+          <td>${escapeHtml(bucket)}</td>
+          <td>${candidate.eligible_for_paper_forward ? statusBadge('PAPER REVIEW', 'safe') : statusBadge('BLOCKED', 'warn')}</td>
+          <td>${candidate.live_enabled ? statusBadge('LIVE', 'danger') : statusBadge('OFF', 'safe')}</td>
+        </tr>`).join('');
+      return `
+        <table class="table">
+          <thead><tr><th>Bucket</th><th>Paper</th><th>Live</th></tr></thead>
+          <tbody>${rows || '<tr><td colspan="3">No gate candidates</td></tr>'}</tbody>
+        </table>
+        ${detailsBlock(payload)}`;
+    }
+
+    function renderThesisFailures(payload) {
+      if (!payload.ok) {
+        return emptyState('No thesis failures report', 'Run a campaign to inspect wrong-way or non-reversing picks.');
+      }
+      const rows = (payload.failures || []).slice(0, 5).map((row) => `
+        <tr>
+          <td>${escapeHtml(row.ticker || 'unknown')}</td>
+          <td>${escapeHtml(row.trade_setup || 'unknown')}</td>
+          <td>${escapeHtml(row.option_type || 'unknown')}</td>
+          <td>${escapeHtml(row.reason || 'unknown')}</td>
+          <td>${escapeHtml(row.contract_dte_days ?? 'n/a')}</td>
+        </tr>`).join('');
+      return `
+        <table class="table">
+          <thead><tr><th>Ticker</th><th>Setup</th><th>Type</th><th>Failure</th><th>DTE</th></tr></thead>
+          <tbody>${rows || '<tr><td colspan="5">No thesis failures</td></tr>'}</tbody>
+        </table>
+        ${detailsBlock(payload)}`;
+    }
+
+    function renderPersistenceStatus() {
+      const safety = dashboardState.safety;
+      const corpus = dashboardState.corpus;
+      const campaign = dashboardState.campaign;
+      if (!safety) {
+        document.getElementById('persistence-status').innerHTML = emptyState('Persistence unknown', 'Authenticate to inspect active runtime paths.');
+        return;
+      }
+      const roots = [safety.active_gate_path, corpus?.manifest_path, campaign?.artifact_dir].filter(Boolean);
+      const durable = roots.some((path) => String(path).startsWith('/var/data/autobott'));
+      document.getElementById('persistence-root-text').textContent = durable ? '/var/data/autobott' : (roots[0] || 'not visible');
+      document.getElementById('persistence-status').innerHTML = `
+        ${metricList([
+          ['Disk-backed path detected', durable ? statusBadge('YES', 'safe') : statusBadge('UNKNOWN', 'warn')],
+          ['Gate path', `<span class="mono">${escapeHtml(safety.active_gate_path || 'unknown')}</span>`],
+          ['Capture path', `<span class="mono">${escapeHtml(corpus?.manifest_path || 'not yet visible')}</span>`],
+          ['Campaign path', `<span class="mono">${escapeHtml(campaign?.artifact_dir || 'not yet visible')}</span>`]
+        ])}
+        <div class="foot-note">Persistent disk proof is strongest after capture/campaign output survives a restart or redeploy.</div>`;
+    }
+
+    async function refreshHealth() {
+      const result = await callApi('/api/health');
+      renderHealth(result.payload);
+      return result;
+    }
+
+    async function refreshProtected() {
+      setAuthState(sessionStorage.getItem('dashboardToken') ? 'LOCKED' : 'LOCKED');
+      const protectedResults = await Promise.all([
+        callApi('/api/safety'),
+        callApi('/api/alpaca/status'),
+        callApi('/api/paper/readiness'),
+        callApi('/api/corpus/latest'),
+        callApi('/api/campaign/latest'),
+        callApi('/api/session/status'),
+        callApi('/api/reports/bucket-edge/latest'),
+        callApi('/api/reports/thesis-failures/latest'),
+        callApi('/api/reports/gate-candidate/latest')
+      ]);
+      renderProtectedPanel('safety-status', protectedResults[0], renderSafety);
+      renderProtectedPanel('alpaca-status', protectedResults[1], renderAlpaca);
+      renderProtectedPanel('paper-readiness', protectedResults[2], renderPaperReadiness);
+      renderProtectedPanel('corpus-status', protectedResults[3], renderCorpus);
+      renderProtectedPanel('campaign-status', protectedResults[4], renderCampaign);
+      renderProtectedPanel('session-status', protectedResults[5], renderSession);
+      renderProtectedPanel('bucket-report', protectedResults[6], renderBucketReport);
+      renderProtectedPanel('thesis-failures', protectedResults[7], renderThesisFailures);
+      renderProtectedPanel('gate-report', protectedResults[8], renderGateReport);
+      renderPersistenceStatus();
+      syncActionState();
+    }
+
     async function refreshAll() {
-      document.getElementById('safety-status').textContent = JSON.stringify(await callApi('/api/safety'), null, 2);
-      document.getElementById('alpaca-status').textContent = JSON.stringify(await callApi('/api/alpaca/status'), null, 2);
-      document.getElementById('corpus-status').textContent = JSON.stringify(await callApi('/api/corpus/latest'), null, 2);
-      document.getElementById('campaign-status').textContent = JSON.stringify(await callApi('/api/campaign/latest'), null, 2);
-      document.getElementById('bucket-report').textContent = JSON.stringify(await callApi('/api/reports/bucket-edge/latest'), null, 2);
-      document.getElementById('gate-report').textContent = JSON.stringify(await callApi('/api/reports/gate-candidate/latest'), null, 2);
+      await refreshHealth();
+      await refreshProtected();
+      updateRefreshStamp();
     }
+
     async function startCapture(minutes) {
-      const payload = await callApi('/api/capture/start', { method:'POST', body: JSON.stringify({ symbols:['SPY','QQQ'], minutes, interval_seconds:60 }) });
-      document.getElementById('action-log').textContent = JSON.stringify(payload, null, 2);
-      refreshAll();
+      const result = await callApi('/api/capture/start', { method:'POST', body: JSON.stringify({ symbols:['SPY','QQQ'], minutes, interval_seconds:60 }) });
+      if (result.ok) {
+        logEntry('Capture completed', `${minutes}-minute paper capture finished without enabling trading or mutating the active gate.`);
+      } else if (result.status === 401) {
+        logEntry('Capture blocked', 'Dashboard token required before protected actions can run.', 'warn');
+      } else {
+        logEntry('Capture failed', result.payload.detail || result.payload.error || 'Unknown capture failure.', 'danger');
+      }
+      await refreshAll();
     }
+
     async function runCampaign() {
-      const payload = await callApi('/api/campaign/run', { method:'POST', body: JSON.stringify({}) });
-      document.getElementById('action-log').textContent = JSON.stringify(payload, null, 2);
-      refreshAll();
+      const result = await callApi('/api/campaign/run', { method:'POST', body: JSON.stringify({}) });
+      if (result.ok) {
+        logEntry('Campaign completed', 'Advisory replay campaign finished. Review report panels for candidate and bucket summaries.');
+      } else if (result.status === 401) {
+        logEntry('Campaign blocked', 'Dashboard token required before protected actions can run.', 'warn');
+      } else {
+        logEntry('Campaign failed', result.payload.detail || result.payload.error || 'Unknown campaign failure.', 'danger');
+      }
+      await refreshAll();
     }
+
+    async function runTradingCycle() {
+      const result = await callApi('/api/trading-cycle/run', { method:'POST', body: JSON.stringify({ symbols:['SPY'], quantity:1 }) });
+      if (result.ok) {
+        const orders = result.payload.orders_submitted?.length ?? 0;
+        const skipped = result.payload.skipped?.length ?? 0;
+        logEntry('Trading cycle completed', `Orders submitted: ${orders}. Skipped decisions: ${skipped}.`);
+      } else if (result.status === 401) {
+        logEntry('Trading cycle blocked', 'Dashboard token required before protected actions can run.', 'warn');
+      } else {
+        logEntry('Trading cycle failed', result.payload.detail || result.payload.error || 'Unknown trading cycle failure.', 'danger');
+      }
+      await refreshAll();
+    }
+
+    async function armPaperMode() {
+      const result = await callApi('/api/runtime/arm-paper', { method:'POST', body: JSON.stringify({ reason:'dashboard_arm_paper' }) });
+      if (result.ok) {
+        logEntry('Paper execution armed', 'Paper execution is enabled and live mode stays locked.', 'safe');
+      } else if (result.status === 401) {
+        logEntry('Arm blocked', 'Dashboard token required before protected actions can run.', 'warn');
+      } else {
+        logEntry('Arm failed', result.payload.detail || result.payload.error || 'Unknown runtime control failure.', 'danger');
+      }
+      await refreshAll();
+    }
+
+    async function disableExecution() {
+      const result = await callApi('/api/runtime/disable-execution', { method:'POST', body: JSON.stringify({ reason:'dashboard_disable_execution' }) });
+      if (result.ok) {
+        logEntry('Execution disabled', 'New paper entries are disabled until paper mode is armed again.', 'warn');
+      } else if (result.status === 401) {
+        logEntry('Disable blocked', 'Dashboard token required before protected actions can run.', 'warn');
+      } else {
+        logEntry('Disable failed', result.payload.detail || result.payload.error || 'Unknown runtime control failure.', 'danger');
+      }
+      await refreshAll();
+    }
+
+    async function engageKillSwitch() {
+      const result = await callApi('/api/runtime/kill-switch', { method:'POST', body: JSON.stringify({ enabled:true, reason:'dashboard_kill_switch' }) });
+      if (result.ok) {
+        logEntry('Kill switch engaged', 'Execution and live mode were forced off immediately.', 'danger');
+      } else if (result.status === 401) {
+        logEntry('Kill switch blocked', 'Dashboard token required before protected actions can run.', 'warn');
+      } else {
+        logEntry('Kill switch failed', result.payload.detail || result.payload.error || 'Unknown runtime control failure.', 'danger');
+      }
+      await refreshAll();
+    }
+
+    async function reconcileExecution() {
+      const result = await callApi('/api/execution/reconcile', { method:'POST', body: JSON.stringify({}) });
+      if (result.ok) {
+        logEntry('Reconcile completed', `Checked ${result.payload.checked} orders and updated ${result.payload.updated}.`, 'safe');
+      } else if (result.status === 401) {
+        logEntry('Reconcile blocked', 'Dashboard token required before protected actions can run.', 'warn');
+      } else {
+        logEntry('Reconcile failed', result.payload.detail || result.payload.error || 'Unknown reconcile failure.', 'danger');
+      }
+      await refreshAll();
+    }
+
+    async function startPaperSession() {
+      const result = await callApi('/api/session/start', { method:'POST', body: JSON.stringify({ symbols:['SPY'], interval_seconds:300, quantity:1 }) });
+      if (result.ok && result.payload.started) {
+        logEntry('Session started', 'Protected paper session launched successfully.', 'safe');
+      } else if (result.status === 401) {
+        logEntry('Session blocked', 'Dashboard token required before protected actions can run.', 'warn');
+      } else if (result.ok) {
+        logEntry('Session already running', 'Supervisor ignored the request because a session is already active.', 'warn');
+      } else {
+        logEntry('Session start failed', result.payload.detail || result.payload.error || 'Unknown session start failure.', 'danger');
+      }
+      await refreshAll();
+    }
+
+    syncActionState();
     refreshAll();
   </script>
 </body>
@@ -397,6 +1488,12 @@ def _read_json(path: Path) -> JsonDict:
     return json.loads(path.read_text(encoding="utf-8")) if path.exists() else {}
 
 
+def _read_jsonl(path: Path) -> list[JsonDict]:
+    if not path.exists():
+        return []
+    return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
+
+
 def _file_hash(path: Path) -> str | None:
     if not path.exists():
         return None
@@ -408,9 +1505,17 @@ def _order_methods_present() -> bool:
     return any(hasattr(AlpacaPaperClient, method_name) for method_name in forbidden)
 
 
+def _thesis_failure_sort_key(row: JsonDict) -> tuple[float, float, float, str]:
+    dte_penalty = 0 if (row.get("contract_dte_days") or 99) <= 2 else 1
+    followthrough = float(row.get("followthrough_rate") or 0.0)
+    adverse = float(row.get("adverse_move_pct") or 0.0)
+    return (dte_penalty, followthrough, adverse, str(row.get("decision_id") or ""))
+
+
 def main() -> int:
     host = os.getenv("HOST", "0.0.0.0")
     port = int(os.getenv("PORT", "8000"))
+    maybe_start_session_supervisor()
     with make_server(host, port, app) as httpd:
         print(f"AutoBott dashboard serving on http://{host}:{port}")
         httpd.serve_forever()

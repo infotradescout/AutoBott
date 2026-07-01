@@ -5,6 +5,8 @@ from pathlib import Path
 import pytest
 
 from autobott_v2 import dashboard_app
+from autobott_v2.runtime_control import default_runtime_state, save_runtime_state
+from autobott_v2.runtime_control import set_kill_switch
 
 
 def _invoke_app(method: str, path: str, *, token: str | None = None, payload: dict | None = None):
@@ -38,6 +40,7 @@ def _auth_env(monkeypatch, tmp_path: Path) -> None:
     gate_path = tmp_path / "data" / "PHASE1_CYCLE_GATE.json"
     gate_path.parent.mkdir(parents=True, exist_ok=True)
     gate_path.write_text(json.dumps({"sentinel": True}, sort_keys=True), encoding="utf-8")
+    save_runtime_state(default_runtime_state())
 
 
 def _write_corpus_manifest(tmp_path: Path) -> None:
@@ -64,6 +67,8 @@ def _write_corpus_manifest(tmp_path: Path) -> None:
 def _write_campaign_artifacts(tmp_path: Path) -> None:
     campaign_dir = tmp_path / "artifacts" / "phase1_replay_campaign" / "campaign1"
     campaign_dir.mkdir(parents=True, exist_ok=True)
+    primary_dir = campaign_dir / "fill_model_results" / "realistic_mid_penalty"
+    primary_dir.mkdir(parents=True, exist_ok=True)
     (campaign_dir / "manifest.json").write_text(
         json.dumps(
             {
@@ -72,9 +77,64 @@ def _write_campaign_artifacts(tmp_path: Path) -> None:
                 "symbols": ["SPY", "QQQ"],
                 "campaign_quality": {"campaign_valid": True},
                 "corpus_quality": {"trading_days": 1},
+                "thesis_validation_by_fill_model": {
+                    "realistic_mid_penalty": {
+                        "pass_rate": 0.72,
+                        "tactical_2dte_pass_rate": 0.68,
+                        "reversal_pass_rate": 0.5,
+                    }
+                },
             },
             sort_keys=True,
         ),
+        encoding="utf-8",
+    )
+    (primary_dir / "thesis_validation.jsonl").write_text(
+        "\n".join(
+            [
+                json.dumps(
+                    {
+                        "decision_id": "bad-2dte",
+                        "ticker": "AAPL",
+                        "trade_setup": "bullish_continuation",
+                        "option_type": "call",
+                        "contract_dte_days": 2,
+                        "reason": "directional_followthrough_failed",
+                        "passed": False,
+                        "followthrough_rate": 0.0,
+                        "adverse_move_pct": -0.03,
+                        "first_move_match": False,
+                        "reversal_confirmed": False,
+                    },
+                    sort_keys=True,
+                ),
+                json.dumps(
+                    {
+                        "decision_id": "bad-reversal",
+                        "ticker": "SPY",
+                        "trade_setup": "late_cycle_bearish_reversal",
+                        "option_type": "put",
+                        "contract_dte_days": 6,
+                        "reason": "reversal_not_confirmed",
+                        "passed": False,
+                        "followthrough_rate": 0.25,
+                        "adverse_move_pct": -0.01,
+                        "first_move_match": False,
+                        "reversal_confirmed": False,
+                    },
+                    sort_keys=True,
+                ),
+            ]
+        ) + "\n",
+        encoding="utf-8",
+    )
+    (primary_dir / "decisions.jsonl").write_text(
+        "\n".join(
+            [
+                json.dumps({"decision_id": "bad-2dte", "decision": "TRADE_CANDIDATE", "confidence_score": 0.71, "reason_codes": ["selected_tactical_priority"]}, sort_keys=True),
+                json.dumps({"decision_id": "bad-reversal", "decision": "TRADE_CANDIDATE", "confidence_score": 0.66, "reason_codes": ["reversal_confirmation_present"]}, sort_keys=True),
+            ]
+        ) + "\n",
         encoding="utf-8",
     )
     (campaign_dir / "bucket_edge_report.json").write_text(
@@ -88,6 +148,8 @@ def _write_campaign_artifacts(tmp_path: Path) -> None:
                                 "profit_factor": 1.2,
                                 "expectancy": 0.1,
                                 "unresolved_position_rate": 0.0,
+                                "thesis_pass_rate": 0.67,
+                                "tactical_2dte_pass_rate": 0.67,
                             }
                         }
                     }
@@ -127,7 +189,69 @@ def test_dashboard_safety_reports_live_locked(monkeypatch, tmp_path) -> None:
     payload = json.loads(body)
     assert status.startswith("200")
     assert payload["live_trading_enabled"] is False
-    assert payload["order_placement_enabled"] is False
+    assert payload["order_placement_enabled"] is True
+    assert payload["kill_switch_enabled"] is False
+
+
+def test_dashboard_execution_state_reflects_kill_switch(monkeypatch, tmp_path) -> None:
+    _auth_env(monkeypatch, tmp_path)
+    set_kill_switch(True, reason="manual_stop")
+    status, body = _invoke_app("GET", "/api/execution/state", token="dashboard-token")
+    payload = json.loads(body)
+    assert status.startswith("200")
+    assert payload["kill_switch_enabled"] is True
+    assert payload["execution_enabled"] is False
+
+
+def test_dashboard_latest_decisions_endpoint_returns_rows(monkeypatch, tmp_path) -> None:
+    _auth_env(monkeypatch, tmp_path)
+    monkeypatch.setattr(dashboard_app, "load_decision_cards", lambda limit=10: [{"decision_card": {"ticker": "AAPL"}}])
+    status, body = _invoke_app("GET", "/api/decisions/latest", token="dashboard-token")
+    payload = json.loads(body)
+    assert status.startswith("200")
+    assert payload["count"] == 1
+    assert payload["decisions"][0]["decision_card"]["ticker"] == "AAPL"
+
+
+def test_dashboard_session_status_endpoint_returns_supervisor_state(monkeypatch, tmp_path) -> None:
+    _auth_env(monkeypatch, tmp_path)
+    monkeypatch.setattr(
+        dashboard_app,
+        "session_supervisor_status",
+        lambda: {
+            "config": {"enabled": True, "symbols": ["SPY"], "interval_seconds": 300, "max_cycles": 2, "quantity": 1, "position_count": 0, "daily_pnl": 0.0},
+            "state": {"running": False, "started_at": None, "finished_at": None, "last_result": {"cycles_completed": 2}, "last_error": None},
+            "thread_alive": False,
+        },
+    )
+    status, body = _invoke_app("GET", "/api/session/status", token="dashboard-token")
+    payload = json.loads(body)
+    assert status.startswith("200")
+    assert payload["ok"] is True
+    assert payload["config"]["enabled"] is True
+    assert payload["state"]["last_result"]["cycles_completed"] == 2
+
+
+def test_dashboard_runtime_arm_paper_endpoint_enables_execution(monkeypatch, tmp_path) -> None:
+    _auth_env(monkeypatch, tmp_path)
+    status, body = _invoke_app("POST", "/api/runtime/arm-paper", token="dashboard-token", payload={"reason": "test_arm"})
+    payload = json.loads(body)
+    assert status.startswith("200")
+    assert payload["runtime_state"]["kill_switch_enabled"] is False
+    assert payload["runtime_state"]["execution_enabled"] is True
+    assert payload["runtime_state"]["live_mode_enabled"] is False
+
+
+def test_dashboard_runtime_disable_and_kill_switch_endpoints(monkeypatch, tmp_path) -> None:
+    _auth_env(monkeypatch, tmp_path)
+    disable_status, disable_body = _invoke_app("POST", "/api/runtime/disable-execution", token="dashboard-token", payload={"reason": "pause"})
+    kill_status, kill_body = _invoke_app("POST", "/api/runtime/kill-switch", token="dashboard-token", payload={"enabled": True, "reason": "panic"})
+    disable_payload = json.loads(disable_body)
+    kill_payload = json.loads(kill_body)
+    assert disable_status.startswith("200")
+    assert disable_payload["runtime_state"]["execution_enabled"] is False
+    assert kill_status.startswith("200")
+    assert kill_payload["runtime_state"]["kill_switch_enabled"] is True
 
 
 def test_dashboard_rejects_missing_auth_for_capture(monkeypatch, tmp_path) -> None:
@@ -141,6 +265,22 @@ def test_dashboard_rejects_missing_auth_for_capture(monkeypatch, tmp_path) -> No
 def test_dashboard_rejects_missing_auth_for_campaign(monkeypatch, tmp_path) -> None:
     _auth_env(monkeypatch, tmp_path)
     status, body = _invoke_app("POST", "/api/campaign/run", payload={})
+    payload = json.loads(body)
+    assert status.startswith("401")
+    assert payload["error"] == "unauthorized"
+
+
+def test_dashboard_rejects_missing_auth_for_trading_cycle(monkeypatch, tmp_path) -> None:
+    _auth_env(monkeypatch, tmp_path)
+    status, body = _invoke_app("POST", "/api/trading-cycle/run", payload={})
+    payload = json.loads(body)
+    assert status.startswith("401")
+    assert payload["error"] == "unauthorized"
+
+
+def test_dashboard_rejects_missing_auth_for_runtime_controls(monkeypatch, tmp_path) -> None:
+    _auth_env(monkeypatch, tmp_path)
+    status, body = _invoke_app("POST", "/api/runtime/arm-paper", payload={})
     payload = json.loads(body)
     assert status.startswith("401")
     assert payload["error"] == "unauthorized"
@@ -173,10 +313,155 @@ def test_dashboard_does_not_expose_alpaca_secrets(monkeypatch, tmp_path) -> None
     assert payload["config"]["secret_key"] != "paper-secret-456"
 
 
+def test_dashboard_paper_readiness_endpoint_returns_probe(monkeypatch, tmp_path) -> None:
+    _auth_env(monkeypatch, tmp_path)
+    monkeypatch.setattr(
+        dashboard_app,
+        "run_paper_readiness_probe",
+        lambda: {"ok": True, "status": "paper_ready", "option_chain_count": 8, "decision_status": "TRADE_CANDIDATE", "selected_contract": "SPY260703C00600000"},
+    )
+    status, body = _invoke_app("GET", "/api/paper/readiness", token="dashboard-token")
+    payload = json.loads(body)
+    assert status.startswith("200")
+    assert payload["status"] == "paper_ready"
+    assert payload["option_chain_count"] == 8
+
+
 def test_dashboard_has_no_order_endpoints() -> None:
     assert dashboard_app._order_methods_present() is False
     routes_source = Path("src/autobott_v2/dashboard_app.py").read_text(encoding="utf-8").lower()
     assert "/api/order" not in routes_source
+
+
+def test_dashboard_trading_cycle_endpoint_returns_result(monkeypatch, tmp_path) -> None:
+    _auth_env(monkeypatch, tmp_path)
+
+    class FakeCycleResult:
+        def to_json_dict(self):
+            return {
+                "symbols": ["SPY"],
+                "orders_submitted": [],
+                "skipped": [],
+                "snapshot_paths": [],
+                "decisions": [],
+                "runtime_state": {},
+                "started_at": "2026-07-01T15:35:00+00:00",
+                "finished_at": "2026-07-01T15:36:00+00:00",
+            }
+
+    monkeypatch.setattr(dashboard_app, "run_trading_cycle", lambda **_kwargs: FakeCycleResult())
+    status, body = _invoke_app("POST", "/api/trading-cycle/run", token="dashboard-token", payload={"symbols": ["SPY"]})
+    payload = json.loads(body)
+    assert status.startswith("200")
+    assert payload["ok"] is True
+    assert payload["symbols"] == ["SPY"]
+
+
+def test_dashboard_trading_session_endpoint_returns_result(monkeypatch, tmp_path) -> None:
+    _auth_env(monkeypatch, tmp_path)
+
+    class FakeSessionResult:
+        def to_json_dict(self):
+            return {
+                "symbols": ["SPY"],
+                "cycles_completed": 2,
+                "cycle_results": [],
+                "started_at": "2026-07-01T15:35:00+00:00",
+                "finished_at": "2026-07-01T15:40:00+00:00",
+            }
+
+    monkeypatch.setattr(dashboard_app, "run_trading_session", lambda **_kwargs: FakeSessionResult())
+    status, body = _invoke_app("POST", "/api/trading-session/run", token="dashboard-token", payload={"symbols": ["SPY"], "max_cycles": 2})
+    payload = json.loads(body)
+    assert status.startswith("200")
+    assert payload["cycles_completed"] == 2
+
+
+def test_dashboard_session_start_endpoint_returns_started(monkeypatch, tmp_path) -> None:
+    _auth_env(monkeypatch, tmp_path)
+    monkeypatch.setattr(dashboard_app, "start_session_supervisor", lambda config: True)
+    monkeypatch.setattr(
+        dashboard_app,
+        "session_supervisor_status",
+        lambda: {
+            "config": {"enabled": True, "symbols": ["SPY"], "interval_seconds": 300, "max_cycles": 1, "quantity": 1, "position_count": 0, "daily_pnl": 0.0},
+            "state": {"running": True, "started_at": None, "finished_at": None, "last_result": None, "last_error": None},
+            "thread_alive": True,
+        },
+    )
+    status, body = _invoke_app("POST", "/api/session/start", token="dashboard-token", payload={"symbols": ["SPY"], "interval_seconds": 300})
+    payload = json.loads(body)
+    assert status.startswith("200")
+    assert payload["started"] is True
+    assert payload["thread_alive"] is True
+
+
+def test_dashboard_open_positions_endpoint_returns_positions(monkeypatch, tmp_path) -> None:
+    _auth_env(monkeypatch, tmp_path)
+
+    class FakePosition:
+        def to_json_dict(self):
+            return {"broker_order_id": "alpaca-order-1", "symbol": "AAPL", "status": "submitted"}
+
+    monkeypatch.setattr(dashboard_app, "load_open_positions", lambda: [FakePosition()])
+    status, body = _invoke_app("GET", "/api/positions/open", token="dashboard-token")
+    payload = json.loads(body)
+    assert status.startswith("200")
+    assert payload["count"] == 1
+    assert payload["positions"][0]["symbol"] == "AAPL"
+
+
+def test_dashboard_execution_exit_endpoint_returns_order(monkeypatch, tmp_path) -> None:
+    _auth_env(monkeypatch, tmp_path)
+
+    class FakePosition:
+        broker_order_id = "alpaca-entry-1"
+
+    class FakeOrder:
+        broker_order_id = "alpaca-exit-1"
+        state = type("State", (), {"value": "submitted"})()
+
+    monkeypatch.setattr(dashboard_app, "load_open_positions", lambda: [FakePosition()])
+    monkeypatch.setattr(dashboard_app, "AlpacaExecutionBroker", lambda: object())
+    monkeypatch.setattr(dashboard_app, "submit_exit_for_position", lambda position, broker, limit_price: FakeOrder())
+    status, body = _invoke_app("POST", "/api/execution/exit", token="dashboard-token", payload={"broker_order_id": "alpaca-entry-1", "limit_price": 3.1})
+    payload = json.loads(body)
+    assert status.startswith("200")
+    assert payload["broker_order_id"] == "alpaca-exit-1"
+
+
+def test_dashboard_execution_cancel_and_replace_endpoints(monkeypatch, tmp_path) -> None:
+    _auth_env(monkeypatch, tmp_path)
+    monkeypatch.setattr(dashboard_app, "AlpacaExecutionBroker", lambda: object())
+    monkeypatch.setattr(dashboard_app, "cancel_open_order", lambda broker_order_id, broker: {"id": broker_order_id, "status": "canceled"})
+    monkeypatch.setattr(dashboard_app, "replace_open_order", lambda broker_order_id, broker, limit_price: {"id": broker_order_id, "limit_price": f"{limit_price:.2f}"})
+
+    cancel_status, cancel_body = _invoke_app("POST", "/api/execution/cancel", token="dashboard-token", payload={"broker_order_id": "alpaca-entry-1"})
+    replace_status, replace_body = _invoke_app("POST", "/api/execution/replace", token="dashboard-token", payload={"broker_order_id": "alpaca-entry-1", "limit_price": 2.75})
+    cancel_payload = json.loads(cancel_body)
+    replace_payload = json.loads(replace_body)
+
+    assert cancel_status.startswith("200")
+    assert cancel_payload["result"]["status"] == "canceled"
+    assert replace_status.startswith("200")
+    assert replace_payload["result"]["limit_price"] == "2.75"
+
+
+def test_dashboard_execution_reconcile_endpoint_returns_summary(monkeypatch, tmp_path) -> None:
+    _auth_env(monkeypatch, tmp_path)
+    monkeypatch.setattr(dashboard_app, "AlpacaExecutionBroker", lambda: object())
+    monkeypatch.setattr(
+        dashboard_app,
+        "reconcile_open_positions",
+        lambda broker, journal_path=None: type("Summary", (), {"checked": 2, "updated": 1, "unchanged": 1, "missing": 0})(),
+    )
+    monkeypatch.setattr(dashboard_app, "load_open_positions", lambda: [object(), object()])
+    status, body = _invoke_app("POST", "/api/execution/reconcile", token="dashboard-token", payload={})
+    payload = json.loads(body)
+    assert status.startswith("200")
+    assert payload["checked"] == 2
+    assert payload["updated"] == 1
+    assert payload["open_position_count"] == 2
 
 
 def test_dashboard_capture_preserves_active_gate(monkeypatch, tmp_path) -> None:
@@ -222,6 +507,33 @@ def test_latest_bucket_edge_report_loads_without_mutating_gate(monkeypatch, tmp_
     assert status.startswith("200")
     assert gate_before == gate_after
     assert payload["bucket_count"] == 1
+    assert payload["buckets"][0]["fill_models"]["realistic_mid_penalty"]["tactical_2dte_pass_rate"] == 0.67
+
+
+def test_latest_campaign_payload_includes_primary_thesis_metrics(monkeypatch, tmp_path) -> None:
+    _auth_env(monkeypatch, tmp_path)
+    _write_campaign_artifacts(tmp_path)
+
+    status, body = _invoke_app("GET", "/api/campaign/latest", token="dashboard-token")
+    payload = json.loads(body)
+
+    assert status.startswith("200")
+    assert payload["primary_thesis_validation"]["pass_rate"] == 0.72
+    assert payload["primary_thesis_validation"]["tactical_2dte_pass_rate"] == 0.68
+
+
+def test_latest_thesis_failures_payload_ranks_and_returns_failures(monkeypatch, tmp_path) -> None:
+    _auth_env(monkeypatch, tmp_path)
+    _write_campaign_artifacts(tmp_path)
+
+    status, body = _invoke_app("GET", "/api/reports/thesis-failures/latest", token="dashboard-token")
+    payload = json.loads(body)
+
+    assert status.startswith("200")
+    assert payload["count"] == 2
+    assert payload["failures"][0]["decision_id"] == "bad-2dte"
+    assert payload["failures"][0]["contract_dte_days"] == 2
+    assert payload["failures"][0]["reason"] == "directional_followthrough_failed"
 
 
 def test_render_config_has_health_check() -> None:
@@ -231,12 +543,19 @@ def test_render_config_has_health_check() -> None:
     assert "key: AUTOBOTT_DATA_ROOT" in render_config
     assert "key: AUTOBOTT_ARTIFACTS_ROOT" in render_config
     assert "key: AUTOBOTT_GATE_PATH" in render_config
+    assert "key: AUTOBOTT_SESSION_AUTOSTART" in render_config
+    assert "key: AUTOBOTT_SESSION_SYMBOLS" in render_config
 
 
 def test_frontend_contains_paper_only_live_locked_orders_disabled() -> None:
     status, body = _invoke_app("GET", "/")
     assert status.startswith("200")
     assert "PAPER ONLY | LIVE TRADING LOCKED | ORDERS DISABLED" in body
+    assert "AutoBott Phase 1 Operator Console" in body
+    assert "LOCKED" in body
+    assert "Session Supervisor" in body
+    assert "Arm paper execution" in body
+    assert "Paper Readiness" in body
 
 
 def test_frontend_contains_no_buy_sell_submit_order_controls() -> None:
@@ -245,3 +564,15 @@ def test_frontend_contains_no_buy_sell_submit_order_controls() -> None:
     assert "buy button" not in lowered
     assert "sell button" not in lowered
     assert "submit order" not in lowered
+    assert "run protected trading cycle" in lowered
+    assert "start paper session" in lowered
+
+
+def test_frontend_contains_clean_locked_state_copy() -> None:
+    status, body = _invoke_app("GET", "/")
+    assert status.startswith("200")
+    assert "Dashboard token required" in body
+    assert "Set token to view this panel." in body
+    assert "Theory pass" in body
+    assert "2DTE pass" in body
+    assert "Worst Thesis Failures" in body

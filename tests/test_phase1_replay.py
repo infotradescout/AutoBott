@@ -121,8 +121,10 @@ def test_replay_writes_decisions_orders_fills_outcomes(tmp_path) -> None:
     assert (artifact_dir / "orders.jsonl").exists()
     assert (artifact_dir / "fills.jsonl").exists()
     assert (artifact_dir / "outcomes.jsonl").exists()
+    assert (artifact_dir / "thesis_validation.jsonl").exists()
     assert (artifact_dir / "summary.md").exists()
     assert (artifact_dir / "manifest.json").exists()
+    assert "tactical_2dte_pass_rate" in result["thesis_validation"]
 
 
 def test_replay_run_is_deterministic(tmp_path) -> None:

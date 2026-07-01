@@ -1,51 +1,54 @@
 # AutoBott v2 Build Plan
 
-## P0 Doctrine + Scope Lock
+## Product Goal
 
-- Lock paper-first doctrine.
-- Define forbidden capabilities in early phases.
-- Add tests that enforce doctrine language.
+Build an automated options trading bot for long calls and long puts with operator oversight, broker execution,
+risk controls, replayability, and auditable history.
 
-## P1 Read-Only Options Decision Cards
+Research, replay, and historical analysis remain core support systems, but they exist to improve the trading bot
+rather than serve as the end product.
 
-- Add typed models.
-- Add data-layer snapshot contracts for market bars, option chains, quotes/spreads, SPY/QQQ/VIX context, and event blackout flags.
-- Add regime, direction, volatility, and contract-selection engines.
-- Add fail-closed checks and blocked reasons.
-- Add replayable JSON decision-card output and JSONL learning ledger.
-- Add paper-only Alpaca status/capture plumbing for real snapshot collection.
-- Add a paper-only operator dashboard for safe capture, replay, and report inspection.
+## P0 Identity + Architecture Lock
 
-## P2 Paper Execution
+- Lock the top-level product definition around automated trading.
+- Separate product layers from support layers in docs and package organization.
+- Add tests that enforce the product identity instead of a paper-only identity.
 
-Prerequisite: Phase 1 decision cards must be stable and auditable.
+## P1 Signal Foundation
 
-- Approved decision card to limit buy simulation.
-- Fill confirmation simulation with tradability checks, spread/quote-age rejection, and leg-level tactical/rider outcomes.
-- Monitor and limit sell simulation.
-- No live broker orders.
+- Maintain typed models for decision inputs and outputs.
+- Keep snapshot contracts for market bars, option chains, quotes/spreads, SPY/QQQ/VIX context, and event blackout flags.
+- Harden regime, direction, volatility, and contract-selection engines.
+- Keep fail-closed checks and explicit blocked reasons.
 
-## P3 Learning
+## P2 Research and Evidence Support
 
-- Persist accepted and rejected candidates.
-- Attach 5m, 15m, 30m, and 1h forward outcomes.
-- Surface regime, signal, ticker, and volatility failure modes.
+- Preserve replayable JSON decision-card output and JSONL learning ledger support.
+- Preserve paper-market status/capture plumbing for real snapshot collection.
+- Preserve replay campaigns, slippage sweeps, scorecards, and historical corpus generation.
+- Keep the operator dashboard useful for evidence review and operational visibility.
 
-## P4 Backtest / Replay Harness
+## P3 Execution Domain
 
-- Replay historical signals and market states with manifest capture and isolated replay gate artifacts.
-- Produce scorecards, slippage-sensitivity comparisons, campaign-level bucket eligibility reports, and drift diagnostics.
+- Add broker-facing execution interfaces as a first-class domain.
+- Add order-intent models, order-state tracking, retries, and cancel/replace behavior.
+- Add pre-trade risk validation that sits between signal generation and broker submission.
+- Add audit records for every order submission, rejection, fill, and cancel event.
 
-## P5 Broker Adapter Preview
+## P4 Position and Exit Domain
 
-- Add interface-only adapter preview.
-- Keep execution disabled.
+- Add open-position state management.
+- Add exit policy enforcement for profit-taking, max-loss, and stale-position handling.
+- Add position-level exposure checks and daily risk limits.
 
-## Deployment Constraint
+## P5 Operator Control Domain
 
-- Render or other hosted surfaces may read from `data/` and `artifacts/`, but must not be treated as durable until persistent disk or external storage is configured.
+- Add operator-visible kill switches and execution-state indicators.
+- Add health, risk, broker, and portfolio visibility in the dashboard.
+- Preserve server-side secret storage and authenticated operator access.
 
-## P6 Live Adapter Gate
+## P6 Deployment and Promotion
 
-- Add explicit approval gate and release checklist.
-- Enable live pathways only after all paper controls pass.
+- Treat hosted environments as real operational surfaces, not just demo dashboards.
+- Require durable storage, environment validation, smoke checks, and rollback steps.
+- Promote from paper execution to live execution only after paper controls and auditability are proven.
