@@ -28,6 +28,20 @@ services:
         sync: false
       - key: AUTOBOTT_DASHBOARD_AUTH_TOKEN
         sync: false
+      - key: AUTOBOTT_SESSION_AUTOSTART
+        sync: false
+      - key: AUTOBOTT_SESSION_SYMBOLS
+        sync: false
+      - key: AUTOBOTT_SESSION_INTERVAL_SECONDS
+        sync: false
+      - key: AUTOBOTT_SESSION_MAX_CYCLES
+        sync: false
+      - key: AUTOBOTT_SESSION_QUANTITY
+        sync: false
+      - key: AUTOBOTT_SESSION_POSITION_COUNT
+        sync: false
+      - key: AUTOBOTT_SESSION_DAILY_PNL
+        sync: false
       - key: AUTOBOTT_DATA_ROOT
         value: /var/data/autobott/data
       - key: AUTOBOTT_ARTIFACTS_ROOT

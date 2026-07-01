@@ -195,6 +195,8 @@ def _bucket_metrics(bucket_key: str, payload: dict[str, Any], fill_model: str) -
     outcomes = [row for row in payload.get("outcomes", []) if bucket_key_from_row(row) == bucket_key]
     latest_positions = _latest_positions(payload.get("positions", []), bucket_key)
     decisions_by_id = {row.get("decision_id"): row for row in payload.get("decisions", [])}
+    bucket_decision_ids = {_root_decision_id(row) for row in orders + outcomes if _root_decision_id(row)}
+    thesis_rows = [row for row in payload.get("thesis_validation", []) if row.get("decision_id") in bucket_decision_ids]
 
     attempts = len(orders)
     filled_entries = len([row for row in orders if row.get("filled")])
@@ -207,6 +209,8 @@ def _bucket_metrics(bucket_key: str, payload: dict[str, Any], fill_model: str) -
     largest_win = max(wins) if wins else 0.0
     largest_win_pct_of_total_net_profit = round(largest_win / net_profit, 4) if net_profit > 0 else 0.0
     trading_days = {(_parse_datetime(row["timestamp"]).date()).isoformat() for row in orders}
+    thesis_passes = [row for row in thesis_rows if row.get("passed")]
+    thesis_2dte = [row for row in thesis_rows if (row.get("contract_dte_days") or 0) <= 2]
 
     auxiliary_dimensions = {
         "symbols": {str(row.get("ticker")) for row in orders if row.get("ticker")},
@@ -234,6 +238,9 @@ def _bucket_metrics(bucket_key: str, payload: dict[str, Any], fill_model: str) -
         "largest_win_pct_of_total_net_profit": largest_win_pct_of_total_net_profit,
         "trading_days_covered": len(trading_days),
         "net_profit": net_profit,
+        "thesis_pass_rate": round(len(thesis_passes) / len(thesis_rows), 4) if thesis_rows else 0.0,
+        "tactical_2dte_pass_rate": round(sum(1 for row in thesis_2dte if row.get("passed")) / len(thesis_2dte), 4) if thesis_2dte else 0.0,
+        "reversal_pass_rate": round(sum(1 for row in thesis_rows if row.get("trade_setup", "").endswith("reversal") and row.get("passed")) / len([row for row in thesis_rows if row.get("trade_setup", "").endswith("reversal")]), 4) if any(row.get("trade_setup", "").endswith("reversal") for row in thesis_rows) else 0.0,
     }
     return metrics, auxiliary_dimensions
 
@@ -318,4 +325,4 @@ def _parse_datetime(value: str) -> datetime:
 
 
 def _empty_payload() -> dict[str, Any]:
-    return {"decisions": [], "orders": [], "positions": [], "outcomes": []}
+    return {"decisions": [], "orders": [], "positions": [], "outcomes": [], "thesis_validation": []}

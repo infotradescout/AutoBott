@@ -92,6 +92,7 @@ def _load_fill_model_payload(path: Path) -> dict[str, Any]:
         "orders": _read_jsonl(path / "orders.jsonl"),
         "positions": _read_jsonl(path / "positions.jsonl"),
         "outcomes": _read_jsonl(path / "outcomes.jsonl"),
+        "thesis_validation": _read_jsonl(path / "thesis_validation.jsonl"),
         "scorecard": _read_json(path / "scorecard.json"),
         "gate_result": _read_json(path / "gate_result.json"),
         "manifest": _read_json(path / "manifest.json"),
@@ -196,6 +197,10 @@ def _campaign_manifest(
             "stale_quote_rate": corpus_quality.get("stale_quote_rate"),
             "major_missing_time_blocks": corpus_quality.get("major_missing_time_blocks"),
         },
+        "thesis_validation_by_fill_model": {
+            fill_model: replay_runs.get(fill_model, {}).get("thesis_validation", {})
+            for fill_model in FILL_MODEL_ORDER
+        },
         "symbols": sorted({symbol for payload in fill_model_payloads.values() for symbol in payload.get("manifest", {}).get("symbols", [])}),
         "replay_runs": replay_runs,
     }
@@ -250,8 +255,9 @@ def _summary(
     ]
     for fill_model in FILL_MODEL_ORDER:
         run = replay_runs[fill_model]
+        thesis = run.get("thesis_validation", {})
         lines.append(
-            f"{fill_model}: decisions={run['decisions_generated']}, orders={run['orders_attempted']}, fills={run['orders_filled']}, closed_trades={run['closed_trades']}, gate_reason={run['gate_reason']}"
+            f"{fill_model}: decisions={run['decisions_generated']}, orders={run['orders_attempted']}, fills={run['orders_filled']}, closed_trades={run['closed_trades']}, thesis_pass_rate={thesis.get('pass_rate', 0.0)}, tactical_2dte_pass_rate={thesis.get('tactical_2dte_pass_rate', 0.0)}, gate_reason={run['gate_reason']}"
         )
     lines.extend(
         [

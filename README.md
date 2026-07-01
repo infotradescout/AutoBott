@@ -1,21 +1,44 @@
 # AutoBott v2
 
-AutoBott v2 is a regime-first, risk-gated, replayable options decision engine.
+AutoBott v2 is being built as an automated options trading system for long calls and long puts.
 
-Phase 1 is paper-first and non-executing. It produces decision cards and learning-ledger rows, not broker orders.
-Paper-only Alpaca connectivity is allowed for market/status/capture workflows, but no live broker execution or order placement is implemented.
+The product is the trading bot itself: signal generation, risk controls, broker execution, position management,
+operator oversight, and auditability. Research, replay, backtests, and historical analysis are crucial support
+systems, but they are not the product.
 
-## Scope
+## Product Identity
 
-- P0: Doctrine + scope lock
-- P1: Read-only options decision cards
-- P2: Paper execution after decision cards are stable
-- P3: Learning ledger and forward-outcome measurement
-- P4: Backtest/replay harness
-- P5: Broker adapter preview (no live execution)
-- P6: Live adapter approval gate
+AutoBott has five major layers:
 
-## Phase 1 Validation
+- `signal`: regime, direction, volatility, and contract selection
+- `risk`: trade eligibility, sizing, exposure limits, and kill switches
+- `execution`: broker routing, order lifecycle, retries, and cancel/replace behavior
+- `positions`: open-position monitoring and exits
+- `operator`: dashboard, health, alerts, and administrative controls
+
+Supporting systems exist to improve and audit the bot:
+
+- `capture`: real market snapshot collection
+- `replay`: deterministic campaign evaluation
+- `history`: historical corpus generation and backtest-style analysis
+- `scorecards`: edge review, drift review, and gate reporting
+
+Today the repository is still weighted toward the support layers. The execution product is not complete yet.
+
+## Current State
+
+The committed runtime currently provides:
+
+- a decision-engine foundation
+- paper-market capture and status plumbing
+- replay, scorecard, and campaign analysis
+- a Render-hosted operator console
+- no committed live order-routing path yet
+
+That means the repo contains important building blocks, but it is not yet the complete automated trading system
+described above.
+
+## Validation
 
 Run the test suite:
 
@@ -29,43 +52,14 @@ Validate a captured market/options snapshot and optionally append the decision c
 .\.venv\Scripts\python.exe -m autobott_v2.phase1_validate --snapshot .\path\to\real_snapshot.json --ledger .\data\learning_ledger.jsonl
 ```
 
-The validator expects real captured inputs: market bars, option-chain quotes, SPY/QQQ/VIX context, event blackout flags, and IV history. It does not synthesize market data.
+The validator expects real captured inputs: market bars, option-chain quotes, SPY/QQQ/VIX context, event blackout
+flags, and IV history. It does not synthesize market data.
 
-Phase 1F/1G adds two paper-only operator surfaces:
-
-- Alpaca paper capture/status plumbing for read-only market snapshots and raw payload preservation
-- a Render-hosted operator console for safe capture, advisory replay, and report inspection
-
-Those additions do not allow order placement, live trading, or browser-side secret entry.
-
-The read-only Alpaca config loader accepts the old bot's common environment names:
-
-- `APCA_API_KEY_ID` or `ALPACA_API_KEY`
-- `APCA_API_SECRET_KEY` or `ALPACA_SECRET_KEY`
-- `APCA_API_BASE_URL` or `ALPACA_BASE_URL`
-- `APCA_API_DATA_URL` or `ALPACA_DATA_URL`
-- `ALPACA_PAPER`
-
-Phase 1 cycle-strategy gating starts from `data/PHASE1_CYCLE_GATE.json`, which is intentionally disabled by default and separated from older strategy gates.
-
-Phase 1 now distinguishes:
-
-- decision cards: what the engine wanted, including `schema_version`, `decision_id`, and `reason_codes`
-- paper capture: raw Alpaca paper-market payload capture plus minimal manifest-backed snapshots via `autobott_v2.phase1_alpaca_capture_now`
-- ledger events: what actually happened in paper validation, including fill model, spread, quote age, and tactical/rider leg role
-- execution simulation: tradability checks plus realistic paper fills via `autobott_v2.phase1_execution_sim`
-- replay + exit lifecycle: deterministic replay artifacts, manifesting, unresolved-position handling, and fixed exit policies via `autobott_v2.phase1_replay` and `autobott_v2.phase1_exit_engine`
-- slippage sweep: fill-model sensitivity runs via `autobott_v2.phase1_slippage_sweep`
-- replay campaign + bucket eligibility review: advisory campaign artifacts and per-bucket paper/live-review checks via `autobott_v2.phase1_replay_campaign` and `autobott_v2.phase1_bucket_eligibility`
-- scorecard / gate updates: aggregated outcome stats, lifecycle diagnostics, and bucket authorization that keep trading disabled unless the phase gate passes
-- operator dashboard: a paper-only operator console for status, capture, replay, and report reads via `autobott_v2.dashboard_app`
-
-## Purpose Lock
-
-P2 and later engine expansion are gated by the Purpose Lock document.
+## Architecture Docs
 
 Read:
 
 - docs/DOCTRINE.md
 - docs/AUTOBOTT_V2_PURPOSE_LOCK.md
 - docs/BUILD_PLAN.md
+- docs/REPO_LANES.md

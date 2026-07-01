@@ -151,6 +151,8 @@ def test_campaign_summary_contains_all_fill_models(tmp_path) -> None:
     assert "realistic_mid_penalty       primary eligibility model" in summary
     assert "conservative                robustness check" in summary
     assert "stress                      adverse robustness check" in summary
+    assert "thesis_pass_rate=" in summary
+    assert "tactical_2dte_pass_rate=" in summary
 
 
 def test_gate_candidate_report_does_not_mutate_active_gate(tmp_path) -> None:
@@ -172,6 +174,17 @@ def test_same_campaign_inputs_produce_same_bucket_edge_report(tmp_path) -> None:
     report_b = json.loads((tmp_path / "artifacts" / "campaignB" / "bucket_edge_report.json").read_text(encoding="utf-8"))
 
     assert {key: value for key, value in report_a.items() if key != "campaign_run_id"} == {key: value for key, value in report_b.items() if key != "campaign_run_id"}
+
+
+def test_campaign_manifest_includes_thesis_rollups(tmp_path) -> None:
+    snapshots_dir = _campaign_fixture(tmp_path)
+
+    run_replay_campaign(snapshots_dir, artifacts_root=tmp_path / "artifacts", campaign_run_id="campaign1")
+    manifest = json.loads((tmp_path / "artifacts" / "campaign1" / "manifest.json").read_text(encoding="utf-8"))
+
+    thesis = manifest["thesis_validation_by_fill_model"]
+    assert "realistic_mid_penalty" in thesis
+    assert "pass_rate" in thesis["realistic_mid_penalty"]
 
 
 def test_replay_campaign_uses_env_artifacts_and_gate_paths(monkeypatch, tmp_path) -> None:

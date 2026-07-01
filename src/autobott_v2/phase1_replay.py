@@ -13,6 +13,7 @@ from .phase1_models import LifecycleStatus
 from .phase1_scorecard import load_phase1_gate, update_phase1_gate
 from .phase1_validate import _decision_input_from_snapshot, _load_snapshot, _parse_datetime
 from .runtime_paths import artifacts_root as default_artifacts_root
+from .thesis_validation import evaluate_decision_thesis, summarize_thesis_results
 
 
 def run_replay(
@@ -33,6 +34,7 @@ def run_replay(
     fills_path = artifact_dir / "fills.jsonl"
     positions_path = artifact_dir / "positions.jsonl"
     outcomes_path = artifact_dir / "outcomes.jsonl"
+    thesis_path = artifact_dir / "thesis_validation.jsonl"
     manifest_path = artifact_dir / "manifest.json"
 
     decisions: list[dict[str, Any]] = []
@@ -40,6 +42,7 @@ def run_replay(
     fills: list[dict[str, Any]] = []
     positions: list[dict[str, Any]] = []
     outcomes: list[dict[str, Any]] = []
+    thesis_results = []
     terminal_events = []
     open_positions = []
     execution_rules = _execution_rules(fill_model)
@@ -93,6 +96,9 @@ def run_replay(
             **decision_card.to_json_dict(),
         }
         decisions.append(decision_record)
+        if decision_card.selected_contract is not None and decision_card.decision.value == "TRADE_CANDIDATE":
+            future_snapshots = [item for item in snapshots_payload if _parse_datetime(item["timestamp"]) > timestamp]
+            thesis_results.append(evaluate_decision_thesis(decision_card, snapshot, future_snapshots))
 
         quote_age_seconds = _quote_age_seconds(snapshot, decision_card.selected_contract.option_symbol) if decision_card.selected_contract else 0
         execution_events = simulate_execution(
@@ -116,6 +122,7 @@ def run_replay(
     _write_jsonl(fills_path, fills)
     _write_jsonl(positions_path, positions)
     _write_jsonl(outcomes_path, outcomes)
+    _write_jsonl(thesis_path, [result.to_json_dict() for result in thesis_results])
 
     replay_gate_path = artifact_dir / "gate.json"
     scorecard = update_phase1_gate(terminal_events, replay_gate_path)
@@ -123,6 +130,7 @@ def run_replay(
     scorecard["decision_stats"]["decisions_generated"] = len(decisions)
     scorecard["decision_stats"]["no_trade_decisions"] = len([decision for decision in decisions if decision.get("decision") == "NO_TRADE"])
     scorecard["fill_model"] = fill_model
+    scorecard["thesis_validation"] = summarize_thesis_results(thesis_results)
     replay_gate_path.write_text(json.dumps(scorecard, indent=2, sort_keys=True), encoding="utf-8")
     gate_result = load_phase1_gate(replay_gate_path)
     if promote_gate:
@@ -145,6 +153,7 @@ def run_replay(
         "orders_filled": len(fills),
         "closed_trades": len(outcomes),
         "gate_reason": gate_result.reason,
+        "thesis_validation": summarize_thesis_results(thesis_results),
     }
 
 
@@ -199,6 +208,9 @@ def _summary(
             f"Win rate: {scorecard.get('win_rate', 0.0)}",
             f"Profit factor: {scorecard.get('profit_factor', 0.0)}",
             f"Max drawdown: {scorecard.get('max_drawdown_pct_observed', 0.0)}",
+            f"Theory pass rate: {scorecard.get('thesis_validation', {}).get('pass_rate', 0.0)}",
+            f"2DTE thesis pass rate: {scorecard.get('thesis_validation', {}).get('tactical_2dte_pass_rate', 0.0)}",
+            f"Reversal thesis pass rate: {scorecard.get('thesis_validation', {}).get('reversal_pass_rate', 0.0)}",
             f"Gate eligibility result: {gate_reason}",
         ]
     )

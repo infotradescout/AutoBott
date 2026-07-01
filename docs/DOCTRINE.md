@@ -1,40 +1,47 @@
-# AutoBott v2 Doctrine (P0 Lock)
+# AutoBott v2 Doctrine
 
-AutoBott v2 is built as a regime-first options decision system that refuses to trade until the decision stack can explain itself.
+AutoBott v2 is built as an automated options trading system whose research stack, replay stack, and historical stack
+exist to improve and audit live trading behavior rather than replace it.
 
 ## Non-Negotiables
 
-- Paper-first.
-- Read-only before paper execution.
-- Risk-gated.
-- Deterministic decisions.
-- Replayable records.
-- Fail-closed on missing or unsafe inputs.
-- No live execution before approval gate.
-- Paper-only broker connectivity is allowed only for status, market-data capture, and advisory operator workflows.
+- The product is the bot, not the backtest harness.
+- Long calls and long puts only unless scope is explicitly expanded.
+- Risk-gated at decision time and execution time.
+- Deterministic, explainable signal generation.
+- Fail-closed on missing, stale, or unsafe inputs.
+- Replayable and auditable order, fill, and position records.
+- Operator-visible safety status, with kill-switch support.
+- Secrets remain server-side.
 
-## Forbidden in P0/P1
+## Forbidden
 
-- Live trading.
-- Live broker execution.
-- Real orders.
-- Market-making logic.
-- HFT assumptions.
-- Broker credential requirements for local validation.
-- External connector dependencies for live or order-writing behavior.
-- Broker connector integration for order placement.
+- Naked option selling.
+- Undocumented discretionary overrides.
 - Secret exposure in frontend/operator surfaces.
+- Silent fallback from protected broker execution to undefined behavior.
+- Strategy changes that bypass audit trails.
+- Production execution without explicit risk controls, position controls, and operator-visible status.
 
-## Allowed in Phase 1F/1G
+## Transitional Current State
 
-- Paper-only Alpaca status checks.
-- Paper-only Alpaca market and option snapshot capture.
-- Safe operator-console actions for capture, replay, and report refresh.
-- Render-hosted monitoring surfaces that keep secrets server-side and preserve `PAPER ONLY` / `LIVE LOCKED` / `ORDERS DISABLED` status.
+The current repository is still in a pre-execution stage:
+
+- signal, replay, scorecard, capture, and dashboard layers exist
+- research and history are already strong support systems
+- committed broker order placement is not yet implemented
+
+That is a repository maturity fact, not the product identity.
+
+## Build Direction
+
+- Research, replay, and historical analysis must inform the trading bot.
+- Operator surfaces must graduate from monitor-only to controlled execution oversight.
+- Execution capability must be added as a first-class domain, not hidden inside research modules.
 
 ## Initial KPIs
 
-- 100% of trade candidates have a decision card.
-- 100% of rejected candidates have blocked reasons.
-- 0 trades bypass risk gate.
-- 0 live orders before approval gate.
+- 100% of trade candidates have a decision record.
+- 100% of submitted orders have an immutable audit trail.
+- 0 trades bypass risk or position controls.
+- 0 secrets reach browser clients.
