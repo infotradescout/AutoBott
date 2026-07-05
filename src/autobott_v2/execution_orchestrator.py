@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime
+from typing import Callable
 
 from .execution_broker import AlpacaExecutionBroker
 from .execution_config import AlpacaExecutionConfig
@@ -22,6 +23,14 @@ from .runtime_control import load_runtime_state
 class OrderPlan:
     intent: TradeIntent
     quantity: int
+
+
+class ExecutionRejectedError(ValueError):
+    def __init__(self, reason: str, *, detail: str | None = None, reasons: tuple[str, ...] = ()) -> None:
+        self.reason = reason
+        self.detail = detail or reason
+        self.reasons = reasons or (reason,)
+        super().__init__(self.detail)
 
 
 def build_trade_intent_from_decision(
@@ -69,15 +78,16 @@ def submit_decision_to_broker(
     current_daily_realized_pnl: float = 0.0,
     open_positions: int = 0,
     journal_path: str | None = None,
+    on_submission_attempt: Callable[[TradeIntent], None] | None = None,
 ) -> ExecutionOrder:
     resolved_broker = broker or AlpacaExecutionBroker(config)
     runtime_state = load_runtime_state()
     if runtime_state.kill_switch_enabled:
-        raise ValueError("kill_switch_enabled")
+        raise ExecutionRejectedError("kill_switch_enabled")
     if not runtime_state.execution_enabled:
-        raise ValueError("execution_disabled")
+        raise ExecutionRejectedError("execution_disabled")
     if resolved_broker.config.environment is BrokerEnvironment.LIVE and not runtime_state.live_mode_enabled:
-        raise ValueError("live_mode_not_enabled")
+        raise ExecutionRejectedError("live_mode_not_enabled")
     intent = build_trade_intent_from_decision(
         decision,
         quantity=quantity,
@@ -91,7 +101,13 @@ def submit_decision_to_broker(
     )
     append_risk_check(intent, risk_check, journal_path=journal_path)
     if not risk_check.approved:
-        raise ValueError("risk_check_not_approved")
+        raise ExecutionRejectedError(
+            risk_check.reasons[0] if risk_check.reasons else "risk_check_not_approved",
+            detail=", ".join(risk_check.reasons) if risk_check.reasons else "risk_check_not_approved",
+            reasons=risk_check.reasons,
+        )
+    if on_submission_attempt is not None:
+        on_submission_attempt(intent)
     order = resolved_broker.submit_order(
         intent,
         current_daily_realized_pnl=current_daily_realized_pnl,

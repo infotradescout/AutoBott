@@ -185,12 +185,14 @@ def test_dashboard_health_returns_ok() -> None:
 def test_dashboard_safety_reports_live_locked(monkeypatch, tmp_path) -> None:
     _auth_env(monkeypatch, tmp_path)
     monkeypatch.setenv("ALPACA_ENV", "paper")
+    monkeypatch.setenv("AUTOBOTT_ALLOW_ORDER_PLACEMENT", "true")
     status, body = _invoke_app("GET", "/api/safety", token="dashboard-token")
     payload = json.loads(body)
     assert status.startswith("200")
     assert payload["live_trading_enabled"] is False
     assert payload["order_placement_enabled"] is True
     assert payload["kill_switch_enabled"] is False
+    assert payload["mode_banner"].endswith("PAPER EXECUTION ARMED")
 
 
 def test_dashboard_execution_state_reflects_kill_switch(monkeypatch, tmp_path) -> None:
@@ -318,12 +320,21 @@ def test_dashboard_paper_readiness_endpoint_returns_probe(monkeypatch, tmp_path)
     monkeypatch.setattr(
         dashboard_app,
         "run_paper_readiness_probe",
-        lambda: {"ok": True, "status": "paper_ready", "option_chain_count": 8, "decision_status": "TRADE_CANDIDATE", "selected_contract": "SPY260703C00600000"},
+        lambda: {
+            "ok": True,
+            "status": "paper_trading_ready",
+            "paper_execution_ready": True,
+            "paper_config_valid": True,
+            "paper_execution_config_valid": True,
+            "option_chain_count": 8,
+            "decision_status": "TRADE_CANDIDATE",
+            "selected_contract": "SPY260703C00600000",
+        },
     )
     status, body = _invoke_app("GET", "/api/paper/readiness", token="dashboard-token")
     payload = json.loads(body)
     assert status.startswith("200")
-    assert payload["status"] == "paper_ready"
+    assert payload["status"] == "paper_trading_ready"
     assert payload["option_chain_count"] == 8
 
 
@@ -545,12 +556,15 @@ def test_render_config_has_health_check() -> None:
     assert "key: AUTOBOTT_GATE_PATH" in render_config
     assert "key: AUTOBOTT_SESSION_AUTOSTART" in render_config
     assert "key: AUTOBOTT_SESSION_SYMBOLS" in render_config
+    assert "key: AUTOBOTT_PAPER_TRADE_ALL_PASSED_SIGNALS" in render_config
+    assert "key: AUTOBOTT_PAPER_MAX_NEW_ENTRY_ATTEMPTS_PER_LOOP" in render_config
+    assert "key: AUTOBOTT_PAPER_MAX_OPEN_ENTRY_BUY_ORDERS" in render_config
 
 
 def test_frontend_contains_paper_only_live_locked_orders_disabled() -> None:
     status, body = _invoke_app("GET", "/")
     assert status.startswith("200")
-    assert "PAPER ONLY | LIVE TRADING LOCKED | ORDERS DISABLED" in body
+    assert "PAPER ONLY | LIVE TRADING LOCKED | EXECUTION CHECKING" in body
     assert "AutoBott Phase 1 Operator Console" in body
     assert "LOCKED" in body
     assert "Session Supervisor" in body

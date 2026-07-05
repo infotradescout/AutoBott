@@ -6,7 +6,11 @@ import pytest
 
 from autobott_v2.execution_config import AlpacaExecutionConfig
 from autobott_v2.execution_models import BrokerEnvironment, ExecutionOrder, ExecutionState
-from autobott_v2.execution_orchestrator import build_trade_intent_from_decision, submit_decision_to_broker
+from autobott_v2.execution_orchestrator import (
+    ExecutionRejectedError,
+    build_trade_intent_from_decision,
+    submit_decision_to_broker,
+)
 from autobott_v2.phase1_models import (
     CycleAssessment,
     CycleStatus,
@@ -132,3 +136,22 @@ def test_submit_decision_to_broker_writes_journal_and_returns_order(tmp_path) ->
     assert len(lines) == 2
     assert '"event_type": "risk_check"' in lines[0]
     assert '"event_type": "order_submission"' in lines[1]
+
+
+def test_submit_decision_to_broker_raises_exact_risk_rejection(tmp_path) -> None:
+    broker = FakeBroker()
+    broker.config = _config(allow_order_placement=False)
+    journal_path = tmp_path / "execution_orders.jsonl"
+
+    with pytest.raises(ExecutionRejectedError) as excinfo:
+        submit_decision_to_broker(
+            _decision_card(),
+            broker=broker,
+            journal_path=str(journal_path),
+        )
+
+    assert excinfo.value.reason == "order_placement_disabled"
+    assert excinfo.value.reasons == ("order_placement_disabled",)
+    lines = journal_path.read_text(encoding="utf-8").splitlines()
+    assert len(lines) == 1
+    assert '"event_type": "risk_check"' in lines[0]

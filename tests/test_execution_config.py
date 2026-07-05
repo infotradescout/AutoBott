@@ -40,3 +40,16 @@ def test_execution_config_allows_live_only_when_explicitly_enabled(monkeypatch) 
     assert config.environment is BrokerEnvironment.LIVE
     assert config.allow_live_trading is True
     assert config.allow_order_placement is True
+
+
+def test_execution_config_enables_paper_trade_through_overrides(monkeypatch) -> None:
+    monkeypatch.setenv("ALPACA_ENV", "paper")
+    monkeypatch.setenv("ALPACA_API_KEY_ID", "paper-key")
+    monkeypatch.setenv("ALPACA_API_SECRET_KEY", "paper-secret")
+    monkeypatch.setenv("AUTOBOTT_PAPER_TRADE_ALL_PASSED_SIGNALS", "true")
+
+    config = load_alpaca_execution_config().validate()
+
+    assert config.paper_trade_all_passed_signals is True
+    assert config.paper_max_new_entry_attempts_per_loop == 25
+    assert config.effective_max_open_positions() == 25

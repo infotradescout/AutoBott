@@ -24,6 +24,12 @@ services:
         sync: false
       - key: AUTOBOTT_ALLOW_ORDER_PLACEMENT
         sync: false
+      - key: AUTOBOTT_PAPER_TRADE_ALL_PASSED_SIGNALS
+        sync: false
+      - key: AUTOBOTT_PAPER_MAX_NEW_ENTRY_ATTEMPTS_PER_LOOP
+        sync: false
+      - key: AUTOBOTT_PAPER_MAX_OPEN_ENTRY_BUY_ORDERS
+        sync: false
       - key: AUTOBOTT_PAPER_ONLY
         sync: false
       - key: AUTOBOTT_DASHBOARD_AUTH_TOKEN

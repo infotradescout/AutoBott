@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import json
 from datetime import UTC, datetime
 from pathlib import Path
 
+import autobott_v2.paper_readiness as paper_readiness
 from autobott_v2.paper_readiness import run_paper_readiness_probe
 from autobott_v2.runtime_control import default_runtime_state, save_runtime_state
 
@@ -61,7 +63,7 @@ def test_paper_readiness_probe_returns_paper_ready(monkeypatch, tmp_path) -> Non
     monkeypatch.setenv("ALPACA_TRADING_BASE_URL", "https://paper-api.alpaca.markets")
     monkeypatch.setenv("ALPACA_DATA_BASE_URL", "https://data.alpaca.markets")
     monkeypatch.setenv("AUTOBOTT_PAPER_ONLY", "true")
-    monkeypatch.setenv("AUTOBOTT_ALLOW_ORDER_PLACEMENT", "false")
+    monkeypatch.setenv("AUTOBOTT_ALLOW_ORDER_PLACEMENT", "true")
     monkeypatch.setenv("AUTOBOTT_DATA_ROOT", str(tmp_path / "data"))
     save_runtime_state(default_runtime_state(), state_path=tmp_path / "data" / "execution" / "runtime_state.json")
 
@@ -74,7 +76,8 @@ def test_paper_readiness_probe_returns_paper_ready(monkeypatch, tmp_path) -> Non
     )
 
     assert result["ok"] is True
-    assert result["status"] == "paper_ready"
+    assert result["status"] == "paper_trading_ready"
+    assert result["paper_execution_ready"] is True
     assert result["option_chain_count"] > 0
     assert Path(result["snapshot_path"]).exists()
 
@@ -98,3 +101,65 @@ def test_paper_readiness_probe_reports_connectivity_failure(monkeypatch, tmp_pat
 
     assert result["ok"] is False
     assert result["status"] == "paper_connectivity_failed"
+
+
+def test_paper_readiness_probe_reports_execution_blockers(monkeypatch, tmp_path) -> None:
+    monkeypatch.setenv("ALPACA_ENV", "paper")
+    monkeypatch.setenv("ALPACA_API_KEY_ID", "paper-key")
+    monkeypatch.setenv("ALPACA_API_SECRET_KEY", "paper-secret")
+    monkeypatch.setenv("ALPACA_TRADING_BASE_URL", "https://paper-api.alpaca.markets")
+    monkeypatch.setenv("ALPACA_DATA_BASE_URL", "https://data.alpaca.markets")
+    monkeypatch.setenv("AUTOBOTT_PAPER_ONLY", "true")
+    monkeypatch.setenv("AUTOBOTT_ALLOW_ORDER_PLACEMENT", "false")
+    monkeypatch.setenv("AUTOBOTT_DATA_ROOT", str(tmp_path / "data"))
+    save_runtime_state(default_runtime_state(), state_path=tmp_path / "data" / "execution" / "runtime_state.json")
+
+    result = run_paper_readiness_probe(
+        symbol="SPY",
+        client=FakePaperClient(),
+        corpus_root=tmp_path / "corpus",
+        scheduled_market_time=datetime(2026, 7, 1, 15, 35, tzinfo=UTC),
+        captured_at_utc=datetime(2026, 7, 1, 15, 35, tzinfo=UTC),
+    )
+
+    assert result["ok"] is True
+    assert result["status"] == "paper_data_ready_execution_blocked"
+    assert result["paper_execution_ready"] is False
+    assert "order_placement_disabled" in result["execution_blockers"]
+
+
+def test_paper_readiness_main_arms_runtime_and_requires_trading_ready(monkeypatch, capsys) -> None:
+    armed = {}
+
+    monkeypatch.setattr(
+        paper_readiness,
+        "arm_paper_execution",
+        lambda reason: armed.setdefault("reason", reason),
+    )
+    monkeypatch.setattr(
+        paper_readiness,
+        "run_paper_readiness_probe",
+        lambda symbol, corpus_root=None: {"ok": True, "status": "paper_trading_ready", "symbol": symbol},
+    )
+
+    exit_code = paper_readiness.main(["--symbol", "QQQ", "--arm-runtime", "--arm-reason", "tomorrow_cutover", "--require-trading-ready"])
+    payload = json.loads(capsys.readouterr().out)
+
+    assert exit_code == 0
+    assert armed["reason"] == "tomorrow_cutover"
+    assert payload["status"] == "paper_trading_ready"
+    assert payload["symbol"] == "QQQ"
+
+
+def test_paper_readiness_main_returns_nonzero_when_trading_not_ready(monkeypatch, capsys) -> None:
+    monkeypatch.setattr(
+        paper_readiness,
+        "run_paper_readiness_probe",
+        lambda symbol, corpus_root=None: {"ok": True, "status": "paper_data_ready_execution_blocked", "symbol": symbol},
+    )
+
+    exit_code = paper_readiness.main(["--require-trading-ready"])
+    payload = json.loads(capsys.readouterr().out)
+
+    assert exit_code == 2
+    assert payload["status"] == "paper_data_ready_execution_blocked"

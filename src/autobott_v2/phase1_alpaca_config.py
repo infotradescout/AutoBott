@@ -29,8 +29,6 @@ class AlpacaPaperConfig:
             raise ValueError("alpaca_trading_base_url_not_paper")
         if self.live_trading_enabled:
             raise ValueError("autobott_live_trading_must_be_disabled")
-        if self.allow_order_placement:
-            raise ValueError("autobott_order_placement_must_be_disabled")
         if not self.paper_only:
             raise ValueError("autobott_paper_only_must_be_enabled")
         if not self.api_key or not self.secret_key:

@@ -56,8 +56,8 @@ class FakeDataClient:
 
 
 class FakeBroker:
-    def __init__(self) -> None:
-        self.config = AlpacaExecutionConfig(
+    def __init__(self, **config_overrides) -> None:
+        base = AlpacaExecutionConfig(
             environment=BrokerEnvironment.PAPER,
             api_key="paper-key",
             secret_key="paper-secret",
@@ -69,6 +69,7 @@ class FakeBroker:
             max_daily_loss=500.0,
             max_open_positions=3,
         )
+        self.config = AlpacaExecutionConfig(**(base.__dict__ | config_overrides))
         self.submitted = []
         self.open_positions_seen = []
 
@@ -88,7 +89,9 @@ class FakeBroker:
 def test_run_trading_cycle_captures_decides_and_submits(tmp_path) -> None:
     save_runtime_state(default_runtime_state(), state_path=tmp_path / "runtime_state.json")
     original = trading_cycle.load_runtime_state
+    original_positions = trading_cycle.load_open_positions
     trading_cycle.load_runtime_state = lambda: original(state_path=tmp_path / "runtime_state.json")
+    trading_cycle.load_open_positions = lambda: []
     try:
         result = trading_cycle.run_trading_cycle(
             symbols=["AAPL"],
@@ -102,11 +105,17 @@ def test_run_trading_cycle_captures_decides_and_submits(tmp_path) -> None:
         )
     finally:
         trading_cycle.load_runtime_state = original
+        trading_cycle.load_open_positions = original_positions
 
     assert result.symbols == ["AAPL"]
     assert len(result.snapshot_paths) == 1
     assert len(result.decisions) == 1
     assert len(result.orders_submitted) == 1
+    assert result.scanner_candidates_count == 1
+    assert result.trade_attempted_count == 1
+    assert result.zero_trade_cycle is False
+    assert result.execution_outcomes[0]["disposition"] == "scanner_candidate"
+    assert result.execution_outcomes[1]["disposition"] == "pass_trade_attempted"
 
 
 def test_run_trading_cycle_skips_when_kill_switch_enabled(tmp_path) -> None:
@@ -129,7 +138,10 @@ def test_run_trading_cycle_skips_when_kill_switch_enabled(tmp_path) -> None:
         trading_cycle.load_runtime_state = original
 
     assert result.orders_submitted == []
-    assert result.skipped[0]["reason"] == "execution_disabled"
+    assert result.skipped[0]["reason"] == "kill_switch_enabled"
+    assert result.execution_rejected_count_by_reason == {"kill_switch_enabled": 1}
+    assert result.trade_attempted_count == 0
+    assert result.zero_trade_cycle is False
 
 
 def test_run_trading_cycle_uses_persisted_open_positions_for_risk_count(tmp_path) -> None:
@@ -177,3 +189,65 @@ def test_run_trading_cycle_uses_persisted_open_positions_for_risk_count(tmp_path
     assert len(result.orders_submitted) == 1
     assert broker.submitted
     assert broker.open_positions_seen == [1]
+
+
+def test_run_trading_cycle_records_exact_execution_rejection_reason(tmp_path) -> None:
+    save_runtime_state(default_runtime_state(), state_path=tmp_path / "runtime_state.json")
+    original = trading_cycle.load_runtime_state
+    original_positions = trading_cycle.load_open_positions
+    trading_cycle.load_runtime_state = lambda: original(state_path=tmp_path / "runtime_state.json")
+    trading_cycle.load_open_positions = lambda: []
+    broker = FakeBroker(allow_order_placement=False)
+    try:
+        result = trading_cycle.run_trading_cycle(
+            symbols=["AAPL"],
+            broker=broker,
+            data_client=FakeDataClient(),
+            scheduled_market_time=datetime(2026, 7, 1, 15, 35, tzinfo=UTC),
+            captured_at_utc=datetime(2026, 7, 1, 15, 35, tzinfo=UTC),
+            corpus_root=tmp_path / "corpus",
+            decision_log_path=tmp_path / "decision_cards.jsonl",
+            execution_log_path=str(tmp_path / "execution_orders.jsonl"),
+        )
+    finally:
+        trading_cycle.load_runtime_state = original
+        trading_cycle.load_open_positions = original_positions
+
+    assert result.orders_submitted == []
+    assert result.trade_attempted_count == 0
+    assert result.execution_rejected_count_by_reason == {"order_placement_disabled": 1}
+    assert result.skipped[0]["reason"] == "order_placement_disabled"
+    assert result.zero_trade_cycle is True
+
+
+def test_run_trading_cycle_paper_trade_through_allows_multiple_attempts(tmp_path) -> None:
+    save_runtime_state(default_runtime_state(), state_path=tmp_path / "runtime_state.json")
+    original = trading_cycle.load_runtime_state
+    original_positions = trading_cycle.load_open_positions
+    trading_cycle.load_runtime_state = lambda: original(state_path=tmp_path / "runtime_state.json")
+    trading_cycle.load_open_positions = lambda: []
+    broker = FakeBroker(
+        max_open_positions=1,
+        paper_trade_all_passed_signals=True,
+        paper_max_open_entry_buy_orders=25,
+        paper_max_new_entry_attempts_per_loop=25,
+    )
+    try:
+        result = trading_cycle.run_trading_cycle(
+            symbols=["AAPL", "MSFT", "NVDA", "QQQ"],
+            broker=broker,
+            data_client=FakeDataClient(),
+            scheduled_market_time=datetime(2026, 7, 1, 15, 35, tzinfo=UTC),
+            captured_at_utc=datetime(2026, 7, 1, 15, 35, tzinfo=UTC),
+            corpus_root=tmp_path / "corpus",
+            decision_log_path=tmp_path / "decision_cards.jsonl",
+            execution_log_path=str(tmp_path / "execution_orders.jsonl"),
+        )
+    finally:
+        trading_cycle.load_runtime_state = original
+        trading_cycle.load_open_positions = original_positions
+
+    assert result.scanner_candidates_count == 4
+    assert result.trade_attempted_count == 4
+    assert len(result.orders_submitted) == 4
+    assert broker.open_positions_seen == [0, 1, 2, 3]

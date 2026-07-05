@@ -12,6 +12,12 @@ def _normalize_bool(value: str | None, *, default: bool = False) -> bool:
     return value.strip().lower() in {"1", "true", "yes", "on"}
 
 
+def _normalize_optional_int(value: str | None, *, default: int | None = None) -> int | None:
+    if value is None or not value.strip():
+        return default
+    return int(value)
+
+
 @dataclass(frozen=True)
 class AlpacaExecutionConfig:
     environment: BrokerEnvironment
@@ -24,6 +30,9 @@ class AlpacaExecutionConfig:
     max_position_cost: float
     max_daily_loss: float
     max_open_positions: int
+    paper_trade_all_passed_signals: bool = False
+    paper_max_new_entry_attempts_per_loop: int | None = None
+    paper_max_open_entry_buy_orders: int | None = None
 
     def validate(self) -> "AlpacaExecutionConfig":
         if not self.api_key or not self.secret_key:
@@ -40,17 +49,35 @@ class AlpacaExecutionConfig:
             raise ValueError("max_daily_loss_invalid")
         if self.max_open_positions <= 0:
             raise ValueError("max_open_positions_invalid")
+        if self.paper_max_new_entry_attempts_per_loop is not None and self.paper_max_new_entry_attempts_per_loop <= 0:
+            raise ValueError("paper_max_new_entry_attempts_per_loop_invalid")
+        if self.paper_max_open_entry_buy_orders is not None and self.paper_max_open_entry_buy_orders <= 0:
+            raise ValueError("paper_max_open_entry_buy_orders_invalid")
         return self
 
     def risk_controls(self) -> ExecutionRiskControls:
         return ExecutionRiskControls(
             max_position_cost=self.max_position_cost,
             max_daily_loss=self.max_daily_loss,
-            max_open_positions=self.max_open_positions,
+            max_open_positions=self.effective_max_open_positions(),
             allow_live_trading=self.allow_live_trading,
             allow_order_placement=self.allow_order_placement,
             allowed_environments=(self.environment,),
         )
+
+    def effective_max_open_positions(self) -> int:
+        if (
+            self.environment is BrokerEnvironment.PAPER
+            and self.paper_trade_all_passed_signals
+            and self.paper_max_open_entry_buy_orders is not None
+        ):
+            return max(self.max_open_positions, self.paper_max_open_entry_buy_orders)
+        return self.max_open_positions
+
+    def effective_max_new_entry_attempts_per_loop(self) -> int | None:
+        if self.environment is BrokerEnvironment.PAPER and self.paper_trade_all_passed_signals:
+            return self.paper_max_new_entry_attempts_per_loop
+        return None
 
 
 def load_alpaca_execution_config() -> AlpacaExecutionConfig:
@@ -60,6 +87,10 @@ def load_alpaca_execution_config() -> AlpacaExecutionConfig:
         "https://api.alpaca.markets"
         if environment is BrokerEnvironment.LIVE
         else "https://paper-api.alpaca.markets"
+    )
+    paper_trade_all_passed_signals = _normalize_bool(
+        os.getenv("AUTOBOTT_PAPER_TRADE_ALL_PASSED_SIGNALS"),
+        default=False,
     )
 
     return AlpacaExecutionConfig(
@@ -73,6 +104,15 @@ def load_alpaca_execution_config() -> AlpacaExecutionConfig:
         max_position_cost=float(os.getenv("AUTOBOTT_MAX_POSITION_COST", "1000")),
         max_daily_loss=float(os.getenv("AUTOBOTT_MAX_DAILY_LOSS", "500")),
         max_open_positions=int(os.getenv("AUTOBOTT_MAX_OPEN_POSITIONS", "3")),
+        paper_trade_all_passed_signals=paper_trade_all_passed_signals,
+        paper_max_new_entry_attempts_per_loop=_normalize_optional_int(
+            os.getenv("AUTOBOTT_PAPER_MAX_NEW_ENTRY_ATTEMPTS_PER_LOOP"),
+            default=25 if paper_trade_all_passed_signals else None,
+        ),
+        paper_max_open_entry_buy_orders=_normalize_optional_int(
+            os.getenv("AUTOBOTT_PAPER_MAX_OPEN_ENTRY_BUY_ORDERS"),
+            default=25 if paper_trade_all_passed_signals else None,
+        ),
     )
 
 

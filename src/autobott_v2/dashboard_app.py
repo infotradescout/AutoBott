@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any, Callable
 from wsgiref.simple_server import make_server
 
+from .execution_config import load_alpaca_execution_config
 from .phase1_alpaca_capture_now import capture_now
 from .phase1_alpaca_client import AlpacaPaperClient
 from .phase1_alpaca_config import load_alpaca_paper_config
@@ -131,14 +132,20 @@ def _health_payload() -> JsonDict:
 
 def _safety_payload() -> JsonDict:
     config = load_alpaca_paper_config()
+    execution_config = load_alpaca_execution_config()
     gate_path = _gate_path()
     runtime_state = load_runtime_state()
     open_positions = load_open_positions()
+    status = _paper_execution_status_payload(config=config, execution_config=execution_config, runtime_state=runtime_state)
     return {
         "alpaca_env": config.env,
-        "paper_only": True,
-        "live_trading_enabled": runtime_state.live_mode_enabled,
-        "order_placement_enabled": runtime_state.execution_enabled and not runtime_state.kill_switch_enabled,
+        "paper_only": config.paper_only,
+        "live_trading_enabled": status["live_trading_enabled"],
+        "order_placement_enabled": status["order_placement_enabled"],
+        "order_placement_configured": status["order_placement_configured"],
+        "paper_trade_through_enabled": status["paper_trade_through_enabled"],
+        "effective_max_open_positions": status["effective_max_open_positions"],
+        "effective_max_new_entry_attempts_per_loop": status["effective_max_new_entry_attempts_per_loop"],
         "active_gate_mutation_allowed": False,
         "active_gate_hash": _file_hash(gate_path),
         "active_gate_path": str(gate_path),
@@ -148,7 +155,7 @@ def _safety_payload() -> JsonDict:
         "runtime_state_path": str(runtime_state_path()),
         "position_store_path": str(position_store_path()),
         "open_position_count": len(open_positions),
-        "mode_banner": "PAPER ONLY | LIVE TRADING LOCKED | ORDERS DISABLED",
+        "mode_banner": status["mode_banner"],
     }
 
 
@@ -228,11 +235,19 @@ def _session_start_payload(payload: JsonDict) -> JsonDict:
 
 def _alpaca_status_payload() -> JsonDict:
     config = load_alpaca_paper_config()
+    execution_config = load_alpaca_execution_config()
+    runtime_state = load_runtime_state()
+    status = _paper_execution_status_payload(config=config, execution_config=execution_config, runtime_state=runtime_state)
     response: JsonDict = {
         "config": config.redacted_dict(),
-        "paper_only": True,
-        "live_trading_enabled": False,
-        "order_placement_enabled": False,
+        "paper_only": config.paper_only,
+        "live_trading_enabled": status["live_trading_enabled"],
+        "order_placement_enabled": status["order_placement_enabled"],
+        "order_placement_configured": status["order_placement_configured"],
+        "paper_trade_through_enabled": status["paper_trade_through_enabled"],
+        "effective_max_open_positions": status["effective_max_open_positions"],
+        "effective_max_new_entry_attempts_per_loop": status["effective_max_new_entry_attempts_per_loop"],
+        "mode_banner": status["mode_banner"],
         "credentials_present": bool(config.api_key and config.secret_key),
     }
     try:
@@ -261,6 +276,58 @@ def _alpaca_status_payload() -> JsonDict:
 
 def _paper_readiness_payload() -> JsonDict:
     return run_paper_readiness_probe()
+
+
+def _paper_execution_status_payload(*, config: Any, execution_config: Any, runtime_state: Any) -> JsonDict:
+    order_placement_configured = bool(getattr(execution_config, "allow_order_placement", False))
+    order_placement_enabled = bool(
+        order_placement_configured
+        and runtime_state.execution_enabled
+        and not runtime_state.kill_switch_enabled
+        and not runtime_state.live_mode_enabled
+    )
+    effective_max_open_positions = (
+        execution_config.effective_max_open_positions()
+        if hasattr(execution_config, "effective_max_open_positions")
+        else getattr(execution_config, "max_open_positions", None)
+    )
+    effective_max_new_entry_attempts_per_loop = (
+        execution_config.effective_max_new_entry_attempts_per_loop()
+        if hasattr(execution_config, "effective_max_new_entry_attempts_per_loop")
+        else None
+    )
+    return {
+        "paper_only": bool(getattr(config, "paper_only", True)),
+        "live_trading_enabled": bool(runtime_state.live_mode_enabled),
+        "order_placement_configured": order_placement_configured,
+        "order_placement_enabled": order_placement_enabled,
+        "paper_trade_through_enabled": bool(getattr(execution_config, "paper_trade_all_passed_signals", False)),
+        "effective_max_open_positions": effective_max_open_positions,
+        "effective_max_new_entry_attempts_per_loop": effective_max_new_entry_attempts_per_loop,
+        "mode_banner": _mode_banner(
+            paper_only=bool(getattr(config, "paper_only", True)),
+            runtime_state=runtime_state,
+            order_placement_configured=order_placement_configured,
+            order_placement_enabled=order_placement_enabled,
+        ),
+    }
+
+
+def _mode_banner(*, paper_only: bool, runtime_state: Any, order_placement_configured: bool, order_placement_enabled: bool) -> str:
+    mode = "PAPER ONLY" if paper_only else "PAPER MODE UNKNOWN"
+    if runtime_state.live_mode_enabled:
+        suffix = "LIVE MODE FLAGGED"
+    elif runtime_state.kill_switch_enabled:
+        suffix = "KILL SWITCH ACTIVE"
+    elif not order_placement_configured:
+        suffix = "ORDER PLACEMENT CONFIG DISABLED"
+    elif not runtime_state.execution_enabled:
+        suffix = "RUNTIME EXECUTION PAUSED"
+    elif order_placement_enabled:
+        suffix = "PAPER EXECUTION ARMED"
+    else:
+        suffix = "EXECUTION BLOCKED"
+    return f"{mode} | LIVE TRADING LOCKED | {suffix}"
 
 
 def _open_positions_payload() -> JsonDict:
@@ -796,14 +863,14 @@ def _dashboard_html() -> str:
         <div class="hero-top">
           <span class="eyebrow">AutoBott / Trader's Corner</span>
           <div class="status-row">
-            <span class="badge safe">PAPER ONLY</span>
-            <span class="badge warn">LIVE TRADING LOCKED</span>
-            <span class="badge danger">ORDERS DISABLED</span>
+            <span class="badge safe" id="mode-badge">PAPER ONLY</span>
+            <span class="badge warn" id="live-lock-badge">LIVE TRADING LOCKED</span>
+            <span class="badge info" id="execution-badge">EXECUTION CHECKING</span>
           </div>
         </div>
         <h1>AutoBott Phase 1 Operator Console</h1>
         <p>Production operator command center for paper capture, advisory replay, report review, and gate safety verification.</p>
-        <div class="muted mono">PAPER ONLY | LIVE TRADING LOCKED | ORDERS DISABLED</div>
+        <div class="muted mono" id="mode-banner-text">PAPER ONLY | LIVE TRADING LOCKED | EXECUTION CHECKING</div>
         <div class="chip-row">
           <span class="chip info">Current Service <span id="service-name">autobott-phase1-dashboard</span></span>
           <span class="chip warn" id="auth-badge">LOCKED</span>
@@ -1110,11 +1177,19 @@ def _dashboard_html() -> str:
       dashboardState.safety = payload;
       const gateHash = payload.active_gate_hash ? `${payload.active_gate_hash.slice(0, 12)}...` : 'missing';
       document.getElementById('env-value').textContent = payload.paper_only ? 'PAPER ONLY' : 'UNKNOWN';
+      document.getElementById('mode-banner-text').textContent = payload.mode_banner || 'PAPER ONLY | LIVE TRADING LOCKED | EXECUTION CHECKING';
+      document.getElementById('mode-badge').textContent = payload.paper_only ? 'PAPER ONLY' : 'MODE CHECK';
+      document.getElementById('mode-badge').className = `badge ${payload.paper_only ? 'safe' : 'warn'}`;
+      document.getElementById('live-lock-badge').textContent = payload.live_trading_enabled ? 'LIVE MODE FLAGGED' : 'LIVE TRADING LOCKED';
+      document.getElementById('live-lock-badge').className = `badge ${payload.live_trading_enabled ? 'danger' : 'warn'}`;
+      document.getElementById('execution-badge').textContent = payload.order_placement_enabled ? 'PAPER EXECUTION ARMED' : (payload.order_placement_configured ? 'EXECUTION PAUSED' : 'ORDERS CONFIG DISABLED');
+      document.getElementById('execution-badge').className = `badge ${payload.order_placement_enabled ? 'danger' : payload.order_placement_configured ? 'warn' : 'info'}`;
       return `
         ${metricList([
           ['Mode', payload.paper_only ? statusBadge('PAPER ONLY', 'safe') : statusBadge('UNKNOWN', 'warn')],
           ['Live trading', payload.live_trading_enabled ? statusBadge('ENABLED', 'danger') : statusBadge('LOCKED', 'safe')],
-          ['Order placement', payload.order_placement_enabled ? statusBadge('ENABLED', 'danger') : statusBadge('DISABLED', 'safe')],
+          ['Order placement', payload.order_placement_enabled ? statusBadge('ARMED', 'danger') : statusBadge(payload.order_placement_configured ? 'PAUSED' : 'CONFIG DISABLED', payload.order_placement_configured ? 'warn' : 'safe')],
+          ['Trade-through', payload.paper_trade_through_enabled ? statusBadge('ENABLED', 'warn') : statusBadge('DISABLED', 'info')],
           ['Gate mutations', payload.active_gate_mutation_allowed ? statusBadge('ALLOWED', 'danger') : statusBadge('BLOCKED', 'safe')],
           ['Order methods', payload.order_methods_present ? statusBadge('PRESENT', 'danger') : statusBadge('ABSENT', 'safe')],
           ['Gate hash', `<span class="mono">${escapeHtml(gateHash)}</span>`]
@@ -1129,6 +1204,7 @@ def _dashboard_html() -> str:
           ['Environment', statusBadge(payload.paper_only ? 'PAPER' : 'UNKNOWN', tone)],
           ['Connection', statusBadge(payload.status || 'unknown', payload.ok ? 'safe' : 'warn')],
           ['Credentials', statusBadge(payload.credentials_present ? 'PRESENT' : 'MISSING', payload.credentials_present ? 'safe' : 'warn')],
+          ['Order placement', payload.order_placement_enabled ? statusBadge('ARMED', 'danger') : statusBadge(payload.order_placement_configured ? 'PAUSED' : 'CONFIG DISABLED', payload.order_placement_configured ? 'warn' : 'safe')],
           ['Account status', escapeHtml(payload.account_status || 'not available')],
           ['Quote checks', `<span class="mono">${escapeHtml(JSON.stringify(payload.quote_checks || {}, null, 0))}</span>`]
         ])}
@@ -1136,12 +1212,14 @@ def _dashboard_html() -> str:
     }
 
     function renderPaperReadiness(payload) {
-      const tone = payload.ok ? 'safe' : 'warn';
+      const tone = payload.paper_execution_ready ? 'safe' : payload.ok ? 'warn' : 'warn';
       return `
         ${metricList([
           ['Status', statusBadge(payload.status || 'unknown', tone)],
           ['Config valid', statusBadge(payload.paper_config_valid ? 'YES' : 'NO', payload.paper_config_valid ? 'safe' : 'warn')],
+          ['Execution config', statusBadge(payload.paper_execution_config_valid ? 'YES' : 'NO', payload.paper_execution_config_valid ? 'safe' : 'warn')],
           ['Credentials', statusBadge(payload.credentials_present ? 'PRESENT' : 'MISSING', payload.credentials_present ? 'safe' : 'warn')],
+          ['Execution ready', statusBadge(payload.paper_execution_ready ? 'YES' : 'NO', payload.paper_execution_ready ? 'danger' : 'warn')],
           ['Option snapshots', escapeHtml(payload.option_snapshot_count ?? 'n/a')],
           ['Option chain', escapeHtml(payload.option_chain_count ?? 'n/a')],
           ['Decision', escapeHtml(payload.decision_status || 'n/a')],
@@ -1344,9 +1422,10 @@ def _dashboard_html() -> str:
     async function runTradingCycle() {
       const result = await callApi('/api/trading-cycle/run', { method:'POST', body: JSON.stringify({ symbols:['SPY'], quantity:1 }) });
       if (result.ok) {
-        const orders = result.payload.orders_submitted?.length ?? 0;
-        const skipped = result.payload.skipped?.length ?? 0;
-        logEntry('Trading cycle completed', `Orders submitted: ${orders}. Skipped decisions: ${skipped}.`);
+        const candidates = result.payload.scanner_candidates_count ?? 0;
+        const attempts = result.payload.trade_attempted_count ?? result.payload.orders_submitted?.length ?? 0;
+        const rejected = Object.values(result.payload.execution_rejected_count_by_reason || {}).reduce((sum, value) => sum + Number(value || 0), 0);
+        logEntry('Trading cycle completed', `Candidates: ${candidates}. Trade attempts: ${attempts}. Execution rejections: ${rejected}.`);
       } else if (result.status === 401) {
         logEntry('Trading cycle blocked', 'Dashboard token required before protected actions can run.', 'warn');
       } else {

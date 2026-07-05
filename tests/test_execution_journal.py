@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 
-from autobott_v2.execution_journal import append_order_submission, append_risk_check, load_execution_journal
+from autobott_v2.execution_journal import append_execution_outcome, append_order_submission, append_risk_check, load_execution_journal
 from autobott_v2.execution_models import (
     BrokerEnvironment,
     ExecutionOrder,
@@ -48,9 +48,19 @@ def test_execution_journal_appends_risk_check_and_submission(tmp_path) -> None:
     )
 
     append_risk_check(intent, risk_check, journal_path=path)
+    append_execution_outcome(
+        decision_id=intent.decision_id,
+        thesis_id=intent.thesis_id,
+        symbol=intent.symbol,
+        disposition="scanner_candidate",
+        detail="bullish_continuation:tactical",
+        payload={"selected_contract": intent.option_symbol},
+        journal_path=path,
+    )
     append_order_submission(order, journal_path=path)
     rows = load_execution_journal(journal_path=path)
 
-    assert [row["event_type"] for row in rows] == ["risk_check", "order_submission"]
+    assert [row["event_type"] for row in rows] == ["risk_check", "execution_outcome", "order_submission"]
     assert rows[0]["payload"]["risk_check"]["approved"] is True
-    assert rows[1]["payload"]["broker_order_id"] == "alpaca-order-1"
+    assert rows[1]["payload"]["disposition"] == "scanner_candidate"
+    assert rows[2]["payload"]["broker_order_id"] == "alpaca-order-1"

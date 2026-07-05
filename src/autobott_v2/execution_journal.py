@@ -51,6 +51,34 @@ def append_order_submission(order: ExecutionOrder, *, journal_path: str | Path |
     return _append_record(record, journal_path=journal_path)
 
 
+def append_execution_outcome(
+    *,
+    decision_id: str | None,
+    thesis_id: str | None,
+    symbol: str,
+    disposition: str,
+    detail: str | None = None,
+    payload: dict[str, Any] | None = None,
+    journal_path: str | Path | None = None,
+) -> Path:
+    outcome_payload = {
+        "symbol": symbol,
+        "disposition": disposition,
+    }
+    if detail is not None:
+        outcome_payload["detail"] = detail
+    if payload:
+        outcome_payload.update(_json_safe(payload))
+    record = ExecutionJournalRecord(
+        recorded_at=datetime.now(tz=UTC),
+        event_type="execution_outcome",
+        decision_id=decision_id,
+        thesis_id=thesis_id,
+        payload=outcome_payload,
+    )
+    return _append_record(record, journal_path=journal_path)
+
+
 def load_execution_journal(*, journal_path: str | Path | None = None) -> list[dict[str, Any]]:
     path = Path(journal_path) if journal_path is not None else execution_journal_path()
     if not path.exists():
