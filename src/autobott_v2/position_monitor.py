@@ -24,6 +24,7 @@ class PositionMonitorRules:
     stop_loss_pct: float = 0.22
     max_contracts_per_option: int = 1
     exit_limit_price_factor: float = 0.98
+    trim_limit_price_factor: float = 0.90
 
 
 def load_position_monitor_rules() -> PositionMonitorRules:
@@ -33,6 +34,7 @@ def load_position_monitor_rules() -> PositionMonitorRules:
         stop_loss_pct=float(os.getenv("AUTOBOTT_EXIT_STOP_LOSS_PCT", "0.22")),
         max_contracts_per_option=int(os.getenv("AUTOBOTT_MAX_CONTRACTS_PER_OPTION", "1")),
         exit_limit_price_factor=float(os.getenv("AUTOBOTT_EXIT_LIMIT_PRICE_FACTOR", "0.98")),
+        trim_limit_price_factor=float(os.getenv("AUTOBOTT_TRIM_LIMIT_PRICE_FACTOR", "0.90")),
     )
 
 
@@ -138,7 +140,9 @@ def _submit_monitor_exit(
     journal_path: str | None,
 ) -> ExecutionOrder:
     symbol = action["symbol"]
-    limit_price = max(0.01, round(float(action["current_price"]) * rules.exit_limit_price_factor, 2))
+    order_type = _monitor_order_type(action)
+    limit_factor = rules.trim_limit_price_factor if action["reason"] in {"trim_excess_contracts", "stop_loss"} else rules.exit_limit_price_factor
+    limit_price = max(0.01, round(float(action["current_price"]) * limit_factor, 2))
     intent = TradeIntent(
         symbol=str(position.get("underlying") or _underlying_from_option_symbol(symbol) or symbol),
         option_symbol=symbol,
@@ -147,7 +151,7 @@ def _submit_monitor_exit(
         limit_price=limit_price,
         generated_at=datetime.now(tz=UTC),
         environment=broker.config.environment if hasattr(broker, "config") else BrokerEnvironment.PAPER,
-        order_type=OrderType.LIMIT,
+        order_type=order_type,
         decision_id=f"monitor-{symbol}",
         thesis_id=f"monitor:{symbol}:{action['reason']}",
         metadata={
@@ -174,6 +178,12 @@ def _submit_monitor_exit(
         journal_path=journal_path,
     )
     return order
+
+
+def _monitor_order_type(action: dict[str, Any]) -> OrderType:
+    if action["reason"] in {"trim_excess_contracts", "stop_loss"}:
+        return OrderType.MARKET
+    return OrderType.LIMIT
 
 
 def _underlying_from_option_symbol(symbol: str) -> str | None:

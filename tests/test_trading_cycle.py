@@ -95,6 +95,15 @@ class FakeBroker:
         )
 
 
+class FakeBrokerWithLivePositions(FakeBroker):
+    def __init__(self, positions, **config_overrides) -> None:
+        super().__init__(**config_overrides)
+        self.positions = positions
+
+    def list_open_positions(self):
+        return self.positions
+
+
 def test_run_trading_cycle_captures_decides_and_submits(tmp_path) -> None:
     save_runtime_state(default_runtime_state(), state_path=tmp_path / "runtime_state.json")
     original = trading_cycle.load_runtime_state
@@ -228,6 +237,49 @@ def test_run_trading_cycle_skips_symbol_with_existing_active_underlying(tmp_path
     trading_cycle.load_open_positions = lambda: original_positions(store_path=tmp_path / "open_positions.json")
     trading_cycle.reconcile_open_positions = lambda *args, **kwargs: None
     broker = FakeBroker()
+    try:
+        result = trading_cycle.run_trading_cycle(
+            symbols=["AAPL", "MSFT"],
+            broker=broker,
+            data_client=FakeDataClient(),
+            scheduled_market_time=datetime(2026, 7, 1, 15, 35, tzinfo=UTC),
+            captured_at_utc=datetime(2026, 7, 1, 15, 35, tzinfo=UTC),
+            corpus_root=tmp_path / "corpus",
+            decision_log_path=tmp_path / "decision_cards.jsonl",
+            execution_log_path=str(tmp_path / "execution_orders.jsonl"),
+        )
+    finally:
+        trading_cycle.load_runtime_state = original_runtime
+        trading_cycle.load_open_positions = original_positions
+        trading_cycle.reconcile_open_positions = original_reconcile
+
+    assert len(result.orders_submitted) == 1
+    assert result.orders_submitted[0]["symbol"] == "MSFT"
+    assert result.skipped[0]["symbol"] == "AAPL"
+    assert result.skipped[0]["reason"] == "underlying_exposure_already_open"
+    assert result.execution_rejected_count_by_reason == {"underlying_exposure_already_open": 1}
+
+
+def test_run_trading_cycle_uses_live_broker_positions_for_underlying_guard(tmp_path) -> None:
+    save_runtime_state(default_runtime_state(), state_path=tmp_path / "runtime_state.json")
+    original_runtime = trading_cycle.load_runtime_state
+    original_positions = trading_cycle.load_open_positions
+    original_reconcile = trading_cycle.reconcile_open_positions
+    trading_cycle.load_runtime_state = lambda: original_runtime(state_path=tmp_path / "runtime_state.json")
+    trading_cycle.load_open_positions = lambda: []
+    trading_cycle.reconcile_open_positions = lambda *args, **kwargs: None
+    broker = FakeBrokerWithLivePositions(
+        [
+            {
+                "symbol": "AAPL260703C00105000",
+                "side": "long",
+                "qty": "1",
+                "current_price": "2.50",
+                "avg_entry_price": "2.50",
+                "unrealized_plpc": "0.00",
+            }
+        ]
+    )
     try:
         result = trading_cycle.run_trading_cycle(
             symbols=["AAPL", "MSFT"],

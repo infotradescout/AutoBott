@@ -83,6 +83,7 @@ def test_position_monitor_trims_excess_contracts_before_profit_loss(tmp_path) ->
 
     assert result["actions"][0]["reason"] == "trim_excess_contracts"
     assert broker.submitted[0].quantity == 3
+    assert broker.submitted[0].order_type.value == "market"
 
 
 def test_position_monitor_closes_stop_loss(tmp_path) -> None:
@@ -97,3 +98,4 @@ def test_position_monitor_closes_stop_loss(tmp_path) -> None:
 
     assert result["actions"][0]["reason"] == "stop_loss"
     assert broker.submitted[0].quantity == 1
+    assert broker.submitted[0].order_type.value == "market"

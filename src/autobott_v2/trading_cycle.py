@@ -123,7 +123,7 @@ def run_trading_cycle(
     scanner_candidates_count = 0
     trade_attempted_count = 0
     open_positions = max(position_count or 0, _active_open_position_count())
-    active_underlyings = _active_underlying_symbols()
+    active_underlyings = _active_underlying_symbols(resolved_broker)
     max_new_entry_attempts_per_loop = resolved_broker.config.effective_max_new_entry_attempts_per_loop()
 
     for symbol in symbols:
@@ -399,12 +399,28 @@ def _active_open_position_count() -> int:
     )
 
 
-def _active_underlying_symbols() -> set[str]:
+def _active_underlying_symbols(broker: Any | None = None) -> set[str]:
+    if broker is not None and hasattr(broker, "list_open_positions"):
+        try:
+            symbols = {
+                _underlying_from_option_symbol(str(position.get("symbol") or "")) or str(position.get("symbol") or "").upper()
+                for position in broker.list_open_positions()
+                if _broker_position_is_active(position)
+            }
+            return {symbol for symbol in symbols if symbol}
+        except Exception:
+            pass
     return {
         position.symbol.upper()
         for position in load_open_positions()
         if _position_is_active(position.status)
     }
+
+
+def _broker_position_is_active(position: dict[str, Any]) -> bool:
+    side = str(position.get("side") or "long").lower()
+    qty = float(position.get("qty") or 0)
+    return side == "long" and qty > 0
 
 
 def _position_is_active(status: str) -> bool:
@@ -417,6 +433,17 @@ def _position_is_active(status: str) -> bool:
         or normalized.startswith("expired")
         or normalized.startswith("closed")
     )
+
+
+def _underlying_from_option_symbol(symbol: str) -> str | None:
+    stripped = symbol.strip().upper()
+    for index, char in enumerate(stripped):
+        if char in {"C", "P"} and index >= 6:
+            expiry = stripped[index - 6 : index]
+            suffix = stripped[index + 1 :]
+            if expiry.isdigit() and suffix.isdigit():
+                return stripped[: index - 6]
+    return None
 
 
 def _decision_thesis_id(decision: DecisionCard) -> str:
