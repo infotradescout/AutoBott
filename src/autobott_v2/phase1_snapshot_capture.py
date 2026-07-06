@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Any
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
+from .options_math import solve_iv_and_greeks
 from .phase1_config import AlpacaReadOnlyConfig, load_alpaca_read_only_config
 from .phase1_snapshot_contract import validate_market_snapshot
 
@@ -517,7 +518,19 @@ def _normalize_option_chain(
         theta = greeks.get("theta")
         vega = greeks.get("vega")
         if iv is None or delta is None or theta is None or vega is None:
-            continue
+            # Alpaca's indicative options feed does not reliably return Greeks/IV.
+            # Fall back to solving them from the observed market price so contract
+            # selection (which targets specific deltas) still has real values.
+            solved = solve_iv_and_greeks(
+                price=mid,
+                s=underlying_price,
+                k=strike,
+                dte_days=dte,
+                option_type=str(option_type).lower(),
+            )
+            if solved is None:
+                continue
+            iv, delta, theta, vega = solved
         normalized.append(
             {
                 "option_symbol": option_symbol,

@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import urllib.parse
 import urllib.request
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from .phase1_alpaca_config import AlpacaPaperConfig, require_alpaca_paper_config
@@ -52,13 +52,34 @@ class AlpacaPaperClient:
         return {symbol.upper(): dict(row) for symbol, row in quotes.items()}
 
     def get_option_chain_snapshots(self, symbol: str) -> dict[str, dict[str, Any]]:
-        payload = self._get_json(
-            self.config.data_base_url,
-            f"/v1beta1/options/snapshots/{symbol.upper()}",
-            {"feed": "indicative"},
-        )
-        snapshots = payload.get("snapshots") or payload.get("option_snapshots") or {}
-        return {option_symbol: dict(row) for option_symbol, row in snapshots.items()}
+        # Without an expiration window, Alpaca's snapshot endpoint defaults to
+        # only the nearest (often same-day) expiration, which the decision
+        # engine's minimum-DTE rule always excludes. Request the window the
+        # engine actually trades so a full chain comes back.
+        today = datetime.now(UTC).date()
+        base_params = {
+            "feed": "indicative",
+            "limit": "1000",
+            "expiration_date_gte": (today + timedelta(days=1)).isoformat(),
+            "expiration_date_lte": (today + timedelta(days=30)).isoformat(),
+        }
+        snapshots: dict[str, dict[str, Any]] = {}
+        page_token: str | None = None
+        for _ in range(10):
+            params = dict(base_params)
+            if page_token:
+                params["page_token"] = page_token
+            payload = self._get_json(
+                self.config.data_base_url,
+                f"/v1beta1/options/snapshots/{symbol.upper()}",
+                params,
+            )
+            page_snapshots = payload.get("snapshots") or payload.get("option_snapshots") or {}
+            snapshots.update({option_symbol: dict(row) for option_symbol, row in page_snapshots.items()})
+            page_token = payload.get("next_page_token")
+            if not page_token:
+                break
+        return snapshots
 
     def get_positions(self) -> list[dict[str, Any]]:
         payload = self._get_json(self.config.trading_base_url, "/v2/positions")
