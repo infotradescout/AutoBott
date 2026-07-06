@@ -22,6 +22,7 @@ LOOKBACK_BARS = 35
 IV_HISTORY_WINDOW = 20
 TACTICAL_TARGET_DTE = 2
 RIDER_TARGET_DTE = 20
+SYNTHETIC_CHAIN_DTES = (0, 1, 2, 3, 5, 10, 20, 30)
 STRIKE_STEPS_PCT = (-0.10, -0.07, -0.04, -0.02, 0.0, 0.02, 0.04, 0.07, 0.10)
 CONTRACT_SPREAD_PCT = 0.06
 CONTRACT_VOLUME = 500
@@ -102,7 +103,7 @@ def synthesize_option_chain(
     realized_volatility = round(iv / IV_REALIZED_VOL_MULTIPLIER, 4)
     contracts: list[dict[str, Any]] = []
     for option_type in ("call", "put"):
-        for dte in (TACTICAL_TARGET_DTE, RIDER_TARGET_DTE):
+        for dte in SYNTHETIC_CHAIN_DTES:
             expiration = as_of + timedelta(days=dte)
             for pct in STRIKE_STEPS_PCT:
                 strike = round(spot * (1 + pct), 2)
