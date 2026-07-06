@@ -42,6 +42,10 @@ from .runtime_paths import phase1_replay_campaign_root, phase1_snapshots_root
 
 JsonDict = dict[str, Any]
 
+DECISION_LAB_MAX_SYNC_SYMBOLS = 2
+DECISION_LAB_MAX_SYNC_DAYS = 3
+DECISION_LAB_MIN_SYNC_INTERVAL_MINUTES = 30
+
 
 def app(environ: dict[str, Any], start_response: Callable[..., Any]) -> list[bytes]:
     method = environ.get("REQUEST_METHOD", "GET").upper()
@@ -600,11 +604,15 @@ def _latest_decision_lab_payload() -> JsonDict:
 
 
 def _decision_lab_backfill_run_payload(payload: JsonDict) -> JsonDict:
-    symbols = [str(symbol).upper() for symbol in payload.get("symbols", ["SPY", "QQQ", "AAPL", "MSFT", "NVDA", "TSLA", "GOOGL"])]
-    days = min(max(int(payload.get("days", 20)), 2), 120)
-    interval_minutes = min(max(int(payload.get("interval_minutes", 15)), 1), 60)
+    requested_symbols = [str(symbol).upper() for symbol in payload.get("symbols", ["SPY", "QQQ"])]
+    symbols = list(dict.fromkeys(requested_symbols))[:DECISION_LAB_MAX_SYNC_SYMBOLS]
+    days = min(max(int(payload.get("days", 2)), 1), DECISION_LAB_MAX_SYNC_DAYS)
+    interval_minutes = min(max(int(payload.get("interval_minutes", DECISION_LAB_MIN_SYNC_INTERVAL_MINUTES)), DECISION_LAB_MIN_SYNC_INTERVAL_MINUTES), 60)
     end_date = _parse_date(payload.get("end_date")) or datetime.now(UTC).date()
     start_date = _parse_date(payload.get("start_date")) or (end_date - timedelta(days=days))
+    earliest_sync_start = end_date - timedelta(days=DECISION_LAB_MAX_SYNC_DAYS - 1)
+    if start_date < earliest_sync_start:
+        start_date = earliest_sync_start
     run_id = str(payload.get("campaign_run_id", datetime.now(UTC).strftime("decision-lab-%Y%m%d-%H%M%S")))
     corpus_root = _artifacts_root() / "decision_lab_historical_corpus" / run_id
     backfill = run_historical_backfill(
@@ -625,6 +633,16 @@ def _decision_lab_backfill_run_payload(payload: JsonDict) -> JsonDict:
     report = build_decision_lab_report(_artifacts_root() / run_id)
     return {
         "ok": True,
+        "operational_limits": {
+            "requested_symbols": requested_symbols,
+            "used_symbols": symbols,
+            "max_sync_symbols": DECISION_LAB_MAX_SYNC_SYMBOLS,
+            "max_sync_days": DECISION_LAB_MAX_SYNC_DAYS,
+            "min_sync_interval_minutes": DECISION_LAB_MIN_SYNC_INTERVAL_MINUTES,
+            "start_date": start_date.isoformat(),
+            "end_date": end_date.isoformat(),
+            "interval_minutes": interval_minutes,
+        },
         "backfill": backfill,
         "campaign": campaign | {"active_gate_changed": gate_before != gate_after},
         "decision_lab": report,
@@ -1714,9 +1732,9 @@ def _dashboard_html() -> str:
       const result = await callApi('/api/reports/decision-lab/backfill-run', {
         method:'POST',
         body: JSON.stringify({
-          symbols:['SPY','QQQ','AAPL','MSFT','NVDA','TSLA','GOOGL'],
-          days:20,
-          interval_minutes:15,
+          symbols:['SPY','QQQ'],
+          days:2,
+          interval_minutes:30,
           campaign_run_id:`decision-lab-${Date.now()}`
         })
       });

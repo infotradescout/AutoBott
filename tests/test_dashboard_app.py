@@ -725,16 +725,18 @@ def test_decision_lab_backfill_run_endpoint_returns_report(monkeypatch, tmp_path
         "POST",
         "/api/reports/decision-lab/backfill-run",
         token="dashboard-token",
-        payload={"symbols": ["AAPL"], "start_date": "2026-06-01", "end_date": "2026-06-10", "interval_minutes": 15, "campaign_run_id": "campaign1"},
+        payload={"symbols": ["AAPL", "SPY", "QQQ"], "start_date": "2026-06-01", "end_date": "2026-06-10", "interval_minutes": 15, "campaign_run_id": "campaign1"},
     )
     payload = json.loads(body)
 
     assert status.startswith("200")
     assert payload["ok"] is True
-    assert calls["backfill"]["symbols"] == ["AAPL"]
-    assert calls["backfill"]["start_date"].isoformat() == "2026-06-01"
-    assert calls["backfill"]["interval_minutes"] == 15
+    assert calls["backfill"]["symbols"] == ["AAPL", "SPY"]
+    assert calls["backfill"]["start_date"].isoformat() == "2026-06-08"
+    assert calls["backfill"]["interval_minutes"] == 30
     assert calls["campaign"]["campaign_run_id"] == "campaign1"
+    assert payload["operational_limits"]["requested_symbols"] == ["AAPL", "SPY", "QQQ"]
+    assert payload["operational_limits"]["used_symbols"] == ["AAPL", "SPY"]
     assert payload["decision_lab"]["summary"]["closed_trades"] == 2
 
 
