@@ -7,6 +7,8 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, time as daytime
 from typing import Any, Callable
 
+from .phase1_snapshot_capture import _market_timezone_info
+from .paper_readiness import _is_regular_trading_day
 from .trading_cycle import TradingCycleResult, run_trading_cycle
 
 
@@ -34,6 +36,7 @@ def run_trading_session(
     interval_seconds: int,
     start_time: daytime | None = None,
     end_time: daytime | None = None,
+    market_timezone: str = "UTC",
     max_cycles: int | None = None,
     now_fn: Callable[[], datetime] | None = None,
     sleep_fn: Callable[[float], None] = time.sleep,
@@ -47,12 +50,16 @@ def run_trading_session(
 
     while True:
         current = _now(now_fn)
-        current_time = current.astimezone(UTC).time().replace(tzinfo=None)
+        current_local = _session_local_datetime(current, market_timezone)
+        current_time = current_local.time().replace(tzinfo=None)
         if start_time and current_time < start_time:
             sleep_fn(interval_seconds)
             continue
         if end_time and current_time > end_time:
             break
+        if not _is_regular_trading_day(current_local.date()):
+            sleep_fn(interval_seconds)
+            continue
         if max_cycles is not None and cycles_completed >= max_cycles:
             break
 
@@ -92,6 +99,13 @@ def main(argv: list[str] | None = None) -> int:
 
 def _now(now_fn: Callable[[], datetime] | None) -> datetime:
     return (now_fn or (lambda: datetime.now(tz=UTC)))()
+
+
+def _session_local_datetime(current: datetime, market_timezone: str) -> datetime:
+    if market_timezone.strip().upper() == "UTC":
+        return current.astimezone(UTC)
+    tz = _market_timezone_info(market_timezone, current.astimezone(UTC).date())
+    return current.astimezone(tz)
 
 
 if __name__ == "__main__":

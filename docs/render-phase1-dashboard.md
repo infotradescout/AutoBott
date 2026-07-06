@@ -33,6 +33,13 @@ Deploy remains blocked until the persistent disk and hosted env vars below are c
 - `AUTOBOTT_PAPER_MAX_OPEN_ENTRY_BUY_ORDERS=25`
 - `AUTOBOTT_PAPER_ONLY=true`
 - `AUTOBOTT_DASHBOARD_AUTH_TOKEN=<long random token>`
+- `AUTOBOTT_SESSION_AUTOSTART=true`
+- `AUTOBOTT_SESSION_SYMBOLS=SPY`
+- `AUTOBOTT_SESSION_INTERVAL_SECONDS=300`
+- `AUTOBOTT_SESSION_START_TIME=09:35`
+- `AUTOBOTT_SESSION_END_TIME=15:55`
+- `AUTOBOTT_SESSION_MARKET_TIMEZONE=America/New_York`
+- `AUTOBOTT_SESSION_ARM_PAPER_EXECUTION=true`
 - `AUTOBOTT_DATA_ROOT=/var/data/autobott/data`
 - `AUTOBOTT_ARTIFACTS_ROOT=/var/data/autobott/artifacts`
 - `AUTOBOTT_GATE_PATH=/var/data/autobott/data/PHASE1_CYCLE_GATE.json`
@@ -50,8 +57,11 @@ When the hosted persistence env vars are absent, local development keeps the exi
 ## Local Run
 
 ```powershell
+. .\local.env.ps1
 .\.venv\Scripts\python.exe -m autobott_v2.dashboard_app
 ```
+
+With those session env vars enabled, startup will arm paper execution automatically and wait for the configured New York session window before running cycles.
 
 ## Cutover Command
 

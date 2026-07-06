@@ -48,6 +48,14 @@ services:
         sync: false
       - key: AUTOBOTT_SESSION_DAILY_PNL
         sync: false
+      - key: AUTOBOTT_SESSION_START_TIME
+        sync: false
+      - key: AUTOBOTT_SESSION_END_TIME
+        sync: false
+      - key: AUTOBOTT_SESSION_MARKET_TIMEZONE
+        sync: false
+      - key: AUTOBOTT_SESSION_ARM_PAPER_EXECUTION
+        sync: false
       - key: AUTOBOTT_DATA_ROOT
         value: /var/data/autobott/data
       - key: AUTOBOTT_ARTIFACTS_ROOT

@@ -223,6 +223,10 @@ def _session_start_payload(payload: JsonDict) -> JsonDict:
         quantity=int(payload.get("quantity", 1)),
         position_count=int(payload.get("position_count", 0)),
         daily_pnl=float(payload.get("daily_pnl", 0.0)),
+        start_time=str(payload["start_time"]).strip() if payload.get("start_time") else None,
+        end_time=str(payload["end_time"]).strip() if payload.get("end_time") else None,
+        market_timezone=str(payload.get("market_timezone", "America/New_York")).strip() or "America/New_York",
+        arm_paper_execution_on_start=bool(payload.get("arm_paper_execution_on_start", False)),
     )
     started = start_session_supervisor(config)
     return {

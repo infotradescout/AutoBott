@@ -556,6 +556,10 @@ def test_render_config_has_health_check() -> None:
     assert "key: AUTOBOTT_GATE_PATH" in render_config
     assert "key: AUTOBOTT_SESSION_AUTOSTART" in render_config
     assert "key: AUTOBOTT_SESSION_SYMBOLS" in render_config
+    assert "key: AUTOBOTT_SESSION_START_TIME" in render_config
+    assert "key: AUTOBOTT_SESSION_END_TIME" in render_config
+    assert "key: AUTOBOTT_SESSION_MARKET_TIMEZONE" in render_config
+    assert "key: AUTOBOTT_SESSION_ARM_PAPER_EXECUTION" in render_config
     assert "key: AUTOBOTT_PAPER_TRADE_ALL_PASSED_SIGNALS" in render_config
     assert "key: AUTOBOTT_PAPER_MAX_NEW_ENTRY_ATTEMPTS_PER_LOOP" in render_config
     assert "key: AUTOBOTT_PAPER_MAX_OPEN_ENTRY_BUY_ORDERS" in render_config

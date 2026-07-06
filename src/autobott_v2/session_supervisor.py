@@ -3,9 +3,10 @@ from __future__ import annotations
 import os
 import threading
 from dataclasses import asdict, dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, time as daytime
 from typing import Any
 
+from .runtime_control import arm_paper_execution
 from .session_runner import run_trading_session
 
 
@@ -24,6 +25,10 @@ class SessionSupervisorConfig:
     quantity: int
     position_count: int
     daily_pnl: float
+    start_time: str | None
+    end_time: str | None
+    market_timezone: str
+    arm_paper_execution_on_start: bool
 
 
 @dataclass
@@ -58,6 +63,10 @@ def load_session_supervisor_config() -> SessionSupervisorConfig:
         quantity=int(os.getenv("AUTOBOTT_SESSION_QUANTITY", "1")),
         position_count=int(os.getenv("AUTOBOTT_SESSION_POSITION_COUNT", "0")),
         daily_pnl=float(os.getenv("AUTOBOTT_SESSION_DAILY_PNL", "0.0")),
+        start_time=_normalize_time_text(os.getenv("AUTOBOTT_SESSION_START_TIME")),
+        end_time=_normalize_time_text(os.getenv("AUTOBOTT_SESSION_END_TIME")),
+        market_timezone=(os.getenv("AUTOBOTT_SESSION_MARKET_TIMEZONE") or "America/New_York").strip() or "America/New_York",
+        arm_paper_execution_on_start=_normalize_bool(os.getenv("AUTOBOTT_SESSION_ARM_PAPER_EXECUTION"), default=False),
     )
 
 
@@ -104,9 +113,14 @@ def session_supervisor_status() -> dict[str, Any]:
 def _run_session(config: SessionSupervisorConfig) -> None:
     global _SESSION_STATE
     try:
+        if config.arm_paper_execution_on_start:
+            arm_paper_execution(reason="session_supervisor_autostart")
         result = run_trading_session(
             symbols=config.symbols,
             interval_seconds=config.interval_seconds,
+            start_time=_parse_optional_time(config.start_time),
+            end_time=_parse_optional_time(config.end_time),
+            market_timezone=config.market_timezone,
             max_cycles=config.max_cycles,
             cycle_kwargs={
                 "quantity": config.quantity,
@@ -124,3 +138,18 @@ def _run_session(config: SessionSupervisorConfig) -> None:
         with _SESSION_LOCK:
             _SESSION_STATE.running = False
             _SESSION_STATE.finished_at = datetime.now(tz=UTC)
+
+
+def _normalize_time_text(value: str | None) -> str | None:
+    if value is None:
+        return None
+    stripped = value.strip()
+    if not stripped:
+        return None
+    return daytime.fromisoformat(stripped).isoformat()
+
+
+def _parse_optional_time(value: str | None) -> daytime | None:
+    if value is None:
+        return None
+    return daytime.fromisoformat(value)
