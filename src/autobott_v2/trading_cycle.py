@@ -122,7 +122,7 @@ def run_trading_cycle(
     execution_rejected_count_by_reason: dict[str, int] = {}
     scanner_candidates_count = 0
     trade_attempted_count = 0
-    open_positions = max(position_count or 0, _active_open_position_count())
+    open_positions = max(position_count or 0, _active_open_position_count(resolved_broker))
     active_underlyings = _active_underlying_symbols(resolved_broker)
     max_new_entry_attempts_per_loop = resolved_broker.config.effective_max_new_entry_attempts_per_loop()
 
@@ -395,7 +395,16 @@ def load_decision_cards(*, log_path: str | Path | None = None, limit: int | None
     return rows[-limit:] if limit is not None else rows
 
 
-def _active_open_position_count() -> int:
+def _active_open_position_count(broker: Any | None = None) -> int:
+    # The local open_positions.json store only ever grows: entries are added
+    # on entry but nothing removes them when position_monitor closes a
+    # position, so it drifts further from reality the longer the bot runs.
+    # Prefer the broker's live position list, same as _active_underlying_symbols.
+    if broker is not None and hasattr(broker, "list_open_positions"):
+        try:
+            return sum(1 for position in broker.list_open_positions() if _broker_position_is_active(position))
+        except Exception:
+            pass
     positions = load_open_positions()
     return len(
         [

@@ -220,6 +220,57 @@ def test_run_trading_cycle_uses_persisted_open_positions_for_risk_count(tmp_path
     assert broker.open_positions_seen == [1]
 
 
+def test_run_trading_cycle_prefers_live_broker_position_count_over_stale_store(tmp_path) -> None:
+    # The local open_positions.json store never removes entries when a
+    # position is closed by the monitor, so it drifts upward forever. The
+    # risk-count used for sizing new entries must come from the broker's
+    # live truth instead, not that ever-growing local file.
+    save_runtime_state(default_runtime_state(), state_path=tmp_path / "runtime_state.json")
+    save_open_positions(
+        [
+            OpenPosition(
+                broker_order_id=f"alpaca-order-{i}",
+                decision_id=f"decision-{i}",
+                symbol="MSFT",
+                option_symbol="MSFT260703C00105000",
+                quantity=1,
+                entry_limit_price=2.5,
+                entry_submitted_at=datetime(2026, 7, 1, 15, 31, tzinfo=UTC),
+                take_profit_price=3.75,
+                stop_loss_price=1.75,
+                status="filled",
+            )
+            for i in range(3)
+        ],
+        store_path=tmp_path / "open_positions.json",
+    )
+    original_runtime = trading_cycle.load_runtime_state
+    original_positions = trading_cycle.load_open_positions
+    original_reconcile = trading_cycle.reconcile_open_positions
+    trading_cycle.load_runtime_state = lambda: original_runtime(state_path=tmp_path / "runtime_state.json")
+    trading_cycle.load_open_positions = lambda: original_positions(store_path=tmp_path / "open_positions.json")
+    trading_cycle.reconcile_open_positions = lambda *args, **kwargs: None
+    broker = FakeBrokerWithLivePositions([{"symbol": "MSFT260703C00105000", "side": "long", "qty": "1"}])
+    try:
+        result = trading_cycle.run_trading_cycle(
+            symbols=["AAPL"],
+            broker=broker,
+            data_client=FakeDataClient(),
+            scheduled_market_time=datetime(2026, 7, 1, 15, 35, tzinfo=UTC),
+            captured_at_utc=datetime(2026, 7, 1, 15, 35, tzinfo=UTC),
+            corpus_root=tmp_path / "corpus",
+            decision_log_path=tmp_path / "decision_cards.jsonl",
+            execution_log_path=str(tmp_path / "execution_orders.jsonl"),
+        )
+    finally:
+        trading_cycle.load_runtime_state = original_runtime
+        trading_cycle.load_open_positions = original_positions
+        trading_cycle.reconcile_open_positions = original_reconcile
+
+    assert len(result.orders_submitted) == 1
+    assert broker.open_positions_seen == [1]
+
+
 def test_run_trading_cycle_skips_symbol_with_existing_active_underlying(tmp_path) -> None:
     save_runtime_state(default_runtime_state(), state_path=tmp_path / "runtime_state.json")
     save_open_positions(
