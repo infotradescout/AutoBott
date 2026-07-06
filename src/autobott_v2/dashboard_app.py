@@ -10,6 +10,7 @@ from wsgiref.simple_server import make_server
 
 from .execution_config import load_alpaca_execution_config
 from .env_bootstrap import bootstrap_env_file
+from .decision_lab import build_decision_lab_report
 from .phase1_alpaca_capture_now import capture_now
 from .phase1_alpaca_client import AlpacaPaperClient
 from .phase1_alpaca_config import load_alpaca_paper_config
@@ -109,6 +110,8 @@ def handle_request(method: str, path: str, headers: dict[str, str], body: bytes)
             return 200, "application/json; charset=utf-8", _latest_thesis_failures_payload()
         if path == "/api/reports/gate-candidate/latest" and method == "GET":
             return 200, "application/json; charset=utf-8", _latest_gate_candidate_payload()
+        if path == "/api/reports/decision-lab/latest" and method == "GET":
+            return 200, "application/json; charset=utf-8", _latest_decision_lab_payload()
         if path == "/api/capture/start" and method == "POST":
             return 200, "application/json; charset=utf-8", _capture_start_payload(_json_body(body))
         if path == "/api/campaign/run" and method == "POST":
@@ -584,6 +587,13 @@ def _latest_gate_candidate_payload() -> JsonDict:
         "manual_approval_required": True,
         "bucket_candidates": report.get("bucket_candidates", {}),
     }
+
+
+def _latest_decision_lab_payload() -> JsonDict:
+    campaign_dir = _latest_campaign_dir()
+    if campaign_dir is None:
+        return {"ok": False, "status": "no_campaign_found"}
+    return build_decision_lab_report(campaign_dir)
 
 
 def _capture_start_payload(payload: JsonDict) -> JsonDict:
@@ -1067,6 +1077,10 @@ def _dashboard_html() -> str:
             <div class="panel-body" id="bucket-report"></div>
           </section>
           <section class="panel">
+            <div class="panel-head"><h3>Decision Lab</h3><span class="badge info">BASELINES</span></div>
+            <div class="panel-body" id="decision-lab"></div>
+          </section>
+          <section class="panel">
             <div class="panel-head"><h3>Worst Thesis Failures</h3><span class="badge danger">REPORTS</span></div>
             <div class="panel-body" id="thesis-failures"></div>
           </section>
@@ -1495,6 +1509,43 @@ def _dashboard_html() -> str:
         ${detailsBlock(payload)}`;
     }
 
+    function renderDecisionLab(payload) {
+      if (!payload.ok) {
+        return emptyState('No decision lab report', 'Run a campaign to score buckets against baselines.');
+      }
+      const summary = payload.summary || {};
+      const actual = payload.baselines?.actual_strategy || {};
+      const recRows = (payload.recommendations || []).slice(0, 4).map((row) => `
+        <tr>
+          <td>${statusBadge(escapeHtml(row.severity || 'info').toUpperCase(), row.severity || 'info')}</td>
+          <td>${escapeHtml(row.action || 'unknown')}</td>
+          <td>${escapeHtml(row.bucket || row.reason || 'n/a')}</td>
+        </tr>`).join('');
+      const bucketRows = (payload.buckets || []).slice(0, 4).map((bucket) => `
+        <tr>
+          <td>${escapeHtml(bucket.bucket)}</td>
+          <td>${escapeHtml(bucket.closed_trades ?? 0)}</td>
+          <td>${escapeHtml(bucket.expectancy ?? 'n/a')}</td>
+          <td>${statusBadge(escapeHtml(bucket.status || 'unknown').toUpperCase(), bucket.status === 'approved' ? 'safe' : bucket.status === 'underperforming' ? 'danger' : 'warn')}</td>
+        </tr>`).join('');
+      return `
+        ${metricList([
+          ['Closed trades', escapeHtml(summary.closed_trades ?? actual.closed_trades ?? 0)],
+          ['Actual vs no trade', escapeHtml(payload.baselines?.actual_vs_no_trade ?? 'n/a')],
+          ['Expectancy', escapeHtml(actual.expectancy ?? summary.expectancy_per_trade ?? 'n/a')],
+          ['Profit factor', escapeHtml(actual.profit_factor ?? summary.profit_factor ?? 'n/a')]
+        ])}
+        <table class="table">
+          <thead><tr><th>Action</th><th>Type</th><th>Reason</th></tr></thead>
+          <tbody>${recRows || '<tr><td colspan="3">No recommendations</td></tr>'}</tbody>
+        </table>
+        <table class="table">
+          <thead><tr><th>Bucket</th><th>Closed</th><th>Expectancy</th><th>Status</th></tr></thead>
+          <tbody>${bucketRows || '<tr><td colspan="4">No bucket rows</td></tr>'}</tbody>
+        </table>
+        ${detailsBlock(payload)}`;
+    }
+
     function renderGateReport(payload) {
       if (!payload.ok) {
         return emptyState('No gate candidate report', 'Run a campaign to generate candidate review output.');
@@ -1572,6 +1623,7 @@ def _dashboard_html() -> str:
         callApi('/api/reports/bucket-edge/latest'),
         callApi('/api/reports/thesis-failures/latest'),
         callApi('/api/reports/gate-candidate/latest'),
+        callApi('/api/reports/decision-lab/latest'),
         callApi('/api/account/positions'),
         callApi('/api/account/orders')
       ]);
@@ -1584,9 +1636,10 @@ def _dashboard_html() -> str:
       renderProtectedPanel('bucket-report', protectedResults[6], renderBucketReport);
       renderProtectedPanel('thesis-failures', protectedResults[7], renderThesisFailures);
       renderProtectedPanel('gate-report', protectedResults[8], renderGateReport);
-      renderProtectedPanel('account-summary', protectedResults[9], renderAccountSummary);
-      renderProtectedPanel('account-positions', protectedResults[9], renderAccountPositions);
-      renderProtectedPanel('account-orders', protectedResults[10], renderAccountOrders);
+      renderProtectedPanel('decision-lab', protectedResults[9], renderDecisionLab);
+      renderProtectedPanel('account-summary', protectedResults[10], renderAccountSummary);
+      renderProtectedPanel('account-positions', protectedResults[10], renderAccountPositions);
+      renderProtectedPanel('account-orders', protectedResults[11], renderAccountOrders);
       renderPersistenceStatus();
       syncActionState();
     }

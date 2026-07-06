@@ -128,13 +128,52 @@ def _write_campaign_artifacts(tmp_path: Path) -> None:
         ) + "\n",
         encoding="utf-8",
     )
+    call_contract = {
+        "option_symbol": "AAPL260717C00100000",
+        "option_type": "call",
+        "expiration": "2026-07-17",
+        "mid": 2.5,
+        "spread_pct": 0.08,
+        "delta": 0.52,
+        "theta": -0.04,
+        "implied_volatility": 0.35,
+    }
+    put_contract = {
+        "option_symbol": "SPY260717P00100000",
+        "option_type": "put",
+        "expiration": "2026-07-17",
+        "mid": 5.5,
+        "spread_pct": 0.14,
+        "delta": -0.55,
+        "theta": -0.18,
+        "implied_volatility": 0.62,
+    }
     (primary_dir / "decisions.jsonl").write_text(
         "\n".join(
             [
-                json.dumps({"decision_id": "bad-2dte", "decision": "TRADE_CANDIDATE", "confidence_score": 0.71, "reason_codes": ["selected_tactical_priority"]}, sort_keys=True),
-                json.dumps({"decision_id": "bad-reversal", "decision": "TRADE_CANDIDATE", "confidence_score": 0.66, "reason_codes": ["reversal_confirmation_present"]}, sort_keys=True),
+                json.dumps({"decision_id": "bad-2dte", "ticker": "AAPL", "timestamp": "2026-07-06T15:00:00+00:00", "decision": "TRADE_CANDIDATE", "confidence_score": 0.71, "reason_codes": ["selected_tactical_priority"], "selected_contract": call_contract}, sort_keys=True),
+                json.dumps({"decision_id": "bad-reversal", "ticker": "SPY", "timestamp": "2026-07-06T15:00:00+00:00", "decision": "TRADE_CANDIDATE", "confidence_score": 0.66, "reason_codes": ["reversal_confirmation_present"], "selected_contract": put_contract}, sort_keys=True),
             ]
         ) + "\n",
+        encoding="utf-8",
+    )
+    outcomes = [
+        {"decision_id": "bad-2dte", "ticker": "AAPL", "trade_setup": "bullish_continuation", "execution_layer": "tactical", "selected_contract": call_contract, "lifecycle_status": "closed", "entry_fill_price": 2.5, "exit_fill_price": 3.0, "pnl": 50.0, "exit_reason": "profit_target"},
+        {"decision_id": "bad-reversal", "ticker": "SPY", "trade_setup": "late_cycle_bearish_reversal", "execution_layer": "tactical", "selected_contract": put_contract, "lifecycle_status": "closed", "entry_fill_price": 5.5, "exit_fill_price": 4.0, "pnl": -150.0, "exit_reason": "stop_loss"},
+    ]
+    (primary_dir / "orders.jsonl").write_text("".join(json.dumps(row, sort_keys=True) + "\n" for row in outcomes), encoding="utf-8")
+    (primary_dir / "outcomes.jsonl").write_text("".join(json.dumps(row, sort_keys=True) + "\n" for row in outcomes), encoding="utf-8")
+    (primary_dir / "scorecard.json").write_text(
+        json.dumps(
+            {
+                "win_rate": 0.5,
+                "profit_factor": 0.3333,
+                "expectancy_per_trade": -50.0,
+                "max_drawdown_pct_observed": 1.0,
+                "thesis_validation": {"pass_rate": 0.0},
+            },
+            sort_keys=True,
+        ),
         encoding="utf-8",
     )
     (campaign_dir / "bucket_edge_report.json").write_text(
@@ -649,6 +688,20 @@ def test_latest_bucket_edge_report_loads_without_mutating_gate(monkeypatch, tmp_
     assert gate_before == gate_after
     assert payload["bucket_count"] == 1
     assert payload["buckets"][0]["fill_models"]["realistic_mid_penalty"]["tactical_2dte_pass_rate"] == 0.67
+
+
+def test_latest_decision_lab_payload_scores_campaign(monkeypatch, tmp_path) -> None:
+    _auth_env(monkeypatch, tmp_path)
+    _write_campaign_artifacts(tmp_path)
+
+    status, body = _invoke_app("GET", "/api/reports/decision-lab/latest", token="dashboard-token")
+    payload = json.loads(body)
+
+    assert status.startswith("200")
+    assert payload["ok"] is True
+    assert payload["summary"]["closed_trades"] == 2
+    assert payload["baselines"]["actual_vs_no_trade"] == -100.0
+    assert any(row["action"] == "do_not_scale" for row in payload["recommendations"])
 
 
 def test_latest_campaign_payload_includes_primary_thesis_metrics(monkeypatch, tmp_path) -> None:
