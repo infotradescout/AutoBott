@@ -26,21 +26,28 @@ class AlpacaPaperClient:
         limit: int = 35,
         feed: str = "iex",
     ) -> dict[str, list[dict[str, Any]]]:
-        payload = self._get_json(
-            self.config.data_base_url,
-            "/v2/stocks/bars",
-            {
-                "symbols": ",".join(symbols),
-                "timeframe": timeframe,
-                "start": _isoformat_z(start),
-                "end": _isoformat_z(end),
-                "limit": str(limit),
-                "sort": "asc",
-                "feed": feed,
-            },
-        )
-        bars = payload.get("bars", {})
-        return {symbol.upper(): list(rows) for symbol, rows in bars.items()}
+        bars: dict[str, list[dict[str, Any]]] = {}
+        base_params = {
+            "symbols": ",".join(symbols),
+            "timeframe": timeframe,
+            "start": _isoformat_z(start),
+            "end": _isoformat_z(end),
+            "limit": str(limit),
+            "sort": "asc",
+            "feed": feed,
+        }
+        page_token: str | None = None
+        for _ in range(20):
+            params = dict(base_params)
+            if page_token:
+                params["page_token"] = page_token
+            payload = self._get_json(self.config.data_base_url, "/v2/stocks/bars", params)
+            for symbol, rows in payload.get("bars", {}).items():
+                bars.setdefault(symbol.upper(), []).extend(list(rows))
+            page_token = payload.get("next_page_token")
+            if not page_token:
+                break
+        return bars
 
     def get_latest_stock_quotes(self, symbols: list[str]) -> dict[str, dict[str, Any]]:
         payload = self._get_json(
