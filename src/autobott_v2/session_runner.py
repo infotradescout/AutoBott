@@ -71,7 +71,17 @@ def run_trading_session(
             break
 
         cycle_symbols = _cycle_symbols(symbols, cycle_index=cycles_completed, batch_size=symbol_batch_size)
-        result = cycle_runner(symbols=cycle_symbols, **kwargs)
+        try:
+            result = cycle_runner(symbols=cycle_symbols, **kwargs)
+        except Exception as exc:
+            # A single bad cycle (e.g. a data-feed hiccup) must not end the
+            # whole session -- keep the loop alive and retry next interval.
+            results.append({"error": f"{type(exc).__name__}: {exc}", "symbols": cycle_symbols})
+            cycles_completed += 1
+            if max_cycles is not None and cycles_completed >= max_cycles:
+                break
+            sleep_fn(interval_seconds)
+            continue
         results.append(result.to_json_dict())
         cycles_completed += 1
 

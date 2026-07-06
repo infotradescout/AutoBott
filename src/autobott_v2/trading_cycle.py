@@ -127,21 +127,30 @@ def run_trading_cycle(
     max_new_entry_attempts_per_loop = resolved_broker.config.effective_max_new_entry_attempts_per_loop()
 
     for symbol in symbols:
-        snapshot_path = capture_symbol_snapshot(
-            symbol=symbol,
-            corpus_root=resolved_corpus_root,
-            scheduled_market_time=snapshot_time,
-            captured_at_utc=captured_at,
-            corpus_type="production_capture" if resolved_broker.config.environment.value == "live" else "paper_capture",
-            market_timezone="America/New_York",
-            volatility_proxy_symbol="UVXY",
-            data_client=resolved_data_client,
-            rules=resolved_rules,
-        )
+        try:
+            snapshot_path = capture_symbol_snapshot(
+                symbol=symbol,
+                corpus_root=resolved_corpus_root,
+                scheduled_market_time=snapshot_time,
+                captured_at_utc=captured_at,
+                corpus_type="production_capture" if resolved_broker.config.environment.value == "live" else "paper_capture",
+                market_timezone="America/New_York",
+                volatility_proxy_symbol="UVXY",
+                data_client=resolved_data_client,
+                rules=resolved_rules,
+            )
+            snapshot = _load_snapshot(Path(snapshot_path))
+            decision_input = _decision_input_from_snapshot(snapshot)
+            decision = build_decision_card(decision_input)
+        except Exception as exc:
+            _append_skip(
+                skipped,
+                symbol=symbol.upper(),
+                reason="snapshot_or_decision_failed",
+                detail=str(exc),
+            )
+            continue
         snapshot_paths.append(snapshot_path)
-        snapshot = _load_snapshot(Path(snapshot_path))
-        decision_input = _decision_input_from_snapshot(snapshot)
-        decision = build_decision_card(decision_input)
         decision_payload = decision.to_json_dict()
         decisions.append(decision_payload)
         append_decision_card(decision_payload, snapshot_path=snapshot_path, log_path=decision_log_path)
