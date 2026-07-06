@@ -506,6 +506,44 @@ def test_dashboard_account_orders_endpoint_returns_history(monkeypatch, tmp_path
     assert payload["orders"][0]["status"] == "filled"
 
 
+def test_dashboard_account_orders_decode_option_type(monkeypatch, tmp_path) -> None:
+    _auth_env(monkeypatch, tmp_path)
+
+    class FakeConfig:
+        def validate(self):
+            return self
+
+    class FakeClient:
+        def __init__(self, config):
+            self.config = config
+
+        def get_orders(self, *, status, limit, direction="desc"):
+            return [
+                {
+                    "symbol": "QQQ260708P00726000",
+                    "side": "buy",
+                    "qty": "1",
+                    "filled_qty": "1",
+                    "filled_avg_price": "5.20",
+                    "status": "filled",
+                    "submitted_at": "2026-07-06T15:35:00Z",
+                    "filled_at": "2026-07-06T15:35:05Z",
+                }
+            ]
+
+    monkeypatch.setattr(dashboard_app, "load_alpaca_paper_config", lambda: FakeConfig())
+    monkeypatch.setattr(dashboard_app, "AlpacaPaperClient", FakeClient)
+
+    status, body = _invoke_app("GET", "/api/account/orders", token="dashboard-token")
+    payload = json.loads(body)
+
+    assert status.startswith("200")
+    assert payload["orders"][0]["underlying"] == "QQQ"
+    assert payload["orders"][0]["option_type"] == "PUT"
+    assert payload["orders"][0]["expiration"] == "2026-07-08"
+    assert payload["orders"][0]["strike"] == 726.0
+
+
 def test_dashboard_account_endpoints_require_auth(monkeypatch, tmp_path) -> None:
     _auth_env(monkeypatch, tmp_path)
     status, _ = _invoke_app("GET", "/api/account/positions")

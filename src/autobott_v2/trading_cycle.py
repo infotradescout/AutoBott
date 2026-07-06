@@ -112,6 +112,7 @@ def run_trading_cycle(
     scanner_candidates_count = 0
     trade_attempted_count = 0
     open_positions = max(position_count or 0, _active_open_position_count())
+    active_underlyings = _active_underlying_symbols()
     max_new_entry_attempts_per_loop = resolved_broker.config.effective_max_new_entry_attempts_per_loop()
 
     for symbol in symbols:
@@ -209,6 +210,20 @@ def run_trading_cycle(
         if not is_candidate:
             _append_skip(skipped, symbol=symbol.upper(), reason=decision_payload["decision"])
             continue
+        if symbol.upper() in active_underlyings:
+            _append_skip(skipped, symbol=symbol.upper(), reason="underlying_exposure_already_open")
+            _record_execution_rejection(
+                execution_outcomes,
+                execution_rejected_count_by_reason,
+                ticker=symbol.upper(),
+                decision_id=decision.decision_id,
+                thesis_id=thesis_id,
+                reason="underlying_exposure_already_open",
+                detail=f"active_underlying={symbol.upper()}",
+                journal_path=execution_log_path,
+                payload={"active_underlyings": sorted(active_underlyings)},
+            )
+            continue
         if max_new_entry_attempts_per_loop is not None and trade_attempted_count >= max_new_entry_attempts_per_loop:
             _append_skip(skipped, symbol=symbol.upper(), reason="max_new_entry_attempts_per_loop_reached")
             _record_execution_rejection(
@@ -255,6 +270,7 @@ def run_trading_cycle(
                 on_submission_attempt=_mark_submission_attempt,
             )
             open_positions += 1
+            active_underlyings.add(symbol.upper())
             orders_submitted.append(
                 {
                     "symbol": symbol.upper(),
@@ -372,6 +388,26 @@ def _active_open_position_count() -> int:
     )
 
 
+def _active_underlying_symbols() -> set[str]:
+    return {
+        position.symbol.upper()
+        for position in load_open_positions()
+        if _position_is_active(position.status)
+    }
+
+
+def _position_is_active(status: str) -> bool:
+    normalized = status.strip().lower()
+    return not (
+        normalized.startswith("canceled")
+        or normalized.startswith("cancelled")
+        or normalized.startswith("rejected")
+        or normalized.startswith("failed")
+        or normalized.startswith("expired")
+        or normalized.startswith("closed")
+    )
+
+
 def _decision_thesis_id(decision: DecisionCard) -> str:
     return f"{decision.ticker}:{decision.trade_setup.value}:{decision.execution_layer.value}"
 
@@ -464,7 +500,7 @@ def _paper_discovery_contract(
         and contract.bid > 0
         and contract.ask > 0
         and contract.ask >= contract.bid
-        and contract.mid <= 25.0
+        and contract.mid <= _paper_discovery_max_contract_price()
     ]
     if not candidates:
         return None
@@ -495,11 +531,19 @@ def _paper_discovery_contract(
     )
 
 
+def _paper_discovery_max_contract_price() -> float:
+    value = os.getenv("AUTOBOTT_PAPER_DISCOVERY_MAX_CONTRACT_PRICE")
+    if value is None or not value.strip():
+        return 10.0
+    return max(0.01, float(value))
+
+
 def _best_paper_discovery_contract(contracts: list[OptionContractSnapshot], as_of: Any) -> OptionContractSnapshot:
     return sorted(
         contracts,
         key=lambda contract: (
             abs((contract.expiration - as_of).days - 2),
+            contract.mid,
             contract.spread_pct,
             abs(abs(contract.delta) - 0.50),
             -contract.volume,

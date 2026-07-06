@@ -379,6 +379,7 @@ def _account_positions_payload() -> JsonDict:
         "positions": [
             {
                 "symbol": position.get("symbol"),
+                **_option_symbol_parts(str(position.get("symbol") or "")),
                 "side": position.get("side"),
                 "qty": position.get("qty"),
                 "avg_entry_price": position.get("avg_entry_price"),
@@ -408,6 +409,7 @@ def _account_orders_payload() -> JsonDict:
         "orders": [
             {
                 "symbol": order.get("symbol"),
+                **_option_symbol_parts(str(order.get("symbol") or "")),
                 "side": order.get("side"),
                 "qty": order.get("qty"),
                 "filled_qty": order.get("filled_qty"),
@@ -418,6 +420,34 @@ def _account_orders_payload() -> JsonDict:
             }
             for order in orders
         ],
+    }
+
+
+def _option_symbol_parts(symbol: str) -> JsonDict:
+    stripped = symbol.strip().upper()
+    if len(stripped) < 15:
+        return {"underlying": stripped or None, "option_type": None, "expiration": None, "strike": None}
+    option_type_index = -1
+    for index, char in enumerate(stripped):
+        if char in {"C", "P"} and index >= 1 and index + 9 <= len(stripped):
+            prefix = stripped[index - 6 : index]
+            suffix = stripped[index + 1 :]
+            if len(prefix) == 6 and prefix.isdigit() and suffix.isdigit():
+                option_type_index = index
+                break
+    if option_type_index < 0:
+        return {"underlying": stripped or None, "option_type": None, "expiration": None, "strike": None}
+    root = stripped[: option_type_index - 6]
+    expiry = stripped[option_type_index - 6 : option_type_index]
+    strike_text = stripped[option_type_index + 1 :]
+    option_type = "CALL" if stripped[option_type_index] == "C" else "PUT"
+    expiration = f"20{expiry[:2]}-{expiry[2:4]}-{expiry[4:6]}"
+    strike = round(int(strike_text) / 1000, 3) if strike_text.isdigit() else None
+    return {
+        "underlying": root,
+        "option_type": option_type,
+        "expiration": expiration,
+        "strike": strike,
     }
 
 
@@ -1337,6 +1367,8 @@ def _dashboard_html() -> str:
         const tone = pl > 0 ? 'safe' : pl < 0 ? 'danger' : 'info';
         return `<tr>
           <td>${escapeHtml(position.symbol || 'n/a')}</td>
+          <td>${escapeHtml(position.option_type || 'n/a')}</td>
+          <td>${escapeHtml(position.strike ?? 'n/a')}</td>
           <td>${escapeHtml(position.side || 'n/a')}</td>
           <td>${escapeHtml(position.qty ?? 'n/a')}</td>
           <td>${formatMoney(position.avg_entry_price)}</td>
@@ -1346,8 +1378,8 @@ def _dashboard_html() -> str:
       }).join('');
       return `
         <table class="table">
-          <thead><tr><th>Symbol</th><th>Side</th><th>Qty</th><th>Entry</th><th>Current</th><th>Unrealized P/L</th></tr></thead>
-          <tbody>${rows || '<tr><td colspan="6">No open positions</td></tr>'}</tbody>
+          <thead><tr><th>Symbol</th><th>Type</th><th>Strike</th><th>Side</th><th>Qty</th><th>Entry</th><th>Current</th><th>Unrealized P/L</th></tr></thead>
+          <tbody>${rows || '<tr><td colspan="8">No open positions</td></tr>'}</tbody>
         </table>
         ${detailsBlock(payload)}`;
     }
@@ -1360,6 +1392,8 @@ def _dashboard_html() -> str:
       const rows = orders.map((order) => `
         <tr>
           <td>${escapeHtml(order.symbol || 'n/a')}</td>
+          <td>${escapeHtml(order.option_type || 'n/a')}</td>
+          <td>${escapeHtml(order.strike ?? 'n/a')}</td>
           <td>${escapeHtml(order.side || 'n/a')}</td>
           <td>${escapeHtml(order.filled_qty || order.qty || 'n/a')}</td>
           <td>${formatMoney(order.filled_avg_price)}</td>
@@ -1368,8 +1402,8 @@ def _dashboard_html() -> str:
         </tr>`).join('');
       return `
         <table class="table">
-          <thead><tr><th>Symbol</th><th>Side</th><th>Qty</th><th>Fill price</th><th>Status</th><th>When</th></tr></thead>
-          <tbody>${rows || '<tr><td colspan="6">No trades yet</td></tr>'}</tbody>
+          <thead><tr><th>Symbol</th><th>Type</th><th>Strike</th><th>Side</th><th>Qty</th><th>Fill price</th><th>Status</th><th>When</th></tr></thead>
+          <tbody>${rows || '<tr><td colspan="8">No trades yet</td></tr>'}</tbody>
         </table>
         ${detailsBlock(payload)}`;
     }

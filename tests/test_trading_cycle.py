@@ -160,8 +160,8 @@ def test_run_trading_cycle_uses_persisted_open_positions_for_risk_count(tmp_path
             OpenPosition(
                 broker_order_id="alpaca-order-1",
                 decision_id="decision-1",
-                symbol="AAPL",
-                option_symbol="AAPL260703C00105000",
+                symbol="MSFT",
+                option_symbol="MSFT260703C00105000",
                 quantity=1,
                 entry_limit_price=2.5,
                 entry_submitted_at=datetime(2026, 7, 1, 15, 31, tzinfo=UTC),
@@ -198,6 +198,55 @@ def test_run_trading_cycle_uses_persisted_open_positions_for_risk_count(tmp_path
     assert len(result.orders_submitted) == 1
     assert broker.submitted
     assert broker.open_positions_seen == [1]
+
+
+def test_run_trading_cycle_skips_symbol_with_existing_active_underlying(tmp_path) -> None:
+    save_runtime_state(default_runtime_state(), state_path=tmp_path / "runtime_state.json")
+    save_open_positions(
+        [
+            OpenPosition(
+                broker_order_id="alpaca-order-1",
+                decision_id="decision-1",
+                symbol="AAPL",
+                option_symbol="AAPL260703C00105000",
+                quantity=1,
+                entry_limit_price=2.5,
+                entry_submitted_at=datetime(2026, 7, 1, 15, 31, tzinfo=UTC),
+                take_profit_price=3.75,
+                stop_loss_price=1.75,
+                status="filled",
+            )
+        ],
+        store_path=tmp_path / "open_positions.json",
+    )
+    original_runtime = trading_cycle.load_runtime_state
+    original_positions = trading_cycle.load_open_positions
+    original_reconcile = trading_cycle.reconcile_open_positions
+    trading_cycle.load_runtime_state = lambda: original_runtime(state_path=tmp_path / "runtime_state.json")
+    trading_cycle.load_open_positions = lambda: original_positions(store_path=tmp_path / "open_positions.json")
+    trading_cycle.reconcile_open_positions = lambda *args, **kwargs: None
+    broker = FakeBroker()
+    try:
+        result = trading_cycle.run_trading_cycle(
+            symbols=["AAPL", "MSFT"],
+            broker=broker,
+            data_client=FakeDataClient(),
+            scheduled_market_time=datetime(2026, 7, 1, 15, 35, tzinfo=UTC),
+            captured_at_utc=datetime(2026, 7, 1, 15, 35, tzinfo=UTC),
+            corpus_root=tmp_path / "corpus",
+            decision_log_path=tmp_path / "decision_cards.jsonl",
+            execution_log_path=str(tmp_path / "execution_orders.jsonl"),
+        )
+    finally:
+        trading_cycle.load_runtime_state = original_runtime
+        trading_cycle.load_open_positions = original_positions
+        trading_cycle.reconcile_open_positions = original_reconcile
+
+    assert len(result.orders_submitted) == 1
+    assert result.orders_submitted[0]["symbol"] == "MSFT"
+    assert result.skipped[0]["symbol"] == "AAPL"
+    assert result.skipped[0]["reason"] == "underlying_exposure_already_open"
+    assert result.execution_rejected_count_by_reason == {"underlying_exposure_already_open": 1}
 
 
 def test_run_trading_cycle_records_exact_execution_rejection_reason(tmp_path) -> None:
