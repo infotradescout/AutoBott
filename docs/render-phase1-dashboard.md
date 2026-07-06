@@ -71,6 +71,14 @@ start_paper_dashboard.cmd
 
 That launcher auto-loads `C:\Users\flavo\Downloads\AutoBott.env`, applies the local paper/session defaults, binds the dashboard to `127.0.0.1:8000`, and uses token `autobott-local` unless overridden.
 
+For automatic weekday local operation, run this once on the workstation:
+
+```text
+install_trading_hours_tasks.ps1
+```
+
+That installs Windows scheduled tasks to start the local dashboard at `08:35 America/Chicago` and stop it at `14:56 America/Chicago` each trading weekday.
+
 ## Cutover Command
 
 For tomorrow's live-data paper-trading cutover, use one readiness command after loading env vars:

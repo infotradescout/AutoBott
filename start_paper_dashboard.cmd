@@ -8,6 +8,9 @@ if not exist "%ROOT%\.venv\Scripts\python.exe" (
   exit /b 1
 )
 
+for /f %%I in ('powershell -NoProfile -Command "(Get-CimInstance Win32_Process | Where-Object { $_.Name -in @(''python.exe'',''pythonw.exe'') -and $_.CommandLine -and $_.CommandLine.Contains(''autobott_v2.launch_dashboard'') } | Measure-Object).Count"') do set "RUNNING_COUNT=%%I"
+if not "%RUNNING_COUNT%"=="0" exit /b 0
+
 set "PYTHONPATH=%ROOT%src;%PYTHONPATH%"
 set "AUTOBOTT_ENV_FILE=C:\Users\flavo\Downloads\AutoBott.env"
 
