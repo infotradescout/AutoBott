@@ -6,6 +6,7 @@ from dataclasses import asdict, dataclass
 from datetime import UTC, datetime, time as daytime
 from typing import Any
 
+from .options_universe import resolve_symbol_universe
 from .runtime_control import arm_paper_execution
 from .session_runner import run_trading_session
 
@@ -22,6 +23,7 @@ class SessionSupervisorConfig:
     symbols: list[str]
     interval_seconds: int
     max_cycles: int | None
+    symbol_batch_size: int | None
     quantity: int
     position_count: int
     daily_pnl: float
@@ -53,13 +55,15 @@ _SESSION_AUTOSTART_CONSUMED = False
 
 
 def load_session_supervisor_config() -> SessionSupervisorConfig:
-    symbols = [item.strip().upper() for item in (os.getenv("AUTOBOTT_SESSION_SYMBOLS") or "SPY").split(",") if item.strip()]
+    symbols = resolve_symbol_universe([item.strip() for item in (os.getenv("AUTOBOTT_SESSION_SYMBOLS") or "SPY").split(",") if item.strip()])
     raw_max_cycles = os.getenv("AUTOBOTT_SESSION_MAX_CYCLES")
+    raw_batch_size = os.getenv("AUTOBOTT_SESSION_SYMBOL_BATCH_SIZE")
     return SessionSupervisorConfig(
         enabled=_normalize_bool(os.getenv("AUTOBOTT_SESSION_AUTOSTART"), default=True),
         symbols=symbols,
         interval_seconds=int(os.getenv("AUTOBOTT_SESSION_INTERVAL_SECONDS", "300")),
         max_cycles=int(raw_max_cycles) if raw_max_cycles else None,
+        symbol_batch_size=int(raw_batch_size) if raw_batch_size else None,
         quantity=int(os.getenv("AUTOBOTT_SESSION_QUANTITY", "1")),
         position_count=int(os.getenv("AUTOBOTT_SESSION_POSITION_COUNT", "0")),
         daily_pnl=float(os.getenv("AUTOBOTT_SESSION_DAILY_PNL", "0.0")),
@@ -122,6 +126,7 @@ def _run_session(config: SessionSupervisorConfig) -> None:
             end_time=_parse_optional_time(config.end_time),
             market_timezone=config.market_timezone,
             max_cycles=config.max_cycles,
+            symbol_batch_size=config.symbol_batch_size,
             continuous_window=True,
             cycle_kwargs={
                 "quantity": config.quantity,

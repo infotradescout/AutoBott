@@ -37,9 +37,11 @@ services:
       - key: AUTOBOTT_SESSION_AUTOSTART
         value: "true"
       - key: AUTOBOTT_SESSION_SYMBOLS
-        value: SPY
+        value: TOP_OPTIONS_100
       - key: AUTOBOTT_SESSION_INTERVAL_SECONDS
-        value: "300"
+        value: "90"
+      - key: AUTOBOTT_SESSION_SYMBOL_BATCH_SIZE
+        value: "10"
       - key: AUTOBOTT_SESSION_MAX_CYCLES
         sync: false
       - key: AUTOBOTT_SESSION_QUANTITY

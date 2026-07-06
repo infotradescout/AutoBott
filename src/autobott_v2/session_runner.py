@@ -38,6 +38,7 @@ def run_trading_session(
     end_time: daytime | None = None,
     market_timezone: str = "UTC",
     max_cycles: int | None = None,
+    symbol_batch_size: int | None = None,
     continuous_window: bool = False,
     now_fn: Callable[[], datetime] | None = None,
     sleep_fn: Callable[[float], None] = time.sleep,
@@ -69,7 +70,8 @@ def run_trading_session(
                 continue
             break
 
-        result = cycle_runner(symbols=symbols, **kwargs)
+        cycle_symbols = _cycle_symbols(symbols, cycle_index=cycles_completed, batch_size=symbol_batch_size)
+        result = cycle_runner(symbols=cycle_symbols, **kwargs)
         results.append(result.to_json_dict())
         cycles_completed += 1
 
@@ -85,6 +87,17 @@ def run_trading_session(
         symbols=[symbol.upper() for symbol in symbols],
         cycle_results=results,
     )
+
+
+def _cycle_symbols(symbols: list[str], *, cycle_index: int, batch_size: int | None) -> list[str]:
+    normalized = [symbol.upper() for symbol in symbols]
+    if batch_size is None or batch_size <= 0 or batch_size >= len(normalized):
+        return normalized
+    start = (cycle_index * batch_size) % len(normalized)
+    end = start + batch_size
+    if end <= len(normalized):
+        return normalized[start:end]
+    return normalized[start:] + normalized[: end - len(normalized)]
 
 
 def main(argv: list[str] | None = None) -> int:

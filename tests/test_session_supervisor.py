@@ -19,6 +19,7 @@ def test_load_session_supervisor_config_from_env(monkeypatch) -> None:
     monkeypatch.setenv("AUTOBOTT_SESSION_SYMBOLS", "AAPL,MSFT")
     monkeypatch.setenv("AUTOBOTT_SESSION_INTERVAL_SECONDS", "120")
     monkeypatch.setenv("AUTOBOTT_SESSION_MAX_CYCLES", "4")
+    monkeypatch.setenv("AUTOBOTT_SESSION_SYMBOL_BATCH_SIZE", "12")
     monkeypatch.setenv("AUTOBOTT_SESSION_START_TIME", "09:35")
     monkeypatch.setenv("AUTOBOTT_SESSION_END_TIME", "15:55")
     monkeypatch.setenv("AUTOBOTT_SESSION_MARKET_TIMEZONE", "America/New_York")
@@ -28,10 +29,21 @@ def test_load_session_supervisor_config_from_env(monkeypatch) -> None:
     assert config.symbols == ["AAPL", "MSFT"]
     assert config.interval_seconds == 120
     assert config.max_cycles == 4
+    assert config.symbol_batch_size == 12
     assert config.start_time == "09:35:00"
     assert config.end_time == "15:55:00"
     assert config.market_timezone == "America/New_York"
     assert config.arm_paper_execution_on_start is True
+
+
+def test_load_session_supervisor_config_expands_top_options_universe(monkeypatch) -> None:
+    _reset_supervisor_state()
+    monkeypatch.setenv("AUTOBOTT_SESSION_SYMBOLS", "TOP_OPTIONS_100")
+
+    config = supervisor.load_session_supervisor_config()
+
+    assert len(config.symbols) == 100
+    assert config.symbols[:5] == ["SPY", "QQQ", "IWM", "DIA", "TLT"]
 
 
 def test_maybe_start_session_supervisor_starts_once(monkeypatch) -> None:
@@ -112,6 +124,7 @@ def test_start_session_supervisor_can_start_manual_session(monkeypatch) -> None:
             symbols=["SPY"],
             interval_seconds=300,
             max_cycles=1,
+            symbol_batch_size=10,
             quantity=1,
             position_count=0,
             daily_pnl=0.0,
@@ -130,3 +143,4 @@ def test_start_session_supervisor_can_start_manual_session(monkeypatch) -> None:
     assert started is True
     assert calls
     assert calls[0]["continuous_window"] is True
+    assert calls[0]["symbol_batch_size"] == 10

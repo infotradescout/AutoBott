@@ -225,6 +225,7 @@ def _session_start_payload(payload: JsonDict) -> JsonDict:
         symbols=symbols,
         interval_seconds=int(payload.get("interval_seconds", 300)),
         max_cycles=int(payload["max_cycles"]) if payload.get("max_cycles") is not None else None,
+        symbol_batch_size=int(payload["symbol_batch_size"]) if payload.get("symbol_batch_size") is not None else None,
         quantity=int(payload.get("quantity", 1)),
         position_count=int(payload.get("position_count", 0)),
         daily_pnl=float(payload.get("daily_pnl", 0.0)),

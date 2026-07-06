@@ -48,6 +48,36 @@ def test_run_trading_session_runs_multiple_cycles() -> None:
     assert calls == [["AAPL", "MSFT"], ["AAPL", "MSFT"], ["AAPL", "MSFT"]]
 
 
+def test_run_trading_session_rotates_symbol_batches() -> None:
+    clock = FakeClock()
+    calls = []
+
+    def fake_cycle_runner(*, symbols, **kwargs):
+        calls.append(list(symbols))
+        return TradingCycleResult(
+            started_at=clock.now(),
+            finished_at=clock.now(),
+            symbols=list(symbols),
+            snapshot_paths=[],
+            decisions=[],
+            orders_submitted=[],
+            skipped=[],
+            runtime_state={},
+        )
+
+    run_trading_session(
+        symbols=["AAPL", "MSFT", "NVDA", "TSLA", "AMD"],
+        interval_seconds=60,
+        max_cycles=4,
+        symbol_batch_size=2,
+        now_fn=clock.now,
+        sleep_fn=clock.sleep,
+        cycle_runner=fake_cycle_runner,
+    )
+
+    assert calls == [["AAPL", "MSFT"], ["NVDA", "TSLA"], ["AMD", "AAPL"], ["MSFT", "NVDA"]]
+
+
 def test_run_trading_session_respects_end_time() -> None:
     clock = FakeClock()
 
