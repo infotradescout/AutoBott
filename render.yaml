@@ -11,51 +11,51 @@ services:
         sizeGB: 1
     envVars:
       - key: ALPACA_ENV
-        sync: false
+        value: paper
       - key: ALPACA_API_KEY_ID
         sync: false
       - key: ALPACA_API_SECRET_KEY
         sync: false
       - key: ALPACA_TRADING_BASE_URL
-        sync: false
+        value: https://paper-api.alpaca.markets
       - key: ALPACA_DATA_BASE_URL
-        sync: false
+        value: https://data.alpaca.markets
       - key: AUTOBOTT_LIVE_TRADING_ENABLED
-        sync: false
+        value: "false"
       - key: AUTOBOTT_ALLOW_ORDER_PLACEMENT
-        sync: false
+        value: "true"
       - key: AUTOBOTT_PAPER_TRADE_ALL_PASSED_SIGNALS
-        sync: false
+        value: "true"
       - key: AUTOBOTT_PAPER_MAX_NEW_ENTRY_ATTEMPTS_PER_LOOP
-        sync: false
+        value: "25"
       - key: AUTOBOTT_PAPER_MAX_OPEN_ENTRY_BUY_ORDERS
-        sync: false
+        value: "25"
       - key: AUTOBOTT_PAPER_ONLY
-        sync: false
+        value: "true"
       - key: AUTOBOTT_DASHBOARD_AUTH_TOKEN
         sync: false
       - key: AUTOBOTT_SESSION_AUTOSTART
-        sync: false
+        value: "true"
       - key: AUTOBOTT_SESSION_SYMBOLS
-        sync: false
+        value: SPY
       - key: AUTOBOTT_SESSION_INTERVAL_SECONDS
-        sync: false
+        value: "300"
       - key: AUTOBOTT_SESSION_MAX_CYCLES
         sync: false
       - key: AUTOBOTT_SESSION_QUANTITY
-        sync: false
+        value: "1"
       - key: AUTOBOTT_SESSION_POSITION_COUNT
-        sync: false
+        value: "0"
       - key: AUTOBOTT_SESSION_DAILY_PNL
-        sync: false
+        value: "0.0"
       - key: AUTOBOTT_SESSION_START_TIME
-        sync: false
+        value: "09:35"
       - key: AUTOBOTT_SESSION_END_TIME
-        sync: false
+        value: "15:55"
       - key: AUTOBOTT_SESSION_MARKET_TIMEZONE
-        sync: false
+        value: America/New_York
       - key: AUTOBOTT_SESSION_ARM_PAPER_EXECUTION
-        sync: false
+        value: "true"
       - key: AUTOBOTT_DATA_ROOT
         value: /var/data/autobott/data
       - key: AUTOBOTT_ARTIFACTS_ROOT

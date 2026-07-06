@@ -17,34 +17,26 @@ Use one Render Web Service for v1:
 - health check path: `/api/health`
 - persistent disk mount: `/var/data/autobott`
 
-Deploy remains blocked until the persistent disk and hosted env vars below are configured. Render web services are ephemeral by default, so `data/` and `artifacts/` are not durable without this disk-backed layout.
+Deploy remains blocked until the persistent disk and hosted secrets below are configured. Render web services are ephemeral by default, so `data/` and `artifacts/` are not durable without this disk-backed layout.
 
-## Required Environment Variables
+## Required Hosted Secrets
 
-- `ALPACA_ENV=paper`
 - `ALPACA_API_KEY_ID=<paper key>`
 - `ALPACA_API_SECRET_KEY=<paper secret>`
-- `ALPACA_TRADING_BASE_URL=https://paper-api.alpaca.markets`
-- `ALPACA_DATA_BASE_URL=https://data.alpaca.markets`
-- `AUTOBOTT_LIVE_TRADING_ENABLED=false`
-- `AUTOBOTT_ALLOW_ORDER_PLACEMENT=true`
-- `AUTOBOTT_PAPER_TRADE_ALL_PASSED_SIGNALS=true`
-- `AUTOBOTT_PAPER_MAX_NEW_ENTRY_ATTEMPTS_PER_LOOP=25`
-- `AUTOBOTT_PAPER_MAX_OPEN_ENTRY_BUY_ORDERS=25`
-- `AUTOBOTT_PAPER_ONLY=true`
 - `AUTOBOTT_DASHBOARD_AUTH_TOKEN=<long random token>`
-- `AUTOBOTT_SESSION_AUTOSTART=true`
-- `AUTOBOTT_SESSION_SYMBOLS=SPY`
-- `AUTOBOTT_SESSION_INTERVAL_SECONDS=300`
-- `AUTOBOTT_SESSION_START_TIME=09:35`
-- `AUTOBOTT_SESSION_END_TIME=15:55`
-- `AUTOBOTT_SESSION_MARKET_TIMEZONE=America/New_York`
-- `AUTOBOTT_SESSION_ARM_PAPER_EXECUTION=true`
-- `AUTOBOTT_DATA_ROOT=/var/data/autobott/data`
-- `AUTOBOTT_ARTIFACTS_ROOT=/var/data/autobott/artifacts`
-- `AUTOBOTT_GATE_PATH=/var/data/autobott/data/PHASE1_CYCLE_GATE.json`
 
 Do not expose Alpaca credentials in frontend code.
+
+The Render blueprint now bakes in the non-secret paper defaults:
+
+- paper Alpaca endpoints
+- live trading disabled
+- order placement enabled for paper
+- session autostart enabled
+- `SPY` session loop every `300` seconds
+- session window `09:35` to `15:55` in `America/New_York`
+- paper execution armed on startup
+- disk-backed data, artifacts, and gate paths under `/var/data/autobott`
 
 ## Local Defaults
 
@@ -70,14 +62,6 @@ start_paper_dashboard.cmd
 ```
 
 That launcher auto-loads `C:\Users\flavo\Downloads\AutoBott.env`, applies the local paper/session defaults, binds the dashboard to `127.0.0.1:8000`, and uses token `autobott-local` unless overridden.
-
-For automatic weekday local operation, run this once on the workstation:
-
-```text
-install_trading_hours_tasks.ps1
-```
-
-That installs Windows scheduled tasks to start the local dashboard at `08:35 America/Chicago` and stop it at `14:56 America/Chicago` each trading weekday.
 
 ## Cutover Command
 
@@ -112,7 +96,7 @@ Before treating hosted operation as usable, verify persistence and paper executi
 2. Restart or redeploy the Render service.
 3. Confirm the captured manifest or replay report still exists after restart.
 4. Confirm `/api/paper/readiness` reports `paper_trading_ready`.
-5. Confirm `/api/safety` reports paper-only mode and `PAPER EXECUTION ARMED` only after runtime arm.
+5. Confirm `/api/safety` reports paper-only mode and `PAPER EXECUTION ARMED` after service startup.
 6. Confirm live trading remains disabled.
 7. Confirm execution outcomes and order submissions are being journaled under the mounted data root.
 

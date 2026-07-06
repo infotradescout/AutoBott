@@ -57,6 +57,7 @@ def test_maybe_start_session_supervisor_starts_once(monkeypatch) -> None:
         time.sleep(0.01)
     assert started is True
     assert calls
+    assert calls[0]["continuous_window"] is True
     second = supervisor.maybe_start_session_supervisor()
     assert second is False
 
@@ -90,6 +91,7 @@ def test_maybe_start_session_supervisor_can_arm_paper_execution(monkeypatch) -> 
     assert started is True
     assert calls
     assert armed == ["session_supervisor_autostart"]
+    assert calls[0]["continuous_window"] is True
 
 
 def test_start_session_supervisor_can_start_manual_session(monkeypatch) -> None:
@@ -127,3 +129,4 @@ def test_start_session_supervisor_can_start_manual_session(monkeypatch) -> None:
         time.sleep(0.01)
     assert started is True
     assert calls
+    assert calls[0]["continuous_window"] is True

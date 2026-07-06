@@ -38,6 +38,7 @@ def run_trading_session(
     end_time: daytime | None = None,
     market_timezone: str = "UTC",
     max_cycles: int | None = None,
+    continuous_window: bool = False,
     now_fn: Callable[[], datetime] | None = None,
     sleep_fn: Callable[[float], None] = time.sleep,
     cycle_runner: Callable[..., TradingCycleResult] = run_trading_cycle,
@@ -52,15 +53,20 @@ def run_trading_session(
         current = _now(now_fn)
         current_local = _session_local_datetime(current, market_timezone)
         current_time = current_local.time().replace(tzinfo=None)
+        if max_cycles is not None and cycles_completed >= max_cycles:
+            break
+        if not _is_regular_trading_day(current_local.date()):
+            if _should_wait_for_next_window(continuous_window=continuous_window, max_cycles=max_cycles):
+                sleep_fn(interval_seconds)
+                continue
+            break
         if start_time and current_time < start_time:
             sleep_fn(interval_seconds)
             continue
         if end_time and current_time > end_time:
-            break
-        if not _is_regular_trading_day(current_local.date()):
-            sleep_fn(interval_seconds)
-            continue
-        if max_cycles is not None and cycles_completed >= max_cycles:
+            if _should_wait_for_next_window(continuous_window=continuous_window, max_cycles=max_cycles):
+                sleep_fn(interval_seconds)
+                continue
             break
 
         result = cycle_runner(symbols=symbols, **kwargs)
@@ -106,6 +112,10 @@ def _session_local_datetime(current: datetime, market_timezone: str) -> datetime
         return current.astimezone(UTC)
     tz = _market_timezone_info(market_timezone, current.astimezone(UTC).date())
     return current.astimezone(tz)
+
+
+def _should_wait_for_next_window(*, continuous_window: bool, max_cycles: int | None) -> bool:
+    return continuous_window
 
 
 if __name__ == "__main__":

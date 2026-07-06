@@ -48,14 +48,6 @@ Double-click start_paper_dashboard.cmd
 
 That launcher auto-loads `C:\Users\flavo\Downloads\AutoBott.env`, applies the local paper defaults, starts the dashboard on `http://127.0.0.1:8000`, and uses dashboard token `autobott-local` unless you override it in the env file.
 
-For automatic weekday operation during market hours on this Windows machine:
-
-```text
-Run install_trading_hours_tasks.ps1 once
-```
-
-That registers local scheduled tasks to start at `08:35` and stop at `14:56` in `America/Chicago`, which corresponds to the paper session window around `09:35` to `15:55` Eastern.
-
 Run the test suite:
 
 ```powershell

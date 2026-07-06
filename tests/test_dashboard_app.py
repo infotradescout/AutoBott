@@ -551,6 +551,10 @@ def test_render_config_has_health_check() -> None:
     render_config = Path("render.yaml").read_text(encoding="utf-8")
     assert "healthCheckPath: /api/health" in render_config
     assert "mountPath: /var/data/autobott" in render_config
+    assert "value: paper" in render_config
+    assert "value: https://paper-api.alpaca.markets" in render_config
+    assert 'value: "true"' in render_config
+    assert 'value: "false"' in render_config
     assert "key: AUTOBOTT_DATA_ROOT" in render_config
     assert "key: AUTOBOTT_ARTIFACTS_ROOT" in render_config
     assert "key: AUTOBOTT_GATE_PATH" in render_config

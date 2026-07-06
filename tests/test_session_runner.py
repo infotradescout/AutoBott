@@ -143,3 +143,73 @@ def test_run_trading_session_skips_non_trading_days() -> None:
 
     assert result.cycles_completed == 0
     assert calls == []
+
+
+def test_run_trading_session_continuous_window_waits_until_next_trading_day() -> None:
+    clock = FakeClock()
+    clock.current = datetime(2026, 7, 5, 18, 0, tzinfo=UTC)
+    calls = []
+
+    def fake_cycle_runner(*, symbols, **kwargs):
+        calls.append(clock.now())
+        return TradingCycleResult(
+            started_at=clock.now(),
+            finished_at=clock.now(),
+            symbols=list(symbols),
+            snapshot_paths=[],
+            decisions=[],
+            orders_submitted=[],
+            skipped=[],
+            runtime_state={},
+        )
+
+    result = run_trading_session(
+        symbols=["SPY"],
+        interval_seconds=1800,
+        start_time=datetime(2026, 7, 6, 9, 30).time(),
+        end_time=datetime(2026, 7, 6, 15, 31).time(),
+        market_timezone="America/New_York",
+        max_cycles=1,
+        continuous_window=True,
+        now_fn=clock.now,
+        sleep_fn=clock.sleep,
+        cycle_runner=fake_cycle_runner,
+    )
+
+    assert result.cycles_completed == 1
+    assert [call.isoformat() for call in calls] == ["2026-07-06T13:30:00+00:00"]
+
+
+def test_run_trading_session_continuous_window_waits_after_end_time() -> None:
+    clock = FakeClock()
+    clock.current = datetime(2026, 7, 1, 21, 0, tzinfo=UTC)
+    calls = []
+
+    def fake_cycle_runner(*, symbols, **kwargs):
+        calls.append(clock.now())
+        return TradingCycleResult(
+            started_at=clock.now(),
+            finished_at=clock.now(),
+            symbols=list(symbols),
+            snapshot_paths=[],
+            decisions=[],
+            orders_submitted=[],
+            skipped=[],
+            runtime_state={},
+        )
+
+    result = run_trading_session(
+        symbols=["SPY"],
+        interval_seconds=1800,
+        start_time=datetime(2026, 7, 2, 9, 30).time(),
+        end_time=datetime(2026, 7, 2, 15, 31).time(),
+        market_timezone="America/New_York",
+        max_cycles=1,
+        continuous_window=True,
+        now_fn=clock.now,
+        sleep_fn=clock.sleep,
+        cycle_runner=fake_cycle_runner,
+    )
+
+    assert result.cycles_completed == 1
+    assert [call.isoformat() for call in calls] == ["2026-07-02T13:30:00+00:00"]

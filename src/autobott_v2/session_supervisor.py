@@ -122,6 +122,7 @@ def _run_session(config: SessionSupervisorConfig) -> None:
             end_time=_parse_optional_time(config.end_time),
             market_timezone=config.market_timezone,
             max_cycles=config.max_cycles,
+            continuous_window=True,
             cycle_kwargs={
                 "quantity": config.quantity,
                 "position_count": config.position_count,
