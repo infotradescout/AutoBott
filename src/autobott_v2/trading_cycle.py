@@ -407,6 +407,7 @@ def _active_underlying_symbols(broker: Any | None = None) -> set[str]:
                 for position in broker.list_open_positions()
                 if _broker_position_is_active(position)
             }
+            symbols.update(_pending_entry_underlying_symbols(broker))
             return {symbol for symbol in symbols if symbol}
         except Exception:
             pass
@@ -421,6 +422,25 @@ def _broker_position_is_active(position: dict[str, Any]) -> bool:
     side = str(position.get("side") or "long").lower()
     qty = float(position.get("qty") or 0)
     return side == "long" and qty > 0
+
+
+def _pending_entry_underlying_symbols(broker: Any) -> set[str]:
+    if not hasattr(broker, "list_orders"):
+        return set()
+    orders = broker.list_orders(status="open", limit=100, direction="desc")
+    return {
+        _underlying_from_option_symbol(str(order.get("symbol") or "")) or str(order.get("symbol") or "").upper()
+        for order in orders
+        if _broker_order_is_pending_entry(order)
+    }
+
+
+def _broker_order_is_pending_entry(order: dict[str, Any]) -> bool:
+    side = str(order.get("side") or "").lower()
+    status = str(order.get("status") or "").lower()
+    filled_qty = float(order.get("filled_qty") or 0)
+    qty = float(order.get("qty") or 0)
+    return side == "buy" and status in {"new", "accepted", "partially_filled", "pending_new"} and filled_qty < qty
 
 
 def _position_is_active(status: str) -> bool:

@@ -126,3 +126,21 @@ def test_cancel_and_replace_order_use_order_endpoints(monkeypatch) -> None:
     assert calls[0]["method"] == "DELETE"
     assert calls[1]["method"] == "PATCH"
     assert calls[1]["body"] == {"limit_price": "2.75"}
+
+
+def test_list_orders_uses_open_orders_endpoint(monkeypatch) -> None:
+    broker = AlpacaExecutionBroker(_config())
+    captured = {}
+
+    def _fake_urlopen(request, timeout=30):
+        captured["url"] = request.full_url
+        captured["method"] = request.get_method()
+        return _FakeResponse([{"id": "alpaca-order-1", "symbol": "AAPL260117C00190000"}])
+
+    monkeypatch.setattr("urllib.request.urlopen", _fake_urlopen)
+
+    orders = broker.list_orders(status="open", limit=25, direction="asc")
+
+    assert orders == [{"id": "alpaca-order-1", "symbol": "AAPL260117C00190000"}]
+    assert captured["method"] == "GET"
+    assert captured["url"] == "https://paper-api.alpaca.markets/v2/orders?status=open&limit=25&direction=asc&nested=false"
