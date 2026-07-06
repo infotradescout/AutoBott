@@ -55,6 +55,15 @@ class FakeDataClient:
         }
 
 
+class WideSpreadDataClient(FakeDataClient):
+    def get_option_chain_snapshots(self, symbol):
+        payload = super().get_option_chain_snapshots(symbol)
+        for row in payload.values():
+            row["latestQuote"]["bp"] = 2.0
+            row["latestQuote"]["ap"] = 3.0
+        return payload
+
+
 class FakeBroker:
     def __init__(self, **config_overrides) -> None:
         base = AlpacaExecutionConfig(
@@ -251,3 +260,62 @@ def test_run_trading_cycle_paper_trade_through_allows_multiple_attempts(tmp_path
     assert result.trade_attempted_count == 4
     assert len(result.orders_submitted) == 4
     assert broker.open_positions_seen == [0, 1, 2, 3]
+
+
+def test_run_trading_cycle_paper_opportunistic_mode_overrides_soft_spread_block(tmp_path, monkeypatch) -> None:
+    monkeypatch.delenv("AUTOBOTT_PAPER_OPPORTUNISTIC_ENTRIES", raising=False)
+    save_runtime_state(default_runtime_state(), state_path=tmp_path / "runtime_state.json")
+    original = trading_cycle.load_runtime_state
+    original_positions = trading_cycle.load_open_positions
+    trading_cycle.load_runtime_state = lambda: original(state_path=tmp_path / "runtime_state.json")
+    trading_cycle.load_open_positions = lambda: []
+    broker = FakeBroker()
+    try:
+        result = trading_cycle.run_trading_cycle(
+            symbols=["AAPL"],
+            broker=broker,
+            data_client=WideSpreadDataClient(),
+            scheduled_market_time=datetime(2026, 7, 1, 15, 35, tzinfo=UTC),
+            captured_at_utc=datetime(2026, 7, 1, 15, 35, tzinfo=UTC),
+            corpus_root=tmp_path / "corpus",
+            decision_log_path=tmp_path / "decision_cards.jsonl",
+            execution_log_path=str(tmp_path / "execution_orders.jsonl"),
+        )
+    finally:
+        trading_cycle.load_runtime_state = original
+        trading_cycle.load_open_positions = original_positions
+
+    assert result.decisions[0]["decision"] == "BLOCKED_BY_SPREAD"
+    assert result.decisions[1]["decision"] == "TRADE_CANDIDATE"
+    assert "paper_opportunistic_discovery" in result.decisions[1]["reason_codes"]
+    assert result.scanner_candidates_count == 1
+    assert result.trade_attempted_count == 1
+    assert len(result.orders_submitted) == 1
+    assert result.execution_outcomes[0]["disposition"] == "paper_opportunistic_override"
+
+
+def test_run_trading_cycle_paper_opportunistic_mode_can_be_disabled(tmp_path, monkeypatch) -> None:
+    monkeypatch.setenv("AUTOBOTT_PAPER_OPPORTUNISTIC_ENTRIES", "false")
+    save_runtime_state(default_runtime_state(), state_path=tmp_path / "runtime_state.json")
+    original = trading_cycle.load_runtime_state
+    original_positions = trading_cycle.load_open_positions
+    trading_cycle.load_runtime_state = lambda: original(state_path=tmp_path / "runtime_state.json")
+    trading_cycle.load_open_positions = lambda: []
+    try:
+        result = trading_cycle.run_trading_cycle(
+            symbols=["AAPL"],
+            broker=FakeBroker(),
+            data_client=WideSpreadDataClient(),
+            scheduled_market_time=datetime(2026, 7, 1, 15, 35, tzinfo=UTC),
+            captured_at_utc=datetime(2026, 7, 1, 15, 35, tzinfo=UTC),
+            corpus_root=tmp_path / "corpus",
+            decision_log_path=tmp_path / "decision_cards.jsonl",
+            execution_log_path=str(tmp_path / "execution_orders.jsonl"),
+        )
+    finally:
+        trading_cycle.load_runtime_state = original
+        trading_cycle.load_open_positions = original_positions
+
+    assert result.decisions[0]["decision"] == "BLOCKED_BY_SPREAD"
+    assert result.trade_attempted_count == 0
+    assert result.orders_submitted == []

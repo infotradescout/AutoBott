@@ -2,18 +2,20 @@ from __future__ import annotations
 
 import argparse
 import json
-from dataclasses import dataclass, field
+import os
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
 from .execution_broker import AlpacaExecutionBroker
+from .execution_models import BrokerEnvironment
 from .execution_journal import append_execution_outcome
 from .execution_reconciler import reconcile_open_positions
 from .execution_orchestrator import ExecutionRejectedError, submit_decision_to_broker
 from .phase1_alpaca_client import AlpacaPaperClient
 from .phase1_engine import build_decision_card
-from .phase1_models import DecisionCard, DecisionStatus
+from .phase1_models import DecisionCard, DecisionStatus, Phase1Rules
 from .phase1_snapshot_capture import CaptureRules, capture_symbol_snapshot
 from .phase1_validate import _decision_input_from_snapshot, _load_snapshot
 from .position_store import load_open_positions
@@ -116,10 +118,37 @@ def run_trading_cycle(
         )
         snapshot_paths.append(snapshot_path)
         snapshot = _load_snapshot(Path(snapshot_path))
-        decision = build_decision_card(_decision_input_from_snapshot(snapshot))
+        decision_input = _decision_input_from_snapshot(snapshot)
+        decision = build_decision_card(decision_input)
         decision_payload = decision.to_json_dict()
         decisions.append(decision_payload)
         append_decision_card(decision_payload, snapshot_path=snapshot_path, log_path=decision_log_path)
+        strict_decision = decision
+        opportunistic_decision = _paper_opportunistic_decision(
+            strict_decision,
+            decision_input=decision_input,
+            broker=resolved_broker,
+        )
+        if opportunistic_decision is not None:
+            decision = opportunistic_decision
+            decision_payload = decision.to_json_dict()
+            decisions.append(decision_payload)
+            append_decision_card(decision_payload, snapshot_path=snapshot_path, log_path=decision_log_path)
+            _record_execution_outcome(
+                execution_outcomes,
+                ticker=symbol.upper(),
+                decision_id=decision.decision_id,
+                thesis_id=_decision_thesis_id(decision),
+                disposition="paper_opportunistic_override",
+                detail=str(strict_decision.blocked_reason or strict_decision.decision.value),
+                journal_path=execution_log_path,
+                payload={
+                    "strict_decision": strict_decision.decision.value,
+                    "strict_blocked_reason": strict_decision.blocked_reason,
+                    "override_reason_codes": list(decision.reason_codes),
+                    "selected_contract": decision.selected_contract.option_symbol if decision.selected_contract else None,
+                },
+            )
         is_candidate = decision.decision is DecisionStatus.TRADE_CANDIDATE
         thesis_id = _decision_thesis_id(decision)
 
@@ -335,6 +364,74 @@ def _active_open_position_count() -> int:
 
 def _decision_thesis_id(decision: DecisionCard) -> str:
     return f"{decision.ticker}:{decision.trade_setup.value}:{decision.execution_layer.value}"
+
+
+def _paper_opportunistic_decision(
+    strict_decision: DecisionCard,
+    *,
+    decision_input: Any,
+    broker: AlpacaExecutionBroker,
+) -> DecisionCard | None:
+    if broker.config.environment is not BrokerEnvironment.PAPER:
+        return None
+    if not _paper_opportunistic_mode_enabled():
+        return None
+    if strict_decision.decision is DecisionStatus.TRADE_CANDIDATE:
+        return None
+    if strict_decision.decision not in {
+        DecisionStatus.BLOCKED_BY_VOLATILITY,
+        DecisionStatus.BLOCKED_BY_SPREAD,
+        DecisionStatus.NO_TRADE,
+    }:
+        return None
+    if strict_decision.decision is DecisionStatus.NO_TRADE and strict_decision.blocked_reason != "confidence_below_threshold":
+        return None
+
+    relaxed = build_decision_card(decision_input, _paper_opportunistic_rules())
+    if relaxed.decision is not DecisionStatus.TRADE_CANDIDATE or relaxed.selected_contract is None:
+        return None
+    reason_codes = list(relaxed.reason_codes)
+    reason_codes.extend(
+        [
+            "paper_opportunistic_discovery",
+            f"strict_decision_{strict_decision.decision.value.lower()}",
+        ]
+    )
+    if strict_decision.blocked_reason:
+        reason_codes.append(f"strict_blocked_{strict_decision.blocked_reason}")
+    return replace(
+        relaxed,
+        reason_codes=reason_codes,
+        explanation=(
+            f"{relaxed.explanation}; paper_opportunistic_discovery override from "
+            f"{strict_decision.decision.value}:{strict_decision.blocked_reason or 'none'}"
+        ),
+    )
+
+
+def _paper_opportunistic_mode_enabled() -> bool:
+    value = os.getenv("AUTOBOTT_PAPER_OPPORTUNISTIC_ENTRIES")
+    if value is None:
+        return True
+    return value.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _paper_opportunistic_rules() -> Phase1Rules:
+    return Phase1Rules(
+        min_direction_score=0.20,
+        min_volatility_score=-1.0,
+        min_confidence=0.12,
+        max_spread_pct=0.40,
+        min_open_interest=1,
+        min_contract_volume=0,
+        min_abs_delta=0.15,
+        max_abs_delta=0.85,
+        intraday_min_abs_delta=0.20,
+        intraday_max_abs_delta=0.85,
+        min_vega=0.001,
+        max_theta_abs=1.0,
+        min_reward_risk_ratio=0.05,
+    )
 
 
 def _append_skip(
