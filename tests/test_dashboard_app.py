@@ -704,6 +704,39 @@ def test_latest_decision_lab_payload_scores_campaign(monkeypatch, tmp_path) -> N
     assert any(row["action"] == "do_not_scale" for row in payload["recommendations"])
 
 
+def test_decision_lab_backfill_run_endpoint_returns_report(monkeypatch, tmp_path) -> None:
+    _auth_env(monkeypatch, tmp_path)
+    _write_campaign_artifacts(tmp_path)
+    calls = {}
+
+    def _fake_backfill(**kwargs):
+        calls["backfill"] = kwargs
+        return {"schema_version": "phase1_historical_backfill.v1", "corpus_root": str(kwargs["corpus_root"]), "symbols": kwargs["symbols"]}
+
+    def _fake_campaign(corpus_root, **kwargs):
+        calls["campaign"] = {"corpus_root": corpus_root, **kwargs}
+        return {"artifact_dir": str(tmp_path / "artifacts" / "phase1_replay_campaign" / "campaign1")}
+
+    monkeypatch.setattr(dashboard_app, "run_historical_backfill", _fake_backfill)
+    monkeypatch.setattr(dashboard_app, "run_phase1_campaign", _fake_campaign)
+    monkeypatch.setattr(dashboard_app, "_artifacts_root", lambda: tmp_path / "artifacts" / "phase1_replay_campaign")
+
+    status, body = _invoke_app(
+        "POST",
+        "/api/reports/decision-lab/backfill-run",
+        token="dashboard-token",
+        payload={"symbols": ["AAPL"], "start_date": "2026-06-01", "end_date": "2026-06-10", "campaign_run_id": "campaign1"},
+    )
+    payload = json.loads(body)
+
+    assert status.startswith("200")
+    assert payload["ok"] is True
+    assert calls["backfill"]["symbols"] == ["AAPL"]
+    assert calls["backfill"]["start_date"].isoformat() == "2026-06-01"
+    assert calls["campaign"]["campaign_run_id"] == "campaign1"
+    assert payload["decision_lab"]["summary"]["closed_trades"] == 2
+
+
 def test_latest_campaign_payload_includes_primary_thesis_metrics(monkeypatch, tmp_path) -> None:
     _auth_env(monkeypatch, tmp_path)
     _write_campaign_artifacts(tmp_path)

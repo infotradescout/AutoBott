@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 import os
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime, timedelta
 from hashlib import sha256
 from pathlib import Path
 from typing import Any, Callable
@@ -15,6 +15,7 @@ from .phase1_alpaca_capture_now import capture_now
 from .phase1_alpaca_client import AlpacaPaperClient
 from .phase1_alpaca_config import load_alpaca_paper_config
 from .phase1_campaign_runner import run_phase1_campaign
+from .phase1_historical_backfill import run_historical_backfill
 from .paper_readiness import run_paper_readiness_probe
 from .session_supervisor import (
     SessionSupervisorConfig,
@@ -112,6 +113,8 @@ def handle_request(method: str, path: str, headers: dict[str, str], body: bytes)
             return 200, "application/json; charset=utf-8", _latest_gate_candidate_payload()
         if path == "/api/reports/decision-lab/latest" and method == "GET":
             return 200, "application/json; charset=utf-8", _latest_decision_lab_payload()
+        if path == "/api/reports/decision-lab/backfill-run" and method == "POST":
+            return 200, "application/json; charset=utf-8", _decision_lab_backfill_run_payload(_json_body(body))
         if path == "/api/capture/start" and method == "POST":
             return 200, "application/json; charset=utf-8", _capture_start_payload(_json_body(body))
         if path == "/api/campaign/run" and method == "POST":
@@ -594,6 +597,36 @@ def _latest_decision_lab_payload() -> JsonDict:
     if campaign_dir is None:
         return {"ok": False, "status": "no_campaign_found"}
     return build_decision_lab_report(campaign_dir)
+
+
+def _decision_lab_backfill_run_payload(payload: JsonDict) -> JsonDict:
+    symbols = [str(symbol).upper() for symbol in payload.get("symbols", ["SPY", "QQQ", "AAPL", "MSFT", "NVDA", "TSLA", "GOOGL"])]
+    days = min(max(int(payload.get("days", 20)), 2), 120)
+    end_date = _parse_date(payload.get("end_date")) or datetime.now(UTC).date()
+    start_date = _parse_date(payload.get("start_date")) or (end_date - timedelta(days=days))
+    run_id = str(payload.get("campaign_run_id", datetime.now(UTC).strftime("decision-lab-%Y%m%d-%H%M%S")))
+    corpus_root = _artifacts_root() / "decision_lab_historical_corpus" / run_id
+    backfill = run_historical_backfill(
+        symbols=symbols,
+        start_date=start_date,
+        end_date=end_date,
+        corpus_root=corpus_root,
+    )
+    gate_before = _file_hash(_gate_path())
+    campaign = run_phase1_campaign(
+        corpus_root,
+        artifacts_root=_artifacts_root(),
+        campaign_run_id=run_id,
+        active_gate_path=_gate_path(),
+    )
+    gate_after = _file_hash(_gate_path())
+    report = build_decision_lab_report(_artifacts_root() / run_id)
+    return {
+        "ok": True,
+        "backfill": backfill,
+        "campaign": campaign | {"active_gate_changed": gate_before != gate_after},
+        "decision_lab": report,
+    }
 
 
 def _capture_start_payload(payload: JsonDict) -> JsonDict:
@@ -1127,6 +1160,7 @@ def _dashboard_html() -> str:
             <div class="group">
               <div class="group-title">Campaign</div>
               <button class="primary protected-action" onclick="runCampaign()">Run campaign from latest corpus</button>
+              <button class="secondary protected-action" onclick="runDecisionLabBackfill()">Run historical decision lab</button>
               <div class="button-note">Advisory replay only. Live trading remains disabled.</div>
             </div>
             <div class="group">
@@ -1674,6 +1708,26 @@ def _dashboard_html() -> str:
       await refreshAll();
     }
 
+    async function runDecisionLabBackfill() {
+      const result = await callApi('/api/reports/decision-lab/backfill-run', {
+        method:'POST',
+        body: JSON.stringify({
+          symbols:['SPY','QQQ','AAPL','MSFT','NVDA','TSLA','GOOGL'],
+          days:20,
+          campaign_run_id:`decision-lab-${Date.now()}`
+        })
+      });
+      if (result.ok) {
+        const lab = result.payload.decision_lab || {};
+        logEntry('Decision Lab completed', `Closed ${lab.summary?.closed_trades ?? 0} replay trades. Actual vs no-trade: ${lab.baselines?.actual_vs_no_trade ?? 'n/a'}.`);
+      } else if (result.status === 401) {
+        logEntry('Decision Lab blocked', 'Dashboard token required before protected actions can run.', 'warn');
+      } else {
+        logEntry('Decision Lab failed', result.payload.detail || result.payload.error || 'Unknown decision lab failure.', 'danger');
+      }
+      await refreshAll();
+    }
+
     async function runTradingCycle() {
       const result = await callApi('/api/trading-cycle/run', { method:'POST', body: JSON.stringify({ symbols:['SPY'], quantity:1 }) });
       if (result.ok) {
@@ -1790,6 +1844,14 @@ def _read_body(environ: dict[str, Any]) -> bytes:
 
 def _json_body(body: bytes) -> JsonDict:
     return json.loads(body.decode("utf-8")) if body else {}
+
+
+def _parse_date(value: Any) -> date | None:
+    if not value:
+        return None
+    if isinstance(value, date):
+        return value
+    return date.fromisoformat(str(value)[:10])
 
 
 def _reason(status_code: int) -> str:
