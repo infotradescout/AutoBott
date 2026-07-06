@@ -35,14 +35,15 @@ class CaptureRules:
 
 
 class AlpacaMarketDataClient:
-    def __init__(self, config: AlpacaReadOnlyConfig | None = None, *, feed: str = "indicative") -> None:
+    def __init__(self, config: AlpacaReadOnlyConfig | None = None, *, feed: str = "indicative", stock_feed: str = "iex") -> None:
         self.config = config or load_alpaca_read_only_config()
         if not self.config.has_credentials:
             raise ValueError("alpaca_credentials_missing")
         self.data_url = (self.config.data_url or "https://data.alpaca.markets").rstrip("/")
         self.feed = feed
+        self.stock_feed = stock_feed
 
-    def get_stock_bars(self, symbols: list[str], *, start: datetime, end: datetime, timeframe: str = "1Min", limit: int = 35) -> dict[str, list[dict[str, Any]]]:
+    def get_stock_bars(self, symbols: list[str], *, start: datetime, end: datetime, timeframe: str = "1Min", limit: int = 35, feed: str | None = None) -> dict[str, list[dict[str, Any]]]:
         payload = self._get_json(
             "/v2/stocks/bars",
             {
@@ -52,6 +53,7 @@ class AlpacaMarketDataClient:
                 "end": _isoformat_z(end),
                 "limit": str(limit),
                 "sort": "asc",
+                "feed": feed or self.stock_feed,
             },
         )
         bars = payload.get("bars", {})
@@ -188,8 +190,9 @@ def capture_symbol_snapshot(
 ) -> str:
     symbol = symbol.upper()
     tz = _market_timezone_info(market_timezone, scheduled_market_time.date())
+    market_date = scheduled_market_time.astimezone(tz).date()
     as_of_utc = scheduled_market_time.astimezone(UTC)
-    trading_date = scheduled_market_time.date().isoformat()
+    trading_date = market_date.isoformat()
     symbol_dir = Path(corpus_root) / trading_date / symbol
     snapshot_dir = symbol_dir / "snapshots"
     option_quote_dir = symbol_dir / "option_quotes"
@@ -199,7 +202,16 @@ def capture_symbol_snapshot(
     context_symbols = _context_symbols(symbol, volatility_proxy_symbol)
     bar_symbols = sorted({symbol, *context_symbols.values()})
     lookback_start = as_of_utc - timedelta(minutes=max(40, rules.lookback_bars + 5))
-    bars = data_client.get_stock_bars(bar_symbols, start=lookback_start, end=as_of_utc, limit=rules.lookback_bars)
+    bars: dict[str, list[dict[str, Any]]] = {}
+    for bar_symbol in bar_symbols:
+        bars.update(
+            data_client.get_stock_bars(
+                [bar_symbol],
+                start=lookback_start,
+                end=as_of_utc,
+                limit=rules.lookback_bars,
+            )
+        )
     quotes = data_client.get_latest_stock_quotes(bar_symbols)
     option_snapshots = data_client.get_option_chain_snapshots(symbol)
 
@@ -212,7 +224,7 @@ def capture_symbol_snapshot(
         symbol=symbol,
         option_snapshots=option_snapshots,
         underlying_price=float(underlying_quote["last"]),
-        as_of_date=scheduled_market_time.date(),
+        as_of_date=market_date,
         rules=rules,
     )
     iv_history = _load_iv_history(symbol_dir, limit=rules.iv_history_limit)
@@ -496,7 +508,11 @@ def _normalize_option_chain(
         last = latest_trade.get("p") if latest_trade.get("p") is not None else latest_trade.get("price")
         mid = (bid + ask) / 2 if bid > 0 and ask > 0 else float(last or 0.0)
         spread = max(0.0, ask - bid)
-        iv = greeks.get("iv") if greeks.get("iv") is not None else snapshot.get("implied_volatility")
+        iv = (
+            greeks.get("iv")
+            if greeks.get("iv") is not None
+            else snapshot.get("implied_volatility", snapshot.get("impliedVolatility"))
+        )
         delta = greeks.get("delta")
         theta = greeks.get("theta")
         vega = greeks.get("vega")

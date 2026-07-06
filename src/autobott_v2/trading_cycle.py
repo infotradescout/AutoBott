@@ -108,7 +108,7 @@ def run_trading_cycle(
             captured_at_utc=captured_at,
             corpus_type="production_capture" if resolved_broker.config.environment.value == "live" else "paper_capture",
             market_timezone="America/New_York",
-            volatility_proxy_symbol="VIXY",
+            volatility_proxy_symbol="UVXY",
             data_client=data_client,
             rules=resolved_rules,
         )

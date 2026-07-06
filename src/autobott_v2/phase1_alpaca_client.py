@@ -24,6 +24,7 @@ class AlpacaPaperClient:
         end: datetime,
         timeframe: str = "1Min",
         limit: int = 35,
+        feed: str = "iex",
     ) -> dict[str, list[dict[str, Any]]]:
         payload = self._get_json(
             self.config.data_base_url,
@@ -35,6 +36,7 @@ class AlpacaPaperClient:
                 "end": _isoformat_z(end),
                 "limit": str(limit),
                 "sort": "asc",
+                "feed": feed,
             },
         )
         bars = payload.get("bars", {})
