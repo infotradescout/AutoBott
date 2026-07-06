@@ -9,6 +9,7 @@ from typing import Any
 
 from .phase1_alpaca_client import AlpacaPaperClient
 from .phase1_alpaca_config import AlpacaPaperConfig, require_alpaca_paper_config
+from .options_universe import resolve_symbol_universe
 from .phase1_snapshot_capture import SNAPSHOT_SCHEMA_VERSION, write_snapshot_day_manifest
 from .phase1_snapshot_contract import validate_market_snapshot
 from .runtime_paths import data_root
@@ -443,17 +444,19 @@ def run_historical_backfill(
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Synthesize a historical Phase 1 snapshot corpus from real Alpaca stock bars plus a modeled option chain.")
-    parser.add_argument("--symbols", nargs="+", required=True, help="Ticker list, for example: SPY QQQ AAPL MSFT NVDA")
+    parser.add_argument("--symbols", nargs="+", required=True, help="Ticker list, or TOP_OPTIONS_100 for the full options universe.")
     parser.add_argument("--start", required=True, help="Inclusive YYYY-MM-DD start date.")
     parser.add_argument("--end", required=True, help="Inclusive YYYY-MM-DD end date.")
+    parser.add_argument("--interval-minutes", type=int, help="Optional intraday bar interval, for example 30 for 30Min bars.")
     parser.add_argument("--corpus-root", help=f"Output root directory. Defaults to {historical_backfill_root()}.")
     args = parser.parse_args(argv)
 
     result = run_historical_backfill(
-        symbols=args.symbols,
+        symbols=resolve_symbol_universe(args.symbols),
         start_date=date.fromisoformat(args.start),
         end_date=date.fromisoformat(args.end),
         corpus_root=args.corpus_root,
+        interval_minutes=args.interval_minutes,
     )
     print(json.dumps(result, indent=2, sort_keys=True))
     return 0
