@@ -15,7 +15,17 @@ from .execution_reconciler import reconcile_open_positions
 from .execution_orchestrator import ExecutionRejectedError, submit_decision_to_broker
 from .phase1_alpaca_client import AlpacaPaperClient
 from .phase1_engine import build_decision_card
-from .phase1_models import DecisionCard, DecisionStatus, Phase1Rules
+from .phase1_models import (
+    ContractScore,
+    DecisionCard,
+    DecisionStatus,
+    DirectionBias,
+    ExecutionLayer,
+    OptionContractSnapshot,
+    OptionType,
+    Phase1Rules,
+    SelectedContract,
+)
 from .phase1_snapshot_capture import CaptureRules, capture_symbol_snapshot
 from .phase1_validate import _decision_input_from_snapshot, _load_snapshot
 from .position_store import load_open_positions
@@ -387,9 +397,13 @@ def _paper_opportunistic_decision(
     if strict_decision.decision is DecisionStatus.NO_TRADE and strict_decision.blocked_reason != "confidence_below_threshold":
         return None
 
-    relaxed = build_decision_card(decision_input, _paper_opportunistic_rules())
+    rules = _paper_opportunistic_rules()
+    relaxed = build_decision_card(decision_input, rules)
     if relaxed.decision is not DecisionStatus.TRADE_CANDIDATE or relaxed.selected_contract is None:
-        return None
+        fallback = _paper_discovery_contract(strict_decision, decision_input=decision_input, rules=rules)
+        if fallback is None:
+            return None
+        relaxed = fallback
     reason_codes = list(relaxed.reason_codes)
     reason_codes.extend(
         [
@@ -432,6 +446,66 @@ def _paper_opportunistic_rules() -> Phase1Rules:
         max_theta_abs=1.0,
         min_reward_risk_ratio=0.05,
     )
+
+
+def _paper_discovery_contract(
+    strict_decision: DecisionCard,
+    *,
+    decision_input: Any,
+    rules: Phase1Rules,
+) -> DecisionCard | None:
+    if strict_decision.direction.bias is DirectionBias.NEUTRAL:
+        return None
+    option_type = OptionType.CALL if strict_decision.direction.bias is DirectionBias.BULLISH else OptionType.PUT
+    candidates = [
+        contract
+        for contract in decision_input.option_chain
+        if contract.option_type is option_type
+        and contract.bid > 0
+        and contract.ask > 0
+        and contract.ask >= contract.bid
+        and contract.mid <= 25.0
+    ]
+    if not candidates:
+        return None
+    selected_contract = _best_paper_discovery_contract(candidates, decision_input.timestamp.date())
+    spread_penalty = min(1.0, selected_contract.spread_pct / max(rules.max_spread_pct, 0.01))
+    delta_fit = max(0.0, 1 - abs(abs(selected_contract.delta) - 0.50) / 0.50)
+    score = round(max(0.05, delta_fit * 0.55 + (1 - spread_penalty) * 0.30 + min(1.0, selected_contract.volume / 200) * 0.15), 4)
+    contract_score = ContractScore(
+        contract=selected_contract,
+        score=score,
+        reward_risk_ratio=0.0,
+        reasons=[
+            "paper_discovery_contract_selected",
+            "soft_contract_filters_overridden",
+            f"spread_pct={round(selected_contract.spread_pct, 4)}",
+        ],
+    )
+    selected = SelectedContract.from_score(contract_score, rules)
+    return replace(
+        strict_decision,
+        selected_contract=selected,
+        tactical_contract=selected,
+        rider_contract=None,
+        execution_layer=ExecutionLayer.TACTICAL,
+        decision=DecisionStatus.TRADE_CANDIDATE,
+        blocked_reason=None,
+        confidence_score=max(0.12, strict_decision.confidence_score),
+    )
+
+
+def _best_paper_discovery_contract(contracts: list[OptionContractSnapshot], as_of: Any) -> OptionContractSnapshot:
+    return sorted(
+        contracts,
+        key=lambda contract: (
+            abs((contract.expiration - as_of).days - 2),
+            contract.spread_pct,
+            abs(abs(contract.delta) - 0.50),
+            -contract.volume,
+            -contract.open_interest,
+        ),
+    )[0]
 
 
 def _append_skip(
