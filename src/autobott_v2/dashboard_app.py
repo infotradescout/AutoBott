@@ -602,6 +602,7 @@ def _latest_decision_lab_payload() -> JsonDict:
 def _decision_lab_backfill_run_payload(payload: JsonDict) -> JsonDict:
     symbols = [str(symbol).upper() for symbol in payload.get("symbols", ["SPY", "QQQ", "AAPL", "MSFT", "NVDA", "TSLA", "GOOGL"])]
     days = min(max(int(payload.get("days", 20)), 2), 120)
+    interval_minutes = min(max(int(payload.get("interval_minutes", 15)), 1), 60)
     end_date = _parse_date(payload.get("end_date")) or datetime.now(UTC).date()
     start_date = _parse_date(payload.get("start_date")) or (end_date - timedelta(days=days))
     run_id = str(payload.get("campaign_run_id", datetime.now(UTC).strftime("decision-lab-%Y%m%d-%H%M%S")))
@@ -611,6 +612,7 @@ def _decision_lab_backfill_run_payload(payload: JsonDict) -> JsonDict:
         start_date=start_date,
         end_date=end_date,
         corpus_root=corpus_root,
+        interval_minutes=interval_minutes,
     )
     gate_before = _file_hash(_gate_path())
     campaign = run_phase1_campaign(
@@ -1714,6 +1716,7 @@ def _dashboard_html() -> str:
         body: JSON.stringify({
           symbols:['SPY','QQQ','AAPL','MSFT','NVDA','TSLA','GOOGL'],
           days:20,
+          interval_minutes:15,
           campaign_run_id:`decision-lab-${Date.now()}`
         })
       });

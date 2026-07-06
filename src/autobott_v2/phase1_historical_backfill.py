@@ -15,6 +15,7 @@ from .runtime_paths import data_root
 
 DEFAULT_CONTEXT_SYMBOLS = {"spy": "SPY", "qqq": "QQQ", "vix": "VIXY"}
 DECISION_POINT_TIME = time(15, 30)
+DEFAULT_INTRADAY_INTERVAL_MINUTES = 15
 RISK_FREE_RATE = 0.045
 IV_REALIZED_VOL_MULTIPLIER = 1.10
 REALIZED_VOL_WINDOW = 20
@@ -163,6 +164,30 @@ def _fetch_daily_bars(client: Any, symbols: list[str], start: datetime, end: dat
     return normalized
 
 
+def _fetch_intraday_bars(client: Any, symbols: list[str], start: datetime, end: datetime, *, interval_minutes: int) -> dict[str, list[dict[str, Any]]]:
+    raw = client.get_stock_bars(symbols, start=start, end=end, timeframe=f"{interval_minutes}Min", limit=5000)
+    normalized: dict[str, list[dict[str, Any]]] = {}
+    for symbol in symbols:
+        rows = raw.get(symbol.upper(), [])
+        parsed = []
+        for row in rows:
+            raw_timestamp = row.get("t") or row.get("timestamp")
+            timestamp = datetime.fromisoformat(str(raw_timestamp).replace("Z", "+00:00")).astimezone(UTC)
+            parsed.append(
+                {
+                    "timestamp": timestamp,
+                    "date": timestamp.date(),
+                    "open": float(row.get("o") if row.get("o") is not None else row.get("open")),
+                    "high": float(row.get("h") if row.get("h") is not None else row.get("high")),
+                    "low": float(row.get("l") if row.get("l") is not None else row.get("low")),
+                    "close": float(row.get("c") if row.get("c") is not None else row.get("close")),
+                    "volume": int(row.get("v") or row.get("volume") or 0),
+                }
+            )
+        normalized[symbol.upper()] = sorted(parsed, key=lambda item: item["timestamp"])
+    return normalized
+
+
 def _index_of_date(bars: list[dict[str, Any]], trading_date: date) -> int | None:
     for index, bar in enumerate(bars):
         if bar["date"] == trading_date:
@@ -170,8 +195,20 @@ def _index_of_date(bars: list[dict[str, Any]], trading_date: date) -> int | None
     return None
 
 
+def _index_of_timestamp_or_date(bars: list[dict[str, Any]], timestamp: datetime | None, trading_date: date) -> int | None:
+    if timestamp is not None:
+        for index, bar in enumerate(bars):
+            if bar.get("timestamp") == timestamp:
+                return index
+    return _index_of_date(bars, trading_date)
+
+
+def _indices_for_date(bars: list[dict[str, Any]], trading_date: date) -> list[int]:
+    return [index for index, bar in enumerate(bars) if bar["date"] == trading_date]
+
+
 def _bar_payload(bar: dict[str, Any]) -> dict[str, Any]:
-    bar_timestamp = datetime.combine(bar["date"], DECISION_POINT_TIME, tzinfo=UTC)
+    bar_timestamp = bar.get("timestamp") or datetime.combine(bar["date"], DECISION_POINT_TIME, tzinfo=UTC)
     return {
         "timestamp": bar_timestamp.isoformat(),
         "open": round(bar["open"], 4),
@@ -194,19 +231,21 @@ def build_synthetic_snapshot(
     trading_date: date,
     bars_by_symbol: dict[str, list[dict[str, Any]]],
     context_symbols: dict[str, str],
+    as_of_index: int | None = None,
 ) -> dict[str, Any] | None:
     symbol_bars = bars_by_symbol.get(symbol.upper(), [])
-    as_of_index = _index_of_date(symbol_bars, trading_date)
-    if as_of_index is None:
+    resolved_as_of_index = as_of_index if as_of_index is not None else _index_of_date(symbol_bars, trading_date)
+    if resolved_as_of_index is None:
         return None
-    window = _window(symbol_bars, as_of_index, size=LOOKBACK_BARS)
+    window = _window(symbol_bars, resolved_as_of_index, size=LOOKBACK_BARS)
     if window is None:
         return None
 
     context_windows: dict[str, list[dict[str, Any]]] = {}
     for key, context_symbol in context_symbols.items():
         context_bars = bars_by_symbol.get(context_symbol.upper(), [])
-        context_index = _index_of_date(context_bars, trading_date)
+        as_of_timestamp = symbol_bars[resolved_as_of_index].get("timestamp")
+        context_index = _index_of_timestamp_or_date(context_bars, as_of_timestamp, trading_date)
         if context_index is None:
             return None
         context_window = _window(context_bars, context_index, size=min(LOOKBACK_BARS, context_index + 1))
@@ -216,20 +255,20 @@ def build_synthetic_snapshot(
 
     closes = [bar["close"] for bar in window]
     spot = closes[-1]
-    iv = round(_annualized_realized_vol(closes) * IV_REALIZED_VOL_MULTIPLIER, 4)
+    iv = round(max(0.05, _annualized_realized_vol(closes) * IV_REALIZED_VOL_MULTIPLIER), 4)
 
-    history_start = max(0, as_of_index - IV_HISTORY_WINDOW)
+    history_start = max(0, resolved_as_of_index - IV_HISTORY_WINDOW)
     iv_history = []
-    for index in range(history_start, as_of_index + 1):
+    for index in range(history_start, resolved_as_of_index + 1):
         history_window = _window(symbol_bars, index, size=LOOKBACK_BARS)
         if history_window is None:
             continue
         history_closes = [bar["close"] for bar in history_window]
-        iv_history.append(round(_annualized_realized_vol(history_closes) * IV_REALIZED_VOL_MULTIPLIER, 4))
+        iv_history.append(round(max(0.05, _annualized_realized_vol(history_closes) * IV_REALIZED_VOL_MULTIPLIER), 4))
     if not iv_history:
         iv_history = [iv]
 
-    timestamp = datetime.combine(trading_date, DECISION_POINT_TIME, tzinfo=UTC)
+    timestamp = window[-1].get("timestamp") or datetime.combine(trading_date, DECISION_POINT_TIME, tzinfo=UTC)
     option_chain = synthesize_option_chain(
         symbol=symbol.upper(),
         spot=spot,
@@ -286,13 +325,14 @@ def build_synthetic_snapshot(
     return payload
 
 
-def _write_snapshot_files(corpus_root: Path, symbol: str, trading_date: date, snapshot: dict[str, Any]) -> Path:
+def _write_snapshot_files(corpus_root: Path, symbol: str, trading_date: date, snapshot: dict[str, Any], *, capture_interval_seconds: int = 86400) -> Path:
     symbol_dir = corpus_root / trading_date.isoformat() / symbol.upper()
     snapshots_dir = symbol_dir / "snapshots"
     option_quotes_dir = symbol_dir / "option_quotes"
     snapshots_dir.mkdir(parents=True, exist_ok=True)
     option_quotes_dir.mkdir(parents=True, exist_ok=True)
-    filename = f"{DECISION_POINT_TIME.strftime('%H%M%S')}.json"
+    snapshot_timestamp = datetime.fromisoformat(str(snapshot["timestamp"]).replace("Z", "+00:00"))
+    filename = f"{snapshot_timestamp.strftime('%H%M%S')}.json"
     (snapshots_dir / filename).write_text(json.dumps(snapshot, indent=2, sort_keys=True), encoding="utf-8")
     (option_quotes_dir / filename).write_text(
         json.dumps(
@@ -313,7 +353,7 @@ def _write_snapshot_files(corpus_root: Path, symbol: str, trading_date: date, sn
         trading_date=trading_date,
         symbol=symbol.upper(),
         source="historical_synthesis",
-        capture_interval_seconds=86400,
+        capture_interval_seconds=capture_interval_seconds,
         corpus_type="historical_replay",
     )
     return symbol_dir
@@ -328,6 +368,7 @@ def run_historical_backfill(
     client: Any | None = None,
     config: AlpacaPaperConfig | None = None,
     context_symbols: dict[str, str] | None = None,
+    interval_minutes: int | None = None,
 ) -> dict[str, Any]:
     if not symbols:
         raise ValueError("symbols_required")
@@ -339,10 +380,18 @@ def run_historical_backfill(
     ctx_symbols = context_symbols or DEFAULT_CONTEXT_SYMBOLS
     resolved_root = Path(corpus_root) if corpus_root is not None else historical_backfill_root()
 
-    fetch_start = datetime.combine(start_date - timedelta(days=BUFFER_LOOKBACK_DAYS), time.min, tzinfo=UTC)
+    intraday = interval_minutes is not None
+    if intraday and interval_minutes <= 0:
+        raise ValueError("interval_minutes_must_be_positive")
+    buffer_days = 10 if intraday else BUFFER_LOOKBACK_DAYS
+    fetch_start = datetime.combine(start_date - timedelta(days=buffer_days), time.min, tzinfo=UTC)
     fetch_end = datetime.combine(end_date + timedelta(days=1), time.min, tzinfo=UTC)
     all_symbols = sorted({symbol.upper() for symbol in symbols} | {value.upper() for value in ctx_symbols.values()})
-    bars_by_symbol = _fetch_daily_bars(resolved_client, all_symbols, fetch_start, fetch_end)
+    bars_by_symbol = (
+        _fetch_intraday_bars(resolved_client, all_symbols, fetch_start, fetch_end, interval_minutes=interval_minutes)
+        if intraday
+        else _fetch_daily_bars(resolved_client, all_symbols, fetch_start, fetch_end)
+    )
 
     snapshots_written: dict[str, int] = {}
     skipped_days: dict[str, int] = {}
@@ -351,21 +400,30 @@ def run_historical_backfill(
         symbol_bars = bars_by_symbol.get(symbol_key, [])
         if len(symbol_bars) < LOOKBACK_BARS:
             raise ValueError(f"insufficient_historical_bars:{symbol_key}")
-        trading_dates = [bar["date"] for bar in symbol_bars if start_date <= bar["date"] <= end_date]
+        trading_dates = sorted({bar["date"] for bar in symbol_bars if start_date <= bar["date"] <= end_date})
         written = 0
         skipped = 0
         for trading_date in trading_dates:
-            snapshot = build_synthetic_snapshot(
-                symbol=symbol_key,
-                trading_date=trading_date,
-                bars_by_symbol=bars_by_symbol,
-                context_symbols=ctx_symbols,
-            )
-            if snapshot is None:
-                skipped += 1
-                continue
-            _write_snapshot_files(resolved_root, symbol_key, trading_date, snapshot)
-            written += 1
+            indices = _indices_for_date(symbol_bars, trading_date) if intraday else [_index_of_date(symbol_bars, trading_date)]
+            for index in [item for item in indices if item is not None]:
+                snapshot = build_synthetic_snapshot(
+                    symbol=symbol_key,
+                    trading_date=trading_date,
+                    bars_by_symbol=bars_by_symbol,
+                    context_symbols=ctx_symbols,
+                    as_of_index=index,
+                )
+                if snapshot is None:
+                    skipped += 1
+                    continue
+                _write_snapshot_files(
+                    resolved_root,
+                    symbol_key,
+                    trading_date,
+                    snapshot,
+                    capture_interval_seconds=(interval_minutes * 60 if intraday and interval_minutes is not None else 86400),
+                )
+                written += 1
         snapshots_written[symbol_key] = written
         skipped_days[symbol_key] = skipped
 
@@ -379,6 +437,7 @@ def run_historical_backfill(
         "end_date": end_date.isoformat(),
         "snapshot_days_written": snapshots_written,
         "snapshot_days_skipped": skipped_days,
+        "interval_minutes": interval_minutes,
     }
 
 

@@ -725,7 +725,7 @@ def test_decision_lab_backfill_run_endpoint_returns_report(monkeypatch, tmp_path
         "POST",
         "/api/reports/decision-lab/backfill-run",
         token="dashboard-token",
-        payload={"symbols": ["AAPL"], "start_date": "2026-06-01", "end_date": "2026-06-10", "campaign_run_id": "campaign1"},
+        payload={"symbols": ["AAPL"], "start_date": "2026-06-01", "end_date": "2026-06-10", "interval_minutes": 15, "campaign_run_id": "campaign1"},
     )
     payload = json.loads(body)
 
@@ -733,6 +733,7 @@ def test_decision_lab_backfill_run_endpoint_returns_report(monkeypatch, tmp_path
     assert payload["ok"] is True
     assert calls["backfill"]["symbols"] == ["AAPL"]
     assert calls["backfill"]["start_date"].isoformat() == "2026-06-01"
+    assert calls["backfill"]["interval_minutes"] == 15
     assert calls["campaign"]["campaign_run_id"] == "campaign1"
     assert payload["decision_lab"]["summary"]["closed_trades"] == 2
 

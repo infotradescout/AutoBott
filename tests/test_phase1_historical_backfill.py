@@ -54,6 +54,37 @@ class FakeAlpacaClient:
         return bars
 
 
+class FakeIntradayAlpacaClient:
+    def __init__(self, series: dict[str, list[float]], start: date, *, bars_per_day: int = 12) -> None:
+        self._series = series
+        self._start = start
+        self._bars_per_day = bars_per_day
+
+    def get_stock_bars(self, symbols, *, start, end, timeframe="15Min", limit=5000):
+        bars: dict[str, list[dict]] = {}
+        for symbol in symbols:
+            closes = self._series[symbol.upper()]
+            rows = []
+            for index, close in enumerate(closes):
+                day_offset = index // self._bars_per_day
+                bar_offset = index % self._bars_per_day
+                bar_dt = datetime.combine(self._start + timedelta(days=day_offset), datetime.min.time(), tzinfo=timezone.utc) + timedelta(hours=14, minutes=30 + 15 * bar_offset)
+                if bar_dt < start or bar_dt > end:
+                    continue
+                rows.append(
+                    {
+                        "t": bar_dt.isoformat(),
+                        "o": close - 0.1,
+                        "h": close + 0.2,
+                        "l": close - 0.2,
+                        "c": close,
+                        "v": 1_000_000,
+                    }
+                )
+            bars[symbol.upper()] = rows
+        return bars
+
+
 def _trending_series(length: int, start_price: float, step: float) -> list[float]:
     return [round(start_price + index * step, 4) for index in range(length)]
 
@@ -147,3 +178,34 @@ def test_run_historical_backfill_writes_campaign_ready_corpus(tmp_path) -> None:
     corpus_summary = load_snapshot_corpus(tmp_path, symbols=["AAPL"])
     assert corpus_summary["quality"]["campaign_ready"], corpus_summary["quality"]["blocking_reasons"]
     assert corpus_summary["corpus_type"] == "historical_replay"
+
+
+def test_run_historical_backfill_writes_intraday_snapshots(tmp_path) -> None:
+    start = date(2024, 1, 1)
+    bars_per_day = 12
+    length = 8 * bars_per_day
+    series = {
+        "AAPL": _trending_series(length, 150.0, 0.08),
+        "SPY": _trending_series(length, 470.0, 0.04),
+        "QQQ": _trending_series(length, 400.0, 0.035),
+        "VIXY": _trending_series(length, 14.0, -0.004),
+    }
+    client = FakeIntradayAlpacaClient(series, start, bars_per_day=bars_per_day)
+    backfill_start = start + timedelta(days=4)
+    backfill_end = start + timedelta(days=5)
+
+    result = run_historical_backfill(
+        symbols=["AAPL"],
+        start_date=backfill_start,
+        end_date=backfill_end,
+        corpus_root=tmp_path,
+        client=client,
+        config=_paper_config(),
+        interval_minutes=15,
+    )
+
+    assert result["snapshot_days_written"]["AAPL"] > 2
+    corpus_summary = load_snapshot_corpus(tmp_path, symbols=["AAPL"])
+    assert corpus_summary["quality"]["campaign_ready"], corpus_summary["quality"]["blocking_reasons"]
+    assert corpus_summary["quality"]["captured_intervals"] == result["snapshot_days_written"]["AAPL"]
+    assert all(day["capture_interval_seconds"] == 900 for day in corpus_summary["days"])
