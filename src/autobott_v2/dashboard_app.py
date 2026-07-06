@@ -9,6 +9,7 @@ from typing import Any, Callable
 from wsgiref.simple_server import make_server
 
 from .execution_config import load_alpaca_execution_config
+from .env_bootstrap import bootstrap_env_file
 from .phase1_alpaca_capture_now import capture_now
 from .phase1_alpaca_client import AlpacaPaperClient
 from .phase1_alpaca_config import load_alpaca_paper_config
@@ -1596,6 +1597,7 @@ def _thesis_failure_sort_key(row: JsonDict) -> tuple[float, float, float, str]:
 
 
 def main() -> int:
+    bootstrap_env_file()
     host = os.getenv("HOST", "0.0.0.0")
     port = int(os.getenv("PORT", "8000"))
     maybe_start_session_supervisor()

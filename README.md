@@ -40,6 +40,14 @@ described above.
 
 ## Validation
 
+Local paper dashboard, no PowerShell setup:
+
+```text
+Double-click start_paper_dashboard.cmd
+```
+
+That launcher auto-loads `C:\Users\flavo\Downloads\AutoBott.env`, applies the local paper defaults, starts the dashboard on `http://127.0.0.1:8000`, and uses dashboard token `autobott-local` unless you override it in the env file.
+
 Run the test suite:
 
 ```powershell

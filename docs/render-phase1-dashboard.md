@@ -63,6 +63,14 @@ When the hosted persistence env vars are absent, local development keeps the exi
 
 With those session env vars enabled, startup will arm paper execution automatically and wait for the configured New York session window before running cycles.
 
+For the local Windows operator path, you can skip PowerShell entirely and launch:
+
+```text
+start_paper_dashboard.cmd
+```
+
+That launcher auto-loads `C:\Users\flavo\Downloads\AutoBott.env`, applies the local paper/session defaults, binds the dashboard to `127.0.0.1:8000`, and uses token `autobott-local` unless overridden.
+
 ## Cutover Command
 
 For tomorrow's live-data paper-trading cutover, use one readiness command after loading env vars:
