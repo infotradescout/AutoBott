@@ -123,8 +123,10 @@ def test_run_trading_cycle_captures_decides_and_submits(tmp_path) -> None:
     assert result.scanner_candidates_count == 1
     assert result.trade_attempted_count == 1
     assert result.zero_trade_cycle is False
-    assert result.execution_outcomes[0]["disposition"] == "scanner_candidate"
-    assert result.execution_outcomes[1]["disposition"] == "pass_trade_attempted"
+    dispositions = [outcome["disposition"] for outcome in result.execution_outcomes]
+    assert "position_monitor_summary" in dispositions
+    assert "scanner_candidate" in dispositions
+    assert "pass_trade_attempted" in dispositions
 
 
 def test_run_trading_cycle_skips_when_kill_switch_enabled(tmp_path) -> None:
@@ -340,7 +342,7 @@ def test_run_trading_cycle_paper_opportunistic_mode_overrides_soft_spread_block(
     assert result.scanner_candidates_count == 1
     assert result.trade_attempted_count == 1
     assert len(result.orders_submitted) == 1
-    assert result.execution_outcomes[0]["disposition"] == "paper_opportunistic_override"
+    assert "paper_opportunistic_override" in [outcome["disposition"] for outcome in result.execution_outcomes]
 
 
 def test_run_trading_cycle_paper_opportunistic_mode_can_be_disabled(tmp_path, monkeypatch) -> None:

@@ -29,6 +29,7 @@ from .phase1_models import (
 from .phase1_snapshot_capture import CaptureRules, capture_symbol_snapshot
 from .phase1_validate import _decision_input_from_snapshot, _load_snapshot
 from .position_store import load_open_positions
+from .position_monitor import run_position_monitor
 from .runtime_control import load_runtime_state
 from .runtime_paths import data_root, phase1_snapshots_root
 
@@ -102,6 +103,16 @@ def run_trading_cycle(
             )
         except Exception:
             pass
+    if hasattr(resolved_broker, "list_open_positions"):
+        try:
+            monitor_summary = run_position_monitor(
+                broker=resolved_broker,
+                journal_path=execution_log_path,
+            )
+        except Exception as exc:
+            monitor_summary = {"ok": False, "error": str(exc)}
+    else:
+        monitor_summary = {"ok": True, "enabled": True, "checked": 0, "actions": []}
 
     snapshot_paths: list[str] = []
     decisions: list[dict[str, Any]] = []
@@ -340,7 +351,7 @@ def run_trading_cycle(
         orders_submitted=orders_submitted,
         skipped=skipped,
         runtime_state=runtime_state.to_json_dict(),
-        execution_outcomes=execution_outcomes,
+        execution_outcomes=[{"disposition": "position_monitor_summary", **monitor_summary}, *execution_outcomes],
         scanner_candidates_count=scanner_candidates_count,
         execution_rejected_count_by_reason=execution_rejected_count_by_reason,
         trade_attempted_count=trade_attempted_count,

@@ -79,6 +79,16 @@ def test_validate_trade_intent_enforces_position_cost_limit() -> None:
     assert "position_cost_exceeds_limit" in result.reasons
 
 
+def test_validate_trade_intent_allows_large_sell_to_close_exit() -> None:
+    result = validate_trade_intent(
+        _intent(side=OrderSide.SELL_TO_CLOSE, quantity=10, limit_price=2.5),
+        _controls(max_position_cost=2_000.0),
+    )
+
+    assert result.approved is True
+    assert "position_cost_exceeds_limit" not in result.reasons
+
+
 def test_validate_trade_intent_enforces_daily_loss_lock() -> None:
     result = validate_trade_intent(
         _intent(),
