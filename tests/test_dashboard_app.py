@@ -422,6 +422,98 @@ def test_dashboard_open_positions_endpoint_returns_positions(monkeypatch, tmp_pa
     assert payload["positions"][0]["symbol"] == "AAPL"
 
 
+def test_dashboard_account_positions_endpoint_returns_pl(monkeypatch, tmp_path) -> None:
+    _auth_env(monkeypatch, tmp_path)
+
+    class FakeConfig:
+        def validate(self):
+            return self
+
+    class FakeClient:
+        def __init__(self, config):
+            self.config = config
+
+        def get_account(self):
+            return {
+                "equity": "10500.00",
+                "last_equity": "10000.00",
+                "cash": "5000.00",
+                "buying_power": "20000.00",
+                "portfolio_value": "10500.00",
+            }
+
+        def get_positions(self):
+            return [
+                {
+                    "symbol": "SPY260703C00600000",
+                    "side": "long",
+                    "qty": "1",
+                    "avg_entry_price": "2.50",
+                    "current_price": "3.00",
+                    "market_value": "300.00",
+                    "unrealized_pl": "50.00",
+                    "unrealized_plpc": "0.2",
+                }
+            ]
+
+    monkeypatch.setattr(dashboard_app, "load_alpaca_paper_config", lambda: FakeConfig())
+    monkeypatch.setattr(dashboard_app, "AlpacaPaperClient", FakeClient)
+
+    status, body = _invoke_app("GET", "/api/account/positions", token="dashboard-token")
+    payload = json.loads(body)
+
+    assert status.startswith("200")
+    assert payload["ok"] is True
+    assert payload["account"]["day_pl"] == 500.0
+    assert payload["positions"][0]["symbol"] == "SPY260703C00600000"
+    assert payload["positions"][0]["unrealized_pl"] == "50.00"
+
+
+def test_dashboard_account_orders_endpoint_returns_history(monkeypatch, tmp_path) -> None:
+    _auth_env(monkeypatch, tmp_path)
+
+    class FakeConfig:
+        def validate(self):
+            return self
+
+    class FakeClient:
+        def __init__(self, config):
+            self.config = config
+
+        def get_orders(self, *, status, limit, direction="desc"):
+            return [
+                {
+                    "symbol": "AAPL",
+                    "side": "buy",
+                    "qty": "1",
+                    "filled_qty": "1",
+                    "filled_avg_price": "150.00",
+                    "status": "filled",
+                    "submitted_at": "2026-07-01T15:35:00Z",
+                    "filled_at": "2026-07-01T15:35:05Z",
+                }
+            ]
+
+    monkeypatch.setattr(dashboard_app, "load_alpaca_paper_config", lambda: FakeConfig())
+    monkeypatch.setattr(dashboard_app, "AlpacaPaperClient", FakeClient)
+
+    status, body = _invoke_app("GET", "/api/account/orders", token="dashboard-token")
+    payload = json.loads(body)
+
+    assert status.startswith("200")
+    assert payload["ok"] is True
+    assert payload["orders"][0]["symbol"] == "AAPL"
+    assert payload["orders"][0]["status"] == "filled"
+
+
+def test_dashboard_account_endpoints_require_auth(monkeypatch, tmp_path) -> None:
+    _auth_env(monkeypatch, tmp_path)
+    status, _ = _invoke_app("GET", "/api/account/positions")
+    assert status.startswith("401")
+    status, _ = _invoke_app("GET", "/api/account/orders")
+    assert status.startswith("401")
+
+
 def test_dashboard_execution_exit_endpoint_returns_order(monkeypatch, tmp_path) -> None:
     _auth_env(monkeypatch, tmp_path)
 

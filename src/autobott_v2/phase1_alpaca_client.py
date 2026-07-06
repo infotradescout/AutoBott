@@ -60,12 +60,30 @@ class AlpacaPaperClient:
         snapshots = payload.get("snapshots") or payload.get("option_snapshots") or {}
         return {option_symbol: dict(row) for option_symbol, row in snapshots.items()}
 
+    def get_positions(self) -> list[dict[str, Any]]:
+        payload = self._get_json(self.config.trading_base_url, "/v2/positions")
+        return list(payload) if isinstance(payload, list) else []
+
+    def get_orders(
+        self,
+        *,
+        status: str = "all",
+        limit: int = 50,
+        direction: str = "desc",
+    ) -> list[dict[str, Any]]:
+        payload = self._get_json(
+            self.config.trading_base_url,
+            "/v2/orders",
+            {"status": status, "limit": str(limit), "direction": direction, "nested": "false"},
+        )
+        return list(payload) if isinstance(payload, list) else []
+
     def _get_json(
         self,
         base_url: str,
         path: str,
         params: dict[str, str] | None = None,
-    ) -> dict[str, Any]:
+    ) -> Any:
         query = urllib.parse.urlencode(params or {})
         suffix = f"?{query}" if query else ""
         request = urllib.request.Request(

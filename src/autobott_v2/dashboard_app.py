@@ -79,6 +79,10 @@ def handle_request(method: str, path: str, headers: dict[str, str], body: bytes)
             return 200, "application/json; charset=utf-8", _paper_readiness_payload()
         if path == "/api/positions/open" and method == "GET":
             return 200, "application/json; charset=utf-8", _open_positions_payload()
+        if path == "/api/account/positions" and method == "GET":
+            return 200, "application/json; charset=utf-8", _account_positions_payload()
+        if path == "/api/account/orders" and method == "GET":
+            return 200, "application/json; charset=utf-8", _account_orders_payload()
         if path == "/api/corpus/latest" and method == "GET":
             return 200, "application/json; charset=utf-8", _latest_corpus_payload()
         if path == "/api/campaign/latest" and method == "GET":
@@ -342,6 +346,77 @@ def _open_positions_payload() -> JsonDict:
         "count": len(positions),
         "positions": positions,
         "position_store_path": str(position_store_path()),
+    }
+
+
+def _account_positions_payload() -> JsonDict:
+    config = load_alpaca_paper_config()
+    try:
+        config.validate()
+    except Exception as exc:
+        return {"ok": False, "status": "config_invalid", "detail": str(exc)}
+    client = AlpacaPaperClient(config)
+    try:
+        account = client.get_account()
+        positions = client.get_positions()
+    except Exception as exc:
+        return {"ok": False, "status": "alpaca_request_failed", "detail": str(exc)}
+    equity = float(account.get("equity") or 0.0)
+    last_equity = float(account.get("last_equity") or 0.0)
+    day_pl = equity - last_equity
+    return {
+        "ok": True,
+        "account": {
+            "equity": equity,
+            "last_equity": last_equity,
+            "day_pl": day_pl,
+            "day_pl_pct": (day_pl / last_equity * 100.0) if last_equity else 0.0,
+            "cash": float(account.get("cash") or 0.0),
+            "buying_power": float(account.get("buying_power") or 0.0),
+            "portfolio_value": float(account.get("portfolio_value") or 0.0),
+        },
+        "positions": [
+            {
+                "symbol": position.get("symbol"),
+                "side": position.get("side"),
+                "qty": position.get("qty"),
+                "avg_entry_price": position.get("avg_entry_price"),
+                "current_price": position.get("current_price"),
+                "market_value": position.get("market_value"),
+                "unrealized_pl": position.get("unrealized_pl"),
+                "unrealized_plpc": position.get("unrealized_plpc"),
+            }
+            for position in positions
+        ],
+    }
+
+
+def _account_orders_payload() -> JsonDict:
+    config = load_alpaca_paper_config()
+    try:
+        config.validate()
+    except Exception as exc:
+        return {"ok": False, "status": "config_invalid", "detail": str(exc)}
+    client = AlpacaPaperClient(config)
+    try:
+        orders = client.get_orders(status="all", limit=50)
+    except Exception as exc:
+        return {"ok": False, "status": "alpaca_request_failed", "detail": str(exc)}
+    return {
+        "ok": True,
+        "orders": [
+            {
+                "symbol": order.get("symbol"),
+                "side": order.get("side"),
+                "qty": order.get("qty"),
+                "filled_qty": order.get("filled_qty"),
+                "filled_avg_price": order.get("filled_avg_price"),
+                "status": order.get("status"),
+                "submitted_at": order.get("submitted_at"),
+                "filled_at": order.get("filled_at"),
+            }
+            for order in orders
+        ],
     }
 
 
@@ -925,6 +1000,18 @@ def _dashboard_html() -> str:
             <div class="panel-body" id="alpaca-status"></div>
           </section>
           <section class="panel">
+            <div class="panel-head"><h3>Account Summary</h3><span class="badge info">P/L</span></div>
+            <div class="panel-body" id="account-summary"></div>
+          </section>
+          <section class="panel">
+            <div class="panel-head"><h3>Open Positions</h3><span class="badge info">P/L</span></div>
+            <div class="panel-body" id="account-positions"></div>
+          </section>
+          <section class="panel">
+            <div class="panel-head"><h3>Recent Trades</h3><span class="badge info">HISTORY</span></div>
+            <div class="panel-body" id="account-orders"></div>
+          </section>
+          <section class="panel">
             <div class="panel-head"><h3>Paper Readiness</h3><span class="badge info">EXECUTION</span></div>
             <div class="panel-body" id="paper-readiness"></div>
           </section>
@@ -1216,6 +1303,76 @@ def _dashboard_html() -> str:
         ${detailsBlock(payload)}`;
     }
 
+    function formatMoney(value) {
+      const num = Number(value);
+      if (Number.isNaN(num)) return 'n/a';
+      return `$${num.toFixed(2)}`;
+    }
+
+    function renderAccountSummary(payload) {
+      if (!payload.ok) {
+        return emptyState('Account unavailable', payload.detail || 'Could not load Alpaca account summary.');
+      }
+      const account = payload.account || {};
+      const plTone = account.day_pl > 0 ? 'safe' : account.day_pl < 0 ? 'danger' : 'info';
+      return `
+        ${metricList([
+          ['Equity', formatMoney(account.equity)],
+          ['Day P/L', `<span class="badge ${plTone}">${formatMoney(account.day_pl)} (${Number(account.day_pl_pct || 0).toFixed(2)}%)</span>`],
+          ['Cash', formatMoney(account.cash)],
+          ['Buying power', formatMoney(account.buying_power)],
+          ['Portfolio value', formatMoney(account.portfolio_value)]
+        ])}
+        ${detailsBlock(payload)}`;
+    }
+
+    function renderAccountPositions(payload) {
+      if (!payload.ok) {
+        return emptyState('Positions unavailable', payload.detail || 'Could not load open positions.');
+      }
+      const positions = payload.positions || [];
+      const rows = positions.map((position) => {
+        const pl = Number(position.unrealized_pl);
+        const tone = pl > 0 ? 'safe' : pl < 0 ? 'danger' : 'info';
+        return `<tr>
+          <td>${escapeHtml(position.symbol || 'n/a')}</td>
+          <td>${escapeHtml(position.side || 'n/a')}</td>
+          <td>${escapeHtml(position.qty ?? 'n/a')}</td>
+          <td>${formatMoney(position.avg_entry_price)}</td>
+          <td>${formatMoney(position.current_price)}</td>
+          <td><span class="badge ${tone}">${formatMoney(position.unrealized_pl)}</span></td>
+        </tr>`;
+      }).join('');
+      return `
+        <table class="table">
+          <thead><tr><th>Symbol</th><th>Side</th><th>Qty</th><th>Entry</th><th>Current</th><th>Unrealized P/L</th></tr></thead>
+          <tbody>${rows || '<tr><td colspan="6">No open positions</td></tr>'}</tbody>
+        </table>
+        ${detailsBlock(payload)}`;
+    }
+
+    function renderAccountOrders(payload) {
+      if (!payload.ok) {
+        return emptyState('Trade history unavailable', payload.detail || 'Could not load recent trades.');
+      }
+      const orders = payload.orders || [];
+      const rows = orders.map((order) => `
+        <tr>
+          <td>${escapeHtml(order.symbol || 'n/a')}</td>
+          <td>${escapeHtml(order.side || 'n/a')}</td>
+          <td>${escapeHtml(order.filled_qty || order.qty || 'n/a')}</td>
+          <td>${formatMoney(order.filled_avg_price)}</td>
+          <td>${escapeHtml(order.status || 'n/a')}</td>
+          <td>${escapeHtml(order.filled_at || order.submitted_at || 'n/a')}</td>
+        </tr>`).join('');
+      return `
+        <table class="table">
+          <thead><tr><th>Symbol</th><th>Side</th><th>Qty</th><th>Fill price</th><th>Status</th><th>When</th></tr></thead>
+          <tbody>${rows || '<tr><td colspan="6">No trades yet</td></tr>'}</tbody>
+        </table>
+        ${detailsBlock(payload)}`;
+    }
+
     function renderPaperReadiness(payload) {
       const tone = payload.paper_execution_ready ? 'safe' : payload.ok ? 'warn' : 'warn';
       return `
@@ -1379,7 +1536,9 @@ def _dashboard_html() -> str:
         callApi('/api/session/status'),
         callApi('/api/reports/bucket-edge/latest'),
         callApi('/api/reports/thesis-failures/latest'),
-        callApi('/api/reports/gate-candidate/latest')
+        callApi('/api/reports/gate-candidate/latest'),
+        callApi('/api/account/positions'),
+        callApi('/api/account/orders')
       ]);
       renderProtectedPanel('safety-status', protectedResults[0], renderSafety);
       renderProtectedPanel('alpaca-status', protectedResults[1], renderAlpaca);
@@ -1390,6 +1549,9 @@ def _dashboard_html() -> str:
       renderProtectedPanel('bucket-report', protectedResults[6], renderBucketReport);
       renderProtectedPanel('thesis-failures', protectedResults[7], renderThesisFailures);
       renderProtectedPanel('gate-report', protectedResults[8], renderGateReport);
+      renderProtectedPanel('account-summary', protectedResults[9], renderAccountSummary);
+      renderProtectedPanel('account-positions', protectedResults[9], renderAccountPositions);
+      renderProtectedPanel('account-orders', protectedResults[10], renderAccountOrders);
       renderPersistenceStatus();
       syncActionState();
     }
