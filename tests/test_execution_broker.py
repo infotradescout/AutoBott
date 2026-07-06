@@ -5,7 +5,7 @@ from datetime import datetime, timezone
 
 import pytest
 
-from autobott_v2.execution_broker import AlpacaExecutionBroker
+from autobott_v2.execution_broker import AlpacaExecutionBroker, _map_alpaca_status
 from autobott_v2.execution_config import AlpacaExecutionConfig
 from autobott_v2.execution_models import BrokerEnvironment, ExecutionState, OrderSide, TradeIntent
 
@@ -84,6 +84,12 @@ def test_submit_order_returns_submitted_execution_order(monkeypatch) -> None:
     assert captured["body"]["symbol"] == "AAPL260117C00190000"
     assert "legs" not in captured["body"]
     assert captured["body"]["limit_price"] == "2.50"
+
+
+def test_map_alpaca_intermediate_order_statuses_as_submitted() -> None:
+    assert _map_alpaca_status("pending_new") is ExecutionState.SUBMITTED
+    assert _map_alpaca_status("accepted_for_bidding") is ExecutionState.SUBMITTED
+    assert _map_alpaca_status("pending_replace") is ExecutionState.SUBMITTED
 
 
 def test_submit_order_fails_closed_on_risk_rejection() -> None:

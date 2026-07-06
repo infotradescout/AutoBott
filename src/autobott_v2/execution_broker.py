@@ -133,10 +133,19 @@ def _map_alpaca_status(status: str | None) -> ExecutionState:
     return {
         "new": ExecutionState.SUBMITTED,
         "accepted": ExecutionState.SUBMITTED,
+        "accepted_for_bidding": ExecutionState.SUBMITTED,
+        "pending_new": ExecutionState.SUBMITTED,
+        "pending_replace": ExecutionState.SUBMITTED,
+        "pending_cancel": ExecutionState.SUBMITTED,
+        "stopped": ExecutionState.SUBMITTED,
+        "calculated": ExecutionState.SUBMITTED,
         "partially_filled": ExecutionState.PARTIALLY_FILLED,
         "filled": ExecutionState.FILLED,
         "canceled": ExecutionState.CANCELED,
+        "expired": ExecutionState.CANCELED,
+        "replaced": ExecutionState.CANCELED,
         "rejected": ExecutionState.REJECTED,
+        "suspended": ExecutionState.REJECTED,
     }.get(normalized, ExecutionState.FAILED)
 
 
