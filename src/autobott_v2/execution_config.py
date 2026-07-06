@@ -90,7 +90,7 @@ def load_alpaca_execution_config() -> AlpacaExecutionConfig:
     )
     paper_trade_all_passed_signals = _normalize_bool(
         os.getenv("AUTOBOTT_PAPER_TRADE_ALL_PASSED_SIGNALS"),
-        default=False,
+        default=True,
     )
 
     return AlpacaExecutionConfig(

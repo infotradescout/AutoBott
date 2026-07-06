@@ -56,17 +56,17 @@ def load_session_supervisor_config() -> SessionSupervisorConfig:
     symbols = [item.strip().upper() for item in (os.getenv("AUTOBOTT_SESSION_SYMBOLS") or "SPY").split(",") if item.strip()]
     raw_max_cycles = os.getenv("AUTOBOTT_SESSION_MAX_CYCLES")
     return SessionSupervisorConfig(
-        enabled=_normalize_bool(os.getenv("AUTOBOTT_SESSION_AUTOSTART"), default=False),
+        enabled=_normalize_bool(os.getenv("AUTOBOTT_SESSION_AUTOSTART"), default=True),
         symbols=symbols,
         interval_seconds=int(os.getenv("AUTOBOTT_SESSION_INTERVAL_SECONDS", "300")),
         max_cycles=int(raw_max_cycles) if raw_max_cycles else None,
         quantity=int(os.getenv("AUTOBOTT_SESSION_QUANTITY", "1")),
         position_count=int(os.getenv("AUTOBOTT_SESSION_POSITION_COUNT", "0")),
         daily_pnl=float(os.getenv("AUTOBOTT_SESSION_DAILY_PNL", "0.0")),
-        start_time=_normalize_time_text(os.getenv("AUTOBOTT_SESSION_START_TIME")),
-        end_time=_normalize_time_text(os.getenv("AUTOBOTT_SESSION_END_TIME")),
+        start_time=_normalize_time_text(os.getenv("AUTOBOTT_SESSION_START_TIME") or "09:35"),
+        end_time=_normalize_time_text(os.getenv("AUTOBOTT_SESSION_END_TIME") or "15:55"),
         market_timezone=(os.getenv("AUTOBOTT_SESSION_MARKET_TIMEZONE") or "America/New_York").strip() or "America/New_York",
-        arm_paper_execution_on_start=_normalize_bool(os.getenv("AUTOBOTT_SESSION_ARM_PAPER_EXECUTION"), default=False),
+        arm_paper_execution_on_start=_normalize_bool(os.getenv("AUTOBOTT_SESSION_ARM_PAPER_EXECUTION"), default=True),
     )
 
 
