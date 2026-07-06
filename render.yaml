@@ -33,7 +33,7 @@ services:
       - key: AUTOBOTT_PAPER_ONLY
         value: "true"
       - key: AUTOBOTT_DASHBOARD_AUTH_TOKEN
-        sync: false
+        generateValue: true
       - key: AUTOBOTT_SESSION_AUTOSTART
         value: "true"
       - key: AUTOBOTT_SESSION_SYMBOLS

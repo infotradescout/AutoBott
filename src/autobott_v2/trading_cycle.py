@@ -11,6 +11,7 @@ from .execution_broker import AlpacaExecutionBroker
 from .execution_journal import append_execution_outcome
 from .execution_reconciler import reconcile_open_positions
 from .execution_orchestrator import ExecutionRejectedError, submit_decision_to_broker
+from .phase1_alpaca_client import AlpacaPaperClient
 from .phase1_engine import build_decision_card
 from .phase1_models import DecisionCard, DecisionStatus
 from .phase1_snapshot_capture import CaptureRules, capture_symbol_snapshot
@@ -76,6 +77,7 @@ def run_trading_cycle(
     started_at = datetime.now(tz=UTC)
     runtime_state = load_runtime_state()
     resolved_broker = broker or AlpacaExecutionBroker()
+    resolved_data_client = data_client or AlpacaPaperClient()
     resolved_corpus_root = Path(corpus_root) if corpus_root is not None else phase1_snapshots_root()
     snapshot_time = scheduled_market_time or datetime.now(tz=UTC)
     captured_at = captured_at_utc or datetime.now(tz=UTC)
@@ -109,7 +111,7 @@ def run_trading_cycle(
             corpus_type="production_capture" if resolved_broker.config.environment.value == "live" else "paper_capture",
             market_timezone="America/New_York",
             volatility_proxy_symbol="UVXY",
-            data_client=data_client,
+            data_client=resolved_data_client,
             rules=resolved_rules,
         )
         snapshot_paths.append(snapshot_path)

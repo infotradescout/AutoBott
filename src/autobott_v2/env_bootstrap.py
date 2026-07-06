@@ -34,9 +34,13 @@ def configure_local_paper_runtime_defaults(*, repo_root: Path | None = None) -> 
     os.environ.setdefault("AUTOBOTT_SESSION_MARKET_TIMEZONE", "America/New_York")
     os.environ.setdefault("AUTOBOTT_SESSION_ARM_PAPER_EXECUTION", "true")
     os.environ.setdefault("AUTOBOTT_DASHBOARD_AUTH_TOKEN", "autobott-local")
-    os.environ.setdefault("AUTOBOTT_DATA_ROOT", str(root / "data"))
-    os.environ.setdefault("AUTOBOTT_ARTIFACTS_ROOT", str(root / "artifacts"))
-    os.environ.setdefault("AUTOBOTT_GATE_PATH", str(root / "data" / "PHASE1_CYCLE_GATE.json"))
+    # Hosted env files (downloaded from the Render dashboard) carry Render's
+    # disk-mounted /var/data paths. Local runs must always use the repo-relative
+    # roots regardless of what the loaded env file says, so these are forced
+    # rather than defaulted.
+    os.environ["AUTOBOTT_DATA_ROOT"] = str(root / "data")
+    os.environ["AUTOBOTT_ARTIFACTS_ROOT"] = str(root / "artifacts")
+    os.environ["AUTOBOTT_GATE_PATH"] = str(root / "data" / "PHASE1_CYCLE_GATE.json")
     os.environ.setdefault("HOST", "127.0.0.1")
     os.environ.setdefault("PORT", "8000")
     os.environ.pop("ALPACA_LIVE_API_KEY", None)
