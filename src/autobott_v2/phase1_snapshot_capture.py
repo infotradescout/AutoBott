@@ -205,13 +205,12 @@ def capture_symbol_snapshot(
     lookback_start = as_of_utc - timedelta(minutes=max(40, rules.lookback_bars + 5))
     bars: dict[str, list[dict[str, Any]]] = {}
     for bar_symbol in bar_symbols:
-        bars.update(
-            data_client.get_stock_bars(
-                [bar_symbol],
-                start=lookback_start,
-                end=as_of_utc,
-                limit=rules.lookback_bars,
-            )
+        bars[bar_symbol.upper()] = _fetch_stock_bars_with_retries(
+            data_client,
+            bar_symbol,
+            start=lookback_start,
+            end=as_of_utc,
+            lookback_bars=rules.lookback_bars,
         )
     quotes = data_client.get_latest_stock_quotes(bar_symbols)
     option_snapshots = data_client.get_option_chain_snapshots(symbol)
@@ -290,6 +289,40 @@ def capture_symbol_snapshot(
         encoding="utf-8",
     )
     return str(snapshot_path)
+
+
+def _fetch_stock_bars_with_retries(
+    data_client: Any,
+    symbol: str,
+    *,
+    start: datetime,
+    end: datetime,
+    lookback_bars: int,
+) -> list[dict[str, Any]]:
+    symbol_key = symbol.upper()
+    best_rows: list[dict[str, Any]] = []
+    windows = [
+        start,
+        end - timedelta(minutes=max(90, lookback_bars * 3)),
+        end - timedelta(minutes=max(180, lookback_bars * 6)),
+        end - timedelta(minutes=max(390, lookback_bars * 12)),
+    ]
+    for window_start in windows:
+        try:
+            payload = data_client.get_stock_bars(
+                [symbol_key],
+                start=window_start,
+                end=end,
+                limit=lookback_bars,
+            )
+        except Exception:
+            continue
+        rows = list(payload.get(symbol_key, []))
+        if len(rows) > len(best_rows):
+            best_rows = rows
+        if len(rows) >= 30:
+            return rows
+    return best_rows
 
 
 def write_snapshot_day_manifest(

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from datetime import UTC, datetime, timedelta, timezone
+from pathlib import Path
 
 from autobott_v2.phase1_snapshot_capture import CaptureRules, capture_snapshot_session, capture_symbol_snapshot, write_snapshot_day_manifest
 
@@ -43,8 +44,21 @@ class FakeCaptureClient:
         }
 
 
+class ShortFirstContextClient(FakeCaptureClient):
+    def __init__(self) -> None:
+        self.calls_by_symbol = {}
+
+    def get_stock_bars(self, symbols, *, start, end, timeframe="1Min", limit=35):
+        symbol = symbols[0].upper()
+        self.calls_by_symbol[symbol] = self.calls_by_symbol.get(symbol, 0) + 1
+        payload = super().get_stock_bars(symbols, start=start, end=end, timeframe=timeframe, limit=limit)
+        if symbol == "UVXY" and self.calls_by_symbol[symbol] == 1:
+            payload[symbol] = payload[symbol][:2]
+        return payload
+
+
 def _base_price(symbol: str) -> float:
-    return {"SPY": 600.0, "QQQ": 520.0, "VIXY": 16.0}.get(symbol.upper(), 600.0)
+    return {"SPY": 600.0, "QQQ": 520.0, "VIXY": 16.0, "UVXY": 18.0}.get(symbol.upper(), 600.0)
 
 
 def _option_snapshot(expiration: str, option_type: str, strike: float, delta: float, bid: float, ask: float):
@@ -185,3 +199,23 @@ def test_snapshot_capture_detects_missing_intervals_after_finalize(tmp_path) -> 
     manifest = write_snapshot_day_manifest(tmp_path / "2026-06-30" / "SPY", trading_date="2026-06-30", symbol="SPY", capture_interval_seconds=60)
 
     assert manifest["missing_intervals"] == ["09:31:00"]
+
+
+def test_snapshot_capture_retries_short_context_bar_response(tmp_path) -> None:
+    client = ShortFirstContextClient()
+    snapshot_path = capture_symbol_snapshot(
+        symbol="SPY",
+        corpus_root=tmp_path,
+        scheduled_market_time=datetime(2026, 6, 30, 10, 35, tzinfo=timezone(timedelta(hours=-4))),
+        captured_at_utc=datetime(2026, 6, 30, 14, 35, tzinfo=UTC),
+        corpus_type="paper_capture",
+        market_timezone="America/New_York",
+        volatility_proxy_symbol="UVXY",
+        data_client=client,
+        rules=CaptureRules(),
+    )
+
+    snapshot = json.loads(Path(snapshot_path).read_text(encoding="utf-8"))
+
+    assert client.calls_by_symbol["UVXY"] == 2
+    assert len(snapshot["context"]["vix_bars"]) == 35
