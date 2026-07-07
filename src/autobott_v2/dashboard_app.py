@@ -74,7 +74,8 @@ def handle_request(method: str, path: str, headers: dict[str, str], body: bytes)
     if path == "/":
         return 200, "text/html; charset=utf-8", _dashboard_html()
     if path == "/api/health":
-        return 200, "application/json; charset=utf-8", _health_payload()
+        payload = _health_payload()
+        return (200 if payload["ok"] else 503), "application/json; charset=utf-8", payload
     if path.startswith("/api/"):
         _require_auth(headers)
         if path == "/api/safety" and method == "GET":
@@ -137,12 +138,37 @@ def handle_request(method: str, path: str, headers: dict[str, str], body: bytes)
 
 
 def _health_payload() -> JsonDict:
-    return {
-        "ok": True,
+    healthy, detail = _session_watchdog_status()
+    payload: JsonDict = {
+        "ok": healthy,
         "app": "autobott-phase1-dashboard",
         "timestamp": datetime.now(UTC).isoformat(),
         "version": os.getenv("RENDER_GIT_COMMIT") or "dev",
     }
+    if detail:
+        payload["session_supervisor"] = detail
+    return payload
+
+
+def _session_watchdog_status() -> tuple[bool, JsonDict | None]:
+    # The session loop runs forever once started (see session_supervisor.py);
+    # the only way it has a started_at but isn't alive is a crash that
+    # escaped the loop's own error handling. Autostart only fires once, so a
+    # dead loop otherwise leaves every open position unmonitored -- stop-loss
+    # and trailing-stop exits included -- for the rest of the trading day.
+    # Failing the health check here lets Render's own restart-on-unhealthy
+    # behavior re-arm the supervisor via main()'s autostart on the next boot.
+    try:
+        status = session_supervisor_status()
+    except Exception:
+        return True, None
+    state = status.get("state") or {}
+    config = status.get("config") or {}
+    if not config.get("enabled"):
+        return True, None
+    if state.get("started_at") and not status.get("thread_alive"):
+        return False, {"stalled": True, "last_error": state.get("last_error")}
+    return True, None
 
 
 def _safety_payload() -> JsonDict:

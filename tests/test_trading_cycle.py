@@ -468,7 +468,11 @@ def test_run_trading_cycle_paper_trade_through_allows_multiple_attempts(tmp_path
     assert broker.open_positions_seen == [0, 1, 2, 3]
 
 
-def test_run_trading_cycle_paper_opportunistic_mode_overrides_soft_spread_block(tmp_path, monkeypatch) -> None:
+def test_run_trading_cycle_paper_opportunistic_mode_does_not_override_spread_block(tmp_path, monkeypatch) -> None:
+    # Liquidity is a hard floor, not a discovery-mode toggle: a contract wide
+    # enough to be BLOCKED_BY_SPREAD under the strict engine bleeds the same
+    # real cost in paper as it would live, so opportunistic mode must not
+    # rescue it. See _paper_opportunistic_rules().
     monkeypatch.delenv("AUTOBOTT_PAPER_OPPORTUNISTIC_ENTRIES", raising=False)
     save_runtime_state(default_runtime_state(), state_path=tmp_path / "runtime_state.json")
     original = trading_cycle.load_runtime_state
@@ -492,12 +496,10 @@ def test_run_trading_cycle_paper_opportunistic_mode_overrides_soft_spread_block(
         trading_cycle.load_open_positions = original_positions
 
     assert result.decisions[0]["decision"] == "BLOCKED_BY_SPREAD"
-    assert result.decisions[1]["decision"] == "TRADE_CANDIDATE"
-    assert "paper_opportunistic_discovery" in result.decisions[1]["reason_codes"]
-    assert result.scanner_candidates_count == 1
-    assert result.trade_attempted_count == 1
-    assert len(result.orders_submitted) == 1
-    assert "paper_opportunistic_override" in [outcome["disposition"] for outcome in result.execution_outcomes]
+    assert len(result.decisions) == 1
+    assert result.scanner_candidates_count == 0
+    assert result.trade_attempted_count == 0
+    assert result.orders_submitted == []
 
 
 def test_run_trading_cycle_paper_opportunistic_mode_can_be_disabled(tmp_path, monkeypatch) -> None:

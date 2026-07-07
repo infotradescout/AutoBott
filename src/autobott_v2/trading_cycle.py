@@ -543,13 +543,20 @@ def _paper_opportunistic_mode_enabled() -> bool:
 
 
 def _paper_opportunistic_rules() -> Phase1Rules:
+    # Discovery mode relaxes signal-strength gates (confidence, direction score,
+    # delta range) to generate more paper reps -- but it must never relax
+    # liquidity below the strict engine's floor. A thin, wide-spread contract
+    # bleeds the same real bid/ask cost in paper as it would live; the strict
+    # defaults (spread<=18%, OI>=100, volume>=10) are the actual floor, not a
+    # discovery-mode toggle.
+    strict_defaults = Phase1Rules()
     return Phase1Rules(
         min_direction_score=0.20,
         min_volatility_score=-1.0,
         min_confidence=0.12,
-        max_spread_pct=0.40,
-        min_open_interest=1,
-        min_contract_volume=0,
+        max_spread_pct=strict_defaults.max_spread_pct,
+        min_open_interest=strict_defaults.min_open_interest,
+        min_contract_volume=strict_defaults.min_contract_volume,
         min_abs_delta=0.15,
         max_abs_delta=0.85,
         intraday_min_abs_delta=0.20,
@@ -577,6 +584,7 @@ def _paper_discovery_contract(
         and contract.ask > 0
         and contract.ask >= contract.bid
         and contract.mid <= _paper_discovery_max_contract_price()
+        and contract.spread_pct <= rules.max_spread_pct
     ]
     if not candidates:
         return None

@@ -221,6 +221,24 @@ def test_dashboard_health_returns_ok() -> None:
     assert payload["ok"] is True
 
 
+def test_dashboard_health_fails_when_session_loop_has_died(monkeypatch) -> None:
+    monkeypatch.setattr(
+        dashboard_app,
+        "session_supervisor_status",
+        lambda: {
+            "config": {"enabled": True},
+            "state": {"started_at": "2026-07-07T14:00:00+00:00", "running": False, "last_error": "boom"},
+            "thread_alive": False,
+        },
+    )
+    status, body = _invoke_app("GET", "/api/health")
+    payload = json.loads(body)
+    assert status.startswith("503")
+    assert payload["ok"] is False
+    assert payload["session_supervisor"]["stalled"] is True
+    assert payload["session_supervisor"]["last_error"] == "boom"
+
+
 def test_dashboard_safety_reports_live_locked(monkeypatch, tmp_path) -> None:
     _auth_env(monkeypatch, tmp_path)
     monkeypatch.setenv("ALPACA_ENV", "paper")
