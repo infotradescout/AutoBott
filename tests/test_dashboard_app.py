@@ -526,6 +526,47 @@ def test_dashboard_account_positions_endpoint_returns_pl(monkeypatch, tmp_path) 
     assert payload["positions"][0]["unrealized_pl"] == "50.00"
 
 
+def test_dashboard_options_scout_ranks_profit_harvest_rows(monkeypatch, tmp_path) -> None:
+    _auth_env(monkeypatch, tmp_path)
+
+    class FakeConfig:
+        def validate(self):
+            return self
+
+    class FakeClient:
+        def __init__(self, config):
+            self.config = config
+
+        def get_positions(self):
+            return [
+                {
+                    "symbol": "SPY260703C00600000",
+                    "side": "long",
+                    "qty": "1",
+                    "avg_entry_price": "2.50",
+                    "current_price": "3.50",
+                    "unrealized_pl": "100.00",
+                    "unrealized_plpc": "0.40",
+                }
+            ]
+
+        def get_orders(self, *, status, limit, direction="desc"):
+            return []
+
+    monkeypatch.setattr(dashboard_app, "load_alpaca_paper_config", lambda: FakeConfig())
+    monkeypatch.setattr(dashboard_app, "AlpacaPaperClient", FakeClient)
+    monkeypatch.setattr(dashboard_app, "load_decision_cards", lambda limit=10: [])
+
+    status, body = _invoke_app("GET", "/api/options/scout", token="dashboard-token")
+    payload = json.loads(body)
+
+    assert status.startswith("200")
+    assert payload["ok"] is True
+    assert payload["scout_rows"][0]["attention"] == "profit_exit_missing"
+    assert payload["scout_rows"][0]["profit_tier"] == "initial"
+    assert payload["scout_rows"][0]["target_exit_price"] == 3.85
+
+
 def test_dashboard_account_orders_endpoint_returns_history(monkeypatch, tmp_path) -> None:
     _auth_env(monkeypatch, tmp_path)
 
@@ -815,6 +856,8 @@ def test_frontend_contains_paper_only_live_locked_orders_disabled() -> None:
     assert "Session Supervisor" in body
     assert "Arm paper execution" in body
     assert "Paper Readiness" in body
+    assert "Volatility Scout" in body
+    assert "OPTIONS FEED" in body
 
 
 def test_frontend_contains_no_buy_sell_submit_order_controls() -> None:

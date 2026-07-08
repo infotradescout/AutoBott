@@ -28,6 +28,7 @@ from .trading_cycle import load_decision_cards, run_trading_cycle
 from .execution_broker import AlpacaExecutionBroker
 from .execution_reconciler import reconcile_open_positions
 from .exit_orchestrator import cancel_open_order, replace_open_order, submit_exit_for_position
+from .position_monitor import load_position_monitor_rules
 from .position_store import load_open_positions, position_store_path
 from .runtime_control import (
     arm_paper_execution,
@@ -90,6 +91,8 @@ def handle_request(method: str, path: str, headers: dict[str, str], body: bytes)
             return 200, "application/json; charset=utf-8", _account_positions_payload()
         if path == "/api/account/orders" and method == "GET":
             return 200, "application/json; charset=utf-8", _account_orders_payload()
+        if path == "/api/options/scout" and method == "GET":
+            return 200, "application/json; charset=utf-8", _options_scout_payload()
         if path == "/api/corpus/latest" and method == "GET":
             return 200, "application/json; charset=utf-8", _latest_corpus_payload()
         if path == "/api/campaign/latest" and method == "GET":
@@ -457,6 +460,186 @@ def _account_orders_payload() -> JsonDict:
             for order in orders
         ],
     }
+
+
+def _options_scout_payload() -> JsonDict:
+    config = load_alpaca_paper_config()
+    try:
+        config.validate()
+    except Exception as exc:
+        return {"ok": False, "status": "config_invalid", "detail": str(exc)}
+    client = AlpacaPaperClient(config)
+    try:
+        positions = client.get_positions()
+        orders = client.get_orders(status="open", limit=100)
+    except Exception as exc:
+        return {"ok": False, "status": "alpaca_request_failed", "detail": str(exc)}
+
+    rules = load_position_monitor_rules()
+    pending_exits = _pending_scout_exits_by_symbol(orders)
+    rows: list[JsonDict] = []
+    for position in positions:
+        symbol = str(position.get("symbol") or "").upper()
+        if not symbol:
+            continue
+        plpc = _float_or_zero(position.get("unrealized_plpc"))
+        current_price = _float_or_zero(position.get("current_price"))
+        pending_exit = pending_exits.get(symbol)
+        tier = _scout_profit_tier(plpc, rules)
+        target_price = _scout_target_price(plpc, current_price, rules)
+        attention = _scout_position_attention(plpc, pending_exit=pending_exit, tier=tier, rules=rules)
+        rows.append(
+            {
+                "source": "open_position",
+                "symbol": symbol,
+                **_option_symbol_parts(symbol),
+                "side": position.get("side"),
+                "qty": position.get("qty"),
+                "current_price": current_price,
+                "avg_entry_price": _float_or_zero(position.get("avg_entry_price")),
+                "unrealized_pl": _float_or_zero(position.get("unrealized_pl")),
+                "unrealized_plpc": plpc,
+                "profit_tier": tier,
+                "target_exit_price": target_price,
+                "pending_exit_order_id": pending_exit.get("id") if pending_exit else None,
+                "pending_exit_limit_price": _float_or_none(pending_exit.get("limit_price")) if pending_exit else None,
+                "attention": attention,
+                "score": _scout_attention_score(attention, plpc),
+            }
+        )
+
+    for row in _latest_decision_scout_rows():
+        rows.append(row)
+
+    ranked = sorted(rows, key=lambda row: (-float(row.get("score") or 0.0), str(row.get("symbol") or "")))
+    return {
+        "ok": True,
+        "status": "options_scout_ready",
+        "generated_at": datetime.now(UTC).isoformat(),
+        "mode": "paper_account_live_data_scout",
+        "scout_rows": ranked[:20],
+        "counts": {
+            "open_positions": len(positions),
+            "pending_exit_orders": len(pending_exits),
+            "rows": len(ranked),
+        },
+        "profit_ladder": {
+            "initial_pct": rules.take_profit_pct,
+            "tighten_pct": rules.take_profit_tighten_pct,
+            "harvest_pct": rules.take_profit_harvest_pct,
+            "force_exit_pct": rules.take_profit_force_exit_pct,
+        },
+    }
+
+
+def _pending_scout_exits_by_symbol(orders: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
+    pending: dict[str, dict[str, Any]] = {}
+    for order in orders:
+        symbol = str(order.get("symbol") or "").upper()
+        side = str(order.get("side") or "").lower()
+        status = str(order.get("status") or "").lower()
+        if symbol and side == "sell" and status in {"new", "accepted", "partially_filled", "pending_new", "pending_replace"}:
+            pending.setdefault(symbol, order)
+    return pending
+
+
+def _scout_profit_tier(plpc: float, rules: Any) -> str:
+    if plpc >= rules.take_profit_force_exit_pct:
+        return "force_exit"
+    if plpc >= rules.take_profit_harvest_pct:
+        return "harvest"
+    if plpc >= rules.take_profit_tighten_pct:
+        return "tighten"
+    if plpc >= rules.take_profit_pct:
+        return "initial"
+    if plpc >= rules.trailing_activation_pct:
+        return "trail_watch"
+    return "monitor"
+
+
+def _scout_target_price(plpc: float, current_price: float, rules: Any) -> float | None:
+    if current_price <= 0 or plpc < rules.take_profit_pct:
+        return None
+    if plpc >= rules.take_profit_force_exit_pct:
+        return current_price
+    if plpc >= rules.take_profit_harvest_pct:
+        factor = rules.take_profit_harvest_limit_price_factor
+    elif plpc >= rules.take_profit_tighten_pct:
+        factor = rules.take_profit_tight_limit_price_factor
+    else:
+        factor = rules.take_profit_limit_price_factor
+    return round(current_price * factor, 2)
+
+
+def _scout_position_attention(plpc: float, *, pending_exit: dict[str, Any] | None, tier: str, rules: Any) -> str:
+    if tier == "force_exit":
+        return "force_exit_due"
+    if plpc >= rules.take_profit_pct and pending_exit is None:
+        return "profit_exit_missing"
+    if plpc >= rules.take_profit_pct and pending_exit is not None:
+        return "profit_exit_working"
+    if plpc >= rules.trailing_activation_pct:
+        return "winner_trailing"
+    if plpc <= -abs(rules.stop_loss_pct):
+        return "stop_loss_due"
+    return "watch"
+
+
+def _scout_attention_score(attention: str, plpc: float) -> float:
+    base = {
+        "force_exit_due": 100.0,
+        "stop_loss_due": 95.0,
+        "profit_exit_missing": 85.0,
+        "profit_exit_working": 70.0,
+        "winner_trailing": 45.0,
+        "decision_candidate": 35.0,
+        "wide_spread_candidate": 30.0,
+        "watch": 10.0,
+    }.get(attention, 5.0)
+    return round(base + min(20.0, abs(plpc) * 10.0), 4)
+
+
+def _latest_decision_scout_rows() -> list[JsonDict]:
+    rows: list[JsonDict] = []
+    for record in load_decision_cards(limit=10):
+        decision = record.get("decision_card", record)
+        contract = decision.get("selected_contract") or {}
+        option_symbol = str(contract.get("option_symbol") or "")
+        if not option_symbol:
+            continue
+        spread_pct = _float_or_zero(contract.get("spread_pct"))
+        iv = _float_or_zero(contract.get("implied_volatility"))
+        attention = "wide_spread_candidate" if spread_pct >= 0.12 else "decision_candidate"
+        rows.append(
+            {
+                "source": "latest_decision",
+                "symbol": option_symbol,
+                **_option_symbol_parts(option_symbol),
+                "ticker": decision.get("ticker"),
+                "decision": decision.get("decision"),
+                "confidence_score": decision.get("confidence_score"),
+                "spread_pct": spread_pct,
+                "implied_volatility": iv,
+                "mid": contract.get("mid"),
+                "attention": attention,
+                "score": _scout_attention_score(attention, 0.0),
+            }
+        )
+    return rows
+
+
+def _float_or_zero(value: Any) -> float:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _float_or_none(value: Any) -> float | None:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
 
 
 def _option_symbol_parts(symbol: str) -> JsonDict:
@@ -1124,6 +1307,10 @@ def _dashboard_html() -> str:
             <div class="panel-body" id="account-summary"></div>
           </section>
           <section class="panel">
+            <div class="panel-head"><h3>Volatility Scout</h3><span class="badge warn">OPTIONS FEED</span></div>
+            <div class="panel-body" id="options-scout"></div>
+          </section>
+          <section class="panel">
             <div class="panel-head"><h3>Open Positions</h3><span class="badge info">P/L</span></div>
             <div class="panel-body" id="account-positions"></div>
           </section>
@@ -1502,6 +1689,40 @@ def _dashboard_html() -> str:
         ${detailsBlock(payload)}`;
     }
 
+    function renderOptionsScout(payload) {
+      if (!payload.ok) {
+        return emptyState('Scout unavailable', payload.detail || 'Could not load options scout feed.');
+      }
+      const rows = payload.scout_rows || [];
+      const feedRows = rows.slice(0, 8).map((row) => {
+        const attention = String(row.attention || 'watch');
+        const tone = attention.includes('force') || attention.includes('stop') ? 'danger' : attention.includes('missing') || attention.includes('wide') ? 'warn' : attention.includes('working') ? 'safe' : 'info';
+        const plpc = row.unrealized_plpc == null ? 'n/a' : `${(Number(row.unrealized_plpc) * 100).toFixed(1)}%`;
+        return `<tr>
+          <td><span class="mono">${escapeHtml(row.symbol || 'n/a')}</span></td>
+          <td>${statusBadge(escapeHtml(attention.replaceAll('_', ' ')).toUpperCase(), tone)}</td>
+          <td>${escapeHtml(row.profit_tier || row.decision || 'n/a')}</td>
+          <td>${plpc}</td>
+          <td>${formatMoney(row.current_price ?? row.mid)}</td>
+          <td>${formatMoney(row.target_exit_price)}</td>
+          <td>${row.pending_exit_order_id ? `<span class="mono">${escapeHtml(row.pending_exit_order_id)}</span>` : 'none'}</td>
+        </tr>`;
+      }).join('');
+      const ladder = payload.profit_ladder || {};
+      return `
+        ${metricList([
+          ['Mode', escapeHtml(payload.mode || 'options scout')],
+          ['Rows', escapeHtml(payload.counts?.rows ?? 0)],
+          ['Open positions', escapeHtml(payload.counts?.open_positions ?? 0)],
+          ['Ladder', `${Number(ladder.initial_pct || 0) * 100}% / ${Number(ladder.tighten_pct || 0) * 100}% / ${Number(ladder.harvest_pct || 0) * 100}% / ${Number(ladder.force_exit_pct || 0) * 100}%`]
+        ])}
+        <table class="table">
+          <thead><tr><th>Contract</th><th>Signal</th><th>Tier</th><th>P/L</th><th>Now</th><th>Target</th><th>Pending</th></tr></thead>
+          <tbody>${feedRows || '<tr><td colspan="7">No scout rows</td></tr>'}</tbody>
+        </table>
+        ${detailsBlock(payload)}`;
+    }
+
     function renderPaperReadiness(payload) {
       const tone = payload.paper_execution_ready ? 'safe' : payload.ok ? 'warn' : 'warn';
       return `
@@ -1705,7 +1926,8 @@ def _dashboard_html() -> str:
         callApi('/api/reports/gate-candidate/latest'),
         callApi('/api/reports/decision-lab/latest'),
         callApi('/api/account/positions'),
-        callApi('/api/account/orders')
+        callApi('/api/account/orders'),
+        callApi('/api/options/scout')
       ]);
       renderProtectedPanel('safety-status', protectedResults[0], renderSafety);
       renderProtectedPanel('alpaca-status', protectedResults[1], renderAlpaca);
@@ -1720,6 +1942,7 @@ def _dashboard_html() -> str:
       renderProtectedPanel('account-summary', protectedResults[10], renderAccountSummary);
       renderProtectedPanel('account-positions', protectedResults[10], renderAccountPositions);
       renderProtectedPanel('account-orders', protectedResults[11], renderAccountOrders);
+      renderProtectedPanel('options-scout', protectedResults[12], renderOptionsScout);
       renderPersistenceStatus();
       syncActionState();
     }
