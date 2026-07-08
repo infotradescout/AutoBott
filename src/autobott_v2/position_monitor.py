@@ -24,8 +24,13 @@ def _normalize_bool(value: str | None, *, default: bool = False) -> bool:
 class PositionMonitorRules:
     enabled: bool = True
     take_profit_pct: float = 0.30
+    take_profit_tighten_pct: float = 0.50
+    take_profit_harvest_pct: float = 0.80
+    take_profit_force_exit_pct: float = 1.20
     take_profit_limit_price_factor: float = 1.10
     take_profit_reprice_factor: float = 1.03
+    take_profit_tight_limit_price_factor: float = 1.05
+    take_profit_harvest_limit_price_factor: float = 1.02
     trailing_activation_pct: float = 0.15
     trailing_drawdown_pct: float = 0.10
     stop_loss_pct: float = 0.22
@@ -37,8 +42,13 @@ def load_position_monitor_rules() -> PositionMonitorRules:
     return PositionMonitorRules(
         enabled=_normalize_bool(os.getenv("AUTOBOTT_POSITION_MONITOR_ENABLED"), default=True),
         take_profit_pct=float(os.getenv("AUTOBOTT_EXIT_TAKE_PROFIT_PCT", "0.30")),
+        take_profit_tighten_pct=float(os.getenv("AUTOBOTT_EXIT_TAKE_PROFIT_TIGHTEN_PCT", "0.50")),
+        take_profit_harvest_pct=float(os.getenv("AUTOBOTT_EXIT_TAKE_PROFIT_HARVEST_PCT", "0.80")),
+        take_profit_force_exit_pct=float(os.getenv("AUTOBOTT_EXIT_TAKE_PROFIT_FORCE_EXIT_PCT", "1.20")),
         take_profit_limit_price_factor=float(os.getenv("AUTOBOTT_TAKE_PROFIT_LIMIT_PRICE_FACTOR", "1.10")),
         take_profit_reprice_factor=float(os.getenv("AUTOBOTT_TAKE_PROFIT_REPRICE_FACTOR", "1.03")),
+        take_profit_tight_limit_price_factor=float(os.getenv("AUTOBOTT_TAKE_PROFIT_TIGHT_LIMIT_PRICE_FACTOR", "1.05")),
+        take_profit_harvest_limit_price_factor=float(os.getenv("AUTOBOTT_TAKE_PROFIT_HARVEST_LIMIT_PRICE_FACTOR", "1.02")),
         trailing_activation_pct=float(os.getenv("AUTOBOTT_EXIT_TRAILING_ACTIVATION_PCT", "0.15")),
         trailing_drawdown_pct=float(os.getenv("AUTOBOTT_EXIT_TRAILING_DRAWDOWN_PCT", "0.10")),
         stop_loss_pct=float(os.getenv("AUTOBOTT_EXIT_STOP_LOSS_PCT", "0.22")),
@@ -185,6 +195,7 @@ def _monitor_action(
             "current_price": current_price,
         }
     if unrealized_plpc >= rules.take_profit_pct:
+        tier = _take_profit_tier(unrealized_plpc, rules)
         return {
             "reason": "take_profit",
             "symbol": symbol,
@@ -192,6 +203,7 @@ def _monitor_action(
             "unrealized_plpc": unrealized_plpc,
             "current_price": current_price,
             "peak_unrealized_plpc": peak_plpc,
+            "take_profit_tier": tier,
         }
     if peak_plpc >= rules.trailing_activation_pct and unrealized_plpc <= peak_plpc - rules.trailing_drawdown_pct:
         return {
@@ -215,8 +227,14 @@ def _submit_monitor_exit(
 ) -> ExecutionOrder:
     symbol = action["symbol"]
     is_take_profit = action["reason"] == "take_profit"
-    limit_price = _exit_limit_price(float(action["current_price"]), rules=rules, take_profit=is_take_profit)
-    order_type = OrderType.LIMIT if is_take_profit else OrderType.MARKET
+    limit_price = _exit_limit_price(
+        float(action["current_price"]),
+        rules=rules,
+        take_profit=is_take_profit,
+        unrealized_plpc=float(action.get("unrealized_plpc") or 0.0),
+    )
+    force_profit_exit = action.get("take_profit_tier") == "force_exit"
+    order_type = OrderType.MARKET if force_profit_exit or not is_take_profit else OrderType.LIMIT
     intent = TradeIntent(
         symbol=str(position.get("underlying") or _underlying_from_option_symbol(symbol) or symbol),
         option_symbol=symbol,
@@ -231,7 +249,8 @@ def _submit_monitor_exit(
         metadata={
             "position_monitor": True,
             "exit_reason": action["reason"],
-            "exit_order_style": "rich_limit" if is_take_profit else "urgent_market",
+            "exit_order_style": "urgent_market" if order_type is OrderType.MARKET else "profit_ladder_limit",
+            "take_profit_tier": action.get("take_profit_tier"),
             "unrealized_plpc": action["unrealized_plpc"],
         },
     )
@@ -247,6 +266,7 @@ def _submit_monitor_exit(
             "quantity": intent.quantity,
             "limit_price": intent.limit_price,
             "order_type": intent.order_type.value,
+            "take_profit_tier": action.get("take_profit_tier"),
             "unrealized_plpc": action["unrealized_plpc"],
             "state": order.state.value,
             "broker_order_id": order.broker_order_id,
@@ -284,7 +304,39 @@ def _handle_pending_take_profit_exit(
 ) -> dict[str, Any]:
     order_id = str(pending_exit.get("id") or pending_exit.get("broker_order_id") or "")
     current_limit = _float_or_none(pending_exit.get("limit_price"))
-    target_limit = _exit_limit_price(float(action["current_price"]), rules=rules, take_profit=True, reprice=True)
+    target_limit = _exit_limit_price(
+        float(action["current_price"]),
+        rules=rules,
+        take_profit=True,
+        reprice=True,
+        unrealized_plpc=float(action.get("unrealized_plpc") or 0.0),
+    )
+    if action.get("take_profit_tier") == "force_exit":
+        try:
+            if order_id and hasattr(broker, "cancel_order"):
+                broker.cancel_order(order_id)
+            order = _submit_forced_take_profit_exit(
+                action=action,
+                broker=broker,
+                rules=rules,
+                journal_path=journal_path,
+            )
+            return {
+                **action,
+                "reason": "take_profit_force_exit_submitted",
+                "submitted": True,
+                "canceled_pending_exit_order_id": order_id or None,
+                "broker_order_id": order.broker_order_id,
+                "state": order.state.value,
+            }
+        except Exception as exc:
+            return {
+                **action,
+                "reason": "take_profit_force_exit_failed",
+                "submitted": False,
+                "canceled_pending_exit_order_id": order_id or None,
+                "error": str(exc),
+            }
     result = {
         **action,
         "reason": "take_profit_exit_already_pending",
@@ -311,6 +363,7 @@ def _handle_pending_take_profit_exit(
                 "old_limit_price": current_limit,
                 "new_limit_price": target_limit,
                 "unrealized_plpc": action["unrealized_plpc"],
+                "take_profit_tier": action.get("take_profit_tier"),
                 "broker_order_id": result["broker_order_id"],
             },
             journal_path=journal_path,
@@ -326,13 +379,58 @@ def _exit_limit_price(
     *,
     rules: PositionMonitorRules,
     take_profit: bool,
+    unrealized_plpc: float = 0.0,
     reprice: bool = False,
 ) -> float:
     if take_profit:
-        factor = rules.take_profit_reprice_factor if reprice else rules.take_profit_limit_price_factor
+        factor = _take_profit_limit_factor(
+            unrealized_plpc=unrealized_plpc,
+            rules=rules,
+            reprice=reprice,
+        )
     else:
         factor = rules.trim_limit_price_factor
     return max(0.01, round(current_price * factor, 2))
+
+
+def _take_profit_tier(unrealized_plpc: float, rules: PositionMonitorRules) -> str:
+    if unrealized_plpc >= rules.take_profit_force_exit_pct:
+        return "force_exit"
+    if unrealized_plpc >= rules.take_profit_harvest_pct:
+        return "harvest"
+    if unrealized_plpc >= rules.take_profit_tighten_pct:
+        return "tighten"
+    return "initial"
+
+
+def _take_profit_limit_factor(
+    *,
+    unrealized_plpc: float,
+    rules: PositionMonitorRules,
+    reprice: bool,
+) -> float:
+    if reprice:
+        return rules.take_profit_reprice_factor
+    tier = _take_profit_tier(unrealized_plpc, rules)
+    if tier == "harvest":
+        return rules.take_profit_harvest_limit_price_factor
+    if tier == "tighten":
+        return rules.take_profit_tight_limit_price_factor
+    return rules.take_profit_limit_price_factor
+
+
+def _submit_forced_take_profit_exit(
+    *,
+    action: dict[str, Any],
+    broker: AlpacaExecutionBroker,
+    rules: PositionMonitorRules,
+    journal_path: str | None,
+) -> ExecutionOrder:
+    position = {
+        "symbol": action["symbol"],
+        "underlying": _underlying_from_option_symbol(action["symbol"]) or action["symbol"],
+    }
+    return _submit_monitor_exit(position, action=action, broker=broker, rules=rules, journal_path=journal_path)
 
 
 def _float_or_none(value: Any) -> float | None:

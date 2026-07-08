@@ -32,10 +32,20 @@ services:
         value: "25"
       - key: AUTOBOTT_EXIT_TAKE_PROFIT_PCT
         value: "0.30"
+      - key: AUTOBOTT_EXIT_TAKE_PROFIT_TIGHTEN_PCT
+        value: "0.50"
+      - key: AUTOBOTT_EXIT_TAKE_PROFIT_HARVEST_PCT
+        value: "0.80"
+      - key: AUTOBOTT_EXIT_TAKE_PROFIT_FORCE_EXIT_PCT
+        value: "1.20"
       - key: AUTOBOTT_TAKE_PROFIT_LIMIT_PRICE_FACTOR
         value: "1.10"
       - key: AUTOBOTT_TAKE_PROFIT_REPRICE_FACTOR
         value: "1.03"
+      - key: AUTOBOTT_TAKE_PROFIT_TIGHT_LIMIT_PRICE_FACTOR
+        value: "1.05"
+      - key: AUTOBOTT_TAKE_PROFIT_HARVEST_LIMIT_PRICE_FACTOR
+        value: "1.02"
       - key: AUTOBOTT_PAPER_ONLY
         value: "true"
       - key: AUTOBOTT_DASHBOARD_AUTH_TOKEN

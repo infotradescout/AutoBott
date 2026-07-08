@@ -119,10 +119,12 @@ def test_position_monitor_takes_profit_on_large_winner_before_reversal(tmp_path)
 
     assert result["actions"][0]["reason"] == "take_profit"
     assert result["actions"][0]["unrealized_plpc"] == 0.72
+    assert result["actions"][0]["take_profit_tier"] == "tighten"
     assert broker.submitted[0].option_symbol == "QQQ260708P00726000"
     assert broker.submitted[0].order_type.value == "limit"
-    assert broker.submitted[0].limit_price == 6.82
-    assert broker.submitted[0].metadata["exit_order_style"] == "rich_limit"
+    assert broker.submitted[0].limit_price == 6.51
+    assert broker.submitted[0].metadata["exit_order_style"] == "profit_ladder_limit"
+    assert broker.submitted[0].metadata["take_profit_tier"] == "tighten"
 
 
 def test_position_monitor_takes_profit_at_stricter_default_threshold(tmp_path) -> None:
@@ -138,7 +140,43 @@ def test_position_monitor_takes_profit_at_stricter_default_threshold(tmp_path) -
 
     assert result["actions"][0]["reason"] == "take_profit"
     assert result["actions"][0]["unrealized_plpc"] == 0.35
+    assert result["actions"][0]["take_profit_tier"] == "initial"
     assert broker.submitted[0].order_type.value == "limit"
+    assert broker.submitted[0].limit_price == 6.82
+
+
+def test_position_monitor_tightens_exit_ladder_for_harvest_winner(tmp_path) -> None:
+    save_runtime_state(default_runtime_state())
+    broker = FakeBroker([_position(unrealized_plpc="0.88")])
+
+    result = run_position_monitor(
+        broker=broker,
+        rules=PositionMonitorRules(),
+        journal_path=str(tmp_path / "journal.jsonl"),
+        trailing_state_path=str(tmp_path / "trailing_peaks.json"),
+    )
+
+    assert result["actions"][0]["reason"] == "take_profit"
+    assert result["actions"][0]["take_profit_tier"] == "harvest"
+    assert broker.submitted[0].order_type.value == "limit"
+    assert broker.submitted[0].limit_price == 6.32
+
+
+def test_position_monitor_force_exits_extreme_winner(tmp_path) -> None:
+    save_runtime_state(default_runtime_state())
+    broker = FakeBroker([_position(unrealized_plpc="1.25")])
+
+    result = run_position_monitor(
+        broker=broker,
+        rules=PositionMonitorRules(),
+        journal_path=str(tmp_path / "journal.jsonl"),
+        trailing_state_path=str(tmp_path / "trailing_peaks.json"),
+    )
+
+    assert result["actions"][0]["reason"] == "take_profit"
+    assert result["actions"][0]["take_profit_tier"] == "force_exit"
+    assert broker.submitted[0].order_type.value == "market"
+    assert broker.submitted[0].metadata["exit_order_style"] == "urgent_market"
 
 
 def test_position_monitor_does_not_duplicate_pending_take_profit_exit(tmp_path) -> None:
@@ -194,6 +232,35 @@ def test_position_monitor_reprices_rich_take_profit_exit_downward(tmp_path) -> N
     assert result["actions"][0]["reason"] == "take_profit_exit_repriced"
     assert broker.replaced == [{"id": "pending-exit-1", "limit_price": 6.39}]
     assert broker.submitted == []
+
+
+def test_position_monitor_cancels_pending_profit_exit_before_force_exit(tmp_path) -> None:
+    save_runtime_state(default_runtime_state())
+    broker = FakeBroker(
+        [_position(unrealized_plpc="1.25")],
+        orders=[
+            {
+                "id": "pending-exit-1",
+                "symbol": "QQQ260708P00726000",
+                "side": "sell",
+                "status": "new",
+                "limit_price": "6.82",
+            }
+        ],
+    )
+
+    result = run_position_monitor(
+        broker=broker,
+        rules=PositionMonitorRules(),
+        journal_path=str(tmp_path / "journal.jsonl"),
+        trailing_state_path=str(tmp_path / "trailing_peaks.json"),
+    )
+
+    assert result["actions"][0]["reason"] == "take_profit_force_exit_submitted"
+    assert result["actions"][0]["take_profit_tier"] == "force_exit"
+    assert result["actions"][0]["canceled_pending_exit_order_id"] == "pending-exit-1"
+    assert broker.canceled == ["pending-exit-1"]
+    assert broker.submitted[0].order_type.value == "market"
 
 
 def test_position_monitor_cancels_pending_profit_exit_before_urgent_stop(tmp_path) -> None:
