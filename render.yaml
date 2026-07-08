@@ -32,6 +32,10 @@ services:
         value: "25"
       - key: AUTOBOTT_EXIT_TAKE_PROFIT_PCT
         value: "0.30"
+      - key: AUTOBOTT_TAKE_PROFIT_LIMIT_PRICE_FACTOR
+        value: "1.10"
+      - key: AUTOBOTT_TAKE_PROFIT_REPRICE_FACTOR
+        value: "1.03"
       - key: AUTOBOTT_PAPER_ONLY
         value: "true"
       - key: AUTOBOTT_DASHBOARD_AUTH_TOKEN

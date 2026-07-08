@@ -37,6 +37,7 @@ The Render blueprint now bakes in the non-secret paper defaults:
 - session window `09:35` to `15:55` in `America/New_York`
 - paper execution armed on startup
 - position monitor takes profit at `+30%` unrealized option P/L by default
+- profitable exits use real `SELL_TO_CLOSE` limit orders at `1.10x` current option price, then reprice toward `1.03x` if an exit is already pending
 - disk-backed data, artifacts, and gate paths under `/var/data/autobott`
 
 ## Local Defaults

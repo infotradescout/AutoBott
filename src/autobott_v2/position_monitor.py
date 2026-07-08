@@ -24,6 +24,8 @@ def _normalize_bool(value: str | None, *, default: bool = False) -> bool:
 class PositionMonitorRules:
     enabled: bool = True
     take_profit_pct: float = 0.30
+    take_profit_limit_price_factor: float = 1.10
+    take_profit_reprice_factor: float = 1.03
     trailing_activation_pct: float = 0.15
     trailing_drawdown_pct: float = 0.10
     stop_loss_pct: float = 0.22
@@ -35,6 +37,8 @@ def load_position_monitor_rules() -> PositionMonitorRules:
     return PositionMonitorRules(
         enabled=_normalize_bool(os.getenv("AUTOBOTT_POSITION_MONITOR_ENABLED"), default=True),
         take_profit_pct=float(os.getenv("AUTOBOTT_EXIT_TAKE_PROFIT_PCT", "0.30")),
+        take_profit_limit_price_factor=float(os.getenv("AUTOBOTT_TAKE_PROFIT_LIMIT_PRICE_FACTOR", "1.10")),
+        take_profit_reprice_factor=float(os.getenv("AUTOBOTT_TAKE_PROFIT_REPRICE_FACTOR", "1.03")),
         trailing_activation_pct=float(os.getenv("AUTOBOTT_EXIT_TRAILING_ACTIVATION_PCT", "0.15")),
         trailing_drawdown_pct=float(os.getenv("AUTOBOTT_EXIT_TRAILING_DRAWDOWN_PCT", "0.10")),
         stop_loss_pct=float(os.getenv("AUTOBOTT_EXIT_STOP_LOSS_PCT", "0.22")),
@@ -89,6 +93,7 @@ def run_position_monitor(
     if not hasattr(resolved_broker, "list_open_positions"):
         return {"ok": True, "enabled": True, "checked": 0, "actions": []}
     positions = resolved_broker.list_open_positions()
+    pending_exits = _pending_exit_orders_by_symbol(resolved_broker)
     peaks = _load_trailing_peaks(state_path=trailing_state_path)
     open_symbols: set[str] = set()
     actions: list[dict[str, Any]] = []
@@ -99,7 +104,22 @@ def run_position_monitor(
         action = _monitor_action(position, resolved_rules, peaks)
         if action is None:
             continue
+        pending_exit = pending_exits.get(action["symbol"])
+        if action["reason"] == "take_profit" and pending_exit is not None:
+            actions.append(
+                _handle_pending_take_profit_exit(
+                    pending_exit,
+                    action=action,
+                    broker=resolved_broker,
+                    rules=resolved_rules,
+                    journal_path=journal_path,
+                )
+            )
+            continue
         try:
+            if action["reason"] in {"stop_loss", "trailing_stop"} and pending_exit is not None and hasattr(resolved_broker, "cancel_order"):
+                resolved_broker.cancel_order(str(pending_exit.get("id") or pending_exit.get("broker_order_id")))
+                action["canceled_pending_exit_order_id"] = pending_exit.get("id") or pending_exit.get("broker_order_id")
             order = _submit_monitor_exit(
                 position,
                 action=action,
@@ -194,7 +214,9 @@ def _submit_monitor_exit(
     journal_path: str | None,
 ) -> ExecutionOrder:
     symbol = action["symbol"]
-    limit_price = max(0.01, round(float(action["current_price"]) * rules.trim_limit_price_factor, 2))
+    is_take_profit = action["reason"] == "take_profit"
+    limit_price = _exit_limit_price(float(action["current_price"]), rules=rules, take_profit=is_take_profit)
+    order_type = OrderType.LIMIT if is_take_profit else OrderType.MARKET
     intent = TradeIntent(
         symbol=str(position.get("underlying") or _underlying_from_option_symbol(symbol) or symbol),
         option_symbol=symbol,
@@ -203,12 +225,13 @@ def _submit_monitor_exit(
         limit_price=limit_price,
         generated_at=datetime.now(tz=UTC),
         environment=broker.config.environment if hasattr(broker, "config") else BrokerEnvironment.PAPER,
-        order_type=OrderType.MARKET,
+        order_type=order_type,
         decision_id=f"monitor-{symbol}",
         thesis_id=f"monitor:{symbol}:{action['reason']}",
         metadata={
             "position_monitor": True,
             "exit_reason": action["reason"],
+            "exit_order_style": "rich_limit" if is_take_profit else "urgent_market",
             "unrealized_plpc": action["unrealized_plpc"],
         },
     )
@@ -223,6 +246,7 @@ def _submit_monitor_exit(
         payload={
             "quantity": intent.quantity,
             "limit_price": intent.limit_price,
+            "order_type": intent.order_type.value,
             "unrealized_plpc": action["unrealized_plpc"],
             "state": order.state.value,
             "broker_order_id": order.broker_order_id,
@@ -230,6 +254,92 @@ def _submit_monitor_exit(
         journal_path=journal_path,
     )
     return order
+
+
+def _pending_exit_orders_by_symbol(broker: Any) -> dict[str, dict[str, Any]]:
+    if not hasattr(broker, "list_orders"):
+        return {}
+    try:
+        orders = broker.list_orders(status="open", limit=100, direction="desc")
+    except Exception:
+        return {}
+    pending: dict[str, dict[str, Any]] = {}
+    for order in orders:
+        symbol = str(order.get("symbol") or "").upper()
+        side = str(order.get("side") or "").lower()
+        status = str(order.get("status") or "").lower()
+        if not symbol or side != "sell" or status not in {"new", "accepted", "partially_filled", "pending_new", "pending_replace"}:
+            continue
+        pending.setdefault(symbol, order)
+    return pending
+
+
+def _handle_pending_take_profit_exit(
+    pending_exit: dict[str, Any],
+    *,
+    action: dict[str, Any],
+    broker: AlpacaExecutionBroker,
+    rules: PositionMonitorRules,
+    journal_path: str | None,
+) -> dict[str, Any]:
+    order_id = str(pending_exit.get("id") or pending_exit.get("broker_order_id") or "")
+    current_limit = _float_or_none(pending_exit.get("limit_price"))
+    target_limit = _exit_limit_price(float(action["current_price"]), rules=rules, take_profit=True, reprice=True)
+    result = {
+        **action,
+        "reason": "take_profit_exit_already_pending",
+        "submitted": False,
+        "broker_order_id": order_id,
+        "existing_limit_price": current_limit,
+        "target_limit_price": target_limit,
+    }
+    if not order_id or current_limit is None or target_limit >= current_limit or not hasattr(broker, "replace_order"):
+        return result
+    try:
+        payload = broker.replace_order(order_id, limit_price=target_limit)
+        result["reason"] = "take_profit_exit_repriced"
+        result["replaced"] = True
+        result["broker_order_id"] = payload.get("id") or order_id
+        result["new_limit_price"] = target_limit
+        append_execution_outcome(
+            decision_id=f"monitor-{action['symbol']}",
+            thesis_id=f"monitor:{action['symbol']}:take_profit_reprice",
+            symbol=action["symbol"],
+            disposition="position_monitor_exit_repriced",
+            detail="take_profit",
+            payload={
+                "old_limit_price": current_limit,
+                "new_limit_price": target_limit,
+                "unrealized_plpc": action["unrealized_plpc"],
+                "broker_order_id": result["broker_order_id"],
+            },
+            journal_path=journal_path,
+        )
+    except Exception as exc:
+        result["replaced"] = False
+        result["error"] = str(exc)
+    return result
+
+
+def _exit_limit_price(
+    current_price: float,
+    *,
+    rules: PositionMonitorRules,
+    take_profit: bool,
+    reprice: bool = False,
+) -> float:
+    if take_profit:
+        factor = rules.take_profit_reprice_factor if reprice else rules.take_profit_limit_price_factor
+    else:
+        factor = rules.trim_limit_price_factor
+    return max(0.01, round(current_price * factor, 2))
+
+
+def _float_or_none(value: Any) -> float | None:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
 
 
 def _underlying_from_option_symbol(symbol: str) -> str | None:
