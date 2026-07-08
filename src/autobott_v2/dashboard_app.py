@@ -93,6 +93,8 @@ def handle_request(method: str, path: str, headers: dict[str, str], body: bytes)
             return 200, "application/json; charset=utf-8", _account_orders_payload()
         if path == "/api/options/scout" and method == "GET":
             return 200, "application/json; charset=utf-8", _options_scout_payload()
+        if path == "/api/options/timeline" and method == "GET":
+            return 200, "application/json; charset=utf-8", _options_timeline_payload()
         if path == "/api/corpus/latest" and method == "GET":
             return 200, "application/json; charset=utf-8", _latest_corpus_payload()
         if path == "/api/campaign/latest" and method == "GET":
@@ -532,6 +534,204 @@ def _options_scout_payload() -> JsonDict:
             "force_exit_pct": rules.take_profit_force_exit_pct,
         },
     }
+
+
+def _options_timeline_payload() -> JsonDict:
+    config = load_alpaca_paper_config()
+    try:
+        config.validate()
+    except Exception as exc:
+        return {"ok": False, "status": "config_invalid", "detail": str(exc)}
+    client = AlpacaPaperClient(config)
+    try:
+        orders = client.get_orders(status="all", limit=200)
+    except Exception as exc:
+        return {"ok": False, "status": "alpaca_request_failed", "detail": str(exc)}
+
+    normalized = sorted((_normalize_order_for_timeline(order) for order in orders), key=lambda row: row["event_time"] or datetime.min.replace(tzinfo=UTC))
+    round_trips, pending = _timeline_round_trips(normalized)
+    clusters = _timeline_clusters(normalized, round_trips)
+    warnings = _timeline_warnings(clusters, round_trips, pending)
+    return {
+        "ok": True,
+        "status": "options_timeline_ready",
+        "generated_at": datetime.now(UTC).isoformat(),
+        "mode": "paper_order_timeline",
+        "round_trips": sorted(round_trips, key=lambda row: row.get("exit_time") or "", reverse=True)[:30],
+        "pending_orders": sorted(pending, key=lambda row: row.get("submitted_at") or "", reverse=True)[:30],
+        "clusters": sorted(clusters, key=lambda row: row.get("bucket_start") or "", reverse=True)[:20],
+        "warnings": warnings,
+        "summary": {
+            "orders_seen": len(normalized),
+            "round_trips": len(round_trips),
+            "pending_orders": len(pending),
+            "realized_pnl": round(sum(float(row.get("pnl") or 0.0) for row in round_trips), 2),
+            "winners": sum(1 for row in round_trips if float(row.get("pnl") or 0.0) > 0),
+            "losers": sum(1 for row in round_trips if float(row.get("pnl") or 0.0) < 0),
+        },
+    }
+
+
+def _normalize_order_for_timeline(order: dict[str, Any]) -> JsonDict:
+    symbol = str(order.get("symbol") or "").upper()
+    submitted_at = _parse_datetime(order.get("submitted_at"))
+    filled_at = _parse_datetime(order.get("filled_at"))
+    event_time = filled_at or submitted_at
+    return {
+        "symbol": symbol,
+        **_option_symbol_parts(symbol),
+        "side": str(order.get("side") or "").lower(),
+        "status": str(order.get("status") or "").lower(),
+        "qty": _float_or_zero(order.get("qty")),
+        "filled_qty": _float_or_zero(order.get("filled_qty")),
+        "filled_avg_price": _float_or_none(order.get("filled_avg_price")),
+        "limit_price": _float_or_none(order.get("limit_price")),
+        "submitted_at": submitted_at.isoformat() if submitted_at else None,
+        "filled_at": filled_at.isoformat() if filled_at else None,
+        "event_time": event_time,
+    }
+
+
+def _timeline_round_trips(orders: list[JsonDict]) -> tuple[list[JsonDict], list[JsonDict]]:
+    open_buys: dict[str, list[JsonDict]] = {}
+    round_trips: list[JsonDict] = []
+    pending: list[JsonDict] = []
+    for order in orders:
+        symbol = str(order.get("symbol") or "")
+        side = str(order.get("side") or "")
+        status = str(order.get("status") or "")
+        filled_qty = float(order.get("filled_qty") or 0.0)
+        filled_price = order.get("filled_avg_price")
+        if status not in {"filled", "partially_filled"}:
+            if status in {"new", "accepted", "pending_new", "pending_replace"}:
+                pending.append(_public_timeline_order(order))
+            continue
+        if filled_qty <= 0 or filled_price is None:
+            continue
+        if side == "buy":
+            open_buys.setdefault(symbol, []).append(order)
+            continue
+        if side != "sell":
+            continue
+        buy = open_buys.get(symbol, []).pop(0) if open_buys.get(symbol) else None
+        if buy is None:
+            round_trips.append(_unmatched_sell_round_trip(order))
+            continue
+        entry_price = float(buy.get("filled_avg_price") or 0.0)
+        exit_price = float(filled_price)
+        qty = min(float(buy.get("filled_qty") or 0.0), filled_qty)
+        pnl = round((exit_price - entry_price) * qty * 100.0, 2)
+        return_pct = ((exit_price - entry_price) / entry_price) if entry_price else 0.0
+        round_trips.append(
+            {
+                "symbol": symbol,
+                **_option_symbol_parts(symbol),
+                "entry_time": buy.get("filled_at") or buy.get("submitted_at"),
+                "exit_time": order.get("filled_at") or order.get("submitted_at"),
+                "entry_price": entry_price,
+                "exit_price": exit_price,
+                "qty": qty,
+                "pnl": pnl,
+                "return_pct": round(return_pct, 4),
+                "classification": _round_trip_classification(return_pct),
+            }
+        )
+    for buys in open_buys.values():
+        for buy in buys:
+            pending.append(_public_timeline_order(buy) | {"pending_kind": "open_filled_buy"})
+    return round_trips, pending
+
+
+def _unmatched_sell_round_trip(order: JsonDict) -> JsonDict:
+    return {
+        "symbol": order.get("symbol"),
+        **_option_symbol_parts(str(order.get("symbol") or "")),
+        "entry_time": None,
+        "exit_time": order.get("filled_at") or order.get("submitted_at"),
+        "entry_price": None,
+        "exit_price": order.get("filled_avg_price"),
+        "qty": order.get("filled_qty"),
+        "pnl": 0.0,
+        "return_pct": None,
+        "classification": "unmatched_sell",
+    }
+
+
+def _public_timeline_order(order: JsonDict) -> JsonDict:
+    return {
+        "symbol": order.get("symbol"),
+        "side": order.get("side"),
+        "status": order.get("status"),
+        "qty": order.get("qty"),
+        "filled_qty": order.get("filled_qty"),
+        "limit_price": order.get("limit_price"),
+        "filled_avg_price": order.get("filled_avg_price"),
+        "submitted_at": order.get("submitted_at"),
+        "filled_at": order.get("filled_at"),
+        **_option_symbol_parts(str(order.get("symbol") or "")),
+    }
+
+
+def _round_trip_classification(return_pct: float) -> str:
+    if return_pct >= 1.2:
+        return "huge_winner"
+    if return_pct >= 0.3:
+        return "winner"
+    if return_pct <= -0.22:
+        return "loss_cut"
+    if return_pct < 0:
+        return "small_loss"
+    return "flat"
+
+
+def _timeline_clusters(orders: list[JsonDict], round_trips: list[JsonDict]) -> list[JsonDict]:
+    clusters: dict[str, JsonDict] = {}
+    for order in orders:
+        bucket = _time_bucket(order.get("event_time"))
+        if bucket is None:
+            continue
+        cluster = clusters.setdefault(bucket.isoformat(), {"bucket_start": bucket.isoformat(), "buy_orders": 0, "sell_orders": 0, "pending_orders": 0, "filled_orders": 0, "symbols": set(), "realized_pnl": 0.0})
+        side = str(order.get("side") or "")
+        status = str(order.get("status") or "")
+        if side == "buy":
+            cluster["buy_orders"] += 1
+        elif side == "sell":
+            cluster["sell_orders"] += 1
+        if status == "filled":
+            cluster["filled_orders"] += 1
+        elif status in {"new", "accepted", "pending_new", "pending_replace"}:
+            cluster["pending_orders"] += 1
+        if order.get("symbol"):
+            cluster["symbols"].add(order["symbol"])
+    for trip in round_trips:
+        exit_time = _parse_datetime(trip.get("exit_time"))
+        bucket = _time_bucket(exit_time)
+        if bucket is None:
+            continue
+        cluster = clusters.setdefault(bucket.isoformat(), {"bucket_start": bucket.isoformat(), "buy_orders": 0, "sell_orders": 0, "pending_orders": 0, "filled_orders": 0, "symbols": set(), "realized_pnl": 0.0})
+        cluster["realized_pnl"] = round(float(cluster.get("realized_pnl") or 0.0) + float(trip.get("pnl") or 0.0), 2)
+    return [{**cluster, "symbols": sorted(cluster["symbols"])[:8]} for cluster in clusters.values()]
+
+
+def _timeline_warnings(clusters: list[JsonDict], round_trips: list[JsonDict], pending: list[JsonDict]) -> list[JsonDict]:
+    warnings: list[JsonDict] = []
+    if any(trip.get("classification") == "huge_winner" for trip in round_trips):
+        warnings.append({"type": "profit_harvest_seen", "detail": "Huge winners were harvested; new-entry throttle should be stricter after this cluster."})
+    if any(float(trip.get("pnl") or 0.0) < 0 for trip in round_trips[-10:]) and pending:
+        warnings.append({"type": "reversal_with_pending_entries", "detail": "Recent losses coexist with pending new entries; review whether shock-day reversal throttle should pause fresh entries."})
+    for cluster in clusters:
+        if int(cluster.get("buy_orders") or 0) >= 5:
+            warnings.append({"type": "entry_cluster", "bucket_start": cluster.get("bucket_start"), "detail": "Large entry cluster detected."})
+        if int(cluster.get("sell_orders") or 0) >= 5:
+            warnings.append({"type": "exit_cluster", "bucket_start": cluster.get("bucket_start"), "detail": "Large exit cluster detected."})
+    return warnings[:12]
+
+
+def _time_bucket(value: Any, *, minutes: int = 15) -> datetime | None:
+    timestamp = value if isinstance(value, datetime) else _parse_datetime(value)
+    if timestamp is None:
+        return None
+    return timestamp.replace(minute=(timestamp.minute // minutes) * minutes, second=0, microsecond=0)
 
 
 def _pending_scout_exits_by_symbol(orders: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
@@ -1383,6 +1583,10 @@ def _dashboard_html() -> str:
             <div class="panel-body" id="decision-feed"></div>
           </section>
           <section class="panel">
+            <div class="panel-head"><h3>Order Timeline</h3><span class="badge info">REGIME TRACE</span></div>
+            <div class="panel-body" id="options-timeline"></div>
+          </section>
+          <section class="panel">
             <div class="panel-head"><h3>Open Positions</h3><span class="badge info">P/L</span></div>
             <div class="panel-body" id="account-positions"></div>
           </section>
@@ -1830,6 +2034,57 @@ def _dashboard_html() -> str:
         ${detailsBlock(payload)}`;
     }
 
+    function renderOptionsTimeline(payload) {
+      if (!payload.ok) {
+        return emptyState('Timeline unavailable', payload.detail || 'Could not load option order timeline.');
+      }
+      const summary = payload.summary || {};
+      const warningRows = (payload.warnings || []).slice(0, 3).map((warning) => `
+        <div class="log-entry warn">
+          <div class="log-label">${escapeHtml(warning.type || 'warning')}</div>
+          <div>${escapeHtml(warning.detail || '')}</div>
+        </div>`).join('');
+      const clusterRows = (payload.clusters || []).slice(0, 5).map((cluster) => {
+        const pnl = Number(cluster.realized_pnl || 0);
+        const tone = pnl > 0 ? 'safe' : pnl < 0 ? 'danger' : 'info';
+        return `<tr>
+          <td>${escapeHtml(cluster.bucket_start || 'n/a')}</td>
+          <td>${escapeHtml(cluster.buy_orders ?? 0)}</td>
+          <td>${escapeHtml(cluster.sell_orders ?? 0)}</td>
+          <td>${statusBadge(formatMoney(pnl), tone)}</td>
+        </tr>`;
+      }).join('');
+      const tripRows = (payload.round_trips || []).slice(0, 5).map((trip) => {
+        const pnl = Number(trip.pnl || 0);
+        const tone = pnl > 0 ? 'safe' : pnl < 0 ? 'danger' : 'info';
+        return `<tr>
+          <td><span class="mono">${escapeHtml(trip.symbol || 'n/a')}</span></td>
+          <td>${escapeHtml(trip.classification || 'n/a')}</td>
+          <td>${formatMoney(trip.entry_price)}</td>
+          <td>${formatMoney(trip.exit_price)}</td>
+          <td>${statusBadge(formatMoney(pnl), tone)}</td>
+        </tr>`;
+      }).join('');
+      return `
+        ${metricList([
+          ['Mode', escapeHtml(payload.mode || 'timeline')],
+          ['Orders seen', escapeHtml(summary.orders_seen ?? 0)],
+          ['Round trips', escapeHtml(summary.round_trips ?? 0)],
+          ['Realized P/L', formatMoney(summary.realized_pnl)],
+          ['Pending', escapeHtml(summary.pending_orders ?? 0)]
+        ])}
+        ${warningRows || '<div class="foot-note">No timeline warnings.</div>'}
+        <table class="table">
+          <thead><tr><th>Bucket</th><th>Buys</th><th>Sells</th><th>P/L</th></tr></thead>
+          <tbody>${clusterRows || '<tr><td colspan="4">No clusters yet</td></tr>'}</tbody>
+        </table>
+        <table class="table">
+          <thead><tr><th>Contract</th><th>Class</th><th>Entry</th><th>Exit</th><th>P/L</th></tr></thead>
+          <tbody>${tripRows || '<tr><td colspan="5">No paired round trips yet</td></tr>'}</tbody>
+        </table>
+        ${detailsBlock(payload)}`;
+    }
+
     function renderPaperReadiness(payload) {
       const tone = payload.paper_execution_ready ? 'safe' : payload.ok ? 'warn' : 'warn';
       return `
@@ -2035,7 +2290,8 @@ def _dashboard_html() -> str:
         callApi('/api/account/positions'),
         callApi('/api/account/orders'),
         callApi('/api/options/scout'),
-        callApi('/api/decisions/feed')
+        callApi('/api/decisions/feed'),
+        callApi('/api/options/timeline')
       ]);
       renderProtectedPanel('safety-status', protectedResults[0], renderSafety);
       renderProtectedPanel('alpaca-status', protectedResults[1], renderAlpaca);
@@ -2052,6 +2308,7 @@ def _dashboard_html() -> str:
       renderProtectedPanel('account-orders', protectedResults[11], renderAccountOrders);
       renderProtectedPanel('options-scout', protectedResults[12], renderOptionsScout);
       renderProtectedPanel('decision-feed', protectedResults[13], renderDecisionFeed);
+      renderProtectedPanel('options-timeline', protectedResults[14], renderOptionsTimeline);
       renderPersistenceStatus();
       syncActionState();
     }
@@ -2231,6 +2488,17 @@ def _parse_date(value: Any) -> date | None:
     if isinstance(value, date):
         return value
     return date.fromisoformat(str(value)[:10])
+
+
+def _parse_datetime(value: Any) -> datetime | None:
+    if not value:
+        return None
+    if isinstance(value, datetime):
+        return value.astimezone(UTC) if value.tzinfo else value.replace(tzinfo=UTC)
+    try:
+        return datetime.fromisoformat(str(value).replace("Z", "+00:00")).astimezone(UTC)
+    except ValueError:
+        return None
 
 
 def _reason(status_code: int) -> str:

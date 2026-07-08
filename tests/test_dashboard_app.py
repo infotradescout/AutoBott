@@ -690,6 +690,64 @@ def test_dashboard_account_orders_decode_option_type(monkeypatch, tmp_path) -> N
     assert payload["orders"][0]["strike"] == 726.0
 
 
+def test_dashboard_options_timeline_pairs_round_trips_and_clusters(monkeypatch, tmp_path) -> None:
+    _auth_env(monkeypatch, tmp_path)
+
+    class FakeConfig:
+        def validate(self):
+            return self
+
+    class FakeClient:
+        def __init__(self, config):
+            self.config = config
+
+        def get_orders(self, *, status, limit, direction="desc"):
+            return [
+                {
+                    "symbol": "SPY260710P00742500",
+                    "side": "sell",
+                    "qty": "1",
+                    "filled_qty": "1",
+                    "filled_avg_price": "2.96",
+                    "status": "filled",
+                    "submitted_at": "2026-07-08T16:35:14Z",
+                    "filled_at": "2026-07-08T16:35:14Z",
+                },
+                {
+                    "symbol": "SPY260710P00742500",
+                    "side": "buy",
+                    "qty": "1",
+                    "filled_qty": "1",
+                    "filled_avg_price": "3.95",
+                    "status": "filled",
+                    "submitted_at": "2026-07-08T15:05:37Z",
+                    "filled_at": "2026-07-08T15:05:41Z",
+                },
+                {
+                    "symbol": "TGT260710P00134000",
+                    "side": "buy",
+                    "qty": "1",
+                    "filled_qty": "0",
+                    "limit_price": "2.07",
+                    "status": "new",
+                    "submitted_at": "2026-07-08T16:35:22Z",
+                },
+            ]
+
+    monkeypatch.setattr(dashboard_app, "load_alpaca_paper_config", lambda: FakeConfig())
+    monkeypatch.setattr(dashboard_app, "AlpacaPaperClient", FakeClient)
+
+    status, body = _invoke_app("GET", "/api/options/timeline", token="dashboard-token")
+    payload = json.loads(body)
+
+    assert status.startswith("200")
+    assert payload["summary"]["round_trips"] == 1
+    assert payload["summary"]["pending_orders"] == 1
+    assert payload["round_trips"][0]["pnl"] == -99.0
+    assert payload["round_trips"][0]["classification"] == "loss_cut"
+    assert any(warning["type"] == "reversal_with_pending_entries" for warning in payload["warnings"])
+
+
 def test_dashboard_account_endpoints_require_auth(monkeypatch, tmp_path) -> None:
     _auth_env(monkeypatch, tmp_path)
     status, _ = _invoke_app("GET", "/api/account/positions")
@@ -908,6 +966,8 @@ def test_frontend_contains_paper_only_live_locked_orders_disabled() -> None:
     assert "OPTIONS FEED" in body
     assert "Decision Feed" in body
     assert "MANUAL MIRROR" in body
+    assert "Order Timeline" in body
+    assert "REGIME TRACE" in body
 
 
 def test_frontend_contains_no_buy_sell_submit_order_controls() -> None:
