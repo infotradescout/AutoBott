@@ -99,6 +99,8 @@ def handle_request(method: str, path: str, headers: dict[str, str], body: bytes)
             return 200, "application/json; charset=utf-8", _latest_campaign_payload()
         if path == "/api/decisions/latest" and method == "GET":
             return 200, "application/json; charset=utf-8", _latest_decisions_payload()
+        if path == "/api/decisions/feed" and method == "GET":
+            return 200, "application/json; charset=utf-8", _decision_feed_payload()
         if path == "/api/execution/state" and method == "GET":
             return 200, "application/json; charset=utf-8", _execution_state_payload()
         if path == "/api/session/status" and method == "GET":
@@ -720,6 +722,72 @@ def _latest_decisions_payload() -> JsonDict:
     }
 
 
+def _decision_feed_payload() -> JsonDict:
+    rows = [_manual_decision_row(record) for record in load_decision_cards(limit=25)]
+    ranked = sorted(rows, key=lambda row: (-float(row.get("score") or 0.0), str(row.get("timestamp") or "")))
+    return {
+        "ok": True,
+        "status": "decision_feed_ready",
+        "generated_at": datetime.now(UTC).isoformat(),
+        "mode": "manual_replication_feed",
+        "count": len(ranked),
+        "decisions": ranked[:20],
+    }
+
+
+def _manual_decision_row(record: JsonDict) -> JsonDict:
+    decision = record.get("decision_card", record)
+    contract = decision.get("selected_contract") or {}
+    status = str(decision.get("decision") or "UNKNOWN")
+    action = "BUY_TO_OPEN" if status == "TRADE_CANDIDATE" and contract else "NO_TRADE"
+    option_symbol = str(contract.get("option_symbol") or "")
+    confidence = _float_or_zero(decision.get("confidence_score"))
+    spread_pct = _float_or_zero(contract.get("spread_pct"))
+    iv = _float_or_zero(contract.get("implied_volatility"))
+    blocked_reason = decision.get("blocked_reason")
+    row = {
+        "decision_id": decision.get("decision_id"),
+        "timestamp": decision.get("timestamp") or record.get("recorded_at"),
+        "ticker": decision.get("ticker"),
+        "decision": status,
+        "action": action,
+        "manual_status": "candidate" if action == "BUY_TO_OPEN" else "blocked_or_watch",
+        "blocked_reason": blocked_reason,
+        "trade_setup": decision.get("trade_setup"),
+        "execution_layer": decision.get("execution_layer"),
+        "confidence_score": confidence,
+        "direction_bias": (decision.get("direction") or {}).get("bias"),
+        "direction_score": (decision.get("direction") or {}).get("score"),
+        "regime": (decision.get("regime") or {}).get("primary"),
+        "option_symbol": option_symbol or None,
+        **_option_symbol_parts(option_symbol),
+        "entry_reference": contract.get("mid"),
+        "bid": contract.get("bid"),
+        "ask": contract.get("ask"),
+        "spread_pct": spread_pct,
+        "implied_volatility": iv,
+        "delta": contract.get("delta"),
+        "target_exit_mid": contract.get("target_exit_mid"),
+        "stop_exit_mid": contract.get("stop_exit_mid"),
+        "exit_rule": contract.get("exit_rule"),
+        "reason_codes": decision.get("reason_codes", []),
+        "score_reasons": contract.get("score_reasons", []),
+        "explanation": decision.get("explanation"),
+        "score": _decision_feed_score(status=status, confidence=confidence, spread_pct=spread_pct, blocked_reason=blocked_reason),
+    }
+    if not option_symbol:
+        row["underlying"] = decision.get("ticker")
+    return row
+
+
+def _decision_feed_score(*, status: str, confidence: float, spread_pct: float, blocked_reason: Any) -> float:
+    if status == "TRADE_CANDIDATE":
+        return round(80.0 + confidence * 20.0 - min(20.0, spread_pct * 50.0), 4)
+    if blocked_reason:
+        return 20.0
+    return 10.0
+
+
 def _latest_bucket_edge_payload() -> JsonDict:
     campaign_dir = _latest_campaign_dir()
     if campaign_dir is None:
@@ -1311,6 +1379,10 @@ def _dashboard_html() -> str:
             <div class="panel-body" id="options-scout"></div>
           </section>
           <section class="panel">
+            <div class="panel-head"><h3>Decision Feed</h3><span class="badge safe">MANUAL MIRROR</span></div>
+            <div class="panel-body" id="decision-feed"></div>
+          </section>
+          <section class="panel">
             <div class="panel-head"><h3>Open Positions</h3><span class="badge info">P/L</span></div>
             <div class="panel-body" id="account-positions"></div>
           </section>
@@ -1723,6 +1795,41 @@ def _dashboard_html() -> str:
         ${detailsBlock(payload)}`;
     }
 
+    function renderDecisionFeed(payload) {
+      if (!payload.ok) {
+        return emptyState('Decision feed unavailable', payload.detail || 'Could not load bot decisions.');
+      }
+      const rows = payload.decisions || [];
+      const feedRows = rows.slice(0, 8).map((row) => {
+        const candidate = row.action === 'BUY_TO_OPEN';
+        const tone = candidate ? 'safe' : row.blocked_reason ? 'warn' : 'info';
+        const reasons = (row.reason_codes || row.score_reasons || []).slice(0, 2).join(', ') || row.blocked_reason || 'watch';
+        return `<tr>
+          <td>${statusBadge(escapeHtml(row.action || 'NO TRADE'), tone)}</td>
+          <td>${escapeHtml(row.ticker || row.underlying || 'n/a')}</td>
+          <td>${escapeHtml(row.direction_bias || row.trade_setup || 'n/a')}</td>
+          <td><span class="mono">${escapeHtml(row.option_symbol || 'none')}</span></td>
+          <td>${formatMoney(row.entry_reference)}</td>
+          <td>${formatMoney(row.target_exit_mid)}</td>
+          <td>${formatMoney(row.stop_exit_mid)}</td>
+          <td>${Number(row.confidence_score || 0).toFixed(2)}</td>
+          <td>${escapeHtml(reasons)}</td>
+        </tr>`;
+      }).join('');
+      return `
+        ${metricList([
+          ['Mode', escapeHtml(payload.mode || 'manual decision feed')],
+          ['Rows', escapeHtml(payload.count ?? 0)],
+          ['Top action', escapeHtml(rows[0]?.action || 'NONE')],
+          ['Top contract', `<span class="mono">${escapeHtml(rows[0]?.option_symbol || 'none')}</span>`]
+        ])}
+        <table class="table">
+          <thead><tr><th>Action</th><th>Ticker</th><th>Bias</th><th>Contract</th><th>Entry ref</th><th>Target</th><th>Stop</th><th>Conf</th><th>Why</th></tr></thead>
+          <tbody>${feedRows || '<tr><td colspan="9">No decisions yet</td></tr>'}</tbody>
+        </table>
+        ${detailsBlock(payload)}`;
+    }
+
     function renderPaperReadiness(payload) {
       const tone = payload.paper_execution_ready ? 'safe' : payload.ok ? 'warn' : 'warn';
       return `
@@ -1927,7 +2034,8 @@ def _dashboard_html() -> str:
         callApi('/api/reports/decision-lab/latest'),
         callApi('/api/account/positions'),
         callApi('/api/account/orders'),
-        callApi('/api/options/scout')
+        callApi('/api/options/scout'),
+        callApi('/api/decisions/feed')
       ]);
       renderProtectedPanel('safety-status', protectedResults[0], renderSafety);
       renderProtectedPanel('alpaca-status', protectedResults[1], renderAlpaca);
@@ -1943,6 +2051,7 @@ def _dashboard_html() -> str:
       renderProtectedPanel('account-positions', protectedResults[10], renderAccountPositions);
       renderProtectedPanel('account-orders', protectedResults[11], renderAccountOrders);
       renderProtectedPanel('options-scout', protectedResults[12], renderOptionsScout);
+      renderProtectedPanel('decision-feed', protectedResults[13], renderDecisionFeed);
       renderPersistenceStatus();
       syncActionState();
     }

@@ -272,6 +272,54 @@ def test_dashboard_latest_decisions_endpoint_returns_rows(monkeypatch, tmp_path)
     assert payload["decisions"][0]["decision_card"]["ticker"] == "AAPL"
 
 
+def test_dashboard_decision_feed_shapes_manual_trade_rows(monkeypatch, tmp_path) -> None:
+    _auth_env(monkeypatch, tmp_path)
+    monkeypatch.setattr(
+        dashboard_app,
+        "load_decision_cards",
+        lambda limit=25: [
+            {
+                "recorded_at": "2026-07-08T15:45:00+00:00",
+                "decision_card": {
+                    "decision_id": "decision-1",
+                    "ticker": "SPY",
+                    "timestamp": "2026-07-08T15:45:00+00:00",
+                    "decision": "TRADE_CANDIDATE",
+                    "trade_setup": "bullish_continuation",
+                    "execution_layer": "tactical",
+                    "confidence_score": 0.74,
+                    "direction": {"bias": "bullish", "score": 0.8},
+                    "regime": {"primary": "trend"},
+                    "reason_codes": ["trend_above_vwap"],
+                    "selected_contract": {
+                        "option_symbol": "SPY260710C00600000",
+                        "option_type": "call",
+                        "bid": 2.4,
+                        "ask": 2.6,
+                        "mid": 2.5,
+                        "spread_pct": 0.08,
+                        "implied_volatility": 0.32,
+                        "delta": 0.52,
+                        "target_exit_mid": 3.75,
+                        "stop_exit_mid": 1.38,
+                        "exit_rule": "take_profit_at_50pct_gain_or_stop_at_45pct_loss_on_mid",
+                        "score_reasons": ["liquidity_passed"],
+                    },
+                },
+            }
+        ],
+    )
+
+    status, body = _invoke_app("GET", "/api/decisions/feed", token="dashboard-token")
+    payload = json.loads(body)
+
+    assert status.startswith("200")
+    assert payload["decisions"][0]["action"] == "BUY_TO_OPEN"
+    assert payload["decisions"][0]["option_symbol"] == "SPY260710C00600000"
+    assert payload["decisions"][0]["entry_reference"] == 2.5
+    assert payload["decisions"][0]["target_exit_mid"] == 3.75
+
+
 def test_dashboard_session_status_endpoint_returns_supervisor_state(monkeypatch, tmp_path) -> None:
     _auth_env(monkeypatch, tmp_path)
     monkeypatch.setattr(
@@ -858,6 +906,8 @@ def test_frontend_contains_paper_only_live_locked_orders_disabled() -> None:
     assert "Paper Readiness" in body
     assert "Volatility Scout" in body
     assert "OPTIONS FEED" in body
+    assert "Decision Feed" in body
+    assert "MANUAL MIRROR" in body
 
 
 def test_frontend_contains_no_buy_sell_submit_order_controls() -> None:
