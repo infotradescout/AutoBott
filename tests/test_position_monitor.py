@@ -62,7 +62,7 @@ def test_position_monitor_holds_a_winner_that_has_not_reversed(tmp_path) -> None
 
     result = run_position_monitor(
         broker=broker,
-        rules=PositionMonitorRules(trailing_activation_pct=0.15, trailing_drawdown_pct=0.10, stop_loss_pct=0.22, max_contracts_per_option=1),
+        rules=PositionMonitorRules(take_profit_pct=0.50, trailing_activation_pct=0.15, trailing_drawdown_pct=0.10, stop_loss_pct=0.22, max_contracts_per_option=1),
         journal_path=str(tmp_path / "journal.jsonl"),
         trailing_state_path=str(tmp_path / "trailing_peaks.json"),
     )
@@ -74,7 +74,7 @@ def test_position_monitor_holds_a_winner_that_has_not_reversed(tmp_path) -> None
 def test_position_monitor_sells_once_a_winner_reverses_from_its_peak(tmp_path) -> None:
     save_runtime_state(default_runtime_state())
     trailing_state_path = str(tmp_path / "trailing_peaks.json")
-    rules = PositionMonitorRules(trailing_activation_pct=0.15, trailing_drawdown_pct=0.10, stop_loss_pct=0.22, max_contracts_per_option=1)
+    rules = PositionMonitorRules(take_profit_pct=0.50, trailing_activation_pct=0.15, trailing_drawdown_pct=0.10, stop_loss_pct=0.22, max_contracts_per_option=1)
     journal_path = str(tmp_path / "journal.jsonl")
 
     # First cycle: position peaks at +30%, well above activation, but hasn't reversed yet.
@@ -92,13 +92,30 @@ def test_position_monitor_sells_once_a_winner_reverses_from_its_peak(tmp_path) -
     assert reversal_broker.submitted[0].order_type.value == "market"
 
 
+def test_position_monitor_takes_profit_on_large_winner_before_reversal(tmp_path) -> None:
+    save_runtime_state(default_runtime_state())
+    broker = FakeBroker([_position(unrealized_plpc="0.72")])
+
+    result = run_position_monitor(
+        broker=broker,
+        rules=PositionMonitorRules(take_profit_pct=0.50, trailing_activation_pct=0.15, trailing_drawdown_pct=0.10, stop_loss_pct=0.22, max_contracts_per_option=1),
+        journal_path=str(tmp_path / "journal.jsonl"),
+        trailing_state_path=str(tmp_path / "trailing_peaks.json"),
+    )
+
+    assert result["actions"][0]["reason"] == "take_profit"
+    assert result["actions"][0]["unrealized_plpc"] == 0.72
+    assert broker.submitted[0].option_symbol == "QQQ260708P00726000"
+    assert broker.submitted[0].order_type.value == "market"
+
+
 def test_position_monitor_trims_excess_contracts_before_profit_loss(tmp_path) -> None:
     save_runtime_state(default_runtime_state())
     broker = FakeBroker([_position(qty="4", unrealized_plpc="-0.05")])
 
     result = run_position_monitor(
         broker=broker,
-        rules=PositionMonitorRules(trailing_activation_pct=0.15, trailing_drawdown_pct=0.10, stop_loss_pct=0.22, max_contracts_per_option=1),
+        rules=PositionMonitorRules(take_profit_pct=0.50, trailing_activation_pct=0.15, trailing_drawdown_pct=0.10, stop_loss_pct=0.22, max_contracts_per_option=1),
         journal_path=str(tmp_path / "journal.jsonl"),
         trailing_state_path=str(tmp_path / "trailing_peaks.json"),
     )
@@ -114,7 +131,7 @@ def test_position_monitor_closes_stop_loss(tmp_path) -> None:
 
     result = run_position_monitor(
         broker=broker,
-        rules=PositionMonitorRules(trailing_activation_pct=0.15, trailing_drawdown_pct=0.10, stop_loss_pct=0.22, max_contracts_per_option=1),
+        rules=PositionMonitorRules(take_profit_pct=0.50, trailing_activation_pct=0.15, trailing_drawdown_pct=0.10, stop_loss_pct=0.22, max_contracts_per_option=1),
         journal_path=str(tmp_path / "journal.jsonl"),
         trailing_state_path=str(tmp_path / "trailing_peaks.json"),
     )
