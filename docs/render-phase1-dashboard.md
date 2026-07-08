@@ -36,7 +36,7 @@ The Render blueprint now bakes in the non-secret paper defaults:
 - `SPY` session loop every `300` seconds
 - session window `09:35` to `15:55` in `America/New_York`
 - paper execution armed on startup
-- position monitor takes profit at `+50%` unrealized option P/L by default
+- position monitor takes profit at `+30%` unrealized option P/L by default
 - disk-backed data, artifacts, and gate paths under `/var/data/autobott`
 
 ## Local Defaults

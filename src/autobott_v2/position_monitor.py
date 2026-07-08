@@ -23,7 +23,7 @@ def _normalize_bool(value: str | None, *, default: bool = False) -> bool:
 @dataclass(frozen=True)
 class PositionMonitorRules:
     enabled: bool = True
-    take_profit_pct: float = 0.50
+    take_profit_pct: float = 0.30
     trailing_activation_pct: float = 0.15
     trailing_drawdown_pct: float = 0.10
     stop_loss_pct: float = 0.22
@@ -34,7 +34,7 @@ class PositionMonitorRules:
 def load_position_monitor_rules() -> PositionMonitorRules:
     return PositionMonitorRules(
         enabled=_normalize_bool(os.getenv("AUTOBOTT_POSITION_MONITOR_ENABLED"), default=True),
-        take_profit_pct=float(os.getenv("AUTOBOTT_EXIT_TAKE_PROFIT_PCT", "0.50")),
+        take_profit_pct=float(os.getenv("AUTOBOTT_EXIT_TAKE_PROFIT_PCT", "0.30")),
         trailing_activation_pct=float(os.getenv("AUTOBOTT_EXIT_TRAILING_ACTIVATION_PCT", "0.15")),
         trailing_drawdown_pct=float(os.getenv("AUTOBOTT_EXIT_TRAILING_DRAWDOWN_PCT", "0.10")),
         stop_loss_pct=float(os.getenv("AUTOBOTT_EXIT_STOP_LOSS_PCT", "0.22")),

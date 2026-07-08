@@ -31,7 +31,7 @@ services:
       - key: AUTOBOTT_PAPER_MAX_OPEN_ENTRY_BUY_ORDERS
         value: "25"
       - key: AUTOBOTT_EXIT_TAKE_PROFIT_PCT
-        value: "0.50"
+        value: "0.30"
       - key: AUTOBOTT_PAPER_ONLY
         value: "true"
       - key: AUTOBOTT_DASHBOARD_AUTH_TOKEN
