@@ -149,5 +149,5 @@ def _entry_limit_price(
 def _entry_limit_extra() -> float:
     value = os.getenv("AUTOBOTT_ENTRY_LIMIT_EXTRA")
     if value is None or not value.strip():
-        return 0.01
+        return 0.0
     return max(0.0, float(value))

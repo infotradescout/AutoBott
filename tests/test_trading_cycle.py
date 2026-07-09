@@ -619,7 +619,7 @@ def test_run_trading_cycle_uses_under_cap_fallback_before_ghost_only_skip(tmp_pa
     assert result.trade_attempted_count == 1
     assert len(result.orders_submitted) == 1
     assert broker.submitted[0].option_symbol == "AAPL260703C00110000"
-    assert broker.submitted[0].limit_price == 0.84
+    assert broker.submitted[0].limit_price == 0.83
     assert "ghost_entry" in ghost_rows
     assert any(outcome["disposition"] == "real_money_cap_fallback_selected" for outcome in result.execution_outcomes)
 
@@ -692,6 +692,46 @@ def test_run_trading_cycle_prioritizes_recent_winners(tmp_path) -> None:
     assert result.symbols == ["MSFT", "AAPL"]
     learning = next(row for row in result.execution_outcomes if row["disposition"] == "trade_outcome_learning_summary")
     assert learning["winner_bias"]["preferred_underlyings"] == ["MSFT"]
+
+
+def test_run_trading_cycle_routes_to_ghost_when_open_basket_drawdown_is_bad(tmp_path) -> None:
+    save_runtime_state(default_runtime_state(), state_path=tmp_path / "runtime_state.json")
+    original = trading_cycle.load_runtime_state
+    original_positions = trading_cycle.load_open_positions
+    trading_cycle.load_runtime_state = lambda: original(state_path=tmp_path / "runtime_state.json")
+    trading_cycle.load_open_positions = lambda: []
+    broker = FakeBrokerWithLivePositions(
+        [
+            {"symbol": "C260710P00139000", "side": "long", "qty": "1", "current_price": "0.84", "avg_entry_price": "0.96", "unrealized_pl": "-12", "unrealized_plpc": "-0.125"},
+            {"symbol": "DIA260710C00526000", "side": "long", "qty": "1", "current_price": "0.69", "avg_entry_price": "0.90", "unrealized_pl": "-21", "unrealized_plpc": "-0.20"},
+            {"symbol": "IWM260710C00298000", "side": "long", "qty": "1", "current_price": "0.81", "avg_entry_price": "0.87", "unrealized_pl": "-6", "unrealized_plpc": "-0.07"},
+            {"symbol": "TLT260710C00084500", "side": "long", "qty": "1", "current_price": "0.20", "avg_entry_price": "0.18", "unrealized_pl": "2", "unrealized_plpc": "0.11"},
+        ],
+        max_open_positions=25,
+    )
+    try:
+        result = trading_cycle.run_trading_cycle(
+            symbols=["AAPL"],
+            broker=broker,
+            data_client=FakeDataClient(),
+            scheduled_market_time=datetime(2026, 7, 1, 15, 35, tzinfo=UTC),
+            captured_at_utc=datetime(2026, 7, 1, 15, 35, tzinfo=UTC),
+            corpus_root=tmp_path / "corpus",
+            decision_log_path=tmp_path / "decision_cards.jsonl",
+            execution_log_path=str(tmp_path / "execution_orders.jsonl"),
+        )
+    finally:
+        trading_cycle.load_runtime_state = original
+        trading_cycle.load_open_positions = original_positions
+
+    assert result.scanner_candidates_count == 1
+    assert result.trade_attempted_count == 0
+    assert result.orders_submitted == []
+    assert result.skipped[0]["reason"] == "open_drawdown_guard"
+    assert result.execution_rejected_count_by_reason == {"open_drawdown_guard": 1}
+    guard = next(row for row in result.execution_outcomes if row["disposition"] == "open_drawdown_guard_summary")
+    assert guard["blocked"] is True
+    assert "ghost_entry" in (tmp_path / "ghost_trades.jsonl").read_text(encoding="utf-8")
 
 
 def test_run_trading_cycle_paper_opportunistic_mode_does_not_override_spread_block(tmp_path, monkeypatch) -> None:

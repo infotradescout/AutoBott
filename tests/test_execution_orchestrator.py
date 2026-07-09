@@ -111,7 +111,7 @@ def test_build_trade_intent_from_decision_uses_marketable_paper_limit() -> None:
     intent = build_trade_intent_from_decision(_decision_card())
     assert intent.symbol == "AAPL"
     assert intent.option_symbol == "AAPL260117C00190000"
-    assert intent.limit_price == 2.61
+    assert intent.limit_price == 2.6
     assert intent.take_profit_price == 3.75
 
 
@@ -128,11 +128,11 @@ def test_build_trade_intent_from_decision_caps_marketable_limit_at_position_cost
 
 
 def test_build_trade_intent_from_decision_can_disable_extra_marketable_cents(monkeypatch) -> None:
-    monkeypatch.setenv("AUTOBOTT_ENTRY_LIMIT_EXTRA", "0")
+    monkeypatch.setenv("AUTOBOTT_ENTRY_LIMIT_EXTRA", "0.01")
 
     intent = build_trade_intent_from_decision(_decision_card())
 
-    assert intent.limit_price == 2.6
+    assert intent.limit_price == 2.61
 
 
 def test_build_trade_intent_from_decision_can_use_passive_mid(monkeypatch) -> None:

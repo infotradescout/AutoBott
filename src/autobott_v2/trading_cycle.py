@@ -131,6 +131,7 @@ def run_trading_cycle(
     trade_attempted_count = 0
     open_positions = max(position_count or 0, _active_open_position_count(resolved_broker))
     active_underlyings = _active_underlying_symbols(resolved_broker)
+    open_drawdown_guard = _open_drawdown_guard(resolved_broker)
     max_new_entry_attempts_per_loop = resolved_broker.config.effective_max_new_entry_attempts_per_loop()
 
     for symbol in cycle_symbols:
@@ -282,6 +283,34 @@ def run_trading_cycle(
                 detail=f"active_underlying={symbol.upper()}",
                 journal_path=execution_log_path,
                 payload={"active_underlyings": sorted(active_underlyings)},
+            )
+            continue
+        if open_drawdown_guard.get("blocked"):
+            if decision.selected_contract is not None:
+                ghost = append_ghost_trade(
+                    decision,
+                    reason="open_drawdown_guard_real_entry_blocked",
+                    max_real_cost=resolved_broker.config.max_position_cost,
+                    journal_path=_ghost_trade_journal_for_execution_log(execution_log_path),
+                )
+            else:
+                ghost = {}
+            _append_skip(
+                skipped,
+                symbol=symbol.upper(),
+                reason="open_drawdown_guard",
+                detail=json.dumps(open_drawdown_guard, sort_keys=True),
+            )
+            _record_execution_rejection(
+                execution_outcomes,
+                execution_rejected_count_by_reason,
+                ticker=symbol.upper(),
+                decision_id=decision.decision_id,
+                thesis_id=thesis_id,
+                reason="open_drawdown_guard",
+                detail="current open basket drawdown blocks fresh real entries; signal routed to ghost lane",
+                journal_path=execution_log_path,
+                payload={"guard": open_drawdown_guard, "ghost": ghost},
             )
             continue
         if decision.selected_contract is not None and _selected_contract_real_cost(decision) > resolved_broker.config.max_position_cost:
@@ -454,6 +483,7 @@ def run_trading_cycle(
         execution_outcomes=[
             {"disposition": "position_monitor_summary", **monitor_summary},
             {"disposition": "trade_outcome_learning_summary", **outcome_learning_summary, "winner_bias": winner_bias},
+            {"disposition": "open_drawdown_guard_summary", **open_drawdown_guard},
             *execution_outcomes,
         ],
         scanner_candidates_count=scanner_candidates_count,
@@ -528,6 +558,52 @@ def _selected_contract_real_cost(decision: DecisionCard) -> float:
     if decision.selected_contract is None:
         return 0.0
     return round(float(decision.selected_contract.mid) * 100, 2)
+
+
+def _open_drawdown_guard(broker: Any) -> dict[str, Any]:
+    if not _env_bool("AUTOBOTT_OPEN_DRAWDOWN_GUARD_ENABLED", default=True):
+        return {"enabled": False, "blocked": False}
+    if not hasattr(broker, "list_open_positions"):
+        return {"enabled": True, "blocked": False, "reason": "broker_positions_unavailable"}
+    try:
+        positions = [position for position in broker.list_open_positions() if _broker_position_is_active(position)]
+    except Exception as exc:
+        return {"enabled": True, "blocked": False, "reason": "position_read_failed", "error": str(exc)}
+    total = len(positions)
+    if total == 0:
+        return {"enabled": True, "blocked": False, "open_positions": 0, "unrealized_pl": 0.0, "losers": 0, "loss_rate": 0.0}
+    unrealized = round(sum(_float_value(position.get("unrealized_pl")) for position in positions), 2)
+    losers = sum(1 for position in positions if _float_value(position.get("unrealized_pl")) < 0)
+    loss_rate = round(losers / total, 4)
+    max_unrealized_loss = abs(float(os.getenv("AUTOBOTT_OPEN_DRAWDOWN_GUARD_MAX_UNREALIZED_LOSS", "30")))
+    min_losers = int(os.getenv("AUTOBOTT_OPEN_DRAWDOWN_GUARD_MIN_LOSERS", "3"))
+    min_loss_rate = float(os.getenv("AUTOBOTT_OPEN_DRAWDOWN_GUARD_LOSS_RATE", "0.60"))
+    blocked = unrealized <= -max_unrealized_loss and losers >= min_losers and loss_rate >= min_loss_rate
+    return {
+        "enabled": True,
+        "blocked": blocked,
+        "open_positions": total,
+        "unrealized_pl": unrealized,
+        "losers": losers,
+        "loss_rate": loss_rate,
+        "max_unrealized_loss": max_unrealized_loss,
+        "min_losers": min_losers,
+        "min_loss_rate": min_loss_rate,
+    }
+
+
+def _env_bool(name: str, *, default: bool = False) -> bool:
+    value = os.getenv(name)
+    if value is None:
+        return default
+    return value.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _float_value(value: Any) -> float:
+    try:
+        return float(value or 0.0)
+    except (TypeError, ValueError):
+        return 0.0
 
 
 def _real_money_cap_fallback_decision(
