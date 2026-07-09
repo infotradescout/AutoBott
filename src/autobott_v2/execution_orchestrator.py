@@ -139,6 +139,15 @@ def _entry_limit_price(
     if environment is not BrokerEnvironment.PAPER or style in {"mid", "passive"}:
         return round(mid, 2)
     limit_price = ask if style in {"marketable", "ask", "aggressive"} else mid
+    if style in {"marketable", "aggressive"}:
+        limit_price += _entry_limit_extra()
     if max_position_cost is not None and max_position_cost > 0 and quantity > 0:
         limit_price = min(limit_price, max_position_cost / (quantity * 100.0))
     return max(0.01, round(limit_price, 2))
+
+
+def _entry_limit_extra() -> float:
+    value = os.getenv("AUTOBOTT_ENTRY_LIMIT_EXTRA")
+    if value is None or not value.strip():
+        return 0.01
+    return max(0.0, float(value))
