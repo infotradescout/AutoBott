@@ -104,6 +104,7 @@ def run_position_monitor(
         return {"ok": True, "enabled": True, "checked": 0, "actions": []}
     positions = resolved_broker.list_open_positions()
     pending_exits = _pending_exit_orders_by_symbol(resolved_broker)
+    pending_orders = _pending_orders_by_symbol(resolved_broker)
     peaks = _load_trailing_peaks(state_path=trailing_state_path)
     open_symbols: set[str] = set()
     actions: list[dict[str, Any]] = []
@@ -127,9 +128,15 @@ def run_position_monitor(
             )
             continue
         try:
-            if action["reason"] in {"stop_loss", "trailing_stop"} and pending_exit is not None and hasattr(resolved_broker, "cancel_order"):
-                resolved_broker.cancel_order(str(pending_exit.get("id") or pending_exit.get("broker_order_id")))
-                action["canceled_pending_exit_order_id"] = pending_exit.get("id") or pending_exit.get("broker_order_id")
+            if action["reason"] in {"stop_loss", "trailing_stop"} and hasattr(resolved_broker, "cancel_order"):
+                canceled_ids = _cancel_pending_orders_for_symbol(
+                    action["symbol"],
+                    pending_orders,
+                    broker=resolved_broker,
+                )
+                if canceled_ids:
+                    action["canceled_pending_order_ids"] = canceled_ids
+                    action["canceled_pending_exit_order_id"] = canceled_ids[0]
             order = _submit_monitor_exit(
                 position,
                 action=action,
@@ -292,6 +299,39 @@ def _pending_exit_orders_by_symbol(broker: Any) -> dict[str, dict[str, Any]]:
             continue
         pending.setdefault(symbol, order)
     return pending
+
+
+def _pending_orders_by_symbol(broker: Any) -> dict[str, list[dict[str, Any]]]:
+    if not hasattr(broker, "list_orders"):
+        return {}
+    try:
+        orders = broker.list_orders(status="open", limit=100, direction="desc")
+    except Exception:
+        return {}
+    pending: dict[str, list[dict[str, Any]]] = {}
+    for order in orders:
+        symbol = str(order.get("symbol") or "").upper()
+        status = str(order.get("status") or "").lower()
+        if not symbol or status not in {"new", "accepted", "partially_filled", "pending_new", "pending_replace"}:
+            continue
+        pending.setdefault(symbol, []).append(order)
+    return pending
+
+
+def _cancel_pending_orders_for_symbol(
+    symbol: str,
+    pending_orders: dict[str, list[dict[str, Any]]],
+    *,
+    broker: AlpacaExecutionBroker,
+) -> list[str]:
+    canceled: list[str] = []
+    for order in pending_orders.get(symbol, []):
+        order_id = str(order.get("id") or order.get("broker_order_id") or "")
+        if not order_id:
+            continue
+        broker.cancel_order(order_id)
+        canceled.append(order_id)
+    return canceled
 
 
 def _handle_pending_take_profit_exit(

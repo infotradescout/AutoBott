@@ -335,6 +335,34 @@ def test_position_monitor_cancels_pending_profit_exit_before_urgent_stop(tmp_pat
     assert broker.submitted[0].order_type.value == "market"
 
 
+def test_position_monitor_cancels_pending_buy_before_urgent_stop(tmp_path) -> None:
+    save_runtime_state(default_runtime_state())
+    broker = FakeBroker(
+        [_position(unrealized_plpc="-0.25")],
+        orders=[
+            {
+                "id": "pending-buy-1",
+                "symbol": "QQQ260708P00726000",
+                "side": "buy",
+                "status": "new",
+                "limit_price": "6.82",
+            }
+        ],
+    )
+
+    result = run_position_monitor(
+        broker=broker,
+        rules=PositionMonitorRules(),
+        journal_path=str(tmp_path / "journal.jsonl"),
+        trailing_state_path=str(tmp_path / "trailing_peaks.json"),
+    )
+
+    assert result["actions"][0]["reason"] == "stop_loss"
+    assert result["actions"][0]["canceled_pending_order_ids"] == ["pending-buy-1"]
+    assert broker.canceled == ["pending-buy-1"]
+    assert broker.submitted[0].order_type.value == "market"
+
+
 def test_position_monitor_trims_excess_contracts_before_profit_loss(tmp_path) -> None:
     save_runtime_state(default_runtime_state())
     broker = FakeBroker([_position(qty="4", unrealized_plpc="-0.05")])

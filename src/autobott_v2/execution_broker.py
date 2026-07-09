@@ -73,6 +73,7 @@ class AlpacaExecutionBroker:
             "side": side,
             "type": "limit" if intent.order_type is OrderType.LIMIT else "market",
             "time_in_force": "day",
+            "position_intent": "buy_to_open" if intent.side is OrderSide.BUY_TO_OPEN else "sell_to_close",
         }
         if intent.order_type is OrderType.LIMIT:
             request_payload["limit_price"] = f"{intent.limit_price:.2f}"

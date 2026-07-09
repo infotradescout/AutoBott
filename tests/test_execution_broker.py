@@ -84,6 +84,29 @@ def test_submit_order_returns_submitted_execution_order(monkeypatch) -> None:
     assert captured["body"]["symbol"] == "AAPL260117C00190000"
     assert "legs" not in captured["body"]
     assert captured["body"]["limit_price"] == "2.50"
+    assert captured["body"]["position_intent"] == "buy_to_open"
+
+
+def test_submit_sell_to_close_marks_position_intent(monkeypatch) -> None:
+    broker = AlpacaExecutionBroker(_config())
+    captured = {}
+
+    def _fake_urlopen(request, timeout=30):
+        captured["body"] = json.loads(request.data.decode("utf-8"))
+        return _FakeResponse(
+            {
+                "id": "alpaca-order-1",
+                "status": "accepted",
+                "submitted_at": "2026-07-01T15:31:00Z",
+            }
+        )
+
+    monkeypatch.setattr("urllib.request.urlopen", _fake_urlopen)
+
+    broker.submit_order(_intent(side=OrderSide.SELL_TO_CLOSE))
+
+    assert captured["body"]["side"] == "sell"
+    assert captured["body"]["position_intent"] == "sell_to_close"
 
 
 def test_map_alpaca_intermediate_order_statuses_as_submitted() -> None:
