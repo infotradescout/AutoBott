@@ -50,6 +50,16 @@ services:
         value: "true"
       - key: AUTOBOTT_POSITION_MONITOR_HEARTBEAT_SECONDS
         value: "15"
+      - key: AUTOBOTT_RECENT_LOSS_GUARD_ENABLED
+        value: "true"
+      - key: AUTOBOTT_RECENT_LOSS_GUARD_LOOKBACK
+        value: "20"
+      - key: AUTOBOTT_RECENT_LOSS_GUARD_CONSECUTIVE_LOSSES
+        value: "2"
+      - key: AUTOBOTT_RECENT_LOSS_GUARD_MIN_SAMPLE
+        value: "3"
+      - key: AUTOBOTT_RECENT_LOSS_GUARD_LOSS_RATE
+        value: "0.67"
       - key: AUTOBOTT_PAPER_ONLY
         value: "true"
       - key: AUTOBOTT_DASHBOARD_AUTH_TOKEN

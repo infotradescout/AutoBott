@@ -39,6 +39,7 @@ from .runtime_control import (
 )
 from .runtime_paths import gate_path as default_gate_path
 from .runtime_paths import phase1_replay_campaign_root, phase1_snapshots_root
+from .trade_outcomes import record_trade_outcomes_from_orders
 
 
 JsonDict = dict[str, Any]
@@ -550,6 +551,7 @@ def _options_timeline_payload() -> JsonDict:
 
     normalized = sorted((_normalize_order_for_timeline(order) for order in orders), key=lambda row: row["event_time"] or datetime.min.replace(tzinfo=UTC))
     round_trips, pending = _timeline_round_trips(normalized)
+    outcome_learning = record_trade_outcomes_from_orders(orders)
     clusters = _timeline_clusters(normalized, round_trips)
     warnings = _timeline_warnings(clusters, round_trips, pending)
     return {
@@ -561,6 +563,7 @@ def _options_timeline_payload() -> JsonDict:
         "pending_orders": sorted(pending, key=lambda row: row.get("submitted_at") or "", reverse=True)[:30],
         "clusters": sorted(clusters, key=lambda row: row.get("bucket_start") or "", reverse=True)[:20],
         "warnings": warnings,
+        "outcome_learning": outcome_learning,
         "summary": {
             "orders_seen": len(normalized),
             "round_trips": len(round_trips),

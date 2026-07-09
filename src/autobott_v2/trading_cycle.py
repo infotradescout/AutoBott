@@ -32,6 +32,7 @@ from .position_store import load_open_positions
 from .position_monitor import run_position_monitor
 from .runtime_control import load_runtime_state
 from .runtime_paths import data_root, phase1_snapshots_root
+from .trade_outcomes import recent_loss_guard, sync_trade_outcomes_from_broker
 
 
 def decision_journal_path() -> Path:
@@ -113,6 +114,9 @@ def run_trading_cycle(
             monitor_summary = {"ok": False, "error": str(exc)}
     else:
         monitor_summary = {"ok": True, "enabled": True, "checked": 0, "actions": []}
+    outcome_journal_path = _trade_outcome_journal_for_execution_log(execution_log_path)
+    outcome_learning_summary = sync_trade_outcomes_from_broker(resolved_broker, journal_path=outcome_journal_path)
+    loss_guard = recent_loss_guard(journal_path=outcome_journal_path)
 
     snapshot_paths: list[str] = []
     decisions: list[dict[str, Any]] = []
@@ -229,6 +233,25 @@ def run_trading_cycle(
             continue
         if not is_candidate:
             _append_skip(skipped, symbol=symbol.upper(), reason=decision_payload["decision"])
+            continue
+        if symbol.upper() in set(loss_guard.get("blocked_underlyings") or []):
+            _append_skip(
+                skipped,
+                symbol=symbol.upper(),
+                reason="recent_loss_guard",
+                detail=json.dumps((loss_guard.get("reasons") or {}).get(symbol.upper(), {}), sort_keys=True),
+            )
+            _record_execution_rejection(
+                execution_outcomes,
+                execution_rejected_count_by_reason,
+                ticker=symbol.upper(),
+                decision_id=decision.decision_id,
+                thesis_id=thesis_id,
+                reason="recent_loss_guard",
+                detail="recent outcomes for this underlying are underperforming",
+                journal_path=execution_log_path,
+                payload=(loss_guard.get("reasons") or {}).get(symbol.upper(), {}),
+            )
             continue
         if symbol.upper() in active_underlyings:
             _append_skip(skipped, symbol=symbol.upper(), reason="underlying_exposure_already_open")
@@ -360,7 +383,11 @@ def run_trading_cycle(
         orders_submitted=orders_submitted,
         skipped=skipped,
         runtime_state=runtime_state.to_json_dict(),
-        execution_outcomes=[{"disposition": "position_monitor_summary", **monitor_summary}, *execution_outcomes],
+        execution_outcomes=[
+            {"disposition": "position_monitor_summary", **monitor_summary},
+            {"disposition": "trade_outcome_learning_summary", **outcome_learning_summary},
+            *execution_outcomes,
+        ],
         scanner_candidates_count=scanner_candidates_count,
         execution_rejected_count_by_reason=execution_rejected_count_by_reason,
         trade_attempted_count=trade_attempted_count,
@@ -415,6 +442,12 @@ def _active_open_position_count(broker: Any | None = None) -> int:
             and not position.status.startswith("failed")
         ]
     )
+
+
+def _trade_outcome_journal_for_execution_log(execution_log_path: str | Path | None) -> Path | None:
+    if execution_log_path is None:
+        return None
+    return Path(execution_log_path).parent / "trade_outcomes.jsonl"
 
 
 def _active_underlying_symbols(broker: Any | None = None) -> set[str]:
