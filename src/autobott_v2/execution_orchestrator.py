@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Callable
@@ -38,6 +39,7 @@ def build_trade_intent_from_decision(
     *,
     quantity: int = 1,
     environment: BrokerEnvironment = BrokerEnvironment.PAPER,
+    max_position_cost: float | None = None,
 ) -> TradeIntent:
     if decision.decision is not DecisionStatus.TRADE_CANDIDATE:
         raise ValueError("decision_not_trade_candidate")
@@ -53,7 +55,12 @@ def build_trade_intent_from_decision(
         option_symbol=contract.option_symbol,
         side=side,
         quantity=quantity,
-        limit_price=contract.mid,
+        limit_price=_entry_limit_price(
+            contract,
+            quantity=quantity,
+            environment=environment,
+            max_position_cost=max_position_cost,
+        ),
         generated_at=decision.timestamp,
         environment=environment,
         take_profit_price=contract.target_exit_mid,
@@ -92,6 +99,7 @@ def submit_decision_to_broker(
         decision,
         quantity=quantity,
         environment=resolved_broker.config.environment,
+        max_position_cost=resolved_broker.config.max_position_cost,
     )
     risk_check = validate_trade_intent(
         intent,
@@ -116,3 +124,21 @@ def submit_decision_to_broker(
     append_order_submission(order, journal_path=journal_path)
     upsert_open_position_from_order(order)
     return order
+
+
+def _entry_limit_price(
+    contract: object,
+    *,
+    quantity: int,
+    environment: BrokerEnvironment,
+    max_position_cost: float | None,
+) -> float:
+    style = (os.getenv("AUTOBOTT_ENTRY_LIMIT_STYLE") or "marketable").strip().lower()
+    mid = float(getattr(contract, "mid"))
+    ask = float(getattr(contract, "ask", mid) or mid)
+    if environment is not BrokerEnvironment.PAPER or style in {"mid", "passive"}:
+        return round(mid, 2)
+    limit_price = ask if style in {"marketable", "ask", "aggressive"} else mid
+    if max_position_cost is not None and max_position_cost > 0 and quantity > 0:
+        limit_price = min(limit_price, max_position_cost / (quantity * 100.0))
+    return max(0.01, round(limit_price, 2))

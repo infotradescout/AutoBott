@@ -619,7 +619,7 @@ def test_run_trading_cycle_uses_under_cap_fallback_before_ghost_only_skip(tmp_pa
     assert result.trade_attempted_count == 1
     assert len(result.orders_submitted) == 1
     assert broker.submitted[0].option_symbol == "AAPL260703C00110000"
-    assert broker.submitted[0].limit_price == 0.8
+    assert broker.submitted[0].limit_price == 0.83
     assert "ghost_entry" in ghost_rows
     assert any(outcome["disposition"] == "real_money_cap_fallback_selected" for outcome in result.execution_outcomes)
 

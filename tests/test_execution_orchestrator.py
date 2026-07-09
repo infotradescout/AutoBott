@@ -107,12 +107,32 @@ class FakeBroker:
         )
 
 
-def test_build_trade_intent_from_decision_maps_selected_contract() -> None:
+def test_build_trade_intent_from_decision_uses_marketable_paper_limit() -> None:
     intent = build_trade_intent_from_decision(_decision_card())
     assert intent.symbol == "AAPL"
     assert intent.option_symbol == "AAPL260117C00190000"
-    assert intent.limit_price == 2.5
+    assert intent.limit_price == 2.6
     assert intent.take_profit_price == 3.75
+
+
+def test_build_trade_intent_from_decision_caps_marketable_limit_at_position_cost() -> None:
+    decision = _decision_card(
+        selected_contract=_decision_card().selected_contract.__class__(
+            **(_decision_card().selected_contract.__dict__ | {"bid": 0.91, "ask": 1.05, "mid": 0.98})
+        )
+    )
+
+    intent = build_trade_intent_from_decision(decision, max_position_cost=100.0)
+
+    assert intent.limit_price == 1.0
+
+
+def test_build_trade_intent_from_decision_can_use_passive_mid(monkeypatch) -> None:
+    monkeypatch.setenv("AUTOBOTT_ENTRY_LIMIT_STYLE", "mid")
+
+    intent = build_trade_intent_from_decision(_decision_card())
+
+    assert intent.limit_price == 2.5
 
 
 def test_build_trade_intent_from_decision_rejects_non_trade_candidate() -> None:
