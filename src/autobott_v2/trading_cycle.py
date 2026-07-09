@@ -13,6 +13,7 @@ from .execution_models import BrokerEnvironment
 from .execution_journal import append_execution_outcome
 from .execution_reconciler import reconcile_open_positions
 from .execution_orchestrator import ExecutionRejectedError, submit_decision_to_broker
+from .ghost_trades import append_ghost_trade, observe_ghost_trades
 from .phase1_alpaca_client import AlpacaPaperClient
 from .phase1_engine import build_decision_card
 from .phase1_models import (
@@ -147,6 +148,19 @@ def run_trading_cycle(
             )
             snapshot = _load_snapshot(Path(snapshot_path))
             decision_input = _decision_input_from_snapshot(snapshot)
+            ghost_journal_path = _ghost_trade_journal_for_execution_log(execution_log_path)
+            ghost_observations = observe_ghost_trades(decision_input, journal_path=ghost_journal_path)
+            if ghost_observations:
+                _record_execution_outcome(
+                    execution_outcomes,
+                    ticker=symbol.upper(),
+                    decision_id=f"ghost-observe-{symbol.upper()}",
+                    thesis_id=f"{symbol.upper()}:ghost_observation",
+                    disposition="ghost_trade_observed",
+                    detail=f"observations={len(ghost_observations)}",
+                    journal_path=execution_log_path,
+                    payload={"observations": ghost_observations},
+                )
             decision = build_decision_card(decision_input)
         except Exception as exc:
             _append_skip(
@@ -268,6 +282,31 @@ def run_trading_cycle(
                 detail=f"active_underlying={symbol.upper()}",
                 journal_path=execution_log_path,
                 payload={"active_underlyings": sorted(active_underlyings)},
+            )
+            continue
+        if decision.selected_contract is not None and _selected_contract_real_cost(decision) > resolved_broker.config.max_position_cost:
+            ghost = append_ghost_trade(
+                decision,
+                reason="contract_cost_above_real_money_cap",
+                max_real_cost=resolved_broker.config.max_position_cost,
+                journal_path=_ghost_trade_journal_for_execution_log(execution_log_path),
+            )
+            _append_skip(
+                skipped,
+                symbol=symbol.upper(),
+                reason="contract_cost_cap_ghost_tracked",
+                detail=f"contract_cost={ghost['notional']} max_real_cost={resolved_broker.config.max_position_cost}",
+            )
+            _record_execution_rejection(
+                execution_outcomes,
+                execution_rejected_count_by_reason,
+                ticker=symbol.upper(),
+                decision_id=decision.decision_id,
+                thesis_id=thesis_id,
+                reason="contract_cost_cap_ghost_tracked",
+                detail="candidate routed to ghost lane instead of real-money lane",
+                journal_path=execution_log_path,
+                payload=ghost,
             )
             continue
         if max_new_entry_attempts_per_loop is not None and trade_attempted_count >= max_new_entry_attempts_per_loop:
@@ -451,6 +490,18 @@ def _trade_outcome_journal_for_execution_log(execution_log_path: str | Path | No
     if execution_log_path is None:
         return None
     return Path(execution_log_path).parent / "trade_outcomes.jsonl"
+
+
+def _ghost_trade_journal_for_execution_log(execution_log_path: str | Path | None) -> Path | None:
+    if execution_log_path is None:
+        return None
+    return Path(execution_log_path).parent / "ghost_trades.jsonl"
+
+
+def _selected_contract_real_cost(decision: DecisionCard) -> float:
+    if decision.selected_contract is None:
+        return 0.0
+    return round(float(decision.selected_contract.mid) * 100, 2)
 
 
 def _prioritize_symbols_by_winners(symbols: list[str], winner_bias: dict[str, Any]) -> list[str]:
@@ -662,7 +713,7 @@ def _paper_discovery_contract(
 def _paper_discovery_max_contract_price() -> float:
     value = os.getenv("AUTOBOTT_PAPER_DISCOVERY_MAX_CONTRACT_PRICE")
     if value is None or not value.strip():
-        return 10.0
+        return 1.0
     return max(0.01, float(value))
 
 
