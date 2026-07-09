@@ -5,12 +5,16 @@ import autobott_v2.session_supervisor as supervisor
 
 def _reset_supervisor_state() -> None:
     supervisor._SESSION_THREAD = None
+    supervisor._POSITION_MONITOR_THREAD = None
+    supervisor._SESSION_STOP_EVENT = None
     supervisor._SESSION_AUTOSTART_CONSUMED = False
     supervisor._SESSION_STATE.running = False
     supervisor._SESSION_STATE.started_at = None
     supervisor._SESSION_STATE.finished_at = None
     supervisor._SESSION_STATE.last_result = None
     supervisor._SESSION_STATE.last_error = None
+    supervisor._SESSION_STATE.last_monitor_result = None
+    supervisor._SESSION_STATE.last_monitor_error = None
 
 
 def test_load_session_supervisor_config_from_env(monkeypatch) -> None:
@@ -24,6 +28,8 @@ def test_load_session_supervisor_config_from_env(monkeypatch) -> None:
     monkeypatch.setenv("AUTOBOTT_SESSION_END_TIME", "15:55")
     monkeypatch.setenv("AUTOBOTT_SESSION_MARKET_TIMEZONE", "America/New_York")
     monkeypatch.setenv("AUTOBOTT_SESSION_ARM_PAPER_EXECUTION", "true")
+    monkeypatch.setenv("AUTOBOTT_POSITION_MONITOR_HEARTBEAT_ENABLED", "true")
+    monkeypatch.setenv("AUTOBOTT_POSITION_MONITOR_HEARTBEAT_SECONDS", "15")
     config = supervisor.load_session_supervisor_config()
     assert config.enabled is True
     assert config.symbols == ["AAPL", "MSFT"]
@@ -34,6 +40,19 @@ def test_load_session_supervisor_config_from_env(monkeypatch) -> None:
     assert config.end_time == "15:55:00"
     assert config.market_timezone == "America/New_York"
     assert config.arm_paper_execution_on_start is True
+    assert config.position_monitor_heartbeat_enabled is True
+    assert config.position_monitor_heartbeat_seconds == 15
+
+
+def test_load_session_supervisor_config_run_forever_ignores_max_cycles(monkeypatch) -> None:
+    _reset_supervisor_state()
+    monkeypatch.setenv("AUTOBOTT_SESSION_MAX_CYCLES", "3")
+    monkeypatch.setenv("AUTOBOTT_SESSION_RUN_FOREVER", "true")
+
+    config = supervisor.load_session_supervisor_config()
+
+    assert config.run_forever is True
+    assert config.max_cycles is None
 
 
 def test_load_session_supervisor_config_expands_top_options_universe(monkeypatch) -> None:

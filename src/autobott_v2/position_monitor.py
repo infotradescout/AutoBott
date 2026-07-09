@@ -27,10 +27,10 @@ class PositionMonitorRules:
     take_profit_tighten_pct: float = 0.50
     take_profit_harvest_pct: float = 0.80
     take_profit_force_exit_pct: float = 1.20
-    take_profit_limit_price_factor: float = 1.10
-    take_profit_reprice_factor: float = 1.03
-    take_profit_tight_limit_price_factor: float = 1.05
-    take_profit_harvest_limit_price_factor: float = 1.02
+    take_profit_limit_price_factor: float = 0.98
+    take_profit_reprice_factor: float = 0.97
+    take_profit_tight_limit_price_factor: float = 0.97
+    take_profit_harvest_limit_price_factor: float = 0.95
     trailing_activation_pct: float = 0.15
     trailing_drawdown_pct: float = 0.10
     stop_loss_pct: float = 0.22
@@ -45,10 +45,10 @@ def load_position_monitor_rules() -> PositionMonitorRules:
         take_profit_tighten_pct=float(os.getenv("AUTOBOTT_EXIT_TAKE_PROFIT_TIGHTEN_PCT", "0.50")),
         take_profit_harvest_pct=float(os.getenv("AUTOBOTT_EXIT_TAKE_PROFIT_HARVEST_PCT", "0.80")),
         take_profit_force_exit_pct=float(os.getenv("AUTOBOTT_EXIT_TAKE_PROFIT_FORCE_EXIT_PCT", "1.20")),
-        take_profit_limit_price_factor=float(os.getenv("AUTOBOTT_TAKE_PROFIT_LIMIT_PRICE_FACTOR", "1.10")),
-        take_profit_reprice_factor=float(os.getenv("AUTOBOTT_TAKE_PROFIT_REPRICE_FACTOR", "1.03")),
-        take_profit_tight_limit_price_factor=float(os.getenv("AUTOBOTT_TAKE_PROFIT_TIGHT_LIMIT_PRICE_FACTOR", "1.05")),
-        take_profit_harvest_limit_price_factor=float(os.getenv("AUTOBOTT_TAKE_PROFIT_HARVEST_LIMIT_PRICE_FACTOR", "1.02")),
+        take_profit_limit_price_factor=float(os.getenv("AUTOBOTT_TAKE_PROFIT_LIMIT_PRICE_FACTOR", "0.98")),
+        take_profit_reprice_factor=float(os.getenv("AUTOBOTT_TAKE_PROFIT_REPRICE_FACTOR", "0.97")),
+        take_profit_tight_limit_price_factor=float(os.getenv("AUTOBOTT_TAKE_PROFIT_TIGHT_LIMIT_PRICE_FACTOR", "0.97")),
+        take_profit_harvest_limit_price_factor=float(os.getenv("AUTOBOTT_TAKE_PROFIT_HARVEST_LIMIT_PRICE_FACTOR", "0.95")),
         trailing_activation_pct=float(os.getenv("AUTOBOTT_EXIT_TRAILING_ACTIVATION_PCT", "0.15")),
         trailing_drawdown_pct=float(os.getenv("AUTOBOTT_EXIT_TRAILING_DRAWDOWN_PCT", "0.10")),
         stop_loss_pct=float(os.getenv("AUTOBOTT_EXIT_STOP_LOSS_PCT", "0.22")),
@@ -194,6 +194,15 @@ def _monitor_action(
             "unrealized_plpc": unrealized_plpc,
             "current_price": current_price,
         }
+    if peak_plpc >= rules.trailing_activation_pct and unrealized_plpc <= peak_plpc - rules.trailing_drawdown_pct:
+        return {
+            "reason": "trailing_stop",
+            "symbol": symbol,
+            "quantity": qty,
+            "unrealized_plpc": unrealized_plpc,
+            "current_price": current_price,
+            "peak_unrealized_plpc": peak_plpc,
+        }
     if unrealized_plpc >= rules.take_profit_pct:
         tier = _take_profit_tier(unrealized_plpc, rules)
         return {
@@ -204,15 +213,6 @@ def _monitor_action(
             "current_price": current_price,
             "peak_unrealized_plpc": peak_plpc,
             "take_profit_tier": tier,
-        }
-    if peak_plpc >= rules.trailing_activation_pct and unrealized_plpc <= peak_plpc - rules.trailing_drawdown_pct:
-        return {
-            "reason": "trailing_stop",
-            "symbol": symbol,
-            "quantity": qty,
-            "unrealized_plpc": unrealized_plpc,
-            "current_price": current_price,
-            "peak_unrealized_plpc": peak_plpc,
         }
     return None
 
@@ -410,13 +410,13 @@ def _take_profit_limit_factor(
     reprice: bool,
 ) -> float:
     if reprice:
-        return rules.take_profit_reprice_factor
+        return min(rules.take_profit_reprice_factor, 0.99)
     tier = _take_profit_tier(unrealized_plpc, rules)
     if tier == "harvest":
-        return rules.take_profit_harvest_limit_price_factor
+        return min(rules.take_profit_harvest_limit_price_factor, 0.99)
     if tier == "tighten":
-        return rules.take_profit_tight_limit_price_factor
-    return rules.take_profit_limit_price_factor
+        return min(rules.take_profit_tight_limit_price_factor, 0.99)
+    return min(rules.take_profit_limit_price_factor, 0.99)
 
 
 def _submit_forced_take_profit_exit(

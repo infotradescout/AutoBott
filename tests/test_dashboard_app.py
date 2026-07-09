@@ -612,7 +612,7 @@ def test_dashboard_options_scout_ranks_profit_harvest_rows(monkeypatch, tmp_path
     assert payload["ok"] is True
     assert payload["scout_rows"][0]["attention"] == "profit_exit_missing"
     assert payload["scout_rows"][0]["profit_tier"] == "initial"
-    assert payload["scout_rows"][0]["target_exit_price"] == 3.85
+    assert payload["scout_rows"][0]["target_exit_price"] == 3.43
 
 
 def test_dashboard_account_orders_endpoint_returns_history(monkeypatch, tmp_path) -> None:

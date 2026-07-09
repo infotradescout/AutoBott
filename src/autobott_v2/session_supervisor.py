@@ -7,6 +7,7 @@ from datetime import UTC, datetime, time as daytime
 from typing import Any
 
 from .options_universe import resolve_symbol_universe
+from .position_monitor import run_position_monitor
 from .runtime_control import arm_paper_execution
 from .session_runner import run_trading_session
 
@@ -31,6 +32,9 @@ class SessionSupervisorConfig:
     end_time: str | None
     market_timezone: str
     arm_paper_execution_on_start: bool
+    position_monitor_heartbeat_enabled: bool = False
+    position_monitor_heartbeat_seconds: int = 15
+    run_forever: bool = False
 
 
 @dataclass
@@ -40,6 +44,8 @@ class SessionSupervisorState:
     finished_at: datetime | None = None
     last_result: dict[str, Any] | None = None
     last_error: str | None = None
+    last_monitor_result: dict[str, Any] | None = None
+    last_monitor_error: str | None = None
 
     def to_json_dict(self) -> dict[str, Any]:
         payload = asdict(self)
@@ -50,6 +56,8 @@ class SessionSupervisorState:
 
 _SESSION_LOCK = threading.Lock()
 _SESSION_THREAD: threading.Thread | None = None
+_POSITION_MONITOR_THREAD: threading.Thread | None = None
+_SESSION_STOP_EVENT: threading.Event | None = None
 _SESSION_STATE = SessionSupervisorState()
 _SESSION_AUTOSTART_CONSUMED = False
 
@@ -58,11 +66,12 @@ def load_session_supervisor_config() -> SessionSupervisorConfig:
     symbols = resolve_symbol_universe([item.strip() for item in (os.getenv("AUTOBOTT_SESSION_SYMBOLS") or "SPY").split(",") if item.strip()])
     raw_max_cycles = os.getenv("AUTOBOTT_SESSION_MAX_CYCLES")
     raw_batch_size = os.getenv("AUTOBOTT_SESSION_SYMBOL_BATCH_SIZE")
+    run_forever = _normalize_bool(os.getenv("AUTOBOTT_SESSION_RUN_FOREVER"), default=False)
     return SessionSupervisorConfig(
         enabled=_normalize_bool(os.getenv("AUTOBOTT_SESSION_AUTOSTART"), default=True),
         symbols=symbols,
         interval_seconds=int(os.getenv("AUTOBOTT_SESSION_INTERVAL_SECONDS", "300")),
-        max_cycles=int(raw_max_cycles) if raw_max_cycles else None,
+        max_cycles=None if run_forever else (int(raw_max_cycles) if raw_max_cycles else None),
         symbol_batch_size=int(raw_batch_size) if raw_batch_size else None,
         quantity=int(os.getenv("AUTOBOTT_SESSION_QUANTITY", "1")),
         position_count=int(os.getenv("AUTOBOTT_SESSION_POSITION_COUNT", "0")),
@@ -71,6 +80,9 @@ def load_session_supervisor_config() -> SessionSupervisorConfig:
         end_time=_normalize_time_text(os.getenv("AUTOBOTT_SESSION_END_TIME") or "15:55"),
         market_timezone=(os.getenv("AUTOBOTT_SESSION_MARKET_TIMEZONE") or "America/New_York").strip() or "America/New_York",
         arm_paper_execution_on_start=_normalize_bool(os.getenv("AUTOBOTT_SESSION_ARM_PAPER_EXECUTION"), default=True),
+        position_monitor_heartbeat_enabled=_normalize_bool(os.getenv("AUTOBOTT_POSITION_MONITOR_HEARTBEAT_ENABLED"), default=False),
+        position_monitor_heartbeat_seconds=max(5, int(os.getenv("AUTOBOTT_POSITION_MONITOR_HEARTBEAT_SECONDS", "15"))),
+        run_forever=run_forever,
     )
 
 
@@ -87,7 +99,7 @@ def start_session_supervisor(config: SessionSupervisorConfig) -> bool:
 
 def _start_session_thread(config: SessionSupervisorConfig, *, consume_autostart: bool) -> bool:
     with _SESSION_LOCK:
-        global _SESSION_THREAD, _SESSION_AUTOSTART_CONSUMED
+        global _SESSION_THREAD, _POSITION_MONITOR_THREAD, _SESSION_AUTOSTART_CONSUMED, _SESSION_STOP_EVENT
         if _SESSION_THREAD is not None and _SESSION_THREAD.is_alive():
             return False
         if consume_autostart and _SESSION_AUTOSTART_CONSUMED:
@@ -99,8 +111,19 @@ def _start_session_thread(config: SessionSupervisorConfig, *, consume_autostart:
         _SESSION_STATE.finished_at = None
         _SESSION_STATE.last_error = None
         _SESSION_STATE.last_result = None
-        _SESSION_THREAD = threading.Thread(target=_run_session, args=(config,), daemon=True, name="autobott-session")
+        _SESSION_STATE.last_monitor_error = None
+        _SESSION_STATE.last_monitor_result = None
+        _SESSION_STOP_EVENT = threading.Event()
+        _SESSION_THREAD = threading.Thread(target=_run_session, args=(config, _SESSION_STOP_EVENT), daemon=True, name="autobott-session")
         _SESSION_THREAD.start()
+        if config.position_monitor_heartbeat_enabled:
+            _POSITION_MONITOR_THREAD = threading.Thread(
+                target=_run_position_monitor_heartbeat,
+                args=(config, _SESSION_STOP_EVENT),
+                daemon=True,
+                name="autobott-position-monitor",
+            )
+            _POSITION_MONITOR_THREAD.start()
         return True
 
 
@@ -111,10 +134,11 @@ def session_supervisor_status() -> dict[str, Any]:
             "config": asdict(config),
             "state": _SESSION_STATE.to_json_dict(),
             "thread_alive": bool(_SESSION_THREAD and _SESSION_THREAD.is_alive()),
+            "position_monitor_thread_alive": bool(_POSITION_MONITOR_THREAD and _POSITION_MONITOR_THREAD.is_alive()),
         }
 
 
-def _run_session(config: SessionSupervisorConfig) -> None:
+def _run_session(config: SessionSupervisorConfig, stop_event: threading.Event) -> None:
     global _SESSION_STATE
     try:
         if config.arm_paper_execution_on_start:
@@ -141,9 +165,23 @@ def _run_session(config: SessionSupervisorConfig) -> None:
         with _SESSION_LOCK:
             _SESSION_STATE.last_error = f"{type(exc).__name__}: {exc}"
     finally:
+        stop_event.set()
         with _SESSION_LOCK:
             _SESSION_STATE.running = False
             _SESSION_STATE.finished_at = datetime.now(tz=UTC)
+
+
+def _run_position_monitor_heartbeat(config: SessionSupervisorConfig, stop_event: threading.Event) -> None:
+    while not stop_event.is_set():
+        try:
+            result = run_position_monitor()
+            with _SESSION_LOCK:
+                _SESSION_STATE.last_monitor_result = result
+                _SESSION_STATE.last_monitor_error = None
+        except Exception as exc:  # pragma: no cover
+            with _SESSION_LOCK:
+                _SESSION_STATE.last_monitor_error = f"{type(exc).__name__}: {exc}"
+        stop_event.wait(config.position_monitor_heartbeat_seconds)
 
 
 def _normalize_time_text(value: str | None) -> str | None:

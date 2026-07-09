@@ -770,7 +770,7 @@ def _scout_target_price(plpc: float, current_price: float, rules: Any) -> float 
         factor = rules.take_profit_tight_limit_price_factor
     else:
         factor = rules.take_profit_limit_price_factor
-    return round(current_price * factor, 2)
+    return round(current_price * min(float(factor), 0.99), 2)
 
 
 def _scout_position_attention(plpc: float, *, pending_exit: dict[str, Any] | None, tier: str, rules: Any) -> str:
