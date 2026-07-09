@@ -8,7 +8,7 @@ from autobott_v2.position_monitor import PositionMonitorRules, run_position_moni
 from autobott_v2.runtime_control import default_runtime_state, save_runtime_state
 
 
-def _config() -> AlpacaExecutionConfig:
+def _config(*, max_position_cost: float = 1000.0) -> AlpacaExecutionConfig:
     return AlpacaExecutionConfig(
         environment=BrokerEnvironment.PAPER,
         api_key="paper-key",
@@ -17,15 +17,15 @@ def _config() -> AlpacaExecutionConfig:
         data_base_url="https://data.alpaca.markets",
         allow_live_trading=False,
         allow_order_placement=True,
-        max_position_cost=1000.0,
+        max_position_cost=max_position_cost,
         max_daily_loss=500.0,
         max_open_positions=25,
     )
 
 
 class FakeBroker:
-    def __init__(self, positions, orders=None):
-        self.config = _config()
+    def __init__(self, positions, orders=None, *, max_position_cost: float = 1000.0):
+        self.config = _config(max_position_cost=max_position_cost)
         self.positions = positions
         self.orders = orders or []
         self.submitted = []
@@ -361,6 +361,54 @@ def test_position_monitor_cancels_pending_buy_before_urgent_stop(tmp_path) -> No
     assert result["actions"][0]["canceled_pending_order_ids"] == ["pending-buy-1"]
     assert broker.canceled == ["pending-buy-1"]
     assert broker.submitted[0].order_type.value == "market"
+
+
+def test_position_monitor_cancels_pending_entry_over_cost_cap_without_positions(tmp_path) -> None:
+    save_runtime_state(default_runtime_state())
+    broker = FakeBroker(
+        [],
+        orders=[
+            {
+                "id": "pending-buy-1",
+                "symbol": "MRK260717P00125000",
+                "side": "buy",
+                "status": "new",
+                "qty": "1",
+                "filled_qty": "0",
+                "limit_price": "1.91",
+            },
+            {
+                "id": "pending-buy-2",
+                "symbol": "T260724P00021000",
+                "side": "buy",
+                "status": "new",
+                "qty": "1",
+                "filled_qty": "0",
+                "limit_price": "0.70",
+            },
+        ],
+        max_position_cost=100.0,
+    )
+
+    result = run_position_monitor(
+        broker=broker,
+        rules=PositionMonitorRules(),
+        journal_path=str(tmp_path / "journal.jsonl"),
+        trailing_state_path=str(tmp_path / "trailing_peaks.json"),
+    )
+
+    assert result["checked"] == 0
+    assert result["actions"] == [
+        {
+            "reason": "pending_entry_over_cost_cap_canceled",
+            "symbol": "MRK260717P00125000",
+            "broker_order_id": "pending-buy-1",
+            "estimated_notional": 191.0,
+            "max_position_cost": 100.0,
+        }
+    ]
+    assert broker.canceled == ["pending-buy-1"]
+    assert broker.submitted == []
 
 
 def test_position_monitor_trims_excess_contracts_before_profit_loss(tmp_path) -> None:

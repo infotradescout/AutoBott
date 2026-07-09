@@ -101,7 +101,7 @@ def load_alpaca_execution_config() -> AlpacaExecutionConfig:
         data_base_url=(os.getenv("ALPACA_DATA_BASE_URL") or "https://data.alpaca.markets").rstrip("/"),
         allow_live_trading=_normalize_bool(os.getenv("AUTOBOTT_LIVE_TRADING_ENABLED"), default=False),
         allow_order_placement=_normalize_bool(os.getenv("AUTOBOTT_ALLOW_ORDER_PLACEMENT"), default=False),
-        max_position_cost=float(os.getenv("AUTOBOTT_MAX_POSITION_COST", "1000")),
+        max_position_cost=float(os.getenv("AUTOBOTT_MAX_POSITION_COST", "100")),
         max_daily_loss=float(os.getenv("AUTOBOTT_MAX_DAILY_LOSS", "500")),
         max_open_positions=int(os.getenv("AUTOBOTT_MAX_OPEN_POSITIONS", "3")),
         paper_trade_all_passed_signals=paper_trade_all_passed_signals,

@@ -108,6 +108,7 @@ def run_position_monitor(
     peaks = _load_trailing_peaks(state_path=trailing_state_path)
     open_symbols: set[str] = set()
     actions: list[dict[str, Any]] = []
+    actions.extend(_cancel_over_cap_pending_entries(pending_orders, broker=resolved_broker))
     for position in positions:
         symbol = str(position.get("symbol") or "").upper()
         if symbol:
@@ -332,6 +333,63 @@ def _cancel_pending_orders_for_symbol(
         broker.cancel_order(order_id)
         canceled.append(order_id)
     return canceled
+
+
+def _cancel_over_cap_pending_entries(
+    pending_orders: dict[str, list[dict[str, Any]]],
+    *,
+    broker: AlpacaExecutionBroker,
+) -> list[dict[str, Any]]:
+    if not hasattr(broker, "cancel_order"):
+        return []
+    max_position_cost = _float_or_none(getattr(getattr(broker, "config", None), "max_position_cost", None))
+    if max_position_cost is None or max_position_cost <= 0:
+        return []
+    actions: list[dict[str, Any]] = []
+    for symbol, orders in pending_orders.items():
+        for order in orders:
+            side = str(order.get("side") or "").lower()
+            if side != "buy":
+                continue
+            order_id = str(order.get("id") or order.get("broker_order_id") or "")
+            if not order_id:
+                continue
+            estimated_notional = _pending_entry_notional(order)
+            if estimated_notional is None or estimated_notional <= max_position_cost:
+                continue
+            try:
+                broker.cancel_order(order_id)
+                actions.append(
+                    {
+                        "reason": "pending_entry_over_cost_cap_canceled",
+                        "symbol": symbol,
+                        "broker_order_id": order_id,
+                        "estimated_notional": estimated_notional,
+                        "max_position_cost": max_position_cost,
+                    }
+                )
+            except Exception as exc:
+                actions.append(
+                    {
+                        "reason": "pending_entry_over_cost_cap_cancel_failed",
+                        "symbol": symbol,
+                        "broker_order_id": order_id,
+                        "estimated_notional": estimated_notional,
+                        "max_position_cost": max_position_cost,
+                        "error": str(exc),
+                    }
+                )
+    return actions
+
+
+def _pending_entry_notional(order: dict[str, Any]) -> float | None:
+    qty = _float_or_none(order.get("qty") or order.get("quantity"))
+    filled_qty = _float_or_none(order.get("filled_qty"))
+    limit_price = _float_or_none(order.get("limit_price"))
+    if qty is None or limit_price is None:
+        return None
+    remaining_qty = max(0.0, qty - (filled_qty or 0.0))
+    return round(limit_price * remaining_qty * 100.0, 2)
 
 
 def _handle_pending_take_profit_exit(
