@@ -44,6 +44,12 @@ services:
         value: "3"
       - key: AUTOBOTT_OPEN_DRAWDOWN_GUARD_LOSS_RATE
         value: "0.60"
+      - key: AUTOBOTT_DEFINED_RISK_SPREADS_ENABLED
+        value: "true"
+      - key: AUTOBOTT_SPREAD_MAX_RISK
+        value: "100"
+      - key: AUTOBOTT_SPREAD_PROFIT_TARGET_PCT
+        value: "0.50"
       - key: AUTOBOTT_EXIT_TAKE_PROFIT_PCT
         value: "0.30"
       - key: AUTOBOTT_EXIT_TAKE_PROFIT_TIGHTEN_PCT

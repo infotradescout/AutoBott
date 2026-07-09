@@ -1,4 +1,10 @@
 from .engine import evaluate_trade
+from .defined_risk_spreads import (
+    DefinedRiskSpreadCandidate,
+    DefinedRiskSpreadRules,
+    append_defined_risk_spread_candidate,
+    select_defined_risk_spread,
+)
 from .execution_broker import AlpacaExecutionBroker, BrokerAdapter
 from .execution_config import AlpacaExecutionConfig, load_alpaca_execution_config, require_alpaca_execution_config
 from .execution_journal import append_order_submission, append_risk_check, execution_journal_path, load_execution_journal
@@ -92,6 +98,8 @@ __all__ = [
     "DecisionCard",
     "DecisionInput",
     "DecisionStatus",
+    "DefinedRiskSpreadCandidate",
+    "DefinedRiskSpreadRules",
     "DirectionBias",
     "ExecutionOrder",
     "BucketEligibilityRules",
@@ -130,6 +138,7 @@ __all__ = [
     "load_runtime_state",
     "load_session_supervisor_config",
     "append_decision_card",
+    "append_defined_risk_spread_candidate",
     "build_decision_card",
     "build_execution_order",
     "build_bucket_edge_report",
@@ -160,6 +169,7 @@ __all__ = [
     "save_open_positions",
     "save_runtime_state",
     "session_supervisor_status",
+    "select_defined_risk_spread",
     "set_execution_mode",
     "set_kill_switch",
     "submit_decision_to_broker",

@@ -77,6 +77,26 @@ class OverCapWithCheapFallbackDataClient(FakeDataClient):
         return payload
 
 
+class SpreadBacktestDataClient(FakeDataClient):
+    def get_option_chain_snapshots(self, symbol):
+        payload = super().get_option_chain_snapshots(symbol)
+        payload[f"{symbol}260703P00104000"] = {
+            "latestQuote": {"bp": 0.45, "ap": 0.50, "t": "2026-07-01T15:35:00Z"},
+            "greeks": {"delta": -0.35, "theta": -0.02, "vega": 0.05, "iv": 0.25},
+            "details": {"expiration_date": "2026-07-03", "strike_price": 104, "type": "put"},
+            "dailyBar": {"v": 200},
+            "open_interest": 1000,
+        }
+        payload[f"{symbol}260703P00103000"] = {
+            "latestQuote": {"bp": 0.18, "ap": 0.22, "t": "2026-07-01T15:35:00Z"},
+            "greeks": {"delta": -0.18, "theta": -0.02, "vega": 0.05, "iv": 0.25},
+            "details": {"expiration_date": "2026-07-03", "strike_price": 103, "type": "put"},
+            "dailyBar": {"v": 200},
+            "open_interest": 1000,
+        }
+        return payload
+
+
 class FakeBroker:
     def __init__(self, **config_overrides) -> None:
         base = AlpacaExecutionConfig(
@@ -732,6 +752,33 @@ def test_run_trading_cycle_routes_to_ghost_when_open_basket_drawdown_is_bad(tmp_
     guard = next(row for row in result.execution_outcomes if row["disposition"] == "open_drawdown_guard_summary")
     assert guard["blocked"] is True
     assert "ghost_entry" in (tmp_path / "ghost_trades.jsonl").read_text(encoding="utf-8")
+
+
+def test_run_trading_cycle_records_defined_risk_spread_backtest_candidate(tmp_path) -> None:
+    save_runtime_state(default_runtime_state(), state_path=tmp_path / "runtime_state.json")
+    original = trading_cycle.load_runtime_state
+    original_positions = trading_cycle.load_open_positions
+    trading_cycle.load_runtime_state = lambda: original(state_path=tmp_path / "runtime_state.json")
+    trading_cycle.load_open_positions = lambda: []
+    try:
+        result = trading_cycle.run_trading_cycle(
+            symbols=["AAPL"],
+            broker=FakeBroker(),
+            data_client=SpreadBacktestDataClient(),
+            scheduled_market_time=datetime(2026, 7, 1, 15, 35, tzinfo=UTC),
+            captured_at_utc=datetime(2026, 7, 1, 15, 35, tzinfo=UTC),
+            corpus_root=tmp_path / "corpus",
+            decision_log_path=tmp_path / "decision_cards.jsonl",
+            execution_log_path=str(tmp_path / "execution_orders.jsonl"),
+        )
+    finally:
+        trading_cycle.load_runtime_state = original
+        trading_cycle.load_open_positions = original_positions
+
+    spread = next(row for row in result.execution_outcomes if row["disposition"] == "defined_risk_spread_backtest_candidate")
+    assert spread["strategy"] == "bull_put_spread"
+    assert spread["max_risk"] == 77.0
+    assert "defined_risk_spread.v1" in (tmp_path / "defined_risk_spreads.jsonl").read_text(encoding="utf-8")
 
 
 def test_run_trading_cycle_paper_opportunistic_mode_does_not_override_spread_block(tmp_path, monkeypatch) -> None:

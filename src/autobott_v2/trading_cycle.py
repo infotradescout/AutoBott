@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any
 
 from .execution_broker import AlpacaExecutionBroker
+from .defined_risk_spreads import append_defined_risk_spread_candidate, select_defined_risk_spread
 from .execution_models import BrokerEnvironment
 from .execution_journal import append_execution_outcome
 from .execution_reconciler import reconcile_open_positions
@@ -163,6 +164,24 @@ def run_trading_cycle(
                     payload={"observations": ghost_observations},
                 )
             decision = build_decision_card(decision_input)
+            spread_candidate = select_defined_risk_spread(decision_input, decision.direction.bias)
+            if spread_candidate is not None:
+                spread_journal_path = _spread_journal_for_execution_log(execution_log_path)
+                append_defined_risk_spread_candidate(
+                    spread_candidate,
+                    decision_id=decision.decision_id,
+                    journal_path=spread_journal_path,
+                )
+                _record_execution_outcome(
+                    execution_outcomes,
+                    ticker=symbol.upper(),
+                    decision_id=decision.decision_id,
+                    thesis_id=f"{symbol.upper()}:defined_risk_spread:{spread_candidate.strategy}",
+                    disposition="defined_risk_spread_backtest_candidate",
+                    detail=f"{spread_candidate.strategy}:max_risk={spread_candidate.max_risk}:credit={spread_candidate.net_credit}",
+                    journal_path=execution_log_path,
+                    payload=spread_candidate.to_json_dict(),
+                )
         except Exception as exc:
             _append_skip(
                 skipped,
@@ -552,6 +571,12 @@ def _ghost_trade_journal_for_execution_log(execution_log_path: str | Path | None
     if execution_log_path is None:
         return None
     return Path(execution_log_path).parent / "ghost_trades.jsonl"
+
+
+def _spread_journal_for_execution_log(execution_log_path: str | Path | None) -> Path | None:
+    if execution_log_path is None:
+        return None
+    return Path(execution_log_path).parent / "defined_risk_spreads.jsonl"
 
 
 def _selected_contract_real_cost(decision: DecisionCard) -> float:
