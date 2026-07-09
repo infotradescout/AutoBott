@@ -58,6 +58,7 @@ _SESSION_LOCK = threading.Lock()
 _SESSION_THREAD: threading.Thread | None = None
 _POSITION_MONITOR_THREAD: threading.Thread | None = None
 _SESSION_STOP_EVENT: threading.Event | None = None
+_POSITION_MONITOR_STOP_EVENT: threading.Event | None = None
 _SESSION_STATE = SessionSupervisorState()
 _SESSION_AUTOSTART_CONSUMED = False
 
@@ -99,7 +100,8 @@ def start_session_supervisor(config: SessionSupervisorConfig) -> bool:
 
 def _start_session_thread(config: SessionSupervisorConfig, *, consume_autostart: bool) -> bool:
     with _SESSION_LOCK:
-        global _SESSION_THREAD, _POSITION_MONITOR_THREAD, _SESSION_AUTOSTART_CONSUMED, _SESSION_STOP_EVENT
+        global _SESSION_THREAD, _SESSION_AUTOSTART_CONSUMED, _SESSION_STOP_EVENT
+        _ensure_position_monitor_thread_locked(config)
         if _SESSION_THREAD is not None and _SESSION_THREAD.is_alive():
             return False
         if consume_autostart and _SESSION_AUTOSTART_CONSUMED:
@@ -116,14 +118,6 @@ def _start_session_thread(config: SessionSupervisorConfig, *, consume_autostart:
         _SESSION_STOP_EVENT = threading.Event()
         _SESSION_THREAD = threading.Thread(target=_run_session, args=(config, _SESSION_STOP_EVENT), daemon=True, name="autobott-session")
         _SESSION_THREAD.start()
-        if config.position_monitor_heartbeat_enabled:
-            _POSITION_MONITOR_THREAD = threading.Thread(
-                target=_run_position_monitor_heartbeat,
-                args=(config, _SESSION_STOP_EVENT),
-                daemon=True,
-                name="autobott-position-monitor",
-            )
-            _POSITION_MONITOR_THREAD.start()
         return True
 
 
@@ -169,6 +163,22 @@ def _run_session(config: SessionSupervisorConfig, stop_event: threading.Event) -
         with _SESSION_LOCK:
             _SESSION_STATE.running = False
             _SESSION_STATE.finished_at = datetime.now(tz=UTC)
+
+
+def _ensure_position_monitor_thread_locked(config: SessionSupervisorConfig) -> None:
+    global _POSITION_MONITOR_THREAD, _POSITION_MONITOR_STOP_EVENT
+    if not config.position_monitor_heartbeat_enabled:
+        return
+    if _POSITION_MONITOR_THREAD is not None and _POSITION_MONITOR_THREAD.is_alive():
+        return
+    _POSITION_MONITOR_STOP_EVENT = threading.Event()
+    _POSITION_MONITOR_THREAD = threading.Thread(
+        target=_run_position_monitor_heartbeat,
+        args=(config, _POSITION_MONITOR_STOP_EVENT),
+        daemon=True,
+        name="autobott-position-monitor",
+    )
+    _POSITION_MONITOR_THREAD.start()
 
 
 def _run_position_monitor_heartbeat(config: SessionSupervisorConfig, stop_event: threading.Event) -> None:

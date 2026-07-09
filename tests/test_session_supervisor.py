@@ -7,6 +7,7 @@ def _reset_supervisor_state() -> None:
     supervisor._SESSION_THREAD = None
     supervisor._POSITION_MONITOR_THREAD = None
     supervisor._SESSION_STOP_EVENT = None
+    supervisor._POSITION_MONITOR_STOP_EVENT = None
     supervisor._SESSION_AUTOSTART_CONSUMED = False
     supervisor._SESSION_STATE.running = False
     supervisor._SESSION_STATE.started_at = None
@@ -163,3 +164,91 @@ def test_start_session_supervisor_can_start_manual_session(monkeypatch) -> None:
     assert calls
     assert calls[0]["continuous_window"] is True
     assert calls[0]["symbol_batch_size"] == 10
+
+
+def test_position_monitor_heartbeat_survives_finished_session(monkeypatch) -> None:
+    _reset_supervisor_state()
+    calls = []
+    monitor_calls = []
+
+    def fake_run_trading_session(**kwargs):
+        calls.append(kwargs)
+
+        class Result:
+            def to_json_dict(self):
+                return {"cycles_completed": 1}
+
+        return Result()
+
+    def fake_run_position_monitor():
+        monitor_calls.append("tick")
+        return {"ok": True, "actions": []}
+
+    monkeypatch.setattr(supervisor, "run_trading_session", fake_run_trading_session)
+    monkeypatch.setattr(supervisor, "run_position_monitor", fake_run_position_monitor)
+    started = supervisor.start_session_supervisor(
+        supervisor.SessionSupervisorConfig(
+            enabled=True,
+            symbols=["SPY"],
+            interval_seconds=300,
+            max_cycles=1,
+            symbol_batch_size=10,
+            quantity=1,
+            position_count=0,
+            daily_pnl=0.0,
+            start_time=None,
+            end_time=None,
+            market_timezone="America/New_York",
+            arm_paper_execution_on_start=False,
+            position_monitor_heartbeat_enabled=True,
+            position_monitor_heartbeat_seconds=5,
+        )
+    )
+    import time
+
+    for _ in range(20):
+        status = supervisor.session_supervisor_status()
+        if status["state"]["finished_at"] is not None and monitor_calls:
+            break
+        time.sleep(0.01)
+
+    assert started is True
+    status = supervisor.session_supervisor_status()
+    assert status["thread_alive"] is False
+    assert status["position_monitor_thread_alive"] is True
+    assert monitor_calls
+
+
+def test_consumed_autostart_still_ensures_position_monitor(monkeypatch) -> None:
+    _reset_supervisor_state()
+    monkeypatch.setenv("AUTOBOTT_SESSION_AUTOSTART", "true")
+    monkeypatch.setenv("AUTOBOTT_SESSION_MAX_CYCLES", "1")
+    monkeypatch.setenv("AUTOBOTT_POSITION_MONITOR_HEARTBEAT_ENABLED", "true")
+    monitor_calls = []
+
+    def fake_run_trading_session(**_kwargs):
+        class Result:
+            def to_json_dict(self):
+                return {"cycles_completed": 1}
+
+        return Result()
+
+    def fake_run_position_monitor():
+        monitor_calls.append("tick")
+        return {"ok": True, "actions": []}
+
+    monkeypatch.setattr(supervisor, "run_trading_session", fake_run_trading_session)
+    monkeypatch.setattr(supervisor, "run_position_monitor", fake_run_position_monitor)
+    assert supervisor.maybe_start_session_supervisor() is True
+    import time
+
+    for _ in range(20):
+        if supervisor._SESSION_AUTOSTART_CONSUMED:
+            break
+        time.sleep(0.01)
+    old_thread = supervisor._POSITION_MONITOR_THREAD
+    supervisor._POSITION_MONITOR_THREAD = None
+
+    assert supervisor.maybe_start_session_supervisor() is False
+    assert supervisor._POSITION_MONITOR_THREAD is not None
+    assert supervisor._POSITION_MONITOR_THREAD is not old_thread
