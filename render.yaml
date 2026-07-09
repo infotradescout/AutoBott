@@ -60,6 +60,16 @@ services:
         value: "3"
       - key: AUTOBOTT_RECENT_LOSS_GUARD_LOSS_RATE
         value: "0.67"
+      - key: AUTOBOTT_RECENT_WINNER_BIAS_ENABLED
+        value: "true"
+      - key: AUTOBOTT_RECENT_WINNER_BIAS_LOOKBACK
+        value: "20"
+      - key: AUTOBOTT_RECENT_WINNER_BIAS_MIN_SAMPLE
+        value: "2"
+      - key: AUTOBOTT_RECENT_WINNER_BIAS_WIN_RATE
+        value: "0.67"
+      - key: AUTOBOTT_RECENT_WINNER_BIAS_CONSECUTIVE_WINS
+        value: "2"
       - key: AUTOBOTT_PAPER_ONLY
         value: "true"
       - key: AUTOBOTT_DASHBOARD_AUTH_TOKEN

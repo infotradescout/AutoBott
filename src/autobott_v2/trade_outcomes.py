@@ -119,6 +119,39 @@ def recent_loss_guard(rows: list[dict[str, Any]] | None = None, *, journal_path:
     return {"enabled": True, "blocked_underlyings": sorted(blocked), "reasons": reasons}
 
 
+def recent_winner_bias(rows: list[dict[str, Any]] | None = None, *, journal_path: str | Path | None = None) -> dict[str, Any]:
+    if not _winner_bias_enabled():
+        return {"enabled": False, "preferred_underlyings": [], "reasons": {}}
+    source = rows if rows is not None else load_trade_outcomes(journal_path=journal_path, limit=_winner_bias_lookback())
+    recent = source[-_winner_bias_lookback() :]
+    by_underlying: dict[str, list[dict[str, Any]]] = {}
+    for row in recent:
+        underlying = str(row.get("underlying") or "").upper()
+        if underlying:
+            by_underlying.setdefault(underlying, []).append(row)
+    preferred: list[str] = []
+    reasons: dict[str, dict[str, Any]] = {}
+    for underlying, outcomes in by_underlying.items():
+        wins = [row for row in outcomes if float(row.get("pnl") or 0.0) > 0]
+        pnls = [float(row.get("pnl") or 0.0) for row in outcomes]
+        win_rate = len(wins) / len(outcomes)
+        net_pnl = round(sum(pnls), 2)
+        tail = outcomes[-_winner_bias_consecutive_wins() :]
+        consecutive_wins = len(tail) >= _winner_bias_consecutive_wins() and all(float(row.get("pnl") or 0.0) > 0 for row in tail)
+        if len(outcomes) >= _winner_bias_min_sample() and net_pnl > 0 and (win_rate >= _winner_bias_win_rate() or consecutive_wins):
+            preferred.append(underlying)
+            reasons[underlying] = {
+                "recent_trades": len(outcomes),
+                "wins": len(wins),
+                "win_rate": round(win_rate, 4),
+                "net_pnl": net_pnl,
+                "consecutive_wins": consecutive_wins,
+                "last_outcome_id": outcomes[-1].get("outcome_id"),
+            }
+    ranked = sorted(preferred, key=lambda symbol: (-float(reasons[symbol]["net_pnl"]), symbol))
+    return {"enabled": True, "preferred_underlyings": ranked, "reasons": reasons}
+
+
 def _outcome_from_pair(entry: dict[str, Any], exit_order: dict[str, Any]) -> dict[str, Any]:
     entry_price = float(entry["filled_avg_price"])
     exit_price = float(exit_order["filled_avg_price"])
@@ -259,3 +292,23 @@ def _loss_guard_min_sample() -> int:
 
 def _loss_guard_loss_rate() -> float:
     return min(1.0, max(0.0, float(os.getenv("AUTOBOTT_RECENT_LOSS_GUARD_LOSS_RATE", "0.67"))))
+
+
+def _winner_bias_enabled() -> bool:
+    return (os.getenv("AUTOBOTT_RECENT_WINNER_BIAS_ENABLED") or "true").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _winner_bias_lookback() -> int:
+    return max(1, int(os.getenv("AUTOBOTT_RECENT_WINNER_BIAS_LOOKBACK", "20")))
+
+
+def _winner_bias_min_sample() -> int:
+    return max(1, int(os.getenv("AUTOBOTT_RECENT_WINNER_BIAS_MIN_SAMPLE", "2")))
+
+
+def _winner_bias_win_rate() -> float:
+    return min(1.0, max(0.0, float(os.getenv("AUTOBOTT_RECENT_WINNER_BIAS_WIN_RATE", "0.67"))))
+
+
+def _winner_bias_consecutive_wins() -> int:
+    return max(1, int(os.getenv("AUTOBOTT_RECENT_WINNER_BIAS_CONSECUTIVE_WINS", "2")))

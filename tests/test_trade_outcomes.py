@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from autobott_v2.trade_outcomes import record_trade_outcomes_from_orders, recent_loss_guard
+from autobott_v2.trade_outcomes import record_trade_outcomes_from_orders, recent_loss_guard, recent_winner_bias
 
 
 def test_trade_outcomes_persist_winner_loser_and_reason(tmp_path) -> None:
@@ -72,3 +72,17 @@ def test_recent_loss_guard_blocks_repeated_underlying_losses() -> None:
     assert guard["enabled"] is True
     assert guard["blocked_underlyings"] == ["AAPL"]
     assert guard["reasons"]["AAPL"]["consecutive_losses"] is True
+
+
+def test_recent_winner_bias_prefers_repeated_winners() -> None:
+    rows = [
+        {"underlying": "AAPL", "pnl": 50.0, "outcome_id": "win-1"},
+        {"underlying": "MSFT", "pnl": -30.0, "outcome_id": "loss-1"},
+        {"underlying": "AAPL", "pnl": 75.0, "outcome_id": "win-2"},
+    ]
+
+    bias = recent_winner_bias(rows)
+
+    assert bias["enabled"] is True
+    assert bias["preferred_underlyings"] == ["AAPL"]
+    assert bias["reasons"]["AAPL"]["consecutive_wins"] is True

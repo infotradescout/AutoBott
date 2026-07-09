@@ -549,6 +549,76 @@ def test_run_trading_cycle_uses_recent_loss_guard(tmp_path) -> None:
     assert result.execution_rejected_count_by_reason == {"recent_loss_guard": 1}
 
 
+def test_run_trading_cycle_prioritizes_recent_winners(tmp_path) -> None:
+    save_runtime_state(default_runtime_state(), state_path=tmp_path / "runtime_state.json")
+    original = trading_cycle.load_runtime_state
+    original_positions = trading_cycle.load_open_positions
+    trading_cycle.load_runtime_state = lambda: original(state_path=tmp_path / "runtime_state.json")
+    trading_cycle.load_open_positions = lambda: []
+    broker = FakeBrokerWithAllOrders(
+        [
+            {
+                "symbol": "MSFT260703C00105000",
+                "side": "buy",
+                "qty": "1",
+                "filled_qty": "1",
+                "filled_avg_price": "2.00",
+                "status": "filled",
+                "submitted_at": "2026-07-01T14:00:00Z",
+                "filled_at": "2026-07-01T14:00:00Z",
+            },
+            {
+                "symbol": "MSFT260703C00105000",
+                "side": "sell",
+                "qty": "1",
+                "filled_qty": "1",
+                "filled_avg_price": "3.00",
+                "status": "filled",
+                "submitted_at": "2026-07-01T14:15:00Z",
+                "filled_at": "2026-07-01T14:15:00Z",
+            },
+            {
+                "symbol": "MSFT260703C00105000",
+                "side": "buy",
+                "qty": "1",
+                "filled_qty": "1",
+                "filled_avg_price": "2.00",
+                "status": "filled",
+                "submitted_at": "2026-07-01T14:30:00Z",
+                "filled_at": "2026-07-01T14:30:00Z",
+            },
+            {
+                "symbol": "MSFT260703C00105000",
+                "side": "sell",
+                "qty": "1",
+                "filled_qty": "1",
+                "filled_avg_price": "2.80",
+                "status": "filled",
+                "submitted_at": "2026-07-01T14:45:00Z",
+                "filled_at": "2026-07-01T14:45:00Z",
+            },
+        ]
+    )
+    try:
+        result = trading_cycle.run_trading_cycle(
+            symbols=["AAPL", "MSFT"],
+            broker=broker,
+            data_client=FakeDataClient(),
+            scheduled_market_time=datetime(2026, 7, 1, 15, 35, tzinfo=UTC),
+            captured_at_utc=datetime(2026, 7, 1, 15, 35, tzinfo=UTC),
+            corpus_root=tmp_path / "corpus",
+            decision_log_path=tmp_path / "decision_cards.jsonl",
+            execution_log_path=str(tmp_path / "execution_orders.jsonl"),
+        )
+    finally:
+        trading_cycle.load_runtime_state = original
+        trading_cycle.load_open_positions = original_positions
+
+    assert result.symbols == ["MSFT", "AAPL"]
+    learning = next(row for row in result.execution_outcomes if row["disposition"] == "trade_outcome_learning_summary")
+    assert learning["winner_bias"]["preferred_underlyings"] == ["MSFT"]
+
+
 def test_run_trading_cycle_paper_opportunistic_mode_does_not_override_spread_block(tmp_path, monkeypatch) -> None:
     # Liquidity is a hard floor, not a discovery-mode toggle: a contract wide
     # enough to be BLOCKED_BY_SPREAD under the strict engine bleeds the same

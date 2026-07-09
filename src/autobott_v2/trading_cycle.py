@@ -32,7 +32,7 @@ from .position_store import load_open_positions
 from .position_monitor import run_position_monitor
 from .runtime_control import load_runtime_state
 from .runtime_paths import data_root, phase1_snapshots_root
-from .trade_outcomes import recent_loss_guard, sync_trade_outcomes_from_broker
+from .trade_outcomes import recent_loss_guard, recent_winner_bias, sync_trade_outcomes_from_broker
 
 
 def decision_journal_path() -> Path:
@@ -117,6 +117,8 @@ def run_trading_cycle(
     outcome_journal_path = _trade_outcome_journal_for_execution_log(execution_log_path)
     outcome_learning_summary = sync_trade_outcomes_from_broker(resolved_broker, journal_path=outcome_journal_path)
     loss_guard = recent_loss_guard(journal_path=outcome_journal_path)
+    winner_bias = recent_winner_bias(journal_path=outcome_journal_path)
+    cycle_symbols = _prioritize_symbols_by_winners(symbols, winner_bias)
 
     snapshot_paths: list[str] = []
     decisions: list[dict[str, Any]] = []
@@ -130,7 +132,7 @@ def run_trading_cycle(
     active_underlyings = _active_underlying_symbols(resolved_broker)
     max_new_entry_attempts_per_loop = resolved_broker.config.effective_max_new_entry_attempts_per_loop()
 
-    for symbol in symbols:
+    for symbol in cycle_symbols:
         try:
             snapshot_path = capture_symbol_snapshot(
                 symbol=symbol,
@@ -200,6 +202,7 @@ def run_trading_cycle(
                 payload={
                     "reason_codes": list(decision.reason_codes),
                     "selected_contract": decision.selected_contract.option_symbol if decision.selected_contract else None,
+                    "recent_winner_bias": (winner_bias.get("reasons") or {}).get(symbol.upper()),
                 },
             )
 
@@ -377,7 +380,7 @@ def run_trading_cycle(
     return TradingCycleResult(
         started_at=started_at,
         finished_at=finished_at,
-        symbols=[symbol.upper() for symbol in symbols],
+        symbols=cycle_symbols,
         snapshot_paths=snapshot_paths,
         decisions=decisions,
         orders_submitted=orders_submitted,
@@ -385,7 +388,7 @@ def run_trading_cycle(
         runtime_state=runtime_state.to_json_dict(),
         execution_outcomes=[
             {"disposition": "position_monitor_summary", **monitor_summary},
-            {"disposition": "trade_outcome_learning_summary", **outcome_learning_summary},
+            {"disposition": "trade_outcome_learning_summary", **outcome_learning_summary, "winner_bias": winner_bias},
             *execution_outcomes,
         ],
         scanner_candidates_count=scanner_candidates_count,
@@ -448,6 +451,14 @@ def _trade_outcome_journal_for_execution_log(execution_log_path: str | Path | No
     if execution_log_path is None:
         return None
     return Path(execution_log_path).parent / "trade_outcomes.jsonl"
+
+
+def _prioritize_symbols_by_winners(symbols: list[str], winner_bias: dict[str, Any]) -> list[str]:
+    preferred = [str(symbol).upper() for symbol in winner_bias.get("preferred_underlyings") or []]
+    normalized = [symbol.upper() for symbol in symbols]
+    preferred_in_cycle = [symbol for symbol in preferred if symbol in normalized]
+    remaining = [symbol for symbol in normalized if symbol not in set(preferred_in_cycle)]
+    return preferred_in_cycle + remaining
 
 
 def _active_underlying_symbols(broker: Any | None = None) -> set[str]:
