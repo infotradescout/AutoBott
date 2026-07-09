@@ -575,7 +575,7 @@ def _open_drawdown_guard(broker: Any) -> dict[str, Any]:
     unrealized = round(sum(_float_value(position.get("unrealized_pl")) for position in positions), 2)
     losers = sum(1 for position in positions if _float_value(position.get("unrealized_pl")) < 0)
     loss_rate = round(losers / total, 4)
-    max_unrealized_loss = abs(float(os.getenv("AUTOBOTT_OPEN_DRAWDOWN_GUARD_MAX_UNREALIZED_LOSS", "30")))
+    max_unrealized_loss = abs(float(os.getenv("AUTOBOTT_OPEN_DRAWDOWN_GUARD_MAX_UNREALIZED_LOSS", "20")))
     min_losers = int(os.getenv("AUTOBOTT_OPEN_DRAWDOWN_GUARD_MIN_LOSERS", "3"))
     min_loss_rate = float(os.getenv("AUTOBOTT_OPEN_DRAWDOWN_GUARD_LOSS_RATE", "0.60"))
     blocked = unrealized <= -max_unrealized_loss and losers >= min_losers and loss_rate >= min_loss_rate

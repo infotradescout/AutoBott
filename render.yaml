@@ -39,7 +39,7 @@ services:
       - key: AUTOBOTT_OPEN_DRAWDOWN_GUARD_ENABLED
         value: "true"
       - key: AUTOBOTT_OPEN_DRAWDOWN_GUARD_MAX_UNREALIZED_LOSS
-        value: "30"
+        value: "20"
       - key: AUTOBOTT_OPEN_DRAWDOWN_GUARD_MIN_LOSERS
         value: "3"
       - key: AUTOBOTT_OPEN_DRAWDOWN_GUARD_LOSS_RATE
