@@ -46,6 +46,8 @@ services:
         value: "0.60"
       - key: AUTOBOTT_DEFINED_RISK_SPREADS_ENABLED
         value: "true"
+      - key: AUTOBOTT_SINGLE_LEG_REAL_ENTRIES_DISABLED
+        value: "true"
       - key: AUTOBOTT_SPREAD_MAX_RISK
         value: "100"
       - key: AUTOBOTT_SPREAD_PROFIT_TARGET_PCT

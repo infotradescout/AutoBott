@@ -271,6 +271,34 @@ def run_trading_cycle(
         if not is_candidate:
             _append_skip(skipped, symbol=symbol.upper(), reason=decision_payload["decision"])
             continue
+        if _env_bool("AUTOBOTT_SINGLE_LEG_REAL_ENTRIES_DISABLED", default=False):
+            if decision.selected_contract is not None:
+                ghost = append_ghost_trade(
+                    decision,
+                    reason="single_leg_real_entries_disabled",
+                    max_real_cost=resolved_broker.config.max_position_cost,
+                    journal_path=_ghost_trade_journal_for_execution_log(execution_log_path),
+                )
+            else:
+                ghost = {}
+            _append_skip(
+                skipped,
+                symbol=symbol.upper(),
+                reason="single_leg_real_entries_disabled",
+                detail="single-leg real entries are ghost-only while defined-risk spread lane is evaluated",
+            )
+            _record_execution_rejection(
+                execution_outcomes,
+                execution_rejected_count_by_reason,
+                ticker=symbol.upper(),
+                decision_id=decision.decision_id,
+                thesis_id=thesis_id,
+                reason="single_leg_real_entries_disabled",
+                detail="single-leg real entries are ghost-only while defined-risk spread lane is evaluated",
+                journal_path=execution_log_path,
+                payload={"ghost": ghost},
+            )
+            continue
         if symbol.upper() in set(loss_guard.get("blocked_underlyings") or []):
             _append_skip(
                 skipped,

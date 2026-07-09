@@ -754,6 +754,36 @@ def test_run_trading_cycle_routes_to_ghost_when_open_basket_drawdown_is_bad(tmp_
     assert "ghost_entry" in (tmp_path / "ghost_trades.jsonl").read_text(encoding="utf-8")
 
 
+def test_run_trading_cycle_can_disable_single_leg_real_entries(tmp_path, monkeypatch) -> None:
+    monkeypatch.setenv("AUTOBOTT_SINGLE_LEG_REAL_ENTRIES_DISABLED", "true")
+    save_runtime_state(default_runtime_state(), state_path=tmp_path / "runtime_state.json")
+    original = trading_cycle.load_runtime_state
+    original_positions = trading_cycle.load_open_positions
+    trading_cycle.load_runtime_state = lambda: original(state_path=tmp_path / "runtime_state.json")
+    trading_cycle.load_open_positions = lambda: []
+    try:
+        result = trading_cycle.run_trading_cycle(
+            symbols=["AAPL"],
+            broker=FakeBroker(),
+            data_client=FakeDataClient(),
+            scheduled_market_time=datetime(2026, 7, 1, 15, 35, tzinfo=UTC),
+            captured_at_utc=datetime(2026, 7, 1, 15, 35, tzinfo=UTC),
+            corpus_root=tmp_path / "corpus",
+            decision_log_path=tmp_path / "decision_cards.jsonl",
+            execution_log_path=str(tmp_path / "execution_orders.jsonl"),
+        )
+    finally:
+        trading_cycle.load_runtime_state = original
+        trading_cycle.load_open_positions = original_positions
+
+    assert result.scanner_candidates_count == 1
+    assert result.trade_attempted_count == 0
+    assert result.orders_submitted == []
+    assert result.skipped[0]["reason"] == "single_leg_real_entries_disabled"
+    assert result.execution_rejected_count_by_reason == {"single_leg_real_entries_disabled": 1}
+    assert "ghost_entry" in (tmp_path / "ghost_trades.jsonl").read_text(encoding="utf-8")
+
+
 def test_run_trading_cycle_records_defined_risk_spread_backtest_candidate(tmp_path) -> None:
     save_runtime_state(default_runtime_state(), state_path=tmp_path / "runtime_state.json")
     original = trading_cycle.load_runtime_state
