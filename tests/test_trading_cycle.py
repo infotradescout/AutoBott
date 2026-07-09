@@ -64,6 +64,19 @@ class WideSpreadDataClient(FakeDataClient):
         return payload
 
 
+class OverCapWithCheapFallbackDataClient(FakeDataClient):
+    def get_option_chain_snapshots(self, symbol):
+        payload = super().get_option_chain_snapshots(symbol)
+        payload[f"{symbol}260703C00110000"] = {
+            "latestQuote": {"bp": 0.77, "ap": 0.83, "t": "2026-07-01T15:35:00Z"},
+            "greeks": {"delta": 0.47, "theta": -0.05, "vega": 0.08, "iv": 0.24},
+            "details": {"expiration_date": "2026-07-03", "strike_price": 110, "type": "call"},
+            "dailyBar": {"v": 120},
+            "open_interest": 650,
+        }
+        return payload
+
+
 class FakeBroker:
     def __init__(self, **config_overrides) -> None:
         base = AlpacaExecutionConfig(
@@ -577,6 +590,38 @@ def test_run_trading_cycle_splits_expensive_candidate_to_ghost_lane(tmp_path) ->
     assert result.orders_submitted == []
     assert result.skipped[0]["reason"] == "contract_cost_cap_ghost_tracked"
     assert "ghost_entry" in ghost_rows
+
+
+def test_run_trading_cycle_uses_under_cap_fallback_before_ghost_only_skip(tmp_path) -> None:
+    save_runtime_state(default_runtime_state(), state_path=tmp_path / "runtime_state.json")
+    original = trading_cycle.load_runtime_state
+    original_positions = trading_cycle.load_open_positions
+    trading_cycle.load_runtime_state = lambda: original(state_path=tmp_path / "runtime_state.json")
+    trading_cycle.load_open_positions = lambda: []
+    broker = FakeBroker(max_position_cost=100.0)
+    try:
+        result = trading_cycle.run_trading_cycle(
+            symbols=["AAPL"],
+            broker=broker,
+            data_client=OverCapWithCheapFallbackDataClient(),
+            scheduled_market_time=datetime(2026, 7, 1, 15, 35, tzinfo=UTC),
+            captured_at_utc=datetime(2026, 7, 1, 15, 35, tzinfo=UTC),
+            corpus_root=tmp_path / "corpus",
+            decision_log_path=tmp_path / "decision_cards.jsonl",
+            execution_log_path=str(tmp_path / "execution_orders.jsonl"),
+        )
+    finally:
+        trading_cycle.load_runtime_state = original
+        trading_cycle.load_open_positions = original_positions
+
+    ghost_rows = (tmp_path / "ghost_trades.jsonl").read_text(encoding="utf-8")
+    assert result.scanner_candidates_count == 1
+    assert result.trade_attempted_count == 1
+    assert len(result.orders_submitted) == 1
+    assert broker.submitted[0].option_symbol == "AAPL260703C00110000"
+    assert broker.submitted[0].limit_price == 0.8
+    assert "ghost_entry" in ghost_rows
+    assert any(outcome["disposition"] == "real_money_cap_fallback_selected" for outcome in result.execution_outcomes)
 
 
 def test_run_trading_cycle_prioritizes_recent_winners(tmp_path) -> None:

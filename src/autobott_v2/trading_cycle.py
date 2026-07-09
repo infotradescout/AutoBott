@@ -291,24 +291,50 @@ def run_trading_cycle(
                 max_real_cost=resolved_broker.config.max_position_cost,
                 journal_path=_ghost_trade_journal_for_execution_log(execution_log_path),
             )
-            _append_skip(
-                skipped,
-                symbol=symbol.upper(),
-                reason="contract_cost_cap_ghost_tracked",
-                detail=f"contract_cost={ghost['notional']} max_real_cost={resolved_broker.config.max_position_cost}",
+            real_lane_decision = _real_money_cap_fallback_decision(
+                decision,
+                decision_input=decision_input,
+                max_real_cost=resolved_broker.config.max_position_cost,
             )
-            _record_execution_rejection(
-                execution_outcomes,
-                execution_rejected_count_by_reason,
-                ticker=symbol.upper(),
-                decision_id=decision.decision_id,
-                thesis_id=thesis_id,
-                reason="contract_cost_cap_ghost_tracked",
-                detail="candidate routed to ghost lane instead of real-money lane",
-                journal_path=execution_log_path,
-                payload=ghost,
-            )
-            continue
+            if real_lane_decision is not None:
+                decision = real_lane_decision
+                decision_payload = decision.to_json_dict()
+                decisions.append(decision_payload)
+                append_decision_card(decision_payload, snapshot_path=snapshot_path, log_path=decision_log_path)
+                _record_execution_outcome(
+                    execution_outcomes,
+                    ticker=symbol.upper(),
+                    decision_id=decision.decision_id,
+                    thesis_id=_decision_thesis_id(decision),
+                    disposition="real_money_cap_fallback_selected",
+                    detail=f"ghost_contract_cost={ghost['notional']} real_contract_cost={_selected_contract_real_cost(decision)}",
+                    journal_path=execution_log_path,
+                    payload={
+                        "ghost": ghost,
+                        "selected_contract": decision.selected_contract.option_symbol if decision.selected_contract else None,
+                        "max_real_cost": resolved_broker.config.max_position_cost,
+                    },
+                )
+                thesis_id = _decision_thesis_id(decision)
+            else:
+                _append_skip(
+                    skipped,
+                    symbol=symbol.upper(),
+                    reason="contract_cost_cap_ghost_tracked",
+                    detail=f"contract_cost={ghost['notional']} max_real_cost={resolved_broker.config.max_position_cost}",
+                )
+                _record_execution_rejection(
+                    execution_outcomes,
+                    execution_rejected_count_by_reason,
+                    ticker=symbol.upper(),
+                    decision_id=decision.decision_id,
+                    thesis_id=thesis_id,
+                    reason="contract_cost_cap_ghost_tracked",
+                    detail="candidate routed to ghost lane instead of real-money lane",
+                    journal_path=execution_log_path,
+                    payload=ghost,
+                )
+                continue
         if max_new_entry_attempts_per_loop is not None and trade_attempted_count >= max_new_entry_attempts_per_loop:
             _append_skip(skipped, symbol=symbol.upper(), reason="max_new_entry_attempts_per_loop_reached")
             _record_execution_rejection(
@@ -502,6 +528,73 @@ def _selected_contract_real_cost(decision: DecisionCard) -> float:
     if decision.selected_contract is None:
         return 0.0
     return round(float(decision.selected_contract.mid) * 100, 2)
+
+
+def _real_money_cap_fallback_decision(
+    decision: DecisionCard,
+    *,
+    decision_input: Any,
+    max_real_cost: float,
+) -> DecisionCard | None:
+    if decision.selected_contract is None or max_real_cost <= 0:
+        return None
+    max_contract_mid = max_real_cost / 100.0
+    option_type = decision.selected_contract.option_type
+    rules = _paper_opportunistic_rules()
+    candidates = [
+        contract
+        for contract in decision_input.option_chain
+        if contract.option_type is option_type
+        and contract.bid > 0
+        and contract.ask > 0
+        and contract.ask >= contract.bid
+        and contract.mid <= max_contract_mid
+        and contract.spread_pct <= rules.max_spread_pct
+        and contract.open_interest >= rules.min_open_interest
+        and contract.volume >= rules.min_contract_volume
+    ]
+    if not candidates:
+        return None
+    selected_contract = _best_real_money_cap_contract(candidates, decision_input.timestamp.date())
+    spread_penalty = min(1.0, selected_contract.spread_pct / max(rules.max_spread_pct, 0.01))
+    delta_fit = max(0.0, 1 - abs(abs(selected_contract.delta) - abs(decision.selected_contract.delta)) / 0.50)
+    score = round(max(0.05, delta_fit * 0.55 + (1 - spread_penalty) * 0.30 + min(1.0, selected_contract.volume / 200) * 0.15), 4)
+    contract_score = ContractScore(
+        contract=selected_contract,
+        score=score,
+        reward_risk_ratio=0.0,
+        reasons=[
+            "real_money_cap_fallback_contract",
+            f"max_real_cost={round(max_real_cost, 2)}",
+            f"contract_cost={round(selected_contract.mid * 100, 2)}",
+        ],
+    )
+    selected = SelectedContract.from_score(contract_score, rules)
+    reason_codes = list(decision.reason_codes)
+    reason_codes.append("real_money_cap_fallback_contract")
+    return replace(
+        decision,
+        selected_contract=selected,
+        tactical_contract=selected,
+        rider_contract=None,
+        execution_layer=ExecutionLayer.TACTICAL,
+        reason_codes=reason_codes,
+        explanation=f"{decision.explanation}; selected under-cap real-money fallback contract",
+    )
+
+
+def _best_real_money_cap_contract(contracts: list[OptionContractSnapshot], as_of: Any) -> OptionContractSnapshot:
+    return sorted(
+        contracts,
+        key=lambda contract: (
+            abs(abs(contract.delta) - 0.50),
+            abs((contract.expiration - as_of).days - 2),
+            contract.spread_pct,
+            -contract.volume,
+            -contract.open_interest,
+            -contract.mid,
+        ),
+    )[0]
 
 
 def _prioritize_symbols_by_winners(symbols: list[str], winner_bias: dict[str, Any]) -> list[str]:
