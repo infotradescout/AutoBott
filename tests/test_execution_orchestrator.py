@@ -1,14 +1,17 @@
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import UTC, datetime
 
 import pytest
 
+from autobott_v2.core_runner import CoreRunnerPair
 from autobott_v2.execution_config import AlpacaExecutionConfig
 from autobott_v2.execution_models import BrokerEnvironment, ExecutionOrder, ExecutionState
 from autobott_v2.execution_orchestrator import (
     ExecutionRejectedError,
     build_trade_intent_from_decision,
+    submit_core_runner_to_broker,
     submit_decision_to_broker,
 )
 from autobott_v2.phase1_models import (
@@ -94,16 +97,19 @@ class FakeBroker:
     def __init__(self) -> None:
         self.config = _config()
         self.last_intent = None
+        self.intents = []
 
     def submit_order(self, intent, *, current_daily_realized_pnl=0.0, open_positions=0):
         self.last_intent = intent
+        self.intents.append(intent)
+        sequence = len(self.intents)
         return ExecutionOrder(
-            order_id="order-1",
-            client_order_id="autobott-order-1",
+            order_id=f"order-{sequence}",
+            client_order_id=f"autobott-order-{sequence}",
             intent=intent,
             state=ExecutionState.SUBMITTED,
             submitted_at=datetime(2026, 7, 1, 15, 31, tzinfo=UTC),
-            broker_order_id="alpaca-order-1",
+            broker_order_id=f"alpaca-order-{sequence}",
         )
 
 
@@ -183,3 +189,70 @@ def test_submit_decision_to_broker_raises_exact_risk_rejection(tmp_path) -> None
     lines = journal_path.read_text(encoding="utf-8").splitlines()
     assert len(lines) == 1
     assert '"event_type": "risk_check"' in lines[0]
+
+
+def test_submit_core_runner_uses_two_distinct_contracts_under_group_budget(tmp_path, monkeypatch) -> None:
+    import autobott_v2.execution_orchestrator as orchestrator
+
+    broker = FakeBroker()
+    selected = _decision_card().selected_contract
+    assert selected is not None
+    primary = replace(
+        selected,
+        option_symbol="AAPL260117C00195000",
+        strike=195.0,
+        bid=0.60,
+        ask=0.70,
+        mid=0.65,
+        delta=0.40,
+        target_exit_mid=0.98,
+        stop_exit_mid=0.36,
+    )
+    runner = replace(
+        selected,
+        option_symbol="AAPL260117C00200000",
+        strike=200.0,
+        bid=0.20,
+        ask=0.25,
+        mid=0.225,
+        delta=0.15,
+        target_exit_mid=0.45,
+        stop_exit_mid=0.07,
+    )
+    pair = CoreRunnerPair(primary, runner, estimated_group_cost=95.0)
+    monkeypatch.setattr(orchestrator, "upsert_open_position_from_order", lambda *args, **kwargs: None)
+    journal_path = tmp_path / "execution_orders.jsonl"
+
+    primary_order, runner_order = submit_core_runner_to_broker(
+        _decision_card(),
+        pair,
+        broker=broker,
+        journal_path=str(journal_path),
+    )
+
+    assert [intent.quantity for intent in broker.intents] == [1, 1]
+    assert [intent.option_symbol for intent in broker.intents] == [primary.option_symbol, runner.option_symbol]
+    assert sum(intent.estimated_notional for intent in broker.intents) == 95.0
+    assert primary_order.intent.metadata["leg_role"] == "primary"
+    assert runner_order.intent.metadata["leg_role"] == "runner"
+    assert primary_order.intent.metadata["trade_group_id"] == runner_order.intent.metadata["trade_group_id"]
+    assert len(journal_path.read_text(encoding="utf-8").splitlines()) == 4
+
+
+def test_submit_core_runner_rejects_actual_debit_above_pair_budget(tmp_path) -> None:
+    broker = FakeBroker()
+    selected = _decision_card().selected_contract
+    assert selected is not None
+    primary = replace(selected, option_symbol="AAPL260117C00195000", strike=195.0, bid=0.60, ask=0.70, mid=0.65)
+    runner = replace(selected, option_symbol="AAPL260117C00200000", strike=200.0, bid=0.20, ask=0.25, mid=0.225)
+    pair = CoreRunnerPair(primary, runner, estimated_group_cost=90.0, max_group_cost=90.0)
+
+    with pytest.raises(ExecutionRejectedError, match="core_runner_group_cost_exceeds_budget"):
+        submit_core_runner_to_broker(
+            _decision_card(),
+            pair,
+            broker=broker,
+            journal_path=str(tmp_path / "execution_orders.jsonl"),
+        )
+
+    assert broker.intents == []

@@ -22,6 +22,11 @@ def test_upsert_open_position_from_order_round_trips(tmp_path) -> None:
             stop_loss_price=1.75,
             decision_id="decision-123",
             thesis_id="thesis-123",
+            metadata={
+                "trade_group_id": "core-runner:decision-123",
+                "leg_role": "runner",
+                "paired_option_symbol": "AAPL260117C00185000",
+            },
         ),
         state=ExecutionState.SUBMITTED,
         submitted_at=datetime(2026, 7, 1, 15, 31, tzinfo=timezone.utc),
@@ -33,3 +38,6 @@ def test_upsert_open_position_from_order_round_trips(tmp_path) -> None:
     assert len(rows) == 1
     assert rows[0].broker_order_id == "alpaca-order-1"
     assert rows[0].status == "submitted"
+    assert rows[0].trade_group_id == "core-runner:decision-123"
+    assert rows[0].leg_role == "runner"
+    assert rows[0].paired_option_symbol == "AAPL260117C00185000"

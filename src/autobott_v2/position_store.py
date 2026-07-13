@@ -26,6 +26,9 @@ class OpenPosition:
     take_profit_price: float | None
     stop_loss_price: float | None
     status: str
+    trade_group_id: str | None = None
+    leg_role: str | None = None
+    paired_option_symbol: str | None = None
 
     def to_json_dict(self) -> dict[str, Any]:
         payload = asdict(self)
@@ -53,6 +56,9 @@ def load_open_positions(*, store_path: str | Path | None = None) -> list[OpenPos
                 take_profit_price=row.get("take_profit_price"),
                 stop_loss_price=row.get("stop_loss_price"),
                 status=str(row.get("status", "open")),
+                trade_group_id=row.get("trade_group_id"),
+                leg_role=row.get("leg_role"),
+                paired_option_symbol=row.get("paired_option_symbol"),
             )
         )
     return positions
@@ -82,6 +88,9 @@ def upsert_open_position_from_order(order: ExecutionOrder, *, store_path: str | 
             take_profit_price=order.intent.take_profit_price,
             stop_loss_price=order.intent.stop_loss_price,
             status=order.state.value,
+            trade_group_id=order.intent.metadata.get("trade_group_id"),
+            leg_role=order.intent.metadata.get("leg_role"),
+            paired_option_symbol=order.intent.metadata.get("paired_option_symbol"),
         )
     )
     return save_open_positions(updated, store_path=store_path)

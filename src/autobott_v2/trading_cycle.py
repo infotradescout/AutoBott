@@ -8,12 +8,13 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+from .core_runner import load_core_runner_rules, select_core_runner_pair
 from .execution_broker import AlpacaExecutionBroker
 from .defined_risk_spreads import append_defined_risk_spread_candidate, select_defined_risk_spread
 from .execution_models import BrokerEnvironment
 from .execution_journal import append_execution_outcome
 from .execution_reconciler import reconcile_open_positions
-from .execution_orchestrator import ExecutionRejectedError, submit_decision_to_broker
+from .execution_orchestrator import ExecutionRejectedError, submit_core_runner_to_broker, submit_decision_to_broker
 from .ghost_trades import append_ghost_trade, observe_ghost_trades
 from .phase1_alpaca_client import AlpacaPaperClient
 from .phase1_engine import build_decision_card
@@ -134,6 +135,8 @@ def run_trading_cycle(
     active_underlyings = _active_underlying_symbols(resolved_broker)
     open_drawdown_guard = _open_drawdown_guard(resolved_broker)
     max_new_entry_attempts_per_loop = resolved_broker.config.effective_max_new_entry_attempts_per_loop()
+    core_runner_enabled = _env_bool("AUTOBOTT_CORE_RUNNER_ENABLED", default=True)
+    core_runner_rules = load_core_runner_rules() if core_runner_enabled else None
 
     for symbol in cycle_symbols:
         try:
@@ -271,7 +274,7 @@ def run_trading_cycle(
         if not is_candidate:
             _append_skip(skipped, symbol=symbol.upper(), reason=decision_payload["decision"])
             continue
-        if _env_bool("AUTOBOTT_SINGLE_LEG_REAL_ENTRIES_DISABLED", default=False):
+        if _env_bool("AUTOBOTT_SINGLE_LEG_REAL_ENTRIES_DISABLED", default=False) and not core_runner_enabled:
             if decision.selected_contract is not None:
                 ghost = append_ghost_trade(
                     decision,
@@ -360,7 +363,11 @@ def run_trading_cycle(
                 payload={"guard": open_drawdown_guard, "ghost": ghost},
             )
             continue
-        if decision.selected_contract is not None and _selected_contract_real_cost(decision) > resolved_broker.config.max_position_cost:
+        if (
+            not core_runner_enabled
+            and decision.selected_contract is not None
+            and _selected_contract_real_cost(decision) > resolved_broker.config.max_position_cost
+        ):
             ghost = append_ghost_trade(
                 decision,
                 reason="contract_cost_above_real_money_cap",
@@ -411,6 +418,67 @@ def run_trading_cycle(
                     payload=ghost,
                 )
                 continue
+        core_runner_pair = None
+        if core_runner_enabled:
+            if decision.selected_contract is not None:
+                core_runner_pair = select_core_runner_pair(
+                    decision.selected_contract,
+                    decision_input.option_chain,
+                    rules=core_runner_rules,
+                )
+            if core_runner_pair is None:
+                ghost = (
+                    append_ghost_trade(
+                        decision,
+                        reason="core_runner_pair_not_found_under_budget",
+                        max_real_cost=core_runner_rules.max_group_cost if core_runner_rules is not None else 100.0,
+                        journal_path=_ghost_trade_journal_for_execution_log(execution_log_path),
+                    )
+                    if decision.selected_contract is not None
+                    else {}
+                )
+                _append_skip(
+                    skipped,
+                    symbol=symbol.upper(),
+                    reason="core_runner_pair_not_found_under_budget",
+                    detail="one primary plus one distinct cheaper runner could not fit the total debit cap",
+                )
+                _record_execution_rejection(
+                    execution_outcomes,
+                    execution_rejected_count_by_reason,
+                    ticker=symbol.upper(),
+                    decision_id=decision.decision_id,
+                    thesis_id=thesis_id,
+                    reason="core_runner_pair_not_found_under_budget",
+                    detail="neither leg submitted because the full setup must stay under budget",
+                    journal_path=execution_log_path,
+                    payload={
+                        "max_group_cost": core_runner_rules.max_group_cost if core_runner_rules is not None else 100.0,
+                        "ghost": ghost,
+                    },
+                )
+                continue
+            decision = replace(
+                decision,
+                selected_contract=core_runner_pair.primary,
+                reason_codes=[*decision.reason_codes, "core_runner_pair_selected"],
+                explanation=f"{decision.explanation}; primary plus convex runner selected under combined debit cap",
+            )
+            thesis_id = _decision_thesis_id(decision)
+            _record_execution_outcome(
+                execution_outcomes,
+                ticker=symbol.upper(),
+                decision_id=decision.decision_id,
+                thesis_id=thesis_id,
+                disposition="core_runner_pair_selected",
+                detail=f"combined_debit={core_runner_pair.estimated_group_cost}",
+                journal_path=execution_log_path,
+                payload={
+                    "primary_option_symbol": core_runner_pair.primary.option_symbol,
+                    "runner_option_symbol": core_runner_pair.runner.option_symbol,
+                    "estimated_group_cost": core_runner_pair.estimated_group_cost,
+                },
+            )
         if max_new_entry_attempts_per_loop is not None and trade_attempted_count >= max_new_entry_attempts_per_loop:
             _append_skip(skipped, symbol=symbol.upper(), reason="max_new_entry_attempts_per_loop_reached")
             _record_execution_rejection(
@@ -447,25 +515,42 @@ def run_trading_cycle(
             )
 
         try:
-            order = submit_decision_to_broker(
-                decision,
-                broker=resolved_broker,
-                quantity=quantity,
-                current_daily_realized_pnl=current_daily_realized_pnl,
-                open_positions=open_positions,
-                journal_path=execution_log_path,
-                on_submission_attempt=_mark_submission_attempt,
-            )
-            open_positions += 1
+            if core_runner_pair is not None:
+                submitted_orders = submit_core_runner_to_broker(
+                    decision,
+                    core_runner_pair,
+                    broker=resolved_broker,
+                    current_daily_realized_pnl=current_daily_realized_pnl,
+                    open_positions=open_positions,
+                    journal_path=execution_log_path,
+                    on_submission_attempt=_mark_submission_attempt,
+                )
+            else:
+                submitted_orders = (
+                    submit_decision_to_broker(
+                        decision,
+                        broker=resolved_broker,
+                        quantity=quantity,
+                        current_daily_realized_pnl=current_daily_realized_pnl,
+                        open_positions=open_positions,
+                        journal_path=execution_log_path,
+                        on_submission_attempt=_mark_submission_attempt,
+                    ),
+                )
+            open_positions += len(submitted_orders)
             active_underlyings.add(symbol.upper())
-            orders_submitted.append(
-                {
-                    "symbol": symbol.upper(),
-                    "broker_order_id": order.broker_order_id,
-                    "state": order.state.value,
-                    "client_order_id": order.client_order_id,
-                }
-            )
+            for order in submitted_orders:
+                orders_submitted.append(
+                    {
+                        "symbol": symbol.upper(),
+                        "option_symbol": order.intent.option_symbol,
+                        "leg_role": order.intent.metadata.get("leg_role", "primary"),
+                        "trade_group_id": order.intent.metadata.get("trade_group_id"),
+                        "broker_order_id": order.broker_order_id,
+                        "state": order.state.value,
+                        "client_order_id": order.client_order_id,
+                    }
+                )
         except ExecutionRejectedError as exc:
             _append_skip(
                 skipped,

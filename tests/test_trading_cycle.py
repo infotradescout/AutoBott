@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
 
+import pytest
+
 import autobott_v2.trading_cycle as trading_cycle
 from autobott_v2.execution_config import AlpacaExecutionConfig
 from autobott_v2.execution_models import BrokerEnvironment, ExecutionOrder, ExecutionState
@@ -97,6 +99,31 @@ class SpreadBacktestDataClient(FakeDataClient):
         return payload
 
 
+class CoreRunnerDataClient(FakeDataClient):
+    def get_option_chain_snapshots(self, symbol):
+        payload = super().get_option_chain_snapshots(symbol)
+        payload[f"{symbol}260703C00110000"] = {
+            "latestQuote": {"bp": 0.62, "ap": 0.70, "t": "2026-07-01T15:35:00Z"},
+            "greeks": {"delta": 0.35, "theta": -0.03, "vega": 0.06, "iv": 0.25},
+            "details": {"expiration_date": "2026-07-03", "strike_price": 110, "type": "call"},
+            "dailyBar": {"v": 250},
+            "open_interest": 800,
+        }
+        payload[f"{symbol}260703C00115000"] = {
+            "latestQuote": {"bp": 0.20, "ap": 0.24, "t": "2026-07-01T15:35:00Z"},
+            "greeks": {"delta": 0.12, "theta": -0.01, "vega": 0.03, "iv": 0.28},
+            "details": {"expiration_date": "2026-07-03", "strike_price": 115, "type": "call"},
+            "dailyBar": {"v": 150},
+            "open_interest": 500,
+        }
+        return payload
+
+
+@pytest.fixture(autouse=True)
+def _legacy_single_leg_default_for_existing_cycle_contracts(monkeypatch):
+    monkeypatch.setenv("AUTOBOTT_CORE_RUNNER_ENABLED", "false")
+
+
 class FakeBroker:
     def __init__(self, **config_overrides) -> None:
         base = AlpacaExecutionConfig(
@@ -187,6 +214,39 @@ def test_run_trading_cycle_captures_decides_and_submits(tmp_path) -> None:
     assert "position_monitor_summary" in dispositions
     assert "scanner_candidate" in dispositions
     assert "pass_trade_attempted" in dispositions
+
+
+def test_run_trading_cycle_submits_primary_and_runner_under_100_total(tmp_path, monkeypatch) -> None:
+    monkeypatch.setenv("AUTOBOTT_CORE_RUNNER_ENABLED", "true")
+    monkeypatch.setenv("AUTOBOTT_MAX_TRADE_GROUP_COST", "100")
+    save_runtime_state(default_runtime_state(), state_path=tmp_path / "runtime_state.json")
+    original = trading_cycle.load_runtime_state
+    original_positions = trading_cycle.load_open_positions
+    trading_cycle.load_runtime_state = lambda: original(state_path=tmp_path / "runtime_state.json")
+    trading_cycle.load_open_positions = lambda: []
+    broker = FakeBroker()
+    try:
+        result = trading_cycle.run_trading_cycle(
+            symbols=["AAPL"],
+            broker=broker,
+            data_client=CoreRunnerDataClient(),
+            scheduled_market_time=datetime(2026, 7, 1, 15, 35, tzinfo=UTC),
+            captured_at_utc=datetime(2026, 7, 1, 15, 35, tzinfo=UTC),
+            corpus_root=tmp_path / "corpus",
+            decision_log_path=tmp_path / "decision_cards.jsonl",
+            execution_log_path=str(tmp_path / "execution_orders.jsonl"),
+        )
+    finally:
+        trading_cycle.load_runtime_state = original
+        trading_cycle.load_open_positions = original_positions
+
+    assert result.trade_attempted_count == 1
+    assert len(result.orders_submitted) == 2
+    assert [row["leg_role"] for row in result.orders_submitted] == ["primary", "runner"]
+    assert result.orders_submitted[0]["option_symbol"] != result.orders_submitted[1]["option_symbol"]
+    assert broker.submitted[0].quantity == broker.submitted[1].quantity == 1
+    assert sum(intent.estimated_notional for intent in broker.submitted) <= 100.0
+    assert broker.submitted[0].metadata["trade_group_id"] == broker.submitted[1].metadata["trade_group_id"]
 
 
 def test_run_trading_cycle_skips_when_kill_switch_enabled(tmp_path) -> None:

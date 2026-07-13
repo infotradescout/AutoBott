@@ -48,6 +48,24 @@ services:
         value: "true"
       - key: AUTOBOTT_SINGLE_LEG_REAL_ENTRIES_DISABLED
         value: "true"
+      - key: AUTOBOTT_CORE_RUNNER_ENABLED
+        value: "true"
+      - key: AUTOBOTT_MAX_TRADE_GROUP_COST
+        value: "100"
+      - key: AUTOBOTT_RUNNER_MAX_COST_RATIO
+        value: "0.40"
+      - key: AUTOBOTT_CORE_MAX_SPREAD_PCT
+        value: "0.18"
+      - key: AUTOBOTT_RUNNER_MAX_SPREAD_PCT
+        value: "0.25"
+      - key: AUTOBOTT_CORE_MIN_OPEN_INTEREST
+        value: "100"
+      - key: AUTOBOTT_RUNNER_MIN_OPEN_INTEREST
+        value: "50"
+      - key: AUTOBOTT_CORE_MIN_VOLUME
+        value: "10"
+      - key: AUTOBOTT_RUNNER_MIN_VOLUME
+        value: "1"
       - key: AUTOBOTT_SPREAD_MAX_RISK
         value: "100"
       - key: AUTOBOTT_SPREAD_PROFIT_TARGET_PCT
@@ -60,6 +78,14 @@ services:
         value: "0.80"
       - key: AUTOBOTT_EXIT_TAKE_PROFIT_FORCE_EXIT_PCT
         value: "1.20"
+      - key: AUTOBOTT_RUNNER_EXIT_TAKE_PROFIT_PCT
+        value: "1.00"
+      - key: AUTOBOTT_RUNNER_EXIT_TRAILING_ACTIVATION_PCT
+        value: "0.50"
+      - key: AUTOBOTT_RUNNER_EXIT_TRAILING_DRAWDOWN_PCT
+        value: "0.25"
+      - key: AUTOBOTT_RUNNER_EXIT_STOP_LOSS_PCT
+        value: "0.70"
       - key: AUTOBOTT_TAKE_PROFIT_LIMIT_PRICE_FACTOR
         value: "0.98"
       - key: AUTOBOTT_TAKE_PROFIT_REPRICE_FACTOR
