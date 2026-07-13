@@ -5,6 +5,7 @@ from datetime import UTC, datetime
 from autobott_v2.execution_config import AlpacaExecutionConfig
 from autobott_v2.execution_models import BrokerEnvironment, ExecutionOrder, ExecutionState
 from autobott_v2.position_monitor import PositionMonitorRules, run_position_monitor
+from autobott_v2.position_store import OpenPosition, save_open_positions
 from autobott_v2.runtime_control import default_runtime_state, save_runtime_state
 
 
@@ -143,6 +144,68 @@ def test_position_monitor_takes_profit_at_stricter_default_threshold(tmp_path) -
     assert result["actions"][0]["take_profit_tier"] == "initial"
     assert broker.submitted[0].order_type.value == "limit"
     assert broker.submitted[0].limit_price == 6.08
+
+
+def test_position_monitor_harvests_primary_but_keeps_runner_open(tmp_path) -> None:
+    save_runtime_state(default_runtime_state())
+    primary_symbol = "VIX260715C00017000"
+    runner_symbol = "VIX260715C00020000"
+    store_path = tmp_path / "open_positions.json"
+    save_open_positions(
+        [
+            OpenPosition(
+                broker_order_id="primary-order",
+                decision_id="decision-1",
+                symbol="VIX",
+                option_symbol=primary_symbol,
+                quantity=1,
+                entry_limit_price=0.70,
+                entry_submitted_at=datetime(2026, 7, 13, 14, 30, tzinfo=UTC),
+                take_profit_price=1.05,
+                stop_loss_price=0.39,
+                status="filled",
+                trade_group_id="core-runner:decision-1",
+                leg_role="primary",
+                paired_option_symbol=runner_symbol,
+            ),
+            OpenPosition(
+                broker_order_id="runner-order",
+                decision_id="decision-1",
+                symbol="VIX",
+                option_symbol=runner_symbol,
+                quantity=1,
+                entry_limit_price=0.25,
+                entry_submitted_at=datetime(2026, 7, 13, 14, 30, tzinfo=UTC),
+                take_profit_price=0.50,
+                stop_loss_price=0.08,
+                status="filled",
+                trade_group_id="core-runner:decision-1",
+                leg_role="runner",
+                paired_option_symbol=primary_symbol,
+            ),
+        ],
+        store_path=store_path,
+    )
+    broker = FakeBroker(
+        [
+            _position(symbol=primary_symbol, current_price="0.95", avg_entry_price="0.70", unrealized_plpc="0.35"),
+            _position(symbol=runner_symbol, current_price="0.34", avg_entry_price="0.25", unrealized_plpc="0.35"),
+        ]
+    )
+
+    result = run_position_monitor(
+        broker=broker,
+        rules=PositionMonitorRules(),
+        journal_path=str(tmp_path / "journal.jsonl"),
+        trailing_state_path=str(tmp_path / "trailing_peaks.json"),
+        position_store_path=store_path,
+    )
+
+    assert len(result["actions"]) == 1
+    assert result["actions"][0]["symbol"] == primary_symbol
+    assert result["actions"][0]["leg_role"] == "primary"
+    assert broker.submitted[0].option_symbol == primary_symbol
+    assert broker.submitted[0].metadata["leg_role"] == "primary"
 
 
 def test_position_monitor_tightens_exit_ladder_for_harvest_winner(tmp_path) -> None:

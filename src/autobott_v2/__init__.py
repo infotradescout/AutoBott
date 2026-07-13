@@ -20,7 +20,8 @@ from .execution_models import (
     build_execution_order,
     validate_trade_intent,
 )
-from .execution_orchestrator import build_trade_intent_from_decision, submit_decision_to_broker
+from .core_runner import CoreRunnerPair, CoreRunnerRules, runner_is_funded, select_core_runner_pair
+from .execution_orchestrator import build_trade_intent_from_decision, submit_core_runner_to_broker, submit_decision_to_broker
 from .execution_reconciler import ReconciliationSummary, reconcile_open_positions
 from .exit_orchestrator import build_exit_intent_from_position, cancel_open_order, replace_open_order, submit_exit_for_position
 from .historical_live_sim import run_historical_live_simulation
@@ -173,6 +174,11 @@ __all__ = [
     "set_execution_mode",
     "set_kill_switch",
     "submit_decision_to_broker",
+    "submit_core_runner_to_broker",
+    "CoreRunnerPair",
+    "CoreRunnerRules",
+    "select_core_runner_pair",
+    "runner_is_funded",
     "submit_exit_for_position",
     "upsert_open_position_from_order",
     "update_phase1_gate",

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -10,6 +10,7 @@ from typing import Any
 from .execution_broker import AlpacaExecutionBroker
 from .execution_journal import append_execution_outcome, append_order_submission
 from .execution_models import BrokerEnvironment, ExecutionOrder, OrderSide, OrderType, TradeIntent
+from .position_store import load_open_positions
 from .runtime_control import load_runtime_state
 from .runtime_paths import data_root
 
@@ -36,6 +37,13 @@ class PositionMonitorRules:
     stop_loss_pct: float = 0.22
     max_contracts_per_option: int = 1
     trim_limit_price_factor: float = 0.90
+    runner_take_profit_pct: float = 1.00
+    runner_take_profit_tighten_pct: float = 1.50
+    runner_take_profit_harvest_pct: float = 2.00
+    runner_take_profit_force_exit_pct: float = 3.00
+    runner_trailing_activation_pct: float = 0.50
+    runner_trailing_drawdown_pct: float = 0.25
+    runner_stop_loss_pct: float = 0.70
 
 
 def load_position_monitor_rules() -> PositionMonitorRules:
@@ -54,6 +62,13 @@ def load_position_monitor_rules() -> PositionMonitorRules:
         stop_loss_pct=float(os.getenv("AUTOBOTT_EXIT_STOP_LOSS_PCT", "0.22")),
         max_contracts_per_option=int(os.getenv("AUTOBOTT_MAX_CONTRACTS_PER_OPTION", "1")),
         trim_limit_price_factor=float(os.getenv("AUTOBOTT_TRIM_LIMIT_PRICE_FACTOR", "0.90")),
+        runner_take_profit_pct=float(os.getenv("AUTOBOTT_RUNNER_EXIT_TAKE_PROFIT_PCT", "1.00")),
+        runner_take_profit_tighten_pct=float(os.getenv("AUTOBOTT_RUNNER_EXIT_TIGHTEN_PCT", "1.50")),
+        runner_take_profit_harvest_pct=float(os.getenv("AUTOBOTT_RUNNER_EXIT_HARVEST_PCT", "2.00")),
+        runner_take_profit_force_exit_pct=float(os.getenv("AUTOBOTT_RUNNER_EXIT_FORCE_PCT", "3.00")),
+        runner_trailing_activation_pct=float(os.getenv("AUTOBOTT_RUNNER_EXIT_TRAILING_ACTIVATION_PCT", "0.50")),
+        runner_trailing_drawdown_pct=float(os.getenv("AUTOBOTT_RUNNER_EXIT_TRAILING_DRAWDOWN_PCT", "0.25")),
+        runner_stop_loss_pct=float(os.getenv("AUTOBOTT_RUNNER_EXIT_STOP_LOSS_PCT", "0.70")),
     )
 
 
@@ -84,6 +99,7 @@ def run_position_monitor(
     rules: PositionMonitorRules | None = None,
     journal_path: str | None = None,
     trailing_state_path: str | Path | None = None,
+    position_store_path: str | Path | None = None,
 ) -> dict[str, Any]:
     resolved_rules = rules or load_position_monitor_rules()
     if not resolved_rules.enabled:
@@ -105,6 +121,11 @@ def run_position_monitor(
     positions = resolved_broker.list_open_positions()
     pending_exits = _pending_exit_orders_by_symbol(resolved_broker)
     pending_orders = _pending_orders_by_symbol(resolved_broker)
+    try:
+        stored_positions = load_open_positions(store_path=position_store_path)
+    except Exception:
+        stored_positions = []
+    stored_by_symbol = {position.option_symbol.upper(): position for position in stored_positions}
     peaks = _load_trailing_peaks(state_path=trailing_state_path)
     open_symbols: set[str] = set()
     actions: list[dict[str, Any]] = []
@@ -113,7 +134,9 @@ def run_position_monitor(
         symbol = str(position.get("symbol") or "").upper()
         if symbol:
             open_symbols.add(symbol)
-        action = _monitor_action(position, resolved_rules, peaks)
+        stored_position = stored_by_symbol.get(symbol)
+        leg_role = stored_position.leg_role if stored_position is not None else None
+        action = _monitor_action(position, _rules_for_leg(resolved_rules, leg_role), peaks, leg_role=leg_role)
         if action is None:
             continue
         pending_exit = pending_exits.get(action["symbol"])
@@ -168,6 +191,8 @@ def _monitor_action(
     position: dict[str, Any],
     rules: PositionMonitorRules,
     peaks: dict[str, float],
+    *,
+    leg_role: str | None = None,
 ) -> dict[str, Any] | None:
     symbol = str(position.get("symbol") or "").upper()
     if not symbol:
@@ -193,6 +218,7 @@ def _monitor_action(
             "quantity": qty - rules.max_contracts_per_option,
             "unrealized_plpc": unrealized_plpc,
             "current_price": current_price,
+            "leg_role": leg_role,
         }
     if unrealized_plpc <= -abs(rules.stop_loss_pct):
         return {
@@ -201,6 +227,7 @@ def _monitor_action(
             "quantity": qty,
             "unrealized_plpc": unrealized_plpc,
             "current_price": current_price,
+            "leg_role": leg_role,
         }
     if peak_plpc >= rules.trailing_activation_pct and unrealized_plpc <= peak_plpc - rules.trailing_drawdown_pct:
         return {
@@ -210,6 +237,7 @@ def _monitor_action(
             "unrealized_plpc": unrealized_plpc,
             "current_price": current_price,
             "peak_unrealized_plpc": peak_plpc,
+            "leg_role": leg_role,
         }
     if unrealized_plpc >= rules.take_profit_pct:
         tier = _take_profit_tier(unrealized_plpc, rules)
@@ -221,6 +249,7 @@ def _monitor_action(
             "current_price": current_price,
             "peak_unrealized_plpc": peak_plpc,
             "take_profit_tier": tier,
+            "leg_role": leg_role,
         }
     return None
 
@@ -260,6 +289,7 @@ def _submit_monitor_exit(
             "exit_order_style": "urgent_market" if order_type is OrderType.MARKET else "profit_ladder_limit",
             "take_profit_tier": action.get("take_profit_tier"),
             "unrealized_plpc": action["unrealized_plpc"],
+            "leg_role": action.get("leg_role"),
         },
     )
     order = broker.submit_order(intent, open_positions=0)
@@ -282,6 +312,21 @@ def _submit_monitor_exit(
         journal_path=journal_path,
     )
     return order
+
+
+def _rules_for_leg(rules: PositionMonitorRules, leg_role: str | None) -> PositionMonitorRules:
+    if leg_role != "runner":
+        return rules
+    return replace(
+        rules,
+        take_profit_pct=rules.runner_take_profit_pct,
+        take_profit_tighten_pct=rules.runner_take_profit_tighten_pct,
+        take_profit_harvest_pct=rules.runner_take_profit_harvest_pct,
+        take_profit_force_exit_pct=rules.runner_take_profit_force_exit_pct,
+        trailing_activation_pct=rules.runner_trailing_activation_pct,
+        trailing_drawdown_pct=rules.runner_trailing_drawdown_pct,
+        stop_loss_pct=rules.runner_stop_loss_pct,
+    )
 
 
 def _pending_exit_orders_by_symbol(broker: Any) -> dict[str, dict[str, Any]]:
