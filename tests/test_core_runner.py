@@ -50,19 +50,20 @@ def _snapshot(symbol: str, strike: float, bid: float, ask: float, delta: float) 
     )
 
 
-def test_pair_steps_down_to_cheaper_primary_and_stays_under_total_budget() -> None:
+def test_pair_keeps_engine_primary_even_when_total_cost_exceeds_affordability_marker() -> None:
     chain = [
         _snapshot("VIX260715C00017000", 17.0, 0.95, 1.05, 0.55),
         _snapshot("VIX260715C00018000", 18.0, 0.55, 0.65, 0.40),
         _snapshot("VIX260715C00020000", 20.0, 0.20, 0.25, 0.15),
     ]
 
-    pair = select_core_runner_pair(_selected_primary(), chain, rules=CoreRunnerRules(max_group_cost=100.0))
+    pair = select_core_runner_pair(_selected_primary(), chain, rules=CoreRunnerRules(affordable_leg_cost=100.0))
 
     assert pair is not None
-    assert pair.primary.option_symbol == "VIX260715C00018000"
+    assert pair.primary.option_symbol == "VIX260715C00017000"
     assert pair.runner.option_symbol == "VIX260715C00020000"
-    assert pair.estimated_group_cost == 90.0
+    assert pair.estimated_group_cost == 130.0
+    assert pair.real_money_affordable is False
     assert pair.primary.option_symbol != pair.runner.option_symbol
 
 
@@ -78,12 +79,15 @@ def test_pair_prefers_engine_selected_primary_when_full_pair_fits() -> None:
     assert pair is not None
     assert pair.primary.option_symbol == selected.option_symbol
     assert pair.estimated_group_cost == 95.0
+    assert pair.primary_estimated_cost == 70.0
+    assert pair.runner_estimated_cost == 25.0
+    assert pair.real_money_affordable is True
 
 
-def test_missing_pair_under_budget_fails_closed() -> None:
+def test_missing_structurally_valid_runner_fails_closed() -> None:
     chain = [
         _snapshot("VIX260715C00017000", 17.0, 0.95, 1.05, 0.55),
-        _snapshot("VIX260715C00020000", 20.0, 0.35, 0.40, 0.15),
+        _snapshot("VIX260715C00020000", 20.0, 0.45, 0.50, 0.15),
     ]
 
     assert select_core_runner_pair(_selected_primary(), chain) is None

@@ -45,6 +45,9 @@ def build_trade_intent_from_decision(
     leg_role: str = "primary",
     trade_group_id: str | None = None,
     paired_option_symbol: str | None = None,
+    affordable_leg_cost: float | None = None,
+    real_money_affordable: bool | None = None,
+    estimated_pair_cost: float | None = None,
 ) -> TradeIntent:
     if decision.decision is not DecisionStatus.TRADE_CANDIDATE:
         raise ValueError("decision_not_trade_candidate")
@@ -82,6 +85,9 @@ def build_trade_intent_from_decision(
             "trade_group_id": trade_group_id,
             "leg_role": leg_role,
             "paired_option_symbol": paired_option_symbol,
+            "affordable_leg_cost": affordable_leg_cost,
+            "real_money_affordable": real_money_affordable,
+            "estimated_pair_cost": estimated_pair_cost,
         },
     )
 
@@ -97,7 +103,7 @@ def submit_core_runner_to_broker(
     journal_path: str | None = None,
     on_submission_attempt: Callable[[TradeIntent], None] | None = None,
 ) -> tuple[ExecutionOrder, ExecutionOrder]:
-    """Submit one primary plus one distinct runner within one debit budget."""
+    """Submit one primary plus one distinct runner to the paper broker."""
 
     resolved_broker = broker or AlpacaExecutionBroker(config)
     runtime_state = load_runtime_state()
@@ -119,6 +125,9 @@ def submit_core_runner_to_broker(
         leg_role="primary",
         trade_group_id=trade_group_id,
         paired_option_symbol=pair.runner.option_symbol,
+        affordable_leg_cost=pair.affordable_leg_cost,
+        real_money_affordable=pair.real_money_affordable,
+        estimated_pair_cost=pair.estimated_group_cost,
     )
     runner_intent = build_trade_intent_from_decision(
         decision,
@@ -129,16 +138,10 @@ def submit_core_runner_to_broker(
         leg_role="runner",
         trade_group_id=trade_group_id,
         paired_option_symbol=pair.primary.option_symbol,
+        affordable_leg_cost=pair.affordable_leg_cost,
+        real_money_affordable=pair.real_money_affordable,
+        estimated_pair_cost=pair.estimated_group_cost,
     )
-    actual_group_notional = round(primary_intent.estimated_notional + runner_intent.estimated_notional, 2)
-    if actual_group_notional > pair.max_group_cost:
-        raise ExecutionRejectedError(
-            "core_runner_group_cost_exceeds_budget",
-            detail=(
-                "core_runner_group_cost_exceeds_budget: "
-                f"actual_group_notional={actual_group_notional} budget={pair.max_group_cost}"
-            ),
-        )
 
     controls = resolved_broker.config.risk_controls()
     primary_risk = validate_trade_intent(

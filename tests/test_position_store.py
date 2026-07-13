@@ -26,6 +26,9 @@ def test_upsert_open_position_from_order_round_trips(tmp_path) -> None:
                 "trade_group_id": "core-runner:decision-123",
                 "leg_role": "runner",
                 "paired_option_symbol": "AAPL260117C00185000",
+                "affordable_leg_cost": 100.0,
+                "real_money_affordable": False,
+                "estimated_pair_cost": 325.0,
             },
         ),
         state=ExecutionState.SUBMITTED,
@@ -41,3 +44,6 @@ def test_upsert_open_position_from_order_round_trips(tmp_path) -> None:
     assert rows[0].trade_group_id == "core-runner:decision-123"
     assert rows[0].leg_role == "runner"
     assert rows[0].paired_option_symbol == "AAPL260117C00185000"
+    assert rows[0].affordable_leg_cost == 100.0
+    assert rows[0].real_money_affordable is False
+    assert rows[0].estimated_pair_cost == 325.0

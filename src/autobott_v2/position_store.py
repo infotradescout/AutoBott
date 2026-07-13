@@ -29,6 +29,9 @@ class OpenPosition:
     trade_group_id: str | None = None
     leg_role: str | None = None
     paired_option_symbol: str | None = None
+    affordable_leg_cost: float | None = None
+    real_money_affordable: bool | None = None
+    estimated_pair_cost: float | None = None
 
     def to_json_dict(self) -> dict[str, Any]:
         payload = asdict(self)
@@ -59,6 +62,9 @@ def load_open_positions(*, store_path: str | Path | None = None) -> list[OpenPos
                 trade_group_id=row.get("trade_group_id"),
                 leg_role=row.get("leg_role"),
                 paired_option_symbol=row.get("paired_option_symbol"),
+                affordable_leg_cost=row.get("affordable_leg_cost"),
+                real_money_affordable=row.get("real_money_affordable"),
+                estimated_pair_cost=row.get("estimated_pair_cost"),
             )
         )
     return positions
@@ -91,6 +97,9 @@ def upsert_open_position_from_order(order: ExecutionOrder, *, store_path: str | 
             trade_group_id=order.intent.metadata.get("trade_group_id"),
             leg_role=order.intent.metadata.get("leg_role"),
             paired_option_symbol=order.intent.metadata.get("paired_option_symbol"),
+            affordable_leg_cost=order.intent.metadata.get("affordable_leg_cost"),
+            real_money_affordable=order.intent.metadata.get("real_money_affordable"),
+            estimated_pair_cost=order.intent.metadata.get("estimated_pair_cost"),
         )
     )
     return save_open_positions(updated, store_path=store_path)

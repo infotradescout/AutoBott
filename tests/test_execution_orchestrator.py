@@ -191,7 +191,7 @@ def test_submit_decision_to_broker_raises_exact_risk_rejection(tmp_path) -> None
     assert '"event_type": "risk_check"' in lines[0]
 
 
-def test_submit_core_runner_uses_two_distinct_contracts_under_group_budget(tmp_path, monkeypatch) -> None:
+def test_submit_core_runner_uses_two_distinct_contracts_and_marks_affordability(tmp_path, monkeypatch) -> None:
     import autobott_v2.execution_orchestrator as orchestrator
 
     broker = FakeBroker()
@@ -202,11 +202,11 @@ def test_submit_core_runner_uses_two_distinct_contracts_under_group_budget(tmp_p
         option_symbol="AAPL260117C00195000",
         strike=195.0,
         bid=0.60,
-        ask=0.70,
-        mid=0.65,
+        ask=1.00,
+        mid=0.95,
         delta=0.40,
-        target_exit_mid=0.98,
-        stop_exit_mid=0.36,
+        target_exit_mid=1.50,
+        stop_exit_mid=0.55,
     )
     runner = replace(
         selected,
@@ -219,7 +219,7 @@ def test_submit_core_runner_uses_two_distinct_contracts_under_group_budget(tmp_p
         target_exit_mid=0.45,
         stop_exit_mid=0.07,
     )
-    pair = CoreRunnerPair(primary, runner, estimated_group_cost=95.0)
+    pair = CoreRunnerPair(primary, runner, estimated_group_cost=125.0)
     monkeypatch.setattr(orchestrator, "upsert_open_position_from_order", lambda *args, **kwargs: None)
     journal_path = tmp_path / "execution_orders.jsonl"
 
@@ -232,27 +232,51 @@ def test_submit_core_runner_uses_two_distinct_contracts_under_group_budget(tmp_p
 
     assert [intent.quantity for intent in broker.intents] == [1, 1]
     assert [intent.option_symbol for intent in broker.intents] == [primary.option_symbol, runner.option_symbol]
-    assert sum(intent.estimated_notional for intent in broker.intents) == 95.0
+    assert sum(intent.estimated_notional for intent in broker.intents) == 125.0
     assert primary_order.intent.metadata["leg_role"] == "primary"
     assert runner_order.intent.metadata["leg_role"] == "runner"
     assert primary_order.intent.metadata["trade_group_id"] == runner_order.intent.metadata["trade_group_id"]
+    assert primary_order.intent.metadata["real_money_affordable"] is True
+    assert runner_order.intent.metadata["affordable_leg_cost"] == 100.0
     assert len(journal_path.read_text(encoding="utf-8").splitlines()) == 4
 
 
-def test_submit_core_runner_rejects_actual_debit_above_pair_budget(tmp_path) -> None:
+def test_submit_core_runner_allows_larger_pair_in_paper_and_marks_it_unaffordable(tmp_path, monkeypatch) -> None:
+    import autobott_v2.execution_orchestrator as orchestrator
+
     broker = FakeBroker()
     selected = _decision_card().selected_contract
     assert selected is not None
-    primary = replace(selected, option_symbol="AAPL260117C00195000", strike=195.0, bid=0.60, ask=0.70, mid=0.65)
-    runner = replace(selected, option_symbol="AAPL260117C00200000", strike=200.0, bid=0.20, ask=0.25, mid=0.225)
-    pair = CoreRunnerPair(primary, runner, estimated_group_cost=90.0, max_group_cost=90.0)
+    primary = replace(
+        selected,
+        option_symbol="AAPL260117C00195000",
+        strike=195.0,
+        bid=1.40,
+        ask=1.50,
+        mid=1.45,
+        target_exit_mid=2.20,
+        stop_exit_mid=0.80,
+    )
+    runner = replace(
+        selected,
+        option_symbol="AAPL260117C00200000",
+        strike=200.0,
+        bid=0.45,
+        ask=0.50,
+        mid=0.475,
+        target_exit_mid=0.95,
+        stop_exit_mid=0.15,
+    )
+    pair = CoreRunnerPair(primary, runner, estimated_group_cost=200.0)
+    monkeypatch.setattr(orchestrator, "upsert_open_position_from_order", lambda *args, **kwargs: None)
 
-    with pytest.raises(ExecutionRejectedError, match="core_runner_group_cost_exceeds_budget"):
-        submit_core_runner_to_broker(
-            _decision_card(),
-            pair,
-            broker=broker,
-            journal_path=str(tmp_path / "execution_orders.jsonl"),
-        )
+    primary_order, runner_order = submit_core_runner_to_broker(
+        _decision_card(),
+        pair,
+        broker=broker,
+        journal_path=str(tmp_path / "execution_orders.jsonl"),
+    )
 
-    assert broker.intents == []
+    assert sum(intent.estimated_notional for intent in broker.intents) == 200.0
+    assert primary_order.intent.metadata["real_money_affordable"] is False
+    assert runner_order.intent.metadata["real_money_affordable"] is False

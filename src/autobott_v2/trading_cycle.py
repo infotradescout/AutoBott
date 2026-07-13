@@ -430,8 +430,10 @@ def run_trading_cycle(
                 ghost = (
                     append_ghost_trade(
                         decision,
-                        reason="core_runner_pair_not_found_under_budget",
-                        max_real_cost=core_runner_rules.max_group_cost if core_runner_rules is not None else 100.0,
+                        reason="core_runner_pair_not_found",
+                        max_real_cost=(
+                            core_runner_rules.affordable_leg_cost if core_runner_rules is not None else 100.0
+                        ),
                         journal_path=_ghost_trade_journal_for_execution_log(execution_log_path),
                     )
                     if decision.selected_contract is not None
@@ -440,8 +442,8 @@ def run_trading_cycle(
                 _append_skip(
                     skipped,
                     symbol=symbol.upper(),
-                    reason="core_runner_pair_not_found_under_budget",
-                    detail="one primary plus one distinct cheaper runner could not fit the total debit cap",
+                    reason="core_runner_pair_not_found",
+                    detail="one primary plus one distinct cheaper liquid runner could not be selected",
                 )
                 _record_execution_rejection(
                     execution_outcomes,
@@ -449,11 +451,13 @@ def run_trading_cycle(
                     ticker=symbol.upper(),
                     decision_id=decision.decision_id,
                     thesis_id=thesis_id,
-                    reason="core_runner_pair_not_found_under_budget",
-                    detail="neither leg submitted because the full setup must stay under budget",
+                    reason="core_runner_pair_not_found",
+                    detail="neither leg submitted because the required primary/runner structure was unavailable",
                     journal_path=execution_log_path,
                     payload={
-                        "max_group_cost": core_runner_rules.max_group_cost if core_runner_rules is not None else 100.0,
+                        "affordable_leg_cost": (
+                            core_runner_rules.affordable_leg_cost if core_runner_rules is not None else 100.0
+                        ),
                         "ghost": ghost,
                     },
                 )
@@ -462,7 +466,7 @@ def run_trading_cycle(
                 decision,
                 selected_contract=core_runner_pair.primary,
                 reason_codes=[*decision.reason_codes, "core_runner_pair_selected"],
-                explanation=f"{decision.explanation}; primary plus convex runner selected under combined debit cap",
+                explanation=f"{decision.explanation}; primary plus convex runner selected for paper execution",
             )
             thesis_id = _decision_thesis_id(decision)
             _record_execution_outcome(
@@ -477,6 +481,10 @@ def run_trading_cycle(
                     "primary_option_symbol": core_runner_pair.primary.option_symbol,
                     "runner_option_symbol": core_runner_pair.runner.option_symbol,
                     "estimated_group_cost": core_runner_pair.estimated_group_cost,
+                    "primary_estimated_cost": core_runner_pair.primary_estimated_cost,
+                    "runner_estimated_cost": core_runner_pair.runner_estimated_cost,
+                    "affordable_leg_cost": core_runner_pair.affordable_leg_cost,
+                    "real_money_affordable": core_runner_pair.real_money_affordable,
                 },
             )
         if max_new_entry_attempts_per_loop is not None and trade_attempted_count >= max_new_entry_attempts_per_loop:

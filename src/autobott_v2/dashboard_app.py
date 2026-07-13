@@ -435,6 +435,16 @@ def _account_positions_payload() -> JsonDict:
                     if stored_by_symbol.get(str(position.get("symbol") or "").upper()) is not None
                     else None
                 ),
+                "real_money_affordable": (
+                    stored_by_symbol.get(str(position.get("symbol") or "").upper()).real_money_affordable
+                    if stored_by_symbol.get(str(position.get("symbol") or "").upper()) is not None
+                    else None
+                ),
+                "affordable_leg_cost": (
+                    stored_by_symbol.get(str(position.get("symbol") or "").upper()).affordable_leg_cost
+                    if stored_by_symbol.get(str(position.get("symbol") or "").upper()) is not None
+                    else None
+                ),
                 "side": position.get("side"),
                 "qty": position.get("qty"),
                 "avg_entry_price": position.get("avg_entry_price"),
@@ -1939,6 +1949,7 @@ def _dashboard_html() -> str:
         return `<tr>
           <td>${escapeHtml(position.symbol || 'n/a')}</td>
           <td><span class="badge ${position.leg_role === 'runner' ? 'warn' : 'info'}">${escapeHtml(position.leg_role || 'legacy')}</span></td>
+          <td><span class="badge ${position.real_money_affordable === true ? 'safe' : position.real_money_affordable === false ? 'warn' : 'info'}">${position.real_money_affordable === true ? '≤ $100/leg' : position.real_money_affordable === false ? 'paper only' : 'legacy'}</span></td>
           <td>${escapeHtml(position.option_type || 'n/a')}</td>
           <td>${escapeHtml(position.strike ?? 'n/a')}</td>
           <td>${escapeHtml(position.side || 'n/a')}</td>
@@ -1950,8 +1961,8 @@ def _dashboard_html() -> str:
       }).join('');
       return `
         <table class="table">
-          <thead><tr><th>Symbol</th><th>Leg</th><th>Type</th><th>Strike</th><th>Side</th><th>Qty</th><th>Entry</th><th>Current</th><th>Unrealized P/L</th></tr></thead>
-          <tbody>${rows || '<tr><td colspan="9">No open positions</td></tr>'}</tbody>
+          <thead><tr><th>Symbol</th><th>Leg</th><th>Affordability</th><th>Type</th><th>Strike</th><th>Side</th><th>Qty</th><th>Entry</th><th>Current</th><th>Unrealized P/L</th></tr></thead>
+          <tbody>${rows || '<tr><td colspan="10">No open positions</td></tr>'}</tbody>
         </table>
         ${detailsBlock(payload)}`;
     }
