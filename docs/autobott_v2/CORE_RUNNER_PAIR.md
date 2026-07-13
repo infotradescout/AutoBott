@@ -4,15 +4,15 @@ Every enabled AutoBott paper buy-in is one linked two-leg setup:
 
 - `primary`: exactly one useful directional contract
 - `runner`: exactly one different, cheaper, farther-out-of-the-money contract
-- combined maximum debit: `$100` by default, including both contracts
+- real-money affordability marker: `$100` per leg by default
 
 The runner is not an extra quantity of the primary. Both legs share a `trade_group_id`, identify their `leg_role`, and
-record the other leg's option symbol.
+record the other leg's option symbol. The affordability marker is reporting metadata, not a paper-trade eligibility cap.
 
 ## Pair selection
 
-The pair selector prefers the contract chosen by the decision engine when that contract and a valid runner fit the
-combined budget. If it does not fit, the selector may choose a cheaper primary from the same direction and expiration.
+The pair selector prefers the contract chosen by the decision engine and then finds a valid runner from the same
+direction and expiration. Contract cost does not make an otherwise valid pair ineligible for paper trading.
 
 The runner must:
 
@@ -22,9 +22,12 @@ The runner must:
 - have lower absolute delta than the primary
 - pass configurable spread, volume, and open-interest minimums
 
-If no qualifying pair fits under the total debit cap, AutoBott submits neither leg and records
-`core_runner_pair_not_found_under_budget`. It never duplicates the primary and never exceeds the group budget to force
-an entry.
+If no structurally valid, liquid pair exists, AutoBott submits neither leg and records `core_runner_pair_not_found`.
+It never duplicates the primary to force an entry.
+
+Pairs with both legs at or below `$100` are labeled `real_money_affordable=true` for the operator to identify trades
+that fit the user's real-money testing budget. Any pair with either leg above that marker remains eligible for paper
+execution and is labeled paper-only. This does not authorize automatic live execution.
 
 ## Exit behavior
 
@@ -37,5 +40,6 @@ unrealized recovery in the runner's own premium does not satisfy that accounting
 
 ## Safety posture
 
-Core + runner entry is enabled on the Render paper service. Live paired submission is explicitly rejected with
+Core + runner entry is enabled on the Render paper service. The paper service keeps a separate `$5,000` per-leg
+operational ceiling so the `$100` affordability marker does not suppress larger paper tests. Live paired submission is explicitly rejected with
 `core_runner_live_not_validated` until atomic/multi-leg live execution and recovery behavior are validated.

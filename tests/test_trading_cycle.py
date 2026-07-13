@@ -216,9 +216,9 @@ def test_run_trading_cycle_captures_decides_and_submits(tmp_path) -> None:
     assert "pass_trade_attempted" in dispositions
 
 
-def test_run_trading_cycle_submits_primary_and_runner_under_100_total(tmp_path, monkeypatch) -> None:
+def test_run_trading_cycle_paper_trades_larger_pair_and_marks_affordability(tmp_path, monkeypatch) -> None:
     monkeypatch.setenv("AUTOBOTT_CORE_RUNNER_ENABLED", "true")
-    monkeypatch.setenv("AUTOBOTT_MAX_TRADE_GROUP_COST", "100")
+    monkeypatch.setenv("AUTOBOTT_REAL_MONEY_AFFORDABLE_LEG_COST", "100")
     save_runtime_state(default_runtime_state(), state_path=tmp_path / "runtime_state.json")
     original = trading_cycle.load_runtime_state
     original_positions = trading_cycle.load_open_positions
@@ -245,7 +245,9 @@ def test_run_trading_cycle_submits_primary_and_runner_under_100_total(tmp_path, 
     assert [row["leg_role"] for row in result.orders_submitted] == ["primary", "runner"]
     assert result.orders_submitted[0]["option_symbol"] != result.orders_submitted[1]["option_symbol"]
     assert broker.submitted[0].quantity == broker.submitted[1].quantity == 1
-    assert sum(intent.estimated_notional for intent in broker.submitted) <= 100.0
+    assert sum(intent.estimated_notional for intent in broker.submitted) > 100.0
+    assert broker.submitted[0].metadata["real_money_affordable"] is False
+    assert broker.submitted[1].metadata["real_money_affordable"] is False
     assert broker.submitted[0].metadata["trade_group_id"] == broker.submitted[1].metadata["trade_group_id"]
 
 

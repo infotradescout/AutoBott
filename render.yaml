@@ -25,9 +25,9 @@ services:
       - key: AUTOBOTT_ALLOW_ORDER_PLACEMENT
         value: "true"
       - key: AUTOBOTT_MAX_POSITION_COST
-        value: "100"
+        value: "5000"
       - key: AUTOBOTT_PAPER_DISCOVERY_MAX_CONTRACT_PRICE
-        value: "1.00"
+        value: "50.00"
       - key: AUTOBOTT_PAPER_TRADE_ALL_PASSED_SIGNALS
         value: "true"
       - key: AUTOBOTT_PAPER_MAX_NEW_ENTRY_ATTEMPTS_PER_LOOP
@@ -50,7 +50,7 @@ services:
         value: "true"
       - key: AUTOBOTT_CORE_RUNNER_ENABLED
         value: "true"
-      - key: AUTOBOTT_MAX_TRADE_GROUP_COST
+      - key: AUTOBOTT_REAL_MONEY_AFFORDABLE_LEG_COST
         value: "100"
       - key: AUTOBOTT_RUNNER_MAX_COST_RATIO
         value: "0.40"
