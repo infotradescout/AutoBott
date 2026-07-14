@@ -951,12 +951,18 @@ def test_render_config_has_health_check() -> None:
     assert "key: AUTOBOTT_PAPER_TRADE_ALL_PASSED_SIGNALS" in render_config
     assert "key: AUTOBOTT_PAPER_MAX_NEW_ENTRY_ATTEMPTS_PER_LOOP" in render_config
     assert "key: AUTOBOTT_PAPER_MAX_OPEN_ENTRY_BUY_ORDERS" in render_config
+    assert 'key: AUTOBOTT_MAX_POSITION_COST\n        value: "1000"' in render_config
+    assert 'key: AUTOBOTT_MAX_DAILY_LOSS\n        value: "5000"' in render_config
+    assert 'key: AUTOBOTT_PAPER_DISCOVERY_MAX_CONTRACT_PRICE\n        value: "8.00"' in render_config
+    assert 'key: AUTOBOTT_MAX_TRADE_GROUP_COST\n        value: "1200"' in render_config
+    assert 'key: AUTOBOTT_OPEN_DRAWDOWN_GUARD_ENABLED\n        value: "false"' in render_config
+    assert 'key: AUTOBOTT_RECENT_LOSS_GUARD_ENABLED\n        value: "false"' in render_config
 
 
-def test_frontend_contains_paper_only_live_locked_orders_disabled() -> None:
+def test_frontend_identifies_live_market_paper_trading_and_real_money_off() -> None:
     status, body = _invoke_app("GET", "/")
     assert status.startswith("200")
-    assert "PAPER ONLY | LIVE TRADING LOCKED | EXECUTION CHECKING" in body
+    assert "ALPACA PAPER | LIVE MARKET TRADING | REAL MONEY OFF | EXECUTION CHECKING" in body
     assert "AutoBott Phase 1 Operator Console" in body
     assert "LOCKED" in body
     assert "Session Supervisor" in body

@@ -371,7 +371,7 @@ def _paper_execution_status_payload(*, config: Any, execution_config: Any, runti
 
 
 def _mode_banner(*, paper_only: bool, runtime_state: Any, order_placement_configured: bool, order_placement_enabled: bool) -> str:
-    mode = "PAPER ONLY" if paper_only else "PAPER MODE UNKNOWN"
+    mode = "ALPACA PAPER" if paper_only else "BROKER MODE UNKNOWN"
     if runtime_state.live_mode_enabled:
         suffix = "LIVE MODE FLAGGED"
     elif runtime_state.kill_switch_enabled:
@@ -381,10 +381,10 @@ def _mode_banner(*, paper_only: bool, runtime_state: Any, order_placement_config
     elif not runtime_state.execution_enabled:
         suffix = "RUNTIME EXECUTION PAUSED"
     elif order_placement_enabled:
-        suffix = "PAPER EXECUTION ARMED"
+        suffix = "LIVE PAPER EXECUTION ARMED"
     else:
         suffix = "EXECUTION BLOCKED"
-    return f"{mode} | LIVE TRADING LOCKED | {suffix}"
+    return f"{mode} | LIVE MARKET TRADING | REAL MONEY OFF | {suffix}"
 
 
 def _open_positions_payload() -> JsonDict:
@@ -1531,14 +1531,14 @@ def _dashboard_html() -> str:
         <div class="hero-top">
           <span class="eyebrow">AutoBott / Trader's Corner</span>
           <div class="status-row">
-            <span class="badge safe" id="mode-badge">PAPER ONLY</span>
-            <span class="badge warn" id="live-lock-badge">LIVE TRADING LOCKED</span>
+            <span class="badge safe" id="mode-badge">ALPACA PAPER</span>
+            <span class="badge warn" id="live-lock-badge">REAL MONEY OFF</span>
             <span class="badge info" id="execution-badge">EXECUTION CHECKING</span>
           </div>
         </div>
         <h1>AutoBott Phase 1 Operator Console</h1>
-        <p>Production operator command center for paper capture, advisory replay, report review, and gate safety verification.</p>
-        <div class="muted mono" id="mode-banner-text">PAPER ONLY | LIVE TRADING LOCKED | EXECUTION CHECKING</div>
+        <p>Live-market command center for Alpaca paper trading, position monitoring, replay, and performance review.</p>
+        <div class="muted mono" id="mode-banner-text">ALPACA PAPER | LIVE MARKET TRADING | REAL MONEY OFF | EXECUTION CHECKING</div>
         <div class="chip-row">
           <span class="chip info">Current Service <span id="service-name">autobott-phase1-dashboard</span></span>
           <span class="chip warn" id="auth-badge">LOCKED</span>
@@ -1873,17 +1873,17 @@ def _dashboard_html() -> str:
     function renderSafety(payload) {
       dashboardState.safety = payload;
       const gateHash = payload.active_gate_hash ? `${payload.active_gate_hash.slice(0, 12)}...` : 'missing';
-      document.getElementById('env-value').textContent = payload.paper_only ? 'PAPER ONLY' : 'UNKNOWN';
-      document.getElementById('mode-banner-text').textContent = payload.mode_banner || 'PAPER ONLY | LIVE TRADING LOCKED | EXECUTION CHECKING';
-      document.getElementById('mode-badge').textContent = payload.paper_only ? 'PAPER ONLY' : 'MODE CHECK';
+      document.getElementById('env-value').textContent = payload.paper_only ? 'ALPACA PAPER' : 'UNKNOWN';
+      document.getElementById('mode-banner-text').textContent = payload.mode_banner || 'ALPACA PAPER | LIVE MARKET TRADING | REAL MONEY OFF | EXECUTION CHECKING';
+      document.getElementById('mode-badge').textContent = payload.paper_only ? 'ALPACA PAPER' : 'MODE CHECK';
       document.getElementById('mode-badge').className = `badge ${payload.paper_only ? 'safe' : 'warn'}`;
-      document.getElementById('live-lock-badge').textContent = payload.live_trading_enabled ? 'LIVE MODE FLAGGED' : 'LIVE TRADING LOCKED';
+      document.getElementById('live-lock-badge').textContent = payload.live_trading_enabled ? 'REAL MONEY FLAGGED' : 'REAL MONEY OFF';
       document.getElementById('live-lock-badge').className = `badge ${payload.live_trading_enabled ? 'danger' : 'warn'}`;
-      document.getElementById('execution-badge').textContent = payload.order_placement_enabled ? 'PAPER EXECUTION ARMED' : (payload.order_placement_configured ? 'EXECUTION PAUSED' : 'ORDERS CONFIG DISABLED');
+      document.getElementById('execution-badge').textContent = payload.order_placement_enabled ? 'LIVE PAPER TRADING' : (payload.order_placement_configured ? 'EXECUTION PAUSED' : 'ORDERS CONFIG DISABLED');
       document.getElementById('execution-badge').className = `badge ${payload.order_placement_enabled ? 'danger' : payload.order_placement_configured ? 'warn' : 'info'}`;
       return `
         ${metricList([
-          ['Mode', payload.paper_only ? statusBadge('PAPER ONLY', 'safe') : statusBadge('UNKNOWN', 'warn')],
+          ['Mode', payload.paper_only ? statusBadge('ALPACA PAPER', 'safe') : statusBadge('UNKNOWN', 'warn')],
           ['Live trading', payload.live_trading_enabled ? statusBadge('ENABLED', 'danger') : statusBadge('LOCKED', 'safe')],
           ['Order placement', payload.order_placement_enabled ? statusBadge('ARMED', 'danger') : statusBadge(payload.order_placement_configured ? 'PAUSED' : 'CONFIG DISABLED', payload.order_placement_configured ? 'warn' : 'safe')],
           ['Trade-through', payload.paper_trade_through_enabled ? statusBadge('ENABLED', 'warn') : statusBadge('DISABLED', 'info')],
