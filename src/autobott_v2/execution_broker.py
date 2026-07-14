@@ -23,6 +23,15 @@ class BrokerAdapter(Protocol):
     def submit_order(self, intent: TradeIntent, *, current_daily_realized_pnl: float = 0.0, open_positions: int = 0) -> ExecutionOrder:
         ...
 
+    def submit_mleg_order(
+        self,
+        intents: tuple[TradeIntent, ...],
+        *,
+        current_daily_realized_pnl: float = 0.0,
+        open_positions: int = 0,
+    ) -> tuple[ExecutionOrder, ...]:
+        ...
+
     def get_order(self, broker_order_id: str) -> dict:
         ...
 
@@ -64,6 +73,81 @@ class AlpacaExecutionBroker:
             submitted_at=_parse_dt(payload.get("submitted_at")),
             broker_order_id=payload.get("id"),
         )
+
+    def submit_mleg_order(
+        self,
+        intents: tuple[TradeIntent, ...],
+        *,
+        current_daily_realized_pnl: float = 0.0,
+        open_positions: int = 0,
+    ) -> tuple[ExecutionOrder, ...]:
+        """Submit option legs as one atomic Alpaca multi-leg order."""
+
+        if len(intents) < 2 or len(intents) > 4:
+            raise ValueError("mleg_requires_two_to_four_legs")
+        if len({intent.option_symbol for intent in intents}) != len(intents):
+            raise ValueError("mleg_requires_unique_option_symbols")
+        if any(intent.side is not OrderSide.BUY_TO_OPEN for intent in intents):
+            raise ValueError("mleg_entry_requires_buy_to_open_legs")
+        if any(intent.order_type is not OrderType.LIMIT for intent in intents):
+            raise ValueError("mleg_entry_requires_limit_orders")
+        if any(intent.quantity != 1 for intent in intents):
+            raise ValueError("mleg_entry_requires_one_contract_per_leg")
+
+        planned_orders: list[ExecutionOrder] = []
+        for index, intent in enumerate(intents):
+            risk_check = validate_trade_intent(
+                intent,
+                self.config.risk_controls(),
+                current_daily_realized_pnl=current_daily_realized_pnl,
+                open_positions=open_positions + index,
+            )
+            planned_orders.append(build_execution_order(intent, risk_check))
+
+        combined_limit_price = round(sum(order.intent.limit_price for order in planned_orders), 2)
+        request_payload = {
+            "qty": "1",
+            "type": "limit",
+            "time_in_force": "day",
+            "order_class": "mleg",
+            "limit_price": f"{combined_limit_price:.2f}",
+            "client_order_id": planned_orders[0].client_order_id,
+            "legs": [
+                {
+                    "symbol": order.intent.option_symbol,
+                    "ratio_qty": "1",
+                    "side": "buy",
+                    "position_intent": "buy_to_open",
+                }
+                for order in planned_orders
+            ],
+        }
+        payload = self._request_json("POST", "/v2/orders", payload=request_payload)
+        if not isinstance(payload, dict):
+            raise ValueError("alpaca_mleg_response_invalid")
+
+        parent_order_id = str(payload.get("id") or "") or None
+        child_by_symbol = {
+            str(leg.get("symbol") or "").upper(): leg
+            for leg in (payload.get("legs") or [])
+            if isinstance(leg, dict)
+        }
+        submitted_orders: list[ExecutionOrder] = []
+        for order in planned_orders:
+            child = child_by_symbol.get(order.intent.option_symbol.upper(), {})
+            submitted_orders.append(
+                ExecutionOrder(
+                    order_id=order.order_id,
+                    client_order_id=str(child.get("client_order_id") or order.client_order_id),
+                    intent=order.intent,
+                    state=_map_alpaca_status(child.get("status") or payload.get("status")),
+                    submitted_at=_parse_dt(child.get("submitted_at") or payload.get("submitted_at")),
+                    broker_order_id=child.get("id") or parent_order_id,
+                )
+            )
+        if any(order.broker_order_id is None for order in submitted_orders):
+            raise ValueError("alpaca_mleg_response_missing_order_id")
+        return tuple(submitted_orders)
 
     def _submit_alpaca_order(self, intent: TradeIntent) -> dict:
         side = "buy" if intent.side is OrderSide.BUY_TO_OPEN else "sell"

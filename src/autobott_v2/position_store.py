@@ -75,7 +75,14 @@ def upsert_open_position_from_order(order: ExecutionOrder, *, store_path: str | 
     if not order.broker_order_id:
         raise ValueError("broker_order_id_required")
     positions = load_open_positions(store_path=store_path)
-    updated = [position for position in positions if position.broker_order_id != order.broker_order_id]
+    updated = [
+        position
+        for position in positions
+        if not (
+            position.broker_order_id == order.broker_order_id
+            and position.option_symbol == order.intent.option_symbol
+        )
+    ]
     updated.append(
         OpenPosition(
             broker_order_id=order.broker_order_id,
