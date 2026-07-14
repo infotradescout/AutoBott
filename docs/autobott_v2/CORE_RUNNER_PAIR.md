@@ -4,7 +4,10 @@ Every enabled AutoBott paper buy-in is one linked two-leg setup:
 
 - `primary`: exactly one useful directional contract
 - `runner`: exactly one different, cheaper, farther-out-of-the-money contract
-- combined maximum debit: `$100` by default, including both contracts
+- combined maximum debit: `$100` by code default, including both contracts
+
+The hosted Alpaca paper service intentionally overrides that affordability default to `$1,200` so live-market testing
+can use the fake balance and exercise more valid pairs. This does not enable Alpaca's real-money environment.
 
 The runner is not an extra quantity of the primary. Both legs share a `trade_group_id`, identify their `leg_role`, and
 record the other leg's option symbol.

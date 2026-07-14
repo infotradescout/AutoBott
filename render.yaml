@@ -25,9 +25,11 @@ services:
       - key: AUTOBOTT_ALLOW_ORDER_PLACEMENT
         value: "true"
       - key: AUTOBOTT_MAX_POSITION_COST
-        value: "100"
+        value: "1000"
+      - key: AUTOBOTT_MAX_DAILY_LOSS
+        value: "5000"
       - key: AUTOBOTT_PAPER_DISCOVERY_MAX_CONTRACT_PRICE
-        value: "1.00"
+        value: "8.00"
       - key: AUTOBOTT_PAPER_TRADE_ALL_PASSED_SIGNALS
         value: "true"
       - key: AUTOBOTT_PAPER_MAX_NEW_ENTRY_ATTEMPTS_PER_LOOP
@@ -37,7 +39,7 @@ services:
       - key: AUTOBOTT_ENTRY_LIMIT_EXTRA
         value: "0"
       - key: AUTOBOTT_OPEN_DRAWDOWN_GUARD_ENABLED
-        value: "true"
+        value: "false"
       - key: AUTOBOTT_OPEN_DRAWDOWN_GUARD_MAX_UNREALIZED_LOSS
         value: "20"
       - key: AUTOBOTT_OPEN_DRAWDOWN_GUARD_MIN_LOSERS
@@ -51,7 +53,7 @@ services:
       - key: AUTOBOTT_CORE_RUNNER_ENABLED
         value: "true"
       - key: AUTOBOTT_MAX_TRADE_GROUP_COST
-        value: "100"
+        value: "1200"
       - key: AUTOBOTT_RUNNER_MAX_COST_RATIO
         value: "0.40"
       - key: AUTOBOTT_CORE_MAX_SPREAD_PCT
@@ -99,7 +101,7 @@ services:
       - key: AUTOBOTT_POSITION_MONITOR_HEARTBEAT_SECONDS
         value: "15"
       - key: AUTOBOTT_RECENT_LOSS_GUARD_ENABLED
-        value: "true"
+        value: "false"
       - key: AUTOBOTT_RECENT_LOSS_GUARD_LOOKBACK
         value: "20"
       - key: AUTOBOTT_RECENT_LOSS_GUARD_CONSECUTIVE_LOSSES
