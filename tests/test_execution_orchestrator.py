@@ -98,6 +98,7 @@ class FakeBroker:
         self.config = _config()
         self.last_intent = None
         self.intents = []
+        self.mleg_calls = []
 
     def submit_order(self, intent, *, current_daily_realized_pnl=0.0, open_positions=0):
         self.last_intent = intent
@@ -110,6 +111,17 @@ class FakeBroker:
             state=ExecutionState.SUBMITTED,
             submitted_at=datetime(2026, 7, 1, 15, 31, tzinfo=UTC),
             broker_order_id=f"alpaca-order-{sequence}",
+        )
+
+    def submit_mleg_order(self, intents, *, current_daily_realized_pnl=0.0, open_positions=0):
+        self.mleg_calls.append(tuple(intents))
+        return tuple(
+            self.submit_order(
+                intent,
+                current_daily_realized_pnl=current_daily_realized_pnl,
+                open_positions=open_positions + index,
+            )
+            for index, intent in enumerate(intents)
         )
 
 
@@ -236,6 +248,7 @@ def test_submit_core_runner_uses_two_distinct_contracts_under_group_budget(tmp_p
     assert primary_order.intent.metadata["leg_role"] == "primary"
     assert runner_order.intent.metadata["leg_role"] == "runner"
     assert primary_order.intent.metadata["trade_group_id"] == runner_order.intent.metadata["trade_group_id"]
+    assert len(broker.mleg_calls) == 1
     assert len(journal_path.read_text(encoding="utf-8").splitlines()) == 4
 
 
@@ -243,8 +256,26 @@ def test_submit_core_runner_rejects_actual_debit_above_pair_budget(tmp_path) -> 
     broker = FakeBroker()
     selected = _decision_card().selected_contract
     assert selected is not None
-    primary = replace(selected, option_symbol="AAPL260117C00195000", strike=195.0, bid=0.60, ask=0.70, mid=0.65)
-    runner = replace(selected, option_symbol="AAPL260117C00200000", strike=200.0, bid=0.20, ask=0.25, mid=0.225)
+    primary = replace(
+        selected,
+        option_symbol="AAPL260117C00195000",
+        strike=195.0,
+        bid=0.60,
+        ask=0.70,
+        mid=0.65,
+        target_exit_mid=1.05,
+        stop_exit_mid=0.38,
+    )
+    runner = replace(
+        selected,
+        option_symbol="AAPL260117C00200000",
+        strike=200.0,
+        bid=0.20,
+        ask=0.25,
+        mid=0.225,
+        target_exit_mid=0.50,
+        stop_exit_mid=0.08,
+    )
     pair = CoreRunnerPair(primary, runner, estimated_group_cost=90.0, max_group_cost=90.0)
 
     with pytest.raises(ExecutionRejectedError, match="core_runner_group_cost_exceeds_budget"):
@@ -256,3 +287,49 @@ def test_submit_core_runner_rejects_actual_debit_above_pair_budget(tmp_path) -> 
         )
 
     assert broker.intents == []
+
+
+def test_submit_core_runner_fails_closed_without_atomic_mleg_support(tmp_path) -> None:
+    class SingleLegOnlyBroker:
+        def __init__(self) -> None:
+            self.config = _config()
+            self.single_leg_submissions = []
+
+        def submit_order(self, intent, *, current_daily_realized_pnl=0.0, open_positions=0):
+            self.single_leg_submissions.append(intent)
+            raise AssertionError("single-leg submission must not be attempted")
+
+    broker = SingleLegOnlyBroker()
+    selected = _decision_card().selected_contract
+    assert selected is not None
+    primary = replace(
+        selected,
+        option_symbol="AAPL260117C00195000",
+        strike=195.0,
+        bid=0.60,
+        ask=0.70,
+        mid=0.65,
+        target_exit_mid=1.05,
+        stop_exit_mid=0.38,
+    )
+    runner = replace(
+        selected,
+        option_symbol="AAPL260117C00200000",
+        strike=200.0,
+        bid=0.20,
+        ask=0.25,
+        mid=0.225,
+        target_exit_mid=0.50,
+        stop_exit_mid=0.08,
+    )
+    pair = CoreRunnerPair(primary, runner, estimated_group_cost=95.0)
+
+    with pytest.raises(ExecutionRejectedError, match="core_runner_atomic_submission_unavailable"):
+        submit_core_runner_to_broker(
+            _decision_card(),
+            pair,
+            broker=broker,
+            journal_path=str(tmp_path / "execution_orders.jsonl"),
+        )
+
+    assert broker.single_leg_submissions == []

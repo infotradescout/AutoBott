@@ -159,34 +159,28 @@ def submit_core_runner_to_broker(
     if rejected:
         raise ExecutionRejectedError(rejected[0], detail=", ".join(rejected), reasons=rejected)
 
+    if not hasattr(resolved_broker, "submit_mleg_order"):
+        raise ExecutionRejectedError("core_runner_atomic_submission_unavailable")
     if on_submission_attempt is not None:
         on_submission_attempt(primary_intent)
-    primary_order = resolved_broker.submit_order(
-        primary_intent,
-        current_daily_realized_pnl=current_daily_realized_pnl,
-        open_positions=open_positions,
-    )
-    append_order_submission(primary_order, journal_path=journal_path)
-    upsert_open_position_from_order(primary_order)
     try:
-        runner_order = resolved_broker.submit_order(
-            runner_intent,
+        submitted_orders = resolved_broker.submit_mleg_order(
+            (primary_intent, runner_intent),
             current_daily_realized_pnl=current_daily_realized_pnl,
-            open_positions=open_positions + 1,
+            open_positions=open_positions,
         )
     except Exception as exc:
-        if primary_order.broker_order_id and hasattr(resolved_broker, "cancel_order"):
-            try:
-                resolved_broker.cancel_order(primary_order.broker_order_id)
-            except Exception:
-                pass
         raise ExecutionRejectedError(
-            "runner_submission_failed",
+            "core_runner_atomic_submission_failed",
             detail=str(exc),
-            reasons=("runner_submission_failed",),
+            reasons=("core_runner_atomic_submission_failed",),
         ) from exc
-    append_order_submission(runner_order, journal_path=journal_path)
-    upsert_open_position_from_order(runner_order)
+    if len(submitted_orders) != 2:
+        raise ExecutionRejectedError("core_runner_atomic_response_invalid")
+    primary_order, runner_order = submitted_orders
+    for order in submitted_orders:
+        append_order_submission(order, journal_path=journal_path)
+        upsert_open_position_from_order(order)
     return primary_order, runner_order
 
 

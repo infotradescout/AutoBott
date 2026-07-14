@@ -87,6 +87,66 @@ def test_submit_order_returns_submitted_execution_order(monkeypatch) -> None:
     assert captured["body"]["position_intent"] == "buy_to_open"
 
 
+def test_submit_mleg_order_sends_one_atomic_two_leg_request(monkeypatch) -> None:
+    broker = AlpacaExecutionBroker(_config())
+    captured = {}
+    primary = _intent(
+        option_symbol="AAPL260117C00195000",
+        limit_price=0.70,
+        take_profit_price=1.05,
+        stop_loss_price=0.38,
+    )
+    runner = _intent(
+        option_symbol="AAPL260117C00200000",
+        limit_price=0.25,
+        take_profit_price=0.50,
+        stop_loss_price=0.08,
+    )
+
+    def _fake_urlopen(request, timeout=30):
+        captured["url"] = request.full_url
+        captured["method"] = request.get_method()
+        captured["body"] = json.loads(request.data.decode("utf-8"))
+        return _FakeResponse(
+            {
+                "id": "alpaca-mleg-1",
+                "status": "accepted",
+                "submitted_at": "2026-07-01T15:31:00Z",
+                "legs": [
+                    {"id": "alpaca-leg-primary", "symbol": primary.option_symbol, "status": "accepted"},
+                    {"id": "alpaca-leg-runner", "symbol": runner.option_symbol, "status": "accepted"},
+                ],
+            }
+        )
+
+    monkeypatch.setattr("urllib.request.urlopen", _fake_urlopen)
+
+    orders = broker.submit_mleg_order((primary, runner))
+
+    assert [order.broker_order_id for order in orders] == ["alpaca-leg-primary", "alpaca-leg-runner"]
+    assert captured["url"] == "https://paper-api.alpaca.markets/v2/orders"
+    assert captured["method"] == "POST"
+    assert captured["body"]["order_class"] == "mleg"
+    assert captured["body"]["qty"] == "1"
+    assert captured["body"]["limit_price"] == "0.95"
+    assert "symbol" not in captured["body"]
+    assert "side" not in captured["body"]
+    assert captured["body"]["legs"] == [
+        {
+            "symbol": primary.option_symbol,
+            "ratio_qty": "1",
+            "side": "buy",
+            "position_intent": "buy_to_open",
+        },
+        {
+            "symbol": runner.option_symbol,
+            "ratio_qty": "1",
+            "side": "buy",
+            "position_intent": "buy_to_open",
+        },
+    ]
+
+
 def test_submit_sell_to_close_marks_position_intent(monkeypatch) -> None:
     broker = AlpacaExecutionBroker(_config())
     captured = {}

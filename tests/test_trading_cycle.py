@@ -141,6 +141,7 @@ class FakeBroker:
         self.config = AlpacaExecutionConfig(**(base.__dict__ | config_overrides))
         self.submitted = []
         self.open_positions_seen = []
+        self.mleg_calls = []
 
     def submit_order(self, intent, *, current_daily_realized_pnl=0.0, open_positions=0):
         self.submitted.append(intent)
@@ -152,6 +153,17 @@ class FakeBroker:
             state=ExecutionState.SUBMITTED,
             submitted_at=datetime(2026, 7, 1, 15, 36, tzinfo=UTC),
             broker_order_id=f"alpaca-order-{len(self.submitted)}",
+        )
+
+    def submit_mleg_order(self, intents, *, current_daily_realized_pnl=0.0, open_positions=0):
+        self.mleg_calls.append(tuple(intents))
+        return tuple(
+            self.submit_order(
+                intent,
+                current_daily_realized_pnl=current_daily_realized_pnl,
+                open_positions=open_positions + index,
+            )
+            for index, intent in enumerate(intents)
         )
 
 
@@ -245,6 +257,7 @@ def test_run_trading_cycle_submits_primary_and_runner_under_100_total(tmp_path, 
     assert [row["leg_role"] for row in result.orders_submitted] == ["primary", "runner"]
     assert result.orders_submitted[0]["option_symbol"] != result.orders_submitted[1]["option_symbol"]
     assert broker.submitted[0].quantity == broker.submitted[1].quantity == 1
+    assert len(broker.mleg_calls) == 1
     assert sum(intent.estimated_notional for intent in broker.submitted) <= 100.0
     assert broker.submitted[0].metadata["trade_group_id"] == broker.submitted[1].metadata["trade_group_id"]
 

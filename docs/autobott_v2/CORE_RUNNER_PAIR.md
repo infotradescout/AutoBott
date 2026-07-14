@@ -26,6 +26,12 @@ If no qualifying pair fits under the total debit cap, AutoBott submits neither l
 `core_runner_pair_not_found_under_budget`. It never duplicates the primary and never exceeds the group budget to force
 an entry.
 
+## Atomic submission
+
+The primary and runner are sent to Alpaca as one `mleg` limit order with two unique `buy_to_open` legs and one combined
+debit limit. AutoBott no longer submits the primary and runner as separate broker orders. If atomic multi-leg submission
+is unavailable, rejected, or malformed, the entry fails closed and neither leg is intentionally submitted alone.
+
 ## Exit behavior
 
 The primary keeps the normal harvest rules. The runner is independently monitored with wider defaults: a 100% profit
@@ -38,4 +44,4 @@ unrealized recovery in the runner's own premium does not satisfy that accounting
 ## Safety posture
 
 Core + runner entry is enabled on the Render paper service. Live paired submission is explicitly rejected with
-`core_runner_live_not_validated` until atomic/multi-leg live execution and recovery behavior are validated.
+`core_runner_live_not_validated`; atomic multi-leg execution is currently paper-only.
