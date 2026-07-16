@@ -11,7 +11,6 @@ from .phase1_models import OptionContractSnapshot, OptionType, SelectedContract
 class CoreRunnerRules:
     """Risk and liquidity rules for one primary plus one convex runner."""
 
-    max_group_cost: float = 100.0
     runner_max_cost_ratio: float = 0.40
     core_max_spread_pct: float = 0.18
     runner_max_spread_pct: float = 0.25
@@ -26,8 +25,6 @@ class CoreRunnerRules:
     runner_stop_loss_pct: float = 0.70
 
     def validate(self) -> "CoreRunnerRules":
-        if self.max_group_cost <= 0:
-            raise ValueError("core_runner_max_group_cost_must_be_positive")
         if not 0 < self.runner_max_cost_ratio < 1:
             raise ValueError("runner_max_cost_ratio_must_be_between_zero_and_one")
         if self.core_max_spread_pct <= 0 or self.runner_max_spread_pct <= 0:
@@ -49,7 +46,6 @@ class CoreRunnerPair:
     primary: SelectedContract
     runner: SelectedContract
     estimated_group_cost: float
-    max_group_cost: float = 100.0
 
     def __post_init__(self) -> None:
         if self.primary.option_symbol == self.runner.option_symbol:
@@ -58,7 +54,6 @@ class CoreRunnerPair:
 
 def load_core_runner_rules() -> CoreRunnerRules:
     return CoreRunnerRules(
-        max_group_cost=float(os.getenv("AUTOBOTT_MAX_TRADE_GROUP_COST", "100")),
         runner_max_cost_ratio=float(os.getenv("AUTOBOTT_RUNNER_MAX_COST_RATIO", "0.40")),
         core_max_spread_pct=float(os.getenv("AUTOBOTT_CORE_MAX_SPREAD_PCT", "0.18")),
         runner_max_spread_pct=float(os.getenv("AUTOBOTT_RUNNER_MAX_SPREAD_PCT", "0.25")),
@@ -80,11 +75,10 @@ def select_core_runner_pair(
     *,
     rules: CoreRunnerRules | None = None,
 ) -> CoreRunnerPair | None:
-    """Select two distinct contracts whose combined ask debit stays under budget.
+    """Select one useful primary plus one distinct, cheaper convex runner.
 
-    The engine-selected contract is preferred when it fits. When it does not,
-    the selector can step farther OTM to find a still-useful primary while
-    preserving enough budget for a cheaper runner.
+    The engine-selected contract is preferred. Price is deliberately not an
+    eligibility gate for paper execution; affordability is a dashboard concern.
     """
 
     resolved = (rules or load_core_runner_rules()).validate()
@@ -104,21 +98,17 @@ def select_core_runner_pair(
             if not _is_valid_runner(core, runner, resolved):
                 continue
             estimated_group_cost = round((core.ask + runner.ask) * 100, 2)
-            if estimated_group_cost > resolved.max_group_cost:
-                continue
             primary = _selected_contract(
                 core,
                 target_profit_pct=resolved.primary_target_profit_pct,
                 stop_loss_pct=resolved.primary_stop_loss_pct,
                 role="primary",
-                max_group_cost=resolved.max_group_cost,
             )
             selected_runner = _selected_contract(
                 runner,
                 target_profit_pct=resolved.runner_target_profit_pct,
                 stop_loss_pct=resolved.runner_stop_loss_pct,
                 role="runner",
-                max_group_cost=resolved.max_group_cost,
             )
             score = (
                 0.0 if core.option_symbol == selected_primary.option_symbol else 1.0,
@@ -126,7 +116,8 @@ def select_core_runner_pair(
                 abs(core.strike - selected_primary.strike),
                 -abs(runner.delta),
                 core.spread_pct + runner.spread_pct,
-                -estimated_group_cost,
+                -float(runner.open_interest),
+                -float(runner.volume),
             )
             pairs.append(
                 (
@@ -135,7 +126,6 @@ def select_core_runner_pair(
                         primary,
                         selected_runner,
                         estimated_group_cost,
-                        max_group_cost=resolved.max_group_cost,
                     ),
                 )
             )
@@ -163,7 +153,7 @@ def _core_is_eligible(contract: OptionContractSnapshot, rules: CoreRunnerRules) 
         0 < contract.bid <= contract.ask
         and contract.spread_pct <= rules.core_max_spread_pct
         and contract.open_interest >= rules.core_min_open_interest
-        and contract.volume >= rules.core_min_volume
+        and (not contract.volume_available or contract.volume >= rules.core_min_volume)
         and abs(contract.delta) >= rules.core_min_abs_delta
     )
 
@@ -173,7 +163,7 @@ def _runner_is_liquid(contract: OptionContractSnapshot, rules: CoreRunnerRules) 
         0 < contract.bid <= contract.ask
         and contract.spread_pct <= rules.runner_max_spread_pct
         and contract.open_interest >= rules.runner_min_open_interest
-        and contract.volume >= rules.runner_min_volume
+        and (not contract.volume_available or contract.volume >= rules.runner_min_volume)
     )
 
 
@@ -199,7 +189,6 @@ def _selected_contract(
     target_profit_pct: float,
     stop_loss_pct: float,
     role: str,
-    max_group_cost: float,
 ) -> SelectedContract:
     return SelectedContract(
         option_symbol=contract.option_symbol,
@@ -226,9 +215,9 @@ def _selected_contract(
         ),
         score_reasons=[
             f"core_runner_{role}",
-            "combined_debit_budget_enforced",
-            f"max_group_cost={max_group_cost:.2f}",
+            "paper_pair_price_unrestricted",
         ],
+        volume_available=contract.volume_available,
     )
 
 

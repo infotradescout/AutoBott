@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import time
 from dataclasses import dataclass
 from datetime import UTC, datetime, time as daytime
@@ -103,11 +104,20 @@ def _cycle_symbols(symbols: list[str], *, cycle_index: int, batch_size: int | No
     normalized = [symbol.upper() for symbol in symbols]
     if batch_size is None or batch_size <= 0 or batch_size >= len(normalized):
         return normalized
-    start = (cycle_index * batch_size) % len(normalized)
-    end = start + batch_size
-    if end <= len(normalized):
-        return normalized[start:end]
-    return normalized[start:] + normalized[: end - len(normalized)]
+    configured_priority = [
+        symbol.strip().upper()
+        for symbol in (os.getenv("AUTOBOTT_SESSION_PRIORITY_SYMBOLS") or "").split(",")
+        if symbol.strip()
+    ]
+    priority = [symbol for symbol in configured_priority if symbol in normalized][:batch_size]
+    rotating = [symbol for symbol in normalized if symbol not in set(priority)]
+    rotating_batch_size = batch_size - len(priority)
+    if rotating_batch_size <= 0 or not rotating:
+        return priority
+    start = (cycle_index * rotating_batch_size) % len(rotating)
+    end = start + rotating_batch_size
+    batch = rotating[start:end] if end <= len(rotating) else rotating[start:] + rotating[: end - len(rotating)]
+    return priority + batch
 
 
 def main(argv: list[str] | None = None) -> int:

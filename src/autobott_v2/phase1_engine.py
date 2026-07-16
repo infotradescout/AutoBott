@@ -296,7 +296,9 @@ def _score_contract(
         return None
     if contract.spread_pct > rules.max_spread_pct:
         return None
-    if contract.open_interest < rules.min_open_interest or contract.volume < rules.min_contract_volume:
+    if contract.open_interest < rules.min_open_interest:
+        return None
+    if contract.volume_available and contract.volume < rules.min_contract_volume:
         return None
     if strike_distance > rules.max_strike_distance_pct:
         return None
@@ -315,10 +317,14 @@ def _score_contract(
         return None
 
     reasons.append("liquidity_passed")
+    if not contract.volume_available:
+        reasons.append("volume_unavailable_open_interest_used")
     reasons.append("risk_reward_passed")
     reasons.append("exit_rule_defined")
     reasons.append(f"{layer.value}_window_passed")
-    liquidity = min(1.0, contract.open_interest / 1000) * 0.55 + min(1.0, contract.volume / 200) * 0.45
+    open_interest_liquidity = min(1.0, contract.open_interest / 1000)
+    volume_liquidity = min(1.0, contract.volume / 200) if contract.volume_available else open_interest_liquidity
+    liquidity = open_interest_liquidity * 0.55 + volume_liquidity * 0.45
     bid_ask_quality = max(0.0, 1 - contract.spread_pct / rules.max_spread_pct)
     edge_fit = _contract_edge_fit(abs_delta, direction, volatility, layer)
     risk_reward = min(1.0, reward_risk_ratio / 1.25)

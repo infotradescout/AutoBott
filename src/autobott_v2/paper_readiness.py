@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 from datetime import UTC, date, datetime, time as daytime, timedelta
 from pathlib import Path
 from typing import Any
@@ -123,6 +124,11 @@ def run_paper_readiness_probe(
         return response
 
     response["account_status"] = str(account.get("status", "unknown"))
+    response["options_trading_level"] = _account_level(account.get("options_trading_level"))
+    response["options_approved_level"] = _account_level(account.get("options_approved_level"))
+    response["core_runner_mleg_ready"] = bool(
+        response["options_trading_level"] is not None and response["options_trading_level"] >= 3
+    )
     response["quote_symbols"] = sorted(quotes.keys())
     response["option_snapshot_count"] = len(option_snapshots)
 
@@ -153,14 +159,14 @@ def run_paper_readiness_probe(
             "selected_contract": decision.selected_contract.option_symbol if decision.selected_contract else None,
         }
     )
-    blockers = _execution_blockers(validated_execution_config, runtime_state)
+    blockers = _execution_blockers(validated_execution_config, runtime_state, account=account)
     response["execution_blockers"] = blockers
     response["paper_execution_ready"] = not blockers
     response["status"] = "paper_trading_ready" if not blockers else "paper_data_ready_execution_blocked"
     return response
 
 
-def _execution_blockers(execution_config: Any, runtime_state: Any) -> list[str]:
+def _execution_blockers(execution_config: Any, runtime_state: Any, *, account: dict[str, Any]) -> list[str]:
     blockers: list[str] = []
     if execution_config is None:
         blockers.append("execution_config_invalid")
@@ -173,7 +179,26 @@ def _execution_blockers(execution_config: Any, runtime_state: Any) -> list[str]:
         blockers.append("runtime_execution_disabled")
     if runtime_state.live_mode_enabled:
         blockers.append("live_mode_should_be_disabled_for_paper")
+    core_runner_enabled = (os.getenv("AUTOBOTT_CORE_RUNNER_ENABLED") or "true").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+    if core_runner_enabled:
+        options_trading_level = _account_level(account.get("options_trading_level"))
+        if options_trading_level is None:
+            blockers.append("core_runner_mleg_level_unknown")
+        elif options_trading_level < 3:
+            blockers.append("core_runner_mleg_level_insufficient")
     return blockers
+
+
+def _account_level(value: Any) -> int | None:
+    try:
+        return int(value) if value is not None else None
+    except (TypeError, ValueError):
+        return None
 
 
 def _capture_probe_snapshot(

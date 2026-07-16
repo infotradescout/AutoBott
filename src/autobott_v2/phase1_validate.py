@@ -99,6 +99,7 @@ def _contract_from_payload(payload: dict[str, Any]) -> OptionContractSnapshot:
         theta=payload["theta"],
         vega=payload["vega"],
         implied_volatility=payload["implied_volatility"],
+        volume_available=bool(payload.get("volume_available", True)),
     )
 
 

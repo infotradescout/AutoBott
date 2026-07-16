@@ -17,6 +17,8 @@ The contract lives at `schemas/phase1_market_snapshot.schema.json`. The validato
 - `underlying_quote`: Current underlying bid, ask, last, spread, spread percent, and quote timestamp.
 - `market_bars`: At least 30 underlying OHLCV bars for regime and direction scoring.
 - `option_chain`: One or more option contract quotes with expiration, strike, bid/ask, spread, volume, open interest, greeks, IV, IV percentile, and realized-volatility context.
+- `manual_mirror_chain` optional: Dashboard-only liquid candidates within the configured manual contract-cost cap. The execution engine does not read this field.
+- Option contracts may set `volume_available: false` when the live snapshot feed omits daily volume. In that case liquidity remains gated by bid/ask spread and open interest; no volume value is invented.
 - `context`: SPY, QQQ, and VIX bars plus event blackout flags.
 - `iv_history`: Historical IV observations used for percentile scoring.
 - `cycle_profile` optional: Median valley-to-peak and peak-to-valley timing, bars since the last turning points, and expected holding days for rider DTE targeting.

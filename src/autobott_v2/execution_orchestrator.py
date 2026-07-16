@@ -97,7 +97,7 @@ def submit_core_runner_to_broker(
     journal_path: str | None = None,
     on_submission_attempt: Callable[[TradeIntent], None] | None = None,
 ) -> tuple[ExecutionOrder, ExecutionOrder]:
-    """Submit one primary plus one distinct runner within one debit budget."""
+    """Submit one primary plus one distinct runner as an atomic paper order."""
 
     resolved_broker = broker or AlpacaExecutionBroker(config)
     runtime_state = load_runtime_state()
@@ -114,7 +114,7 @@ def submit_core_runner_to_broker(
         decision,
         quantity=1,
         environment=resolved_broker.config.environment,
-        max_position_cost=resolved_broker.config.max_position_cost,
+        max_position_cost=resolved_broker.config.effective_max_position_cost(),
         contract=pair.primary,
         leg_role="primary",
         trade_group_id=trade_group_id,
@@ -124,22 +124,12 @@ def submit_core_runner_to_broker(
         decision,
         quantity=1,
         environment=resolved_broker.config.environment,
-        max_position_cost=resolved_broker.config.max_position_cost,
+        max_position_cost=resolved_broker.config.effective_max_position_cost(),
         contract=pair.runner,
         leg_role="runner",
         trade_group_id=trade_group_id,
         paired_option_symbol=pair.primary.option_symbol,
     )
-    actual_group_notional = round(primary_intent.estimated_notional + runner_intent.estimated_notional, 2)
-    if actual_group_notional > pair.max_group_cost:
-        raise ExecutionRejectedError(
-            "core_runner_group_cost_exceeds_budget",
-            detail=(
-                "core_runner_group_cost_exceeds_budget: "
-                f"actual_group_notional={actual_group_notional} budget={pair.max_group_cost}"
-            ),
-        )
-
     controls = resolved_broker.config.risk_controls()
     primary_risk = validate_trade_intent(
         primary_intent,
@@ -229,7 +219,7 @@ def submit_decision_to_broker(
         decision,
         quantity=quantity,
         environment=resolved_broker.config.environment,
-        max_position_cost=resolved_broker.config.max_position_cost,
+        max_position_cost=resolved_broker.config.effective_max_position_cost(),
     )
     risk_check = validate_trade_intent(
         intent,
@@ -271,8 +261,9 @@ def _entry_limit_price(
     limit_price = ask if style in {"marketable", "ask", "aggressive"} else mid
     if style in {"marketable", "aggressive"}:
         limit_price += _entry_limit_extra()
-    if max_position_cost is not None and max_position_cost > 0 and quantity > 0:
-        limit_price = min(limit_price, max_position_cost / (quantity * 100.0))
+    # Never distort a live quote to squeeze it under an affordability limit.
+    # Execution risk controls either approve the real notional or reject it;
+    # paper mode can explicitly disable that risk limit altogether.
     return max(0.01, round(limit_price, 2))
 
 

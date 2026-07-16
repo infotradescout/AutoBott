@@ -201,7 +201,8 @@ def _safety_payload() -> JsonDict:
         "order_methods_present": _order_methods_present(),
         "core_runner_enabled": (os.getenv("AUTOBOTT_CORE_RUNNER_ENABLED", "true").strip().lower() in {"1", "true", "yes", "on"}),
         "core_runner_atomic_mleg_required": True,
-        "core_runner_max_group_cost": float(os.getenv("AUTOBOTT_MAX_TRADE_GROUP_COST", "100")),
+        "core_runner_pair_price_restricted": False,
+        "paper_position_cost_limit_enabled": execution_config.effective_max_position_cost() is not None,
         "kill_switch_enabled": runtime_state.kill_switch_enabled,
         "execution_enabled": runtime_state.execution_enabled,
         "runtime_state_path": str(runtime_state_path()),
@@ -322,6 +323,12 @@ def _alpaca_status_payload() -> JsonDict:
                 "ok": True,
                 "status": "paper_connected",
                 "account_status": str(account.get("status", "unknown")),
+                "options_trading_level": _int_or_none(account.get("options_trading_level")),
+                "options_approved_level": _int_or_none(account.get("options_approved_level")),
+                "core_runner_mleg_ready": bool(
+                    _int_or_none(account.get("options_trading_level")) is not None
+                    and _int_or_none(account.get("options_trading_level")) >= 3
+                ),
                 "quote_symbols": sorted(quotes.keys()),
                 "quote_checks": {"SPY": "PASS" if "SPY" in quotes else "FAIL", "QQQ": "PASS" if "QQQ" in quotes else "FAIL"},
             }
@@ -861,6 +868,13 @@ def _float_or_none(value: Any) -> float | None:
         return None
 
 
+def _int_or_none(value: Any) -> int | None:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
 def _option_symbol_parts(symbol: str) -> JsonDict:
     stripped = symbol.strip().upper()
     if len(stripped) < 15:
@@ -940,15 +954,60 @@ def _latest_decisions_payload() -> JsonDict:
 
 
 def _decision_feed_payload() -> JsonDict:
-    rows = [_manual_decision_row(record) for record in load_decision_cards(limit=25)]
-    ranked = sorted(rows, key=lambda row: (-float(row.get("score") or 0.0), str(row.get("timestamp") or "")))
+    max_contract_cost = _manual_mirror_max_contract_cost()
+    max_signal_age_minutes = _manual_mirror_max_signal_age_minutes()
+    now = _manual_mirror_now()
+    rows = []
+    # Hosted rotation can emit more than 100 strict/opportunistic rows inside
+    # the configured freshness window. Read enough history for the full
+    # 30-minute default instead of silently shrinking coverage to ~10 minutes.
+    for record in load_decision_cards(limit=500):
+        decision = record.get("decision_card", record)
+        if not _manual_mirror_decision_is_current(
+            record,
+            decision,
+            now=now,
+            max_signal_age_minutes=max_signal_age_minutes,
+        ):
+            continue
+        row = _manual_decision_row(record)
+        if row.get("action") != "BUY_TO_OPEN":
+            continue
+        affordable_row = _manual_mirror_row(record, row, max_contract_cost=max_contract_cost)
+        if affordable_row is not None:
+            rows.append(affordable_row)
+    ranked = sorted(
+        rows,
+        key=lambda row: (
+            float(row.get("score") or 0.0),
+            (_parse_datetime(row.get("timestamp")) or datetime.min.replace(tzinfo=UTC)).timestamp(),
+        ),
+        reverse=True,
+    )
+    unique: list[JsonDict] = []
+    seen_symbols: set[str] = set()
+    for row in ranked:
+        option_symbol = str(row.get("option_symbol") or "")
+        if not option_symbol or option_symbol in seen_symbols:
+            continue
+        seen_symbols.add(option_symbol)
+        unique.append(row)
+    quoted, quote_status = _apply_latest_manual_mirror_quotes(
+        unique[:20],
+        max_contract_cost=max_contract_cost,
+        now=now,
+        max_quote_age_minutes=max_signal_age_minutes,
+    )
     return {
         "ok": True,
         "status": "decision_feed_ready",
         "generated_at": datetime.now(UTC).isoformat(),
-        "mode": "manual_replication_feed",
-        "count": len(ranked),
-        "decisions": ranked[:20],
+        "mode": "manual_mirror_under_cost_limit",
+        "max_contract_cost": max_contract_cost,
+        "max_signal_age_minutes": max_signal_age_minutes,
+        "quote_status": quote_status,
+        "count": len(quoted),
+        "decisions": quoted,
     }
 
 
@@ -995,6 +1054,232 @@ def _manual_decision_row(record: JsonDict) -> JsonDict:
     if not option_symbol:
         row["underlying"] = decision.get("ticker")
     return row
+
+
+def _manual_mirror_max_contract_cost() -> float:
+    value = os.getenv("AUTOBOTT_MANUAL_MIRROR_MAX_CONTRACT_COST")
+    if value is None or not value.strip():
+        return 100.0
+    return max(0.01, float(value))
+
+
+def _manual_mirror_max_signal_age_minutes() -> float:
+    value = os.getenv("AUTOBOTT_MANUAL_MIRROR_MAX_SIGNAL_AGE_MINUTES")
+    if value is None or not value.strip():
+        return 30.0
+    return max(1.0, float(value))
+
+
+def _manual_mirror_now() -> datetime:
+    return datetime.now(UTC)
+
+
+def _manual_mirror_decision_is_current(
+    record: JsonDict,
+    decision: JsonDict,
+    *,
+    now: datetime,
+    max_signal_age_minutes: float,
+) -> bool:
+    timestamp = _parse_datetime(decision.get("timestamp") or record.get("recorded_at"))
+    if timestamp is None:
+        return False
+    age_seconds = (now - timestamp).total_seconds()
+    if age_seconds < -300 or age_seconds > max_signal_age_minutes * 60:
+        return False
+    expiration_value = (decision.get("selected_contract") or {}).get("expiration")
+    try:
+        expiration = _parse_date(expiration_value)
+    except ValueError:
+        return False
+    return expiration is not None and expiration >= now.date()
+
+
+def _manual_mirror_row(
+    record: JsonDict,
+    row: JsonDict,
+    *,
+    max_contract_cost: float,
+) -> JsonDict | None:
+    decision = record.get("decision_card", record)
+    selected = decision.get("selected_contract") or {}
+    selected_bid = _float_or_none(selected.get("bid"))
+    selected_ask = _float_or_none(selected.get("ask"))
+    selected_spread_pct = _float_or_zero(selected.get("spread_pct"))
+    selected_open_interest = int(selected.get("open_interest") or 0)
+    selected_volume = int(selected.get("volume") or 0)
+    selected_volume_available = bool(selected.get("volume_available", True))
+    if (
+        selected_bid is not None
+        and selected_ask is not None
+        and 0 < selected_bid <= selected_ask
+        and selected_ask * 100 <= max_contract_cost
+        and selected_spread_pct <= 0.25
+        and selected_open_interest >= 50
+        and (not selected_volume_available or selected_volume >= 1)
+    ):
+        return {
+            **row,
+            "estimated_contract_cost": round(selected_ask * 100, 2),
+            "manual_mirror_max_contract_cost": max_contract_cost,
+            "paper_execution_option_symbol": selected.get("option_symbol"),
+            "manual_mirror_substitution": False,
+        }
+
+    replacement = _manual_mirror_contract(record, decision, max_contract_cost=max_contract_cost)
+    if replacement is None:
+        return None
+    bid = _float_or_zero(replacement.get("bid"))
+    ask = _float_or_zero(replacement.get("ask"))
+    mid = round((bid + ask) / 2, 4)
+    selected_mid = _float_or_zero(selected.get("mid"))
+    selected_target = _float_or_zero(selected.get("target_exit_mid"))
+    selected_stop = _float_or_zero(selected.get("stop_exit_mid"))
+    target_multiple = selected_target / selected_mid if selected_mid > 0 and selected_target > 0 else 1.50
+    stop_multiple = selected_stop / selected_mid if selected_mid > 0 and selected_stop > 0 else 0.55
+    option_symbol = str(replacement.get("option_symbol") or "")
+    return {
+        **row,
+        "option_symbol": option_symbol,
+        **_option_symbol_parts(option_symbol),
+        "entry_reference": mid,
+        "bid": bid,
+        "ask": ask,
+        "spread_pct": _float_or_zero(replacement.get("spread_pct")),
+        "implied_volatility": replacement.get("implied_volatility"),
+        "delta": replacement.get("delta"),
+        "target_exit_mid": round(mid * target_multiple, 4),
+        "stop_exit_mid": round(mid * stop_multiple, 4),
+        "exit_rule": "manual_mirror_uses_signal_target_and_stop_percentages",
+        "score_reasons": [
+            *(replacement.get("score_reasons") or []),
+            "manual_mirror_under_cost_limit",
+            "paper_execution_contract_unchanged",
+        ],
+        "estimated_contract_cost": round(ask * 100, 2),
+        "manual_mirror_max_contract_cost": max_contract_cost,
+        "paper_execution_option_symbol": selected.get("option_symbol"),
+        "manual_mirror_substitution": True,
+    }
+
+
+def _manual_mirror_contract(
+    record: JsonDict,
+    decision: JsonDict,
+    *,
+    max_contract_cost: float,
+) -> JsonDict | None:
+    snapshot_path = record.get("snapshot_path")
+    if not snapshot_path:
+        return None
+    try:
+        snapshot = _read_json(Path(str(snapshot_path)))
+    except (OSError, ValueError, TypeError, json.JSONDecodeError):
+        return None
+    selected = decision.get("selected_contract") or {}
+    selected_type = str(selected.get("option_type") or "").lower()
+    selected_expiration = str(selected.get("expiration") or "")
+    if not selected_type or not selected_expiration:
+        return None
+    target_delta = abs(_float_or_zero(selected.get("delta"))) or 0.50
+    candidates = []
+    candidate_chain = [
+        *(snapshot.get("manual_mirror_chain") or []),
+        *(snapshot.get("option_chain") or []),
+    ]
+    seen_symbols: set[str] = set()
+    for contract in candidate_chain:
+        option_symbol = str(contract.get("option_symbol") or "")
+        if not option_symbol or option_symbol in seen_symbols:
+            continue
+        seen_symbols.add(option_symbol)
+        if str(contract.get("option_type") or "").lower() != selected_type:
+            continue
+        if str(contract.get("expiration") or "") != selected_expiration:
+            continue
+        bid = _float_or_zero(contract.get("bid"))
+        ask = _float_or_zero(contract.get("ask"))
+        spread_pct = _float_or_zero(contract.get("spread_pct"))
+        open_interest = int(contract.get("open_interest") or 0)
+        volume = int(contract.get("volume") or 0)
+        volume_available = bool(contract.get("volume_available", True))
+        if (
+            bid <= 0
+            or ask < bid
+            or ask * 100 > max_contract_cost
+            or spread_pct > 0.25
+            or open_interest < 50
+            or (volume_available and volume < 1)
+        ):
+            continue
+        candidates.append(contract)
+    if not candidates:
+        return None
+    return min(
+        candidates,
+        key=lambda contract: (
+            abs(abs(_float_or_zero(contract.get("delta"))) - target_delta),
+            _float_or_zero(contract.get("spread_pct")),
+            -int(contract.get("open_interest") or 0),
+            -int(contract.get("volume") or 0),
+            _float_or_zero(contract.get("ask")),
+        ),
+    )
+
+
+def _apply_latest_manual_mirror_quotes(
+    rows: list[JsonDict],
+    *,
+    max_contract_cost: float,
+    now: datetime,
+    max_quote_age_minutes: float,
+) -> tuple[list[JsonDict], str]:
+    if not rows:
+        return [], "no_current_candidates"
+    symbols = [str(row.get("option_symbol") or "") for row in rows if row.get("option_symbol")]
+    try:
+        quotes = AlpacaPaperClient().get_latest_option_quotes(symbols)
+    except Exception as exc:
+        return [], f"latest_quotes_unavailable:{type(exc).__name__}"
+
+    refreshed: list[JsonDict] = []
+    for row in rows:
+        option_symbol = str(row.get("option_symbol") or "").upper()
+        quote = quotes.get(option_symbol)
+        if not quote:
+            continue
+        bid = _float_or_zero(quote.get("bp") if quote.get("bp") is not None else quote.get("bid_price"))
+        ask = _float_or_zero(quote.get("ap") if quote.get("ap") is not None else quote.get("ask_price"))
+        quote_timestamp = _parse_datetime(quote.get("t") or quote.get("timestamp"))
+        if quote_timestamp is None or (now - quote_timestamp).total_seconds() > max_quote_age_minutes * 60:
+            continue
+        if quote_timestamp > now + timedelta(minutes=5):
+            continue
+        if bid <= 0 or ask < bid or ask * 100 > max_contract_cost:
+            continue
+        mid = round((bid + ask) / 2, 4)
+        spread_pct = round((ask - bid) / mid, 4) if mid > 0 else 1.0
+        if spread_pct > 0.25:
+            continue
+        prior_mid = _float_or_zero(row.get("entry_reference"))
+        target_multiple = _float_or_zero(row.get("target_exit_mid")) / prior_mid if prior_mid > 0 else 1.50
+        stop_multiple = _float_or_zero(row.get("stop_exit_mid")) / prior_mid if prior_mid > 0 else 0.55
+        refreshed.append(
+            {
+                **row,
+                "entry_reference": mid,
+                "bid": bid,
+                "ask": ask,
+                "spread_pct": spread_pct,
+                "estimated_contract_cost": round(ask * 100, 2),
+                "target_exit_mid": round(mid * target_multiple, 4),
+                "stop_exit_mid": round(mid * stop_multiple, 4),
+                "quote_timestamp": quote_timestamp.isoformat(),
+                "quote_source": "alpaca_latest_indicative",
+                "manual_status": "current_candidate",
+            }
+        )
+    return refreshed, "alpaca_latest_indicative"
 
 
 def _decision_feed_score(*, status: str, confidence: float, spread_pct: float, blocked_reason: Any) -> float:
@@ -1596,7 +1881,7 @@ def _dashboard_html() -> str:
             <div class="panel-body" id="options-scout"></div>
           </section>
           <section class="panel">
-            <div class="panel-head"><h3>Decision Feed</h3><span class="badge safe">MANUAL MIRROR</span></div>
+            <div class="panel-head"><h3>Decision Feed</h3><span class="badge safe" id="manual-mirror-badge">MANUAL MIRROR</span></div>
             <div class="panel-body" id="decision-feed"></div>
           </section>
           <section class="panel">
@@ -1903,6 +2188,8 @@ def _dashboard_html() -> str:
           ['Credentials', statusBadge(payload.credentials_present ? 'PRESENT' : 'MISSING', payload.credentials_present ? 'safe' : 'warn')],
           ['Order placement', payload.order_placement_enabled ? statusBadge('ARMED', 'danger') : statusBadge(payload.order_placement_configured ? 'PAUSED' : 'CONFIG DISABLED', payload.order_placement_configured ? 'warn' : 'safe')],
           ['Account status', escapeHtml(payload.account_status || 'not available')],
+          ['Options level', escapeHtml(payload.options_trading_level ?? 'unknown')],
+          ['Atomic MLeg', statusBadge(payload.core_runner_mleg_ready ? 'READY' : 'LEVEL 3 REQUIRED', payload.core_runner_mleg_ready ? 'safe' : 'warn')],
           ['Quote checks', `<span class="mono">${escapeHtml(JSON.stringify(payload.quote_checks || {}, null, 0))}</span>`]
         ])}
         ${detailsBlock(payload)}`;
@@ -2022,6 +2309,8 @@ def _dashboard_html() -> str:
         return emptyState('Decision feed unavailable', payload.detail || 'Could not load bot decisions.');
       }
       const rows = payload.decisions || [];
+      const mirrorBadge = document.getElementById('manual-mirror-badge');
+      if (mirrorBadge) mirrorBadge.textContent = `≤ ${formatMoney(payload.max_contract_cost)} MANUAL MIRROR`;
       const feedRows = rows.slice(0, 8).map((row) => {
         const candidate = row.action === 'BUY_TO_OPEN';
         const tone = candidate ? 'safe' : row.blocked_reason ? 'warn' : 'info';
@@ -2032,6 +2321,7 @@ def _dashboard_html() -> str:
           <td>${escapeHtml(row.direction_bias || row.trade_setup || 'n/a')}</td>
           <td><span class="mono">${escapeHtml(row.option_symbol || 'none')}</span></td>
           <td>${formatMoney(row.entry_reference)}</td>
+          <td>${formatMoney(row.estimated_contract_cost)}</td>
           <td>${formatMoney(row.target_exit_mid)}</td>
           <td>${formatMoney(row.stop_exit_mid)}</td>
           <td>${Number(row.confidence_score || 0).toFixed(2)}</td>
@@ -2041,13 +2331,16 @@ def _dashboard_html() -> str:
       return `
         ${metricList([
           ['Mode', escapeHtml(payload.mode || 'manual decision feed')],
+          ['Contract cap', formatMoney(payload.max_contract_cost)],
+          ['Quote source', escapeHtml(payload.quote_status || 'unavailable')],
+          ['Signal age', `${escapeHtml(payload.max_signal_age_minutes ?? 'n/a')} min max`],
           ['Rows', escapeHtml(payload.count ?? 0)],
           ['Top action', escapeHtml(rows[0]?.action || 'NONE')],
           ['Top contract', `<span class="mono">${escapeHtml(rows[0]?.option_symbol || 'none')}</span>`]
         ])}
         <table class="table">
-          <thead><tr><th>Action</th><th>Ticker</th><th>Bias</th><th>Contract</th><th>Entry ref</th><th>Target</th><th>Stop</th><th>Conf</th><th>Why</th></tr></thead>
-          <tbody>${feedRows || '<tr><td colspan="9">No decisions yet</td></tr>'}</tbody>
+          <thead><tr><th>Action</th><th>Ticker</th><th>Bias</th><th>Contract</th><th>Premium</th><th>Contract cost</th><th>Target</th><th>Stop</th><th>Conf</th><th>Why</th></tr></thead>
+          <tbody>${feedRows || `<tr><td colspan="10">No current trade ideas at or below ${formatMoney(payload.max_contract_cost)}</td></tr>`}</tbody>
         </table>
         ${detailsBlock(payload)}`;
     }
@@ -2112,6 +2405,8 @@ def _dashboard_html() -> str:
           ['Execution config', statusBadge(payload.paper_execution_config_valid ? 'YES' : 'NO', payload.paper_execution_config_valid ? 'safe' : 'warn')],
           ['Credentials', statusBadge(payload.credentials_present ? 'PRESENT' : 'MISSING', payload.credentials_present ? 'safe' : 'warn')],
           ['Execution ready', statusBadge(payload.paper_execution_ready ? 'YES' : 'NO', payload.paper_execution_ready ? 'danger' : 'warn')],
+          ['Options level', escapeHtml(payload.options_trading_level ?? 'unknown')],
+          ['Atomic MLeg', statusBadge(payload.core_runner_mleg_ready ? 'READY' : 'LEVEL 3 REQUIRED', payload.core_runner_mleg_ready ? 'safe' : 'warn')],
           ['Option snapshots', escapeHtml(payload.option_snapshot_count ?? 'n/a')],
           ['Option chain', escapeHtml(payload.option_chain_count ?? 'n/a')],
           ['Decision', escapeHtml(payload.decision_status || 'n/a')],

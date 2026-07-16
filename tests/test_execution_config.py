@@ -14,6 +14,8 @@ def test_execution_config_defaults_to_paper(monkeypatch) -> None:
     assert config.environment is BrokerEnvironment.PAPER
     assert config.allow_live_trading is False
     assert config.trading_base_url == "https://paper-api.alpaca.markets"
+    assert config.paper_ignore_position_cost_limit is True
+    assert config.effective_max_position_cost() is None
 
 
 def test_execution_config_rejects_live_without_explicit_enable(monkeypatch) -> None:
@@ -40,6 +42,7 @@ def test_execution_config_allows_live_only_when_explicitly_enabled(monkeypatch) 
     assert config.environment is BrokerEnvironment.LIVE
     assert config.allow_live_trading is True
     assert config.allow_order_placement is True
+    assert config.effective_max_position_cost() == config.max_position_cost
 
 
 def test_execution_config_enables_paper_trade_through_overrides(monkeypatch) -> None:

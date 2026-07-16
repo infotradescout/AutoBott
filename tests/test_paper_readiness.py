@@ -11,7 +11,7 @@ from autobott_v2.runtime_control import default_runtime_state, save_runtime_stat
 
 class FakePaperClient:
     def get_account(self):
-        return {"status": "ACTIVE"}
+        return {"status": "ACTIVE", "options_trading_level": 3, "options_approved_level": 3}
 
     def get_latest_stock_quotes(self, symbols):
         return {
@@ -80,6 +80,37 @@ def test_paper_readiness_probe_returns_paper_ready(monkeypatch, tmp_path) -> Non
     assert result["paper_execution_ready"] is True
     assert result["option_chain_count"] > 0
     assert Path(result["snapshot_path"]).exists()
+
+
+def test_paper_readiness_requires_level_three_for_atomic_core_runner(monkeypatch, tmp_path) -> None:
+    monkeypatch.setenv("ALPACA_ENV", "paper")
+    monkeypatch.setenv("ALPACA_API_KEY_ID", "paper-key")
+    monkeypatch.setenv("ALPACA_API_SECRET_KEY", "paper-secret")
+    monkeypatch.setenv("ALPACA_TRADING_BASE_URL", "https://paper-api.alpaca.markets")
+    monkeypatch.setenv("ALPACA_DATA_BASE_URL", "https://data.alpaca.markets")
+    monkeypatch.setenv("AUTOBOTT_PAPER_ONLY", "true")
+    monkeypatch.setenv("AUTOBOTT_ALLOW_ORDER_PLACEMENT", "true")
+    monkeypatch.setenv("AUTOBOTT_CORE_RUNNER_ENABLED", "true")
+    monkeypatch.setenv("AUTOBOTT_DATA_ROOT", str(tmp_path / "data"))
+    save_runtime_state(default_runtime_state(), state_path=tmp_path / "data" / "execution" / "runtime_state.json")
+
+    class LevelTwoClient(FakePaperClient):
+        def get_account(self):
+            return {"status": "ACTIVE", "options_trading_level": 2, "options_approved_level": 3}
+
+    result = run_paper_readiness_probe(
+        symbol="SPY",
+        client=LevelTwoClient(),
+        corpus_root=tmp_path / "corpus",
+        scheduled_market_time=datetime(2026, 7, 1, 15, 35, tzinfo=UTC),
+        captured_at_utc=datetime(2026, 7, 1, 15, 35, tzinfo=UTC),
+    )
+
+    assert result["paper_execution_ready"] is False
+    assert result["options_trading_level"] == 2
+    assert result["options_approved_level"] == 3
+    assert result["core_runner_mleg_ready"] is False
+    assert "core_runner_mleg_level_insufficient" in result["execution_blockers"]
 
 
 def test_paper_readiness_probe_reports_connectivity_failure(monkeypatch, tmp_path) -> None:

@@ -363,61 +363,6 @@ def run_trading_cycle(
                 payload={"guard": open_drawdown_guard, "ghost": ghost},
             )
             continue
-        if (
-            not core_runner_enabled
-            and decision.selected_contract is not None
-            and _selected_contract_real_cost(decision) > resolved_broker.config.max_position_cost
-        ):
-            ghost = append_ghost_trade(
-                decision,
-                reason="contract_cost_above_real_money_cap",
-                max_real_cost=resolved_broker.config.max_position_cost,
-                journal_path=_ghost_trade_journal_for_execution_log(execution_log_path),
-            )
-            real_lane_decision = _real_money_cap_fallback_decision(
-                decision,
-                decision_input=decision_input,
-                max_real_cost=resolved_broker.config.max_position_cost,
-            )
-            if real_lane_decision is not None:
-                decision = real_lane_decision
-                decision_payload = decision.to_json_dict()
-                decisions.append(decision_payload)
-                append_decision_card(decision_payload, snapshot_path=snapshot_path, log_path=decision_log_path)
-                _record_execution_outcome(
-                    execution_outcomes,
-                    ticker=symbol.upper(),
-                    decision_id=decision.decision_id,
-                    thesis_id=_decision_thesis_id(decision),
-                    disposition="real_money_cap_fallback_selected",
-                    detail=f"ghost_contract_cost={ghost['notional']} real_contract_cost={_selected_contract_real_cost(decision)}",
-                    journal_path=execution_log_path,
-                    payload={
-                        "ghost": ghost,
-                        "selected_contract": decision.selected_contract.option_symbol if decision.selected_contract else None,
-                        "max_real_cost": resolved_broker.config.max_position_cost,
-                    },
-                )
-                thesis_id = _decision_thesis_id(decision)
-            else:
-                _append_skip(
-                    skipped,
-                    symbol=symbol.upper(),
-                    reason="contract_cost_cap_ghost_tracked",
-                    detail=f"contract_cost={ghost['notional']} max_real_cost={resolved_broker.config.max_position_cost}",
-                )
-                _record_execution_rejection(
-                    execution_outcomes,
-                    execution_rejected_count_by_reason,
-                    ticker=symbol.upper(),
-                    decision_id=decision.decision_id,
-                    thesis_id=thesis_id,
-                    reason="contract_cost_cap_ghost_tracked",
-                    detail="candidate routed to ghost lane instead of real-money lane",
-                    journal_path=execution_log_path,
-                    payload=ghost,
-                )
-                continue
         core_runner_pair = None
         if core_runner_enabled:
             if decision.selected_contract is not None:
@@ -430,8 +375,8 @@ def run_trading_cycle(
                 ghost = (
                     append_ghost_trade(
                         decision,
-                        reason="core_runner_pair_not_found_under_budget",
-                        max_real_cost=core_runner_rules.max_group_cost if core_runner_rules is not None else 100.0,
+                        reason="core_runner_pair_not_found",
+                        max_real_cost=_selected_contract_real_cost(decision),
                         journal_path=_ghost_trade_journal_for_execution_log(execution_log_path),
                     )
                     if decision.selected_contract is not None
@@ -440,8 +385,8 @@ def run_trading_cycle(
                 _append_skip(
                     skipped,
                     symbol=symbol.upper(),
-                    reason="core_runner_pair_not_found_under_budget",
-                    detail="one primary plus one distinct cheaper runner could not fit the total debit cap",
+                    reason="core_runner_pair_not_found",
+                    detail="one primary plus one distinct cheaper liquid runner could not be selected",
                 )
                 _record_execution_rejection(
                     execution_outcomes,
@@ -449,20 +394,17 @@ def run_trading_cycle(
                     ticker=symbol.upper(),
                     decision_id=decision.decision_id,
                     thesis_id=thesis_id,
-                    reason="core_runner_pair_not_found_under_budget",
-                    detail="neither leg submitted because the full setup must stay under budget",
+                    reason="core_runner_pair_not_found",
+                    detail="neither leg submitted because the required primary/runner structure was unavailable",
                     journal_path=execution_log_path,
-                    payload={
-                        "max_group_cost": core_runner_rules.max_group_cost if core_runner_rules is not None else 100.0,
-                        "ghost": ghost,
-                    },
+                    payload={"ghost": ghost},
                 )
                 continue
             decision = replace(
                 decision,
                 selected_contract=core_runner_pair.primary,
                 reason_codes=[*decision.reason_codes, "core_runner_pair_selected"],
-                explanation=f"{decision.explanation}; primary plus convex runner selected under combined debit cap",
+                explanation=f"{decision.explanation}; primary plus convex runner selected for paper execution",
             )
             thesis_id = _decision_thesis_id(decision)
             _record_execution_outcome(
@@ -744,73 +686,6 @@ def _float_value(value: Any) -> float:
         return 0.0
 
 
-def _real_money_cap_fallback_decision(
-    decision: DecisionCard,
-    *,
-    decision_input: Any,
-    max_real_cost: float,
-) -> DecisionCard | None:
-    if decision.selected_contract is None or max_real_cost <= 0:
-        return None
-    max_contract_mid = max_real_cost / 100.0
-    option_type = decision.selected_contract.option_type
-    rules = _paper_opportunistic_rules()
-    candidates = [
-        contract
-        for contract in decision_input.option_chain
-        if contract.option_type is option_type
-        and contract.bid > 0
-        and contract.ask > 0
-        and contract.ask >= contract.bid
-        and contract.mid <= max_contract_mid
-        and contract.spread_pct <= rules.max_spread_pct
-        and contract.open_interest >= rules.min_open_interest
-        and contract.volume >= rules.min_contract_volume
-    ]
-    if not candidates:
-        return None
-    selected_contract = _best_real_money_cap_contract(candidates, decision_input.timestamp.date())
-    spread_penalty = min(1.0, selected_contract.spread_pct / max(rules.max_spread_pct, 0.01))
-    delta_fit = max(0.0, 1 - abs(abs(selected_contract.delta) - abs(decision.selected_contract.delta)) / 0.50)
-    score = round(max(0.05, delta_fit * 0.55 + (1 - spread_penalty) * 0.30 + min(1.0, selected_contract.volume / 200) * 0.15), 4)
-    contract_score = ContractScore(
-        contract=selected_contract,
-        score=score,
-        reward_risk_ratio=0.0,
-        reasons=[
-            "real_money_cap_fallback_contract",
-            f"max_real_cost={round(max_real_cost, 2)}",
-            f"contract_cost={round(selected_contract.mid * 100, 2)}",
-        ],
-    )
-    selected = SelectedContract.from_score(contract_score, rules)
-    reason_codes = list(decision.reason_codes)
-    reason_codes.append("real_money_cap_fallback_contract")
-    return replace(
-        decision,
-        selected_contract=selected,
-        tactical_contract=selected,
-        rider_contract=None,
-        execution_layer=ExecutionLayer.TACTICAL,
-        reason_codes=reason_codes,
-        explanation=f"{decision.explanation}; selected under-cap real-money fallback contract",
-    )
-
-
-def _best_real_money_cap_contract(contracts: list[OptionContractSnapshot], as_of: Any) -> OptionContractSnapshot:
-    return sorted(
-        contracts,
-        key=lambda contract: (
-            abs(abs(contract.delta) - 0.50),
-            abs((contract.expiration - as_of).days - 2),
-            contract.spread_pct,
-            -contract.volume,
-            -contract.open_interest,
-            -contract.mid,
-        ),
-    )[0]
-
-
 def _prioritize_symbols_by_winners(symbols: list[str], winner_bias: dict[str, Any]) -> list[str]:
     preferred = [str(symbol).upper() for symbol in winner_bias.get("preferred_underlyings") or []]
     normalized = [symbol.upper() for symbol in symbols]
@@ -902,11 +777,16 @@ def _paper_opportunistic_decision(
         return None
     if strict_decision.decision is DecisionStatus.TRADE_CANDIDATE:
         return None
+    volatility_hedge_regime_override = (
+        strict_decision.decision is DecisionStatus.BLOCKED_BY_REGIME
+        and strict_decision.direction.bias is DirectionBias.BULLISH
+        and strict_decision.ticker.upper() in _paper_volatility_hedge_symbols()
+    )
     if strict_decision.decision not in {
         DecisionStatus.BLOCKED_BY_VOLATILITY,
         DecisionStatus.BLOCKED_BY_SPREAD,
         DecisionStatus.NO_TRADE,
-    }:
+    } and not volatility_hedge_regime_override:
         return None
     if strict_decision.decision is DecisionStatus.NO_TRADE and strict_decision.blocked_reason != "confidence_below_threshold":
         return None
@@ -925,6 +805,8 @@ def _paper_opportunistic_decision(
             f"strict_decision_{strict_decision.decision.value.lower()}",
         ]
     )
+    if volatility_hedge_regime_override:
+        reason_codes.append("paper_volatility_hedge_risk_off_override")
     if strict_decision.blocked_reason:
         reason_codes.append(f"strict_blocked_{strict_decision.blocked_reason}")
     return replace(
@@ -942,6 +824,11 @@ def _paper_opportunistic_mode_enabled() -> bool:
     if value is None:
         return True
     return value.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _paper_volatility_hedge_symbols() -> set[str]:
+    value = os.getenv("AUTOBOTT_VOLATILITY_HEDGE_SYMBOLS") or "VXX,UVXY"
+    return {symbol.strip().upper() for symbol in value.split(",") if symbol.strip()}
 
 
 def _paper_opportunistic_rules() -> Phase1Rules:
@@ -985,7 +872,6 @@ def _paper_discovery_contract(
         and contract.bid > 0
         and contract.ask > 0
         and contract.ask >= contract.bid
-        and contract.mid <= _paper_discovery_max_contract_price()
         and contract.spread_pct <= rules.max_spread_pct
     ]
     if not candidates:
@@ -1017,23 +903,16 @@ def _paper_discovery_contract(
     )
 
 
-def _paper_discovery_max_contract_price() -> float:
-    value = os.getenv("AUTOBOTT_PAPER_DISCOVERY_MAX_CONTRACT_PRICE")
-    if value is None or not value.strip():
-        return 1.0
-    return max(0.01, float(value))
-
-
 def _best_paper_discovery_contract(contracts: list[OptionContractSnapshot], as_of: Any) -> OptionContractSnapshot:
     return sorted(
         contracts,
         key=lambda contract: (
             abs((contract.expiration - as_of).days - 2),
-            contract.mid,
             contract.spread_pct,
             abs(abs(contract.delta) - 0.50),
             -contract.volume,
             -contract.open_interest,
+            contract.mid,
         ),
     )[0]
 

@@ -147,6 +147,20 @@ def test_submit_mleg_order_sends_one_atomic_two_leg_request(monkeypatch) -> None
     ]
 
 
+def test_list_orders_can_request_nested_mleg_parents(monkeypatch) -> None:
+    broker = AlpacaExecutionBroker(_config())
+    captured = {}
+
+    def _fake_urlopen(request, timeout=30):
+        captured["url"] = request.full_url
+        return _FakeResponse([])
+
+    monkeypatch.setattr("urllib.request.urlopen", _fake_urlopen)
+
+    assert broker.list_orders(status="open", nested=True) == []
+    assert "nested=true" in captured["url"]
+
+
 def test_submit_sell_to_close_marks_position_intent(monkeypatch) -> None:
     broker = AlpacaExecutionBroker(_config())
     captured = {}

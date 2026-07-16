@@ -33,6 +33,7 @@ class AlpacaExecutionConfig:
     paper_trade_all_passed_signals: bool = False
     paper_max_new_entry_attempts_per_loop: int | None = None
     paper_max_open_entry_buy_orders: int | None = None
+    paper_ignore_position_cost_limit: bool = False
 
     def validate(self) -> "AlpacaExecutionConfig":
         if not self.api_key or not self.secret_key:
@@ -57,13 +58,25 @@ class AlpacaExecutionConfig:
 
     def risk_controls(self) -> ExecutionRiskControls:
         return ExecutionRiskControls(
-            max_position_cost=self.max_position_cost,
+            max_position_cost=self.effective_max_position_cost(),
             max_daily_loss=self.max_daily_loss,
             max_open_positions=self.effective_max_open_positions(),
             allow_live_trading=self.allow_live_trading,
             allow_order_placement=self.allow_order_placement,
             allowed_environments=(self.environment,),
         )
+
+    def effective_max_position_cost(self) -> float | None:
+        """Return the execution cap, or no cap for configured paper testing.
+
+        The configured max remains the real-money safety ceiling. Paper mode can
+        deliberately use broker buying power instead so an affordability marker
+        cannot suppress live-market experiments.
+        """
+
+        if self.environment is BrokerEnvironment.PAPER and self.paper_ignore_position_cost_limit:
+            return None
+        return self.max_position_cost
 
     def effective_max_open_positions(self) -> int:
         if (
@@ -112,6 +125,10 @@ def load_alpaca_execution_config() -> AlpacaExecutionConfig:
         paper_max_open_entry_buy_orders=_normalize_optional_int(
             os.getenv("AUTOBOTT_PAPER_MAX_OPEN_ENTRY_BUY_ORDERS"),
             default=25 if paper_trade_all_passed_signals else None,
+        ),
+        paper_ignore_position_cost_limit=_normalize_bool(
+            os.getenv("AUTOBOTT_PAPER_IGNORE_POSITION_COST_LIMIT"),
+            default=True,
         ),
     )
 

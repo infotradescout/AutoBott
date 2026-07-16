@@ -119,6 +119,77 @@ class CoreRunnerDataClient(FakeDataClient):
         return payload
 
 
+class RiskOffVolatilityDataClient(FakeDataClient):
+    def get_stock_bars(self, symbols, *, start, end, timeframe="1Min", limit=35):
+        bars = {}
+        base_time = datetime(2026, 7, 1, 15, 0, tzinfo=UTC)
+        for symbol in symbols:
+            symbol = symbol.upper()
+            start_price, step = {
+                "VXX": (15.0, 0.20),
+                "UVXY": (10.0, 0.50),
+                "SPY": (600.0, -0.30),
+                "QQQ": (500.0, -0.20),
+            }.get(symbol, (100.0, 0.10))
+            rows = []
+            for index in range(limit):
+                price = start_price + step * index
+                rows.append(
+                    {
+                        "t": (base_time + timedelta(minutes=index)).isoformat().replace("+00:00", "Z"),
+                        "o": price - step * 0.2,
+                        "h": price + 0.08,
+                        "l": price - 0.08,
+                        "c": price,
+                        "v": 100000 + index * 100,
+                    }
+                )
+            bars[symbol] = rows
+        return bars
+
+    def get_latest_stock_quotes(self, symbols):
+        prices = {"VXX": 21.8, "UVXY": 27.0, "SPY": 589.8, "QQQ": 493.2, "AAPL": 103.4}
+        return {
+            symbol.upper(): {
+                "bp": prices[symbol.upper()] - 0.02,
+                "ap": prices[symbol.upper()] + 0.02,
+                "t": "2026-07-01T15:35:00Z",
+            }
+            for symbol in symbols
+        }
+
+    def get_option_chain_snapshots(self, symbol):
+        if symbol.upper() == "AAPL":
+            return {
+                "AAPL260703C00105000": {
+                    "latestQuote": {"bp": 2.40, "ap": 2.50, "t": "2026-07-01T15:35:00Z"},
+                    "greeks": {"delta": 0.55, "theta": -0.05, "vega": 0.10, "iv": 0.30},
+                    "details": {"expiration_date": "2026-07-03", "strike_price": 105, "type": "call"},
+                    "open_interest": 5000,
+                },
+                "AAPL260703C00115000": {
+                    "latestQuote": {"bp": 0.65, "ap": 0.70, "t": "2026-07-01T15:35:00Z"},
+                    "greeks": {"delta": 0.20, "theta": -0.02, "vega": 0.06, "iv": 0.35},
+                    "details": {"expiration_date": "2026-07-03", "strike_price": 115, "type": "call"},
+                    "open_interest": 3500,
+                },
+            }
+        return {
+            "VXX260703C00022000": {
+                "latestQuote": {"bp": 2.40, "ap": 2.50, "t": "2026-07-01T15:35:00Z"},
+                "greeks": {"delta": 0.55, "theta": -0.05, "vega": 0.10, "iv": 0.80},
+                "details": {"expiration_date": "2026-07-03", "strike_price": 22, "type": "call"},
+                "open_interest": 5000,
+            },
+            "VXX260703C00025000": {
+                "latestQuote": {"bp": 0.65, "ap": 0.70, "t": "2026-07-01T15:35:00Z"},
+                "greeks": {"delta": 0.20, "theta": -0.02, "vega": 0.06, "iv": 0.90},
+                "details": {"expiration_date": "2026-07-03", "strike_price": 25, "type": "call"},
+                "open_interest": 3500,
+            },
+        }
+
+
 @pytest.fixture(autouse=True)
 def _legacy_single_leg_default_for_existing_cycle_contracts(monkeypatch):
     monkeypatch.setenv("AUTOBOTT_CORE_RUNNER_ENABLED", "false")
@@ -228,9 +299,8 @@ def test_run_trading_cycle_captures_decides_and_submits(tmp_path) -> None:
     assert "pass_trade_attempted" in dispositions
 
 
-def test_run_trading_cycle_submits_primary_and_runner_under_100_total(tmp_path, monkeypatch) -> None:
+def test_run_trading_cycle_submits_primary_and_runner_without_100_total_cap(tmp_path, monkeypatch) -> None:
     monkeypatch.setenv("AUTOBOTT_CORE_RUNNER_ENABLED", "true")
-    monkeypatch.setenv("AUTOBOTT_MAX_TRADE_GROUP_COST", "100")
     save_runtime_state(default_runtime_state(), state_path=tmp_path / "runtime_state.json")
     original = trading_cycle.load_runtime_state
     original_positions = trading_cycle.load_open_positions
@@ -258,8 +328,67 @@ def test_run_trading_cycle_submits_primary_and_runner_under_100_total(tmp_path, 
     assert result.orders_submitted[0]["option_symbol"] != result.orders_submitted[1]["option_symbol"]
     assert broker.submitted[0].quantity == broker.submitted[1].quantity == 1
     assert len(broker.mleg_calls) == 1
-    assert sum(intent.estimated_notional for intent in broker.submitted) <= 100.0
+    assert sum(intent.estimated_notional for intent in broker.submitted) > 100.0
     assert broker.submitted[0].metadata["trade_group_id"] == broker.submitted[1].metadata["trade_group_id"]
+
+
+def test_risk_off_allows_bullish_volatility_hedge_in_paper_only(tmp_path, monkeypatch) -> None:
+    monkeypatch.setenv("AUTOBOTT_CORE_RUNNER_ENABLED", "true")
+    monkeypatch.setenv("AUTOBOTT_VOLATILITY_HEDGE_SYMBOLS", "VXX,UVXY")
+    save_runtime_state(default_runtime_state(), state_path=tmp_path / "runtime_state.json")
+    original = trading_cycle.load_runtime_state
+    original_positions = trading_cycle.load_open_positions
+    trading_cycle.load_runtime_state = lambda: original(state_path=tmp_path / "runtime_state.json")
+    trading_cycle.load_open_positions = lambda: []
+    broker = FakeBroker()
+    try:
+        result = trading_cycle.run_trading_cycle(
+            symbols=["VXX"],
+            broker=broker,
+            data_client=RiskOffVolatilityDataClient(),
+            scheduled_market_time=datetime(2026, 7, 1, 15, 35, tzinfo=UTC),
+            captured_at_utc=datetime(2026, 7, 1, 15, 35, tzinfo=UTC),
+            corpus_root=tmp_path / "corpus",
+            decision_log_path=tmp_path / "decision_cards.jsonl",
+            execution_log_path=str(tmp_path / "execution_orders.jsonl"),
+        )
+    finally:
+        trading_cycle.load_runtime_state = original
+        trading_cycle.load_open_positions = original_positions
+
+    assert result.decisions[0]["decision"] == "BLOCKED_BY_REGIME"
+    assert result.decisions[1]["decision"] == "TRADE_CANDIDATE"
+    assert "paper_volatility_hedge_risk_off_override" in result.decisions[1]["reason_codes"]
+    assert len(result.orders_submitted) == 2
+    assert len(broker.mleg_calls) == 1
+
+
+def test_risk_off_still_blocks_ordinary_bullish_equity_in_paper(tmp_path, monkeypatch) -> None:
+    monkeypatch.setenv("AUTOBOTT_CORE_RUNNER_ENABLED", "true")
+    monkeypatch.setenv("AUTOBOTT_VOLATILITY_HEDGE_SYMBOLS", "VXX,UVXY")
+    save_runtime_state(default_runtime_state(), state_path=tmp_path / "runtime_state.json")
+    original = trading_cycle.load_runtime_state
+    original_positions = trading_cycle.load_open_positions
+    trading_cycle.load_runtime_state = lambda: original(state_path=tmp_path / "runtime_state.json")
+    trading_cycle.load_open_positions = lambda: []
+    try:
+        result = trading_cycle.run_trading_cycle(
+            symbols=["AAPL"],
+            broker=FakeBroker(),
+            data_client=RiskOffVolatilityDataClient(),
+            scheduled_market_time=datetime(2026, 7, 1, 15, 35, tzinfo=UTC),
+            captured_at_utc=datetime(2026, 7, 1, 15, 35, tzinfo=UTC),
+            corpus_root=tmp_path / "corpus",
+            decision_log_path=tmp_path / "decision_cards.jsonl",
+            execution_log_path=str(tmp_path / "execution_orders.jsonl"),
+        )
+    finally:
+        trading_cycle.load_runtime_state = original
+        trading_cycle.load_open_positions = original_positions
+
+    assert len(result.decisions) == 1
+    assert result.decisions[0]["decision"] == "BLOCKED_BY_REGIME"
+    assert result.orders_submitted == []
 
 
 def test_run_trading_cycle_skips_when_kill_switch_enabled(tmp_path) -> None:
@@ -655,7 +784,37 @@ def test_run_trading_cycle_uses_recent_loss_guard(tmp_path) -> None:
     assert result.execution_rejected_count_by_reason == {"recent_loss_guard": 1}
 
 
-def test_run_trading_cycle_splits_expensive_candidate_to_ghost_lane(tmp_path) -> None:
+def test_run_trading_cycle_paper_ignores_real_money_cost_limit(tmp_path) -> None:
+    save_runtime_state(default_runtime_state(), state_path=tmp_path / "runtime_state.json")
+    original = trading_cycle.load_runtime_state
+    original_positions = trading_cycle.load_open_positions
+    trading_cycle.load_runtime_state = lambda: original(state_path=tmp_path / "runtime_state.json")
+    trading_cycle.load_open_positions = lambda: []
+    broker = FakeBroker(max_position_cost=100.0, paper_ignore_position_cost_limit=True)
+    try:
+        result = trading_cycle.run_trading_cycle(
+            symbols=["AAPL"],
+            broker=broker,
+            data_client=FakeDataClient(),
+            scheduled_market_time=datetime(2026, 7, 1, 15, 35, tzinfo=UTC),
+            captured_at_utc=datetime(2026, 7, 1, 15, 35, tzinfo=UTC),
+            corpus_root=tmp_path / "corpus",
+            decision_log_path=tmp_path / "decision_cards.jsonl",
+            execution_log_path=str(tmp_path / "execution_orders.jsonl"),
+        )
+    finally:
+        trading_cycle.load_runtime_state = original
+        trading_cycle.load_open_positions = original_positions
+
+    assert result.scanner_candidates_count == 1
+    assert result.trade_attempted_count == 1
+    assert len(result.orders_submitted) == 1
+    assert broker.submitted[0].option_symbol == "AAPL260703C00105000"
+    assert broker.submitted[0].limit_price == 2.6
+    assert not (tmp_path / "ghost_trades.jsonl").exists()
+
+
+def test_run_trading_cycle_keeps_cost_limit_when_paper_bypass_is_off(tmp_path) -> None:
     save_runtime_state(default_runtime_state(), state_path=tmp_path / "runtime_state.json")
     original = trading_cycle.load_runtime_state
     original_positions = trading_cycle.load_open_positions
@@ -677,44 +836,10 @@ def test_run_trading_cycle_splits_expensive_candidate_to_ghost_lane(tmp_path) ->
         trading_cycle.load_runtime_state = original
         trading_cycle.load_open_positions = original_positions
 
-    ghost_rows = (tmp_path / "ghost_trades.jsonl").read_text(encoding="utf-8")
     assert result.scanner_candidates_count == 1
     assert result.trade_attempted_count == 0
     assert result.orders_submitted == []
-    assert result.skipped[0]["reason"] == "contract_cost_cap_ghost_tracked"
-    assert "ghost_entry" in ghost_rows
-
-
-def test_run_trading_cycle_uses_under_cap_fallback_before_ghost_only_skip(tmp_path) -> None:
-    save_runtime_state(default_runtime_state(), state_path=tmp_path / "runtime_state.json")
-    original = trading_cycle.load_runtime_state
-    original_positions = trading_cycle.load_open_positions
-    trading_cycle.load_runtime_state = lambda: original(state_path=tmp_path / "runtime_state.json")
-    trading_cycle.load_open_positions = lambda: []
-    broker = FakeBroker(max_position_cost=100.0)
-    try:
-        result = trading_cycle.run_trading_cycle(
-            symbols=["AAPL"],
-            broker=broker,
-            data_client=OverCapWithCheapFallbackDataClient(),
-            scheduled_market_time=datetime(2026, 7, 1, 15, 35, tzinfo=UTC),
-            captured_at_utc=datetime(2026, 7, 1, 15, 35, tzinfo=UTC),
-            corpus_root=tmp_path / "corpus",
-            decision_log_path=tmp_path / "decision_cards.jsonl",
-            execution_log_path=str(tmp_path / "execution_orders.jsonl"),
-        )
-    finally:
-        trading_cycle.load_runtime_state = original
-        trading_cycle.load_open_positions = original_positions
-
-    ghost_rows = (tmp_path / "ghost_trades.jsonl").read_text(encoding="utf-8")
-    assert result.scanner_candidates_count == 1
-    assert result.trade_attempted_count == 1
-    assert len(result.orders_submitted) == 1
-    assert broker.submitted[0].option_symbol == "AAPL260703C00110000"
-    assert broker.submitted[0].limit_price == 0.83
-    assert "ghost_entry" in ghost_rows
-    assert any(outcome["disposition"] == "real_money_cap_fallback_selected" for outcome in result.execution_outcomes)
+    assert result.skipped[0]["reason"] == "position_cost_exceeds_limit"
 
 
 def test_run_trading_cycle_prioritizes_recent_winners(tmp_path) -> None:

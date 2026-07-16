@@ -4,18 +4,17 @@ Every enabled AutoBott paper buy-in is one linked two-leg setup:
 
 - `primary`: exactly one useful directional contract
 - `runner`: exactly one different, cheaper, farther-out-of-the-money contract
-- combined maximum debit: `$100` by code default, including both contracts
 
-The hosted Alpaca paper service intentionally overrides that affordability default to `$1,200` so live-market testing
-can use the fake balance and exercise more valid pairs. This does not enable Alpaca's real-money environment.
+Paper pair selection has no affordability ceiling. The hosted service uses Alpaca's fake buying power for live-market
+paper testing; this does not enable Alpaca's real-money environment.
 
 The runner is not an extra quantity of the primary. Both legs share a `trade_group_id`, identify their `leg_role`, and
 record the other leg's option symbol.
 
 ## Pair selection
 
-The pair selector prefers the contract chosen by the decision engine when that contract and a valid runner fit the
-combined budget. If it does not fit, the selector may choose a cheaper primary from the same direction and expiration.
+The pair selector prefers the contract chosen by the decision engine and finds a valid runner from the same direction
+and expiration. Contract price does not make an otherwise valid pair ineligible for paper trading.
 
 The runner must:
 
@@ -25,9 +24,13 @@ The runner must:
 - have lower absolute delta than the primary
 - pass configurable spread, volume, and open-interest minimums
 
-If no qualifying pair fits under the total debit cap, AutoBott submits neither leg and records
-`core_runner_pair_not_found_under_budget`. It never duplicates the primary and never exceeds the group budget to force
-an entry.
+If no structurally valid, liquid pair exists, AutoBott submits neither leg and records `core_runner_pair_not_found`.
+It never duplicates the primary to force an entry.
+
+The `$100` default exists only in the dashboard's **Decision Feed / Manual Mirror** window and is configurable with
+`AUTOBOTT_MANUAL_MIRROR_MAX_CONTRACT_COST`. That window keeps a separate affordable candidate set, requires the same
+expiration and minimum liquidity, and refreshes the quote before display. It does not alter scanner output, the
+paper-selected primary, runner selection, or broker submission.
 
 ## Atomic submission
 

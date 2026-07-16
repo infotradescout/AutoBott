@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
 
-from autobott_v2.session_runner import run_trading_session
+from autobott_v2.session_runner import _cycle_symbols, run_trading_session
 from autobott_v2.trading_cycle import TradingCycleResult
 
 
@@ -76,6 +76,14 @@ def test_run_trading_session_rotates_symbol_batches() -> None:
     )
 
     assert calls == [["AAPL", "MSFT"], ["NVDA", "TSLA"], ["AMD", "AAPL"], ["MSFT", "NVDA"]]
+
+
+def test_priority_symbols_are_scanned_in_every_rotating_batch(monkeypatch) -> None:
+    monkeypatch.setenv("AUTOBOTT_SESSION_PRIORITY_SYMBOLS", "VXX,UVXY")
+    symbols = ["AAPL", "MSFT", "NVDA", "TSLA", "AMD", "VXX", "UVXY"]
+
+    assert _cycle_symbols(symbols, cycle_index=0, batch_size=4) == ["VXX", "UVXY", "AAPL", "MSFT"]
+    assert _cycle_symbols(symbols, cycle_index=1, batch_size=4) == ["VXX", "UVXY", "NVDA", "TSLA"]
 
 
 def test_run_trading_session_respects_end_time() -> None:
