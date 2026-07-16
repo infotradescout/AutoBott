@@ -71,3 +71,4 @@ Read:
 - docs/AUTOBOTT_V2_PURPOSE_LOCK.md
 - docs/BUILD_PLAN.md
 - docs/REPO_LANES.md
+- docs/TRADESCOUT_DEFAULT_PROFILE.md

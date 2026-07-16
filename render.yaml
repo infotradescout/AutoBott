@@ -26,10 +26,10 @@ services:
         value: "true"
       - key: AUTOBOTT_MAX_POSITION_COST
         value: "1000"
+      - key: AUTOBOTT_PAPER_IGNORE_POSITION_COST_LIMIT
+        value: "true"
       - key: AUTOBOTT_MAX_DAILY_LOSS
         value: "5000"
-      - key: AUTOBOTT_PAPER_DISCOVERY_MAX_CONTRACT_PRICE
-        value: "8.00"
       - key: AUTOBOTT_PAPER_TRADE_ALL_PASSED_SIGNALS
         value: "true"
       - key: AUTOBOTT_PAPER_MAX_NEW_ENTRY_ATTEMPTS_PER_LOOP
@@ -37,7 +37,9 @@ services:
       - key: AUTOBOTT_PAPER_MAX_OPEN_ENTRY_BUY_ORDERS
         value: "25"
       - key: AUTOBOTT_ENTRY_LIMIT_EXTRA
-        value: "0"
+        value: "0.02"
+      - key: AUTOBOTT_PENDING_ENTRY_MAX_AGE_SECONDS
+        value: "180"
       - key: AUTOBOTT_OPEN_DRAWDOWN_GUARD_ENABLED
         value: "false"
       - key: AUTOBOTT_OPEN_DRAWDOWN_GUARD_MAX_UNREALIZED_LOSS
@@ -52,8 +54,6 @@ services:
         value: "true"
       - key: AUTOBOTT_CORE_RUNNER_ENABLED
         value: "true"
-      - key: AUTOBOTT_MAX_TRADE_GROUP_COST
-        value: "1200"
       - key: AUTOBOTT_RUNNER_MAX_COST_RATIO
         value: "0.40"
       - key: AUTOBOTT_CORE_MAX_SPREAD_PCT
@@ -124,12 +124,20 @@ services:
         value: "true"
       - key: AUTOBOTT_DASHBOARD_AUTH_TOKEN
         generateValue: true
+      - key: AUTOBOTT_MANUAL_MIRROR_MAX_CONTRACT_COST
+        value: "100"
+      - key: AUTOBOTT_MANUAL_MIRROR_MAX_SIGNAL_AGE_MINUTES
+        value: "30"
       - key: AUTOBOTT_SESSION_AUTOSTART
         value: "true"
       - key: AUTOBOTT_SESSION_RUN_FOREVER
         value: "true"
       - key: AUTOBOTT_SESSION_SYMBOLS
-        value: TOP_OPTIONS_100
+        value: TOP_OPTIONS_100,VXX,UVXY
+      - key: AUTOBOTT_SESSION_PRIORITY_SYMBOLS
+        value: VXX,UVXY,SPY,QQQ
+      - key: AUTOBOTT_VOLATILITY_HEDGE_SYMBOLS
+        value: VXX,UVXY
       - key: AUTOBOTT_SESSION_INTERVAL_SECONDS
         value: "90"
       - key: AUTOBOTT_SESSION_SYMBOL_BATCH_SIZE

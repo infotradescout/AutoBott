@@ -3,7 +3,9 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import os
 import time
+import urllib.error
 import urllib.parse
 import urllib.request
 from dataclasses import dataclass
@@ -12,7 +14,9 @@ from pathlib import Path
 from typing import Any
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
+from .core_runner import CoreRunnerRules, load_core_runner_rules
 from .options_math import solve_iv_and_greeks
+from .phase1_alpaca_client import _merge_option_contract_metadata
 from .phase1_config import AlpacaReadOnlyConfig, load_alpaca_read_only_config
 from .phase1_snapshot_contract import validate_market_snapshot
 
@@ -32,7 +36,9 @@ class CaptureRules:
     option_chain_max_contracts_per_type: int = 8
     option_chain_max_dte: int = 30
     option_chain_min_dte: int = 1
-    max_strike_distance_pct: float = 0.10
+    # Capture far enough OTM to retain a truly convex runner. Primary contract
+    # selection still applies its tighter strategy-level strike-distance rule.
+    max_strike_distance_pct: float = 0.35
 
 
 class AlpacaMarketDataClient:
@@ -41,8 +47,13 @@ class AlpacaMarketDataClient:
         if not self.config.has_credentials:
             raise ValueError("alpaca_credentials_missing")
         self.data_url = (self.config.data_url or "https://data.alpaca.markets").rstrip("/")
+        self.trading_url = (
+            self.config.base_url
+            or ("https://paper-api.alpaca.markets" if self.config.paper else "https://api.alpaca.markets")
+        ).rstrip("/")
         self.feed = feed
         self.stock_feed = stock_feed
+        self._option_contract_metadata_cache: dict[tuple[str, str, str], dict[str, dict[str, Any]]] = {}
 
     def get_stock_bars(self, symbols: list[str], *, start: datetime, end: datetime, timeframe: str = "1Min", limit: int = 35, feed: str | None = None) -> dict[str, list[dict[str, Any]]]:
         payload = self._get_json(
@@ -71,19 +82,89 @@ class AlpacaMarketDataClient:
         return {symbol.upper(): dict(row) for symbol, row in quotes.items()}
 
     def get_option_chain_snapshots(self, symbol: str) -> dict[str, dict[str, Any]]:
-        payload = self._get_json(
-            f"/v1beta1/options/snapshots/{symbol.upper()}",
-            {
-                "feed": self.feed,
-            },
+        today = datetime.now(UTC).date()
+        base_params = {
+            "feed": self.feed,
+            "limit": "1000",
+            "expiration_date_gte": (today + timedelta(days=1)).isoformat(),
+            "expiration_date_lte": (today + timedelta(days=30)).isoformat(),
+        }
+        metadata = self._get_option_contract_metadata(
+            symbol,
+            expiration_date_gte=base_params["expiration_date_gte"],
+            expiration_date_lte=base_params["expiration_date_lte"],
         )
-        snapshots = payload.get("snapshots") or payload.get("option_snapshots") or {}
-        return {option_symbol: dict(row) for option_symbol, row in snapshots.items()}
+        snapshots: dict[str, dict[str, Any]] = {}
+        page_token: str | None = None
+        seen_page_tokens: set[str] = set()
+        while True:
+            params = dict(base_params)
+            if page_token:
+                params["page_token"] = page_token
+            payload = self._get_json_with_retry(f"/v1beta1/options/snapshots/{symbol.upper()}", params)
+            page = payload.get("snapshots") or payload.get("option_snapshots") or {}
+            snapshots.update({option_symbol.upper(): dict(row) for option_symbol, row in page.items()})
+            next_page_token = payload.get("next_page_token")
+            if not next_page_token:
+                break
+            if next_page_token in seen_page_tokens:
+                raise ValueError("option_chain_pagination_token_cycle")
+            seen_page_tokens.add(next_page_token)
+            page_token = next_page_token
+        return {
+            option_symbol: _merge_option_contract_metadata(snapshot, metadata[option_symbol])
+            for option_symbol, snapshot in snapshots.items()
+            if option_symbol in metadata
+        }
 
-    def _get_json(self, path: str, params: dict[str, str]) -> dict[str, Any]:
+    def _get_option_contract_metadata(
+        self,
+        symbol: str,
+        *,
+        expiration_date_gte: str,
+        expiration_date_lte: str,
+    ) -> dict[str, dict[str, Any]]:
+        base_params = {
+            "underlying_symbols": symbol.upper(),
+            "status": "active",
+            "expiration_date_gte": expiration_date_gte,
+            "expiration_date_lte": expiration_date_lte,
+            "limit": "10000",
+        }
+        cache_key = (symbol.upper(), expiration_date_gte, expiration_date_lte)
+        cached = self._option_contract_metadata_cache.get(cache_key)
+        if cached is not None:
+            return cached
+        metadata: dict[str, dict[str, Any]] = {}
+        page_token: str | None = None
+        seen_page_tokens: set[str] = set()
+        while True:
+            params = dict(base_params)
+            if page_token:
+                params["page_token"] = page_token
+            payload = self._get_json_with_retry("/v2/options/contracts", params, base_url=self.trading_url)
+            for contract in payload.get("option_contracts") or []:
+                if contract.get("tradable") is not True:
+                    continue
+                option_symbol = str(contract.get("symbol") or "").upper()
+                if option_symbol:
+                    metadata[option_symbol] = dict(contract)
+            next_page_token = payload.get("next_page_token")
+            if not next_page_token:
+                break
+            if next_page_token in seen_page_tokens:
+                raise ValueError("option_contract_pagination_token_cycle")
+            seen_page_tokens.add(next_page_token)
+            page_token = next_page_token
+        if not metadata:
+            raise ValueError(f"option_contract_metadata_empty:{symbol.upper()}")
+        self._option_contract_metadata_cache[cache_key] = metadata
+        return metadata
+
+    def _get_json(self, path: str, params: dict[str, str], *, base_url: str | None = None) -> dict[str, Any]:
         query = urllib.parse.urlencode(params)
         request = urllib.request.Request(
-            f"{self.data_url}{path}?{query}",
+            f"{base_url or self.data_url}{path}?{query}",
             headers={
                 "APCA-API-KEY-ID": str(self.config.api_key),
                 "APCA-API-SECRET-KEY": str(self.config.secret_key),
@@ -93,6 +174,27 @@ class AlpacaMarketDataClient:
         )
         with urllib.request.urlopen(request, timeout=30) as response:
             return json.loads(response.read().decode("utf-8"))
+
+    def _get_json_with_retry(
+        self,
+        path: str,
+        params: dict[str, str],
+        *,
+        base_url: str | None = None,
+    ) -> dict[str, Any]:
+        for attempt in range(3):
+            try:
+                return self._get_json(path, params, base_url=base_url)
+            except urllib.error.HTTPError as exc:
+                if exc.code != 429 and exc.code < 500:
+                    raise
+                if attempt == 2:
+                    raise
+            except (urllib.error.URLError, TimeoutError):
+                if attempt == 2:
+                    raise
+            time.sleep(0.25 * (2**attempt))
+        raise RuntimeError("alpaca_request_retry_exhausted")
 
 
 def capture_snapshot_session(
@@ -220,12 +322,18 @@ def capture_symbol_snapshot(
     qqq_bars = _normalize_stock_bars(context_symbols["qqq"], bars, rules.lookback_bars)
     vix_bars = _normalize_stock_bars(context_symbols["vix"], bars, rules.lookback_bars)
     underlying_quote = _normalize_stock_quote(symbol, quotes, fallback_price=underlying_bars[-1]["close"])
-    option_chain = _normalize_option_chain(
+    normalized_option_chain = _normalize_option_chain(
         symbol=symbol,
         option_snapshots=option_snapshots,
         underlying_price=float(underlying_quote["last"]),
         as_of_date=market_date,
         rules=rules,
+        select_subset=False,
+    )
+    option_chain = _select_chain_subset(normalized_option_chain, float(underlying_quote["last"]), market_date, rules)
+    manual_mirror_chain = _select_manual_mirror_candidates(
+        normalized_option_chain,
+        max_contract_cost=_manual_mirror_capture_max_contract_cost(),
     )
     iv_history = _load_iv_history(symbol_dir, limit=rules.iv_history_limit)
     if not iv_history:
@@ -248,6 +356,10 @@ def capture_symbol_snapshot(
         "underlying_quote": underlying_quote,
         "market_bars": underlying_bars,
         "option_chain": option_chain,
+        # Dashboard-only candidates. The execution engine reads option_chain;
+        # this separate list makes the affordable Manual Mirror panel reliable
+        # without turning its display cap into a paper-execution constraint.
+        "manual_mirror_chain": manual_mirror_chain,
         "context": {
             "spy_bars": spy_bars,
             "qqq_bars": qqq_bars,
@@ -517,6 +629,7 @@ def _normalize_option_chain(
     underlying_price: float,
     as_of_date: date,
     rules: CaptureRules,
+    select_subset: bool = True,
 ) -> list[dict[str, Any]]:
     normalized: list[dict[str, Any]] = []
     for option_symbol, snapshot in option_snapshots.items():
@@ -564,6 +677,8 @@ def _normalize_option_chain(
             if solved is None:
                 continue
             iv, delta, theta, vega = solved
+        daily_bar = snapshot.get("dailyBar") or snapshot.get("daily_bar") or {}
+        volume_value = daily_bar.get("v") if daily_bar.get("v") is not None else daily_bar.get("volume")
         normalized.append(
             {
                 "option_symbol": option_symbol,
@@ -577,7 +692,8 @@ def _normalize_option_chain(
                 "spread": round(spread, 4),
                 "spread_pct": round(spread / mid, 4) if mid > 0 else 0.0,
                 "quote_timestamp": _normalize_timestamp(quote.get("t") or quote.get("timestamp") or latest_trade.get("t") or latest_trade.get("timestamp") or datetime.now(UTC).isoformat()),
-                "volume": int(snapshot.get("dailyBar", {}).get("v") or snapshot.get("daily_bar", {}).get("volume") or 0),
+                "volume": int(volume_value or 0),
+                "volume_available": volume_value is not None,
                 "open_interest": int(snapshot.get("open_interest") or snapshot.get("openInterest") or 0),
                 "delta": round(float(delta), 4),
                 "theta": round(float(theta), 4),
@@ -587,7 +703,11 @@ def _normalize_option_chain(
                 "realized_volatility": None,
             }
         )
-    return _select_chain_subset(normalized, underlying_price, as_of_date, rules)
+    if select_subset:
+        return _select_chain_subset(normalized, underlying_price, as_of_date, rules)
+    if not normalized:
+        raise ValueError("empty_option_chain_after_normalization")
+    return normalized
 
 
 def _select_chain_subset(
@@ -601,14 +721,19 @@ def _select_chain_subset(
     selected: list[dict[str, Any]] = []
     for option_type in ("call", "put"):
         by_type = [contract for contract in contracts if contract["option_type"] == option_type]
-        tactical = sorted(
+        bucket_size = rules.option_chain_max_contracts_per_type // 2
+        tactical = _select_bucket_with_runner_candidates(
             [contract for contract in by_type if 1 <= _dte(contract, as_of_date) <= 3],
-            key=lambda contract: (_distance_from_target_delta(contract, 0.55), abs(contract["strike"] - underlying_price)),
-        )[: rules.option_chain_max_contracts_per_type // 2]
-        rider = sorted(
+            target_delta=0.55,
+            underlying_price=underlying_price,
+            max_contracts=bucket_size,
+        )
+        rider = _select_bucket_with_runner_candidates(
             [contract for contract in by_type if 7 <= _dte(contract, as_of_date) <= rules.option_chain_max_dte],
-            key=lambda contract: (_distance_from_target_delta(contract, 0.45), abs(contract["strike"] - underlying_price)),
-        )[: rules.option_chain_max_contracts_per_type // 2]
+            target_delta=0.45,
+            underlying_price=underlying_price,
+            max_contracts=bucket_size,
+        )
         selected.extend(tactical)
         selected.extend(rider)
     deduped: dict[str, dict[str, Any]] = {contract["option_symbol"]: contract for contract in selected}
@@ -616,6 +741,179 @@ def _select_chain_subset(
     if not final:
         raise ValueError("empty_option_chain_after_filtering")
     return final
+
+
+def _select_bucket_with_runner_candidates(
+    contracts: list[dict[str, Any]],
+    *,
+    target_delta: float,
+    underlying_price: float,
+    max_contracts: int,
+) -> list[dict[str, Any]]:
+    """Keep decision-quality primaries and their same-expiration runners.
+
+    The downstream entry contract requires a cheaper, farther-OTM second leg.
+    Keeping only contracts near the primary target delta deletes that leg from
+    a dense live chain, so each bucket reserves space for matched candidates.
+    """
+
+    if max_contracts <= 0:
+        return []
+    pair_rules = load_core_runner_rules()
+    ranked_cores = sorted(
+        contracts,
+        key=lambda contract: (
+            _distance_from_target_delta(contract, target_delta),
+            abs(contract["strike"] - underlying_price),
+            float(contract["spread_pct"]) if contract.get("spread_pct") is not None else 1.0,
+        ),
+    )
+    selected: list[dict[str, Any]] = []
+    selected_symbols: set[str] = set()
+    max_pairs = max_contracts // 2
+    pairs_added = 0
+    for core in ranked_cores:
+        if pairs_added >= max_pairs:
+            break
+        if not _capture_core_is_eligible(core, pair_rules):
+            continue
+        runner = _best_capture_runner(core, contracts, rules=pair_rules)
+        if runner is None:
+            continue
+        pair_symbols = {str(core["option_symbol"]), str(runner["option_symbol"])}
+        if pair_symbols & selected_symbols:
+            continue
+        selected.extend((core, runner))
+        selected_symbols.update(pair_symbols)
+        pairs_added += 1
+
+    for contract in ranked_cores:
+        if len(selected) >= max_contracts:
+            break
+        symbol = str(contract["option_symbol"])
+        if symbol in selected_symbols:
+            continue
+        selected.append(contract)
+        selected_symbols.add(symbol)
+    return selected[:max_contracts]
+
+
+def _best_capture_runner(
+    core: dict[str, Any],
+    contracts: list[dict[str, Any]],
+    *,
+    rules: CoreRunnerRules,
+) -> dict[str, Any] | None:
+    core_type = str(core["option_type"])
+    core_delta = abs(float(core["delta"]))
+    core_ask = float(core["ask"])
+    core_strike = float(core["strike"])
+    candidates = []
+    for candidate in contracts:
+        if candidate["option_symbol"] == core["option_symbol"]:
+            continue
+        if candidate["expiration"] != core["expiration"] or candidate["option_type"] != core_type:
+            continue
+        bid = float(candidate["bid"])
+        ask = float(candidate["ask"])
+        strike = float(candidate["strike"])
+        spread_pct = float(candidate["spread_pct"]) if candidate.get("spread_pct") is not None else 1.0
+        if (
+            bid <= 0
+            or ask < bid
+            or spread_pct > rules.runner_max_spread_pct
+            or int(candidate.get("open_interest") or 0) < rules.runner_min_open_interest
+            or (
+                bool(candidate.get("volume_available", True))
+                and int(candidate.get("volume") or 0) < rules.runner_min_volume
+            )
+            or ask >= core_ask
+            or ask > core_ask * rules.runner_max_cost_ratio
+        ):
+            continue
+        if abs(float(candidate["delta"])) >= core_delta:
+            continue
+        if core_type == "call" and strike <= core_strike:
+            continue
+        if core_type == "put" and strike >= core_strike:
+            continue
+        candidates.append(candidate)
+    if not candidates:
+        return None
+    return min(
+        candidates,
+        key=lambda candidate: (
+            -abs(float(candidate["delta"])),
+            float(candidate["spread_pct"]) if candidate.get("spread_pct") is not None else 1.0,
+            -int(candidate.get("open_interest") or 0),
+            -int(candidate.get("volume") or 0),
+        ),
+    )
+
+
+def _capture_core_is_eligible(contract: dict[str, Any], rules: CoreRunnerRules) -> bool:
+    bid = float(contract["bid"])
+    ask = float(contract["ask"])
+    spread_pct = float(contract["spread_pct"]) if contract.get("spread_pct") is not None else 1.0
+    return (
+        0 < bid <= ask
+        and spread_pct <= rules.core_max_spread_pct
+        and int(contract.get("open_interest") or 0) >= rules.core_min_open_interest
+        and (
+            not bool(contract.get("volume_available", True))
+            or int(contract.get("volume") or 0) >= rules.core_min_volume
+        )
+        and abs(float(contract["delta"])) >= rules.core_min_abs_delta
+    )
+
+
+def _manual_mirror_capture_max_contract_cost() -> float:
+    value = os.getenv("AUTOBOTT_MANUAL_MIRROR_MAX_CONTRACT_COST")
+    if value is None or not value.strip():
+        return 100.0
+    return max(0.01, float(value))
+
+
+def _select_manual_mirror_candidates(
+    contracts: list[dict[str, Any]],
+    *,
+    max_contract_cost: float,
+) -> list[dict[str, Any]]:
+    """Keep one liquid affordable contract per type and expiration for display."""
+
+    rules = load_core_runner_rules()
+    eligible = [
+        contract
+        for contract in contracts
+        if 0 < float(contract["bid"]) <= float(contract["ask"])
+        and float(contract["ask"]) * 100 <= max_contract_cost
+        and float(contract.get("spread_pct") or 0.0) <= rules.runner_max_spread_pct
+        and int(contract.get("open_interest") or 0) >= rules.runner_min_open_interest
+        and (
+            not bool(contract.get("volume_available", True))
+            or int(contract.get("volume") or 0) >= rules.runner_min_volume
+        )
+    ]
+    best_by_expiration: dict[tuple[str, str], dict[str, Any]] = {}
+    for contract in eligible:
+        key = (str(contract["option_type"]), str(contract["expiration"]))
+        current = best_by_expiration.get(key)
+        if current is None or _manual_mirror_capture_score(contract) < _manual_mirror_capture_score(current):
+            best_by_expiration[key] = contract
+    return sorted(
+        best_by_expiration.values(),
+        key=lambda contract: (str(contract["expiration"]), str(contract["option_type"]), float(contract["strike"])),
+    )
+
+
+def _manual_mirror_capture_score(contract: dict[str, Any]) -> tuple[float, ...]:
+    return (
+        abs(abs(float(contract["delta"])) - 0.50),
+        float(contract.get("spread_pct") or 0.0),
+        -float(contract.get("open_interest") or 0),
+        -float(contract.get("volume") or 0),
+        float(contract["ask"]),
+    )
 
 
 def _load_iv_history(symbol_dir: Path, *, limit: int) -> list[float]:

@@ -44,6 +44,7 @@ class PositionMonitorRules:
     runner_trailing_activation_pct: float = 0.50
     runner_trailing_drawdown_pct: float = 0.25
     runner_stop_loss_pct: float = 0.70
+    pending_entry_max_age_seconds: int = 180
 
 
 def load_position_monitor_rules() -> PositionMonitorRules:
@@ -69,6 +70,7 @@ def load_position_monitor_rules() -> PositionMonitorRules:
         runner_trailing_activation_pct=float(os.getenv("AUTOBOTT_RUNNER_EXIT_TRAILING_ACTIVATION_PCT", "0.50")),
         runner_trailing_drawdown_pct=float(os.getenv("AUTOBOTT_RUNNER_EXIT_TRAILING_DRAWDOWN_PCT", "0.25")),
         runner_stop_loss_pct=float(os.getenv("AUTOBOTT_RUNNER_EXIT_STOP_LOSS_PCT", "0.70")),
+        pending_entry_max_age_seconds=max(30, int(os.getenv("AUTOBOTT_PENDING_ENTRY_MAX_AGE_SECONDS", "180"))),
     )
 
 
@@ -129,6 +131,12 @@ def run_position_monitor(
     peaks = _load_trailing_peaks(state_path=trailing_state_path)
     open_symbols: set[str] = set()
     actions: list[dict[str, Any]] = []
+    actions.extend(
+        _cancel_stale_pending_mleg_entries(
+            resolved_broker,
+            max_age_seconds=resolved_rules.pending_entry_max_age_seconds,
+        )
+    )
     actions.extend(_cancel_over_cap_pending_entries(pending_orders, broker=resolved_broker))
     for position in positions:
         symbol = str(position.get("symbol") or "").upper()
@@ -387,7 +395,13 @@ def _cancel_over_cap_pending_entries(
 ) -> list[dict[str, Any]]:
     if not hasattr(broker, "cancel_order"):
         return []
-    max_position_cost = _float_or_none(getattr(getattr(broker, "config", None), "max_position_cost", None))
+    config = getattr(broker, "config", None)
+    effective_limit = (
+        config.effective_max_position_cost()
+        if config is not None and hasattr(config, "effective_max_position_cost")
+        else getattr(config, "max_position_cost", None)
+    )
+    max_position_cost = _float_or_none(effective_limit)
     if max_position_cost is None or max_position_cost <= 0:
         return []
     actions: list[dict[str, Any]] = []
@@ -425,6 +439,81 @@ def _cancel_over_cap_pending_entries(
                     }
                 )
     return actions
+
+
+def _cancel_stale_pending_mleg_entries(
+    broker: AlpacaExecutionBroker,
+    *,
+    max_age_seconds: int,
+) -> list[dict[str, Any]]:
+    if not hasattr(broker, "list_orders") or not hasattr(broker, "cancel_order"):
+        return []
+    try:
+        try:
+            orders = broker.list_orders(status="open", limit=100, direction="desc", nested=True)
+        except TypeError:
+            orders = broker.list_orders(status="open", limit=100, direction="desc")
+    except Exception:
+        return []
+    now = _monitor_now()
+    actions: list[dict[str, Any]] = []
+    for order in orders:
+        if str(order.get("order_class") or "").lower() != "mleg":
+            continue
+        if not str(order.get("client_order_id") or "").startswith("autobott-"):
+            continue
+        status = str(order.get("status") or "").lower()
+        if status not in {"new", "accepted", "partially_filled", "pending_new", "pending_replace"}:
+            continue
+        submitted_at = _datetime_or_none(order.get("submitted_at") or order.get("created_at"))
+        if submitted_at is None:
+            continue
+        age_seconds = max(0.0, (now - submitted_at).total_seconds())
+        if age_seconds < max_age_seconds:
+            continue
+        order_id = str(order.get("id") or order.get("broker_order_id") or "")
+        if not order_id:
+            continue
+        legs = [leg for leg in order.get("legs") or [] if isinstance(leg, dict)]
+        symbols = [str(leg.get("symbol") or "").upper() for leg in legs if leg.get("symbol")]
+        try:
+            broker.cancel_order(order_id)
+            actions.append(
+                {
+                    "reason": "stale_atomic_entry_canceled",
+                    "broker_order_id": order_id,
+                    "symbols": symbols,
+                    "age_seconds": round(age_seconds, 1),
+                    "max_age_seconds": max_age_seconds,
+                }
+            )
+        except Exception as exc:
+            actions.append(
+                {
+                    "reason": "stale_atomic_entry_cancel_failed",
+                    "broker_order_id": order_id,
+                    "symbols": symbols,
+                    "age_seconds": round(age_seconds, 1),
+                    "max_age_seconds": max_age_seconds,
+                    "error": str(exc),
+                }
+            )
+    return actions
+
+
+def _monitor_now() -> datetime:
+    return datetime.now(UTC)
+
+
+def _datetime_or_none(value: Any) -> datetime | None:
+    if value is None:
+        return None
+    if isinstance(value, datetime):
+        return value.astimezone(UTC) if value.tzinfo else value.replace(tzinfo=UTC)
+    try:
+        return datetime.fromisoformat(str(value).replace("Z", "+00:00")).astimezone(UTC)
+    except ValueError:
+        return None
 
 
 def _pending_entry_notional(order: dict[str, Any]) -> float | None:

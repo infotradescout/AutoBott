@@ -53,6 +53,9 @@ def reconcile_open_positions(
             take_profit_price=position.take_profit_price,
             stop_loss_price=position.stop_loss_price,
             status=next_state.value,
+            trade_group_id=position.trade_group_id,
+            leg_role=position.leg_role,
+            paired_option_symbol=position.paired_option_symbol,
         )
         if next_position.status != position.status:
             updated += 1
@@ -72,6 +75,11 @@ def reconcile_open_positions(
                         stop_loss_price=position.stop_loss_price,
                         decision_id=position.decision_id,
                         thesis_id=position.decision_id,
+                        metadata={
+                            "trade_group_id": position.trade_group_id,
+                            "leg_role": position.leg_role,
+                            "paired_option_symbol": position.paired_option_symbol,
+                        },
                     ),
                     state=next_state,
                     submitted_at=submitted_at,

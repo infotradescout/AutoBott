@@ -1,5 +1,6 @@
 import io
 import json
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
@@ -41,6 +42,14 @@ def _auth_env(monkeypatch, tmp_path: Path) -> None:
     gate_path.parent.mkdir(parents=True, exist_ok=True)
     gate_path.write_text(json.dumps({"sentinel": True}, sort_keys=True), encoding="utf-8")
     save_runtime_state(default_runtime_state())
+
+
+def _stub_latest_option_quotes(monkeypatch, quotes: dict[str, dict]) -> None:
+    class FakeLatestQuoteClient:
+        def get_latest_option_quotes(self, _symbols):
+            return quotes
+
+    monkeypatch.setattr(dashboard_app, "AlpacaPaperClient", FakeLatestQuoteClient)
 
 
 def _write_corpus_manifest(tmp_path: Path) -> None:
@@ -274,10 +283,15 @@ def test_dashboard_latest_decisions_endpoint_returns_rows(monkeypatch, tmp_path)
 
 def test_dashboard_decision_feed_shapes_manual_trade_rows(monkeypatch, tmp_path) -> None:
     _auth_env(monkeypatch, tmp_path)
+    monkeypatch.setattr(dashboard_app, "_manual_mirror_now", lambda: datetime(2026, 7, 8, 15, 50, tzinfo=UTC))
+    _stub_latest_option_quotes(
+        monkeypatch,
+        {"SPY260710C00600000": {"bp": 0.74, "ap": 0.80, "t": "2026-07-08T15:49:00+00:00"}},
+    )
     monkeypatch.setattr(
         dashboard_app,
         "load_decision_cards",
-        lambda limit=25: [
+        lambda limit=100: [
             {
                 "recorded_at": "2026-07-08T15:45:00+00:00",
                 "decision_card": {
@@ -294,14 +308,17 @@ def test_dashboard_decision_feed_shapes_manual_trade_rows(monkeypatch, tmp_path)
                     "selected_contract": {
                         "option_symbol": "SPY260710C00600000",
                         "option_type": "call",
-                        "bid": 2.4,
-                        "ask": 2.6,
-                        "mid": 2.5,
+                        "expiration": "2026-07-10",
+                        "bid": 0.74,
+                        "ask": 0.80,
+                        "mid": 0.77,
                         "spread_pct": 0.08,
+                        "open_interest": 900,
+                        "volume": 500,
                         "implied_volatility": 0.32,
                         "delta": 0.52,
-                        "target_exit_mid": 3.75,
-                        "stop_exit_mid": 1.38,
+                        "target_exit_mid": 1.155,
+                        "stop_exit_mid": 0.4235,
                         "exit_rule": "take_profit_at_50pct_gain_or_stop_at_45pct_loss_on_mid",
                         "score_reasons": ["liquidity_passed"],
                     },
@@ -316,8 +333,195 @@ def test_dashboard_decision_feed_shapes_manual_trade_rows(monkeypatch, tmp_path)
     assert status.startswith("200")
     assert payload["decisions"][0]["action"] == "BUY_TO_OPEN"
     assert payload["decisions"][0]["option_symbol"] == "SPY260710C00600000"
-    assert payload["decisions"][0]["entry_reference"] == 2.5
-    assert payload["decisions"][0]["target_exit_mid"] == 3.75
+    assert payload["decisions"][0]["entry_reference"] == 0.77
+    assert payload["decisions"][0]["estimated_contract_cost"] == 80.0
+    assert payload["max_contract_cost"] == 100.0
+
+
+def test_dashboard_manual_mirror_substitutes_under_100_without_changing_paper_contract(monkeypatch, tmp_path) -> None:
+    _auth_env(monkeypatch, tmp_path)
+    monkeypatch.setattr(dashboard_app, "_manual_mirror_now", lambda: datetime(2026, 7, 16, 15, 50, tzinfo=UTC))
+    _stub_latest_option_quotes(
+        monkeypatch,
+        {"VXX260717C00050000": {"bp": 0.74, "ap": 0.80, "t": "2026-07-16T15:49:00+00:00"}},
+    )
+    snapshot_path = tmp_path / "snapshot.json"
+    snapshot_path.write_text(
+        json.dumps(
+            {
+                "manual_mirror_chain": [
+                    {
+                        "option_symbol": "VXX260717C00050000",
+                        "option_type": "call",
+                        "expiration": "2026-07-17",
+                        "bid": 0.74,
+                        "ask": 0.80,
+                        "spread_pct": 0.0779,
+                        "delta": 0.31,
+                        "implied_volatility": 0.72,
+                        "open_interest": 850,
+                        "volume": 410,
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        dashboard_app,
+        "load_decision_cards",
+        lambda limit=100: [
+            {
+                "snapshot_path": str(snapshot_path),
+                "decision_card": {
+                    "decision_id": "vxx-volatility",
+                    "ticker": "VXX",
+                    "timestamp": "2026-07-16T15:45:00+00:00",
+                    "decision": "TRADE_CANDIDATE",
+                    "trade_setup": "bullish_continuation",
+                    "execution_layer": "tactical",
+                    "confidence_score": 0.81,
+                    "direction": {"bias": "bullish", "score": 0.84},
+                    "regime": {"primary": "volatility_expansion"},
+                    "reason_codes": ["volatility_expansion"],
+                    "selected_contract": {
+                        "option_symbol": "VXX260717C00045000",
+                        "option_type": "call",
+                        "expiration": "2026-07-17",
+                        "bid": 2.40,
+                        "ask": 2.60,
+                        "mid": 2.50,
+                        "spread_pct": 0.08,
+                        "delta": 0.52,
+                        "target_exit_mid": 3.75,
+                        "stop_exit_mid": 1.375,
+                    },
+                },
+            }
+        ],
+    )
+
+    status, body = _invoke_app("GET", "/api/decisions/feed", token="dashboard-token")
+    payload = json.loads(body)
+
+    assert status.startswith("200")
+    idea = payload["decisions"][0]
+    assert idea["option_symbol"] == "VXX260717C00050000"
+    assert idea["estimated_contract_cost"] == 80.0
+    assert idea["paper_execution_option_symbol"] == "VXX260717C00045000"
+    assert idea["manual_mirror_substitution"] is True
+    assert idea["quote_source"] == "alpaca_latest_indicative"
+
+
+def test_dashboard_manual_mirror_rejects_cross_expiration_substitution(monkeypatch, tmp_path) -> None:
+    _auth_env(monkeypatch, tmp_path)
+    monkeypatch.setattr(dashboard_app, "_manual_mirror_now", lambda: datetime(2026, 7, 16, 15, 50, tzinfo=UTC))
+    snapshot_path = tmp_path / "snapshot.json"
+    snapshot_path.write_text(
+        json.dumps(
+            {
+                "manual_mirror_chain": [
+                    {
+                        "option_symbol": "VXX260724C00050000",
+                        "option_type": "call",
+                        "expiration": "2026-07-24",
+                        "bid": 0.74,
+                        "ask": 0.80,
+                        "spread_pct": 0.0779,
+                        "delta": 0.31,
+                        "open_interest": 850,
+                        "volume": 410,
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        dashboard_app,
+        "load_decision_cards",
+        lambda limit=100: [
+            {
+                "snapshot_path": str(snapshot_path),
+                "decision_card": {
+                    "decision_id": "same-expiration-required",
+                    "ticker": "VXX",
+                    "timestamp": "2026-07-16T15:45:00+00:00",
+                    "decision": "TRADE_CANDIDATE",
+                    "selected_contract": {
+                        "option_symbol": "VXX260717C00045000",
+                        "option_type": "call",
+                        "expiration": "2026-07-17",
+                        "bid": 2.40,
+                        "ask": 2.60,
+                        "mid": 2.50,
+                        "delta": 0.52,
+                    },
+                },
+            }
+        ],
+    )
+
+    status, body = _invoke_app("GET", "/api/decisions/feed", token="dashboard-token")
+    payload = json.loads(body)
+
+    assert status.startswith("200")
+    assert payload["count"] == 0
+    assert payload["decisions"] == []
+
+
+def test_manual_mirror_does_not_publish_cheap_but_illiquid_selected_contract(tmp_path) -> None:
+    snapshot_path = tmp_path / "snapshot.json"
+    snapshot_path.write_text(
+        json.dumps(
+            {
+                "manual_mirror_chain": [
+                    {
+                        "option_symbol": "VXX260717C00051000",
+                        "option_type": "call",
+                        "expiration": "2026-07-17",
+                        "bid": 0.64,
+                        "ask": 0.70,
+                        "spread_pct": 0.0896,
+                        "delta": 0.28,
+                        "open_interest": 850,
+                        "volume": 0,
+                        "volume_available": False,
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    record = {
+        "snapshot_path": str(snapshot_path),
+        "decision_card": {
+            "ticker": "VXX",
+            "decision": "TRADE_CANDIDATE",
+            "selected_contract": {
+                "option_symbol": "VXX260717C00050000",
+                "option_type": "call",
+                "expiration": "2026-07-17",
+                "bid": 0.74,
+                "ask": 0.80,
+                "mid": 0.77,
+                "spread_pct": 0.0779,
+                "delta": 0.31,
+                "open_interest": 0,
+                "volume": 0,
+            },
+        },
+    }
+
+    result = dashboard_app._manual_mirror_row(
+        record,
+        dashboard_app._manual_decision_row(record),
+        max_contract_cost=100.0,
+    )
+
+    assert result is not None
+    assert result["option_symbol"] == "VXX260717C00051000"
+    assert result["manual_mirror_substitution"] is True
 
 
 def test_dashboard_session_status_endpoint_returns_supervisor_state(monkeypatch, tmp_path) -> None:
@@ -944,6 +1148,7 @@ def test_render_config_has_health_check() -> None:
     assert "key: AUTOBOTT_GATE_PATH" in render_config
     assert "key: AUTOBOTT_SESSION_AUTOSTART" in render_config
     assert "key: AUTOBOTT_SESSION_SYMBOLS" in render_config
+    assert 'key: AUTOBOTT_SESSION_PRIORITY_SYMBOLS\n        value: VXX,UVXY,SPY,QQQ' in render_config
     assert "key: AUTOBOTT_SESSION_START_TIME" in render_config
     assert "key: AUTOBOTT_SESSION_END_TIME" in render_config
     assert "key: AUTOBOTT_SESSION_MARKET_TIMEZONE" in render_config
@@ -953,8 +1158,14 @@ def test_render_config_has_health_check() -> None:
     assert "key: AUTOBOTT_PAPER_MAX_OPEN_ENTRY_BUY_ORDERS" in render_config
     assert 'key: AUTOBOTT_MAX_POSITION_COST\n        value: "1000"' in render_config
     assert 'key: AUTOBOTT_MAX_DAILY_LOSS\n        value: "5000"' in render_config
-    assert 'key: AUTOBOTT_PAPER_DISCOVERY_MAX_CONTRACT_PRICE\n        value: "8.00"' in render_config
-    assert 'key: AUTOBOTT_MAX_TRADE_GROUP_COST\n        value: "1200"' in render_config
+    assert 'key: AUTOBOTT_PAPER_IGNORE_POSITION_COST_LIMIT\n        value: "true"' in render_config
+    assert 'key: AUTOBOTT_MANUAL_MIRROR_MAX_CONTRACT_COST\n        value: "100"' in render_config
+    assert 'key: AUTOBOTT_MANUAL_MIRROR_MAX_SIGNAL_AGE_MINUTES\n        value: "30"' in render_config
+    assert 'key: AUTOBOTT_VOLATILITY_HEDGE_SYMBOLS\n        value: VXX,UVXY' in render_config
+    assert 'key: AUTOBOTT_ENTRY_LIMIT_EXTRA\n        value: "0.02"' in render_config
+    assert 'key: AUTOBOTT_PENDING_ENTRY_MAX_AGE_SECONDS\n        value: "180"' in render_config
+    assert "AUTOBOTT_PAPER_DISCOVERY_MAX_CONTRACT_PRICE" not in render_config
+    assert "AUTOBOTT_MAX_TRADE_GROUP_COST" not in render_config
     assert 'key: AUTOBOTT_OPEN_DRAWDOWN_GUARD_ENABLED\n        value: "false"' in render_config
     assert 'key: AUTOBOTT_RECENT_LOSS_GUARD_ENABLED\n        value: "false"' in render_config
 
@@ -972,6 +1183,8 @@ def test_frontend_identifies_live_market_paper_trading_and_real_money_off() -> N
     assert "OPTIONS FEED" in body
     assert "Decision Feed" in body
     assert "MANUAL MIRROR" in body
+    assert 'id="manual-mirror-badge"' in body
+    assert "payload.max_contract_cost" in body
     assert "Order Timeline" in body
     assert "REGIME TRACE" in body
 

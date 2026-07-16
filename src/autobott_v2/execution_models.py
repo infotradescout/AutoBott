@@ -35,7 +35,7 @@ class ExecutionState(str, Enum):
 
 @dataclass(frozen=True)
 class ExecutionRiskControls:
-    max_position_cost: float
+    max_position_cost: float | None
     max_daily_loss: float
     max_open_positions: int
     allow_live_trading: bool = False
@@ -107,7 +107,11 @@ def validate_trade_intent(
         reasons.append("quantity_must_be_positive")
     if normalized_limit_price <= 0:
         reasons.append("limit_price_must_be_positive")
-    if intent.side is OrderSide.BUY_TO_OPEN and estimated_notional > controls.max_position_cost:
+    if (
+        intent.side is OrderSide.BUY_TO_OPEN
+        and controls.max_position_cost is not None
+        and estimated_notional > controls.max_position_cost
+    ):
         reasons.append("position_cost_exceeds_limit")
     if open_positions >= controls.max_open_positions:
         reasons.append("max_open_positions_reached")

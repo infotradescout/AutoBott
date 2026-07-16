@@ -105,6 +105,7 @@ class OptionContractSnapshot:
     theta: float
     vega: float
     implied_volatility: float
+    volume_available: bool = True
 
     @property
     def mid(self) -> float:
@@ -254,6 +255,7 @@ class SelectedContract:
     stop_exit_mid: float
     exit_rule: str
     score_reasons: list[str]
+    volume_available: bool = True
 
     @classmethod
     def from_score(cls, score: ContractScore, rules: Phase1Rules) -> "SelectedContract":
@@ -279,6 +281,7 @@ class SelectedContract:
             stop_exit_mid=round(contract.mid * (1 - rules.stop_loss_pct), 4),
             exit_rule=f"take_profit_at_{int(rules.target_profit_pct * 100)}pct_gain_or_stop_at_{int(rules.stop_loss_pct * 100)}pct_loss_on_mid",
             score_reasons=score.reasons,
+            volume_available=contract.volume_available,
         )
 
 

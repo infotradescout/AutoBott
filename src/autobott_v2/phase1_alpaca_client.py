@@ -1,12 +1,19 @@
 from __future__ import annotations
 
 import json
+import threading
+import time
+import urllib.error
 import urllib.parse
 import urllib.request
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from .phase1_alpaca_config import AlpacaPaperConfig, require_alpaca_paper_config
+
+
+_OPTION_CONTRACT_METADATA_CACHE: dict[tuple[str, str, str, str], dict[str, dict[str, Any]]] = {}
+_OPTION_CONTRACT_METADATA_CACHE_LOCK = threading.Lock()
 
 
 class AlpacaPaperClient:
@@ -70,23 +77,116 @@ class AlpacaPaperClient:
             "expiration_date_gte": (today + timedelta(days=1)).isoformat(),
             "expiration_date_lte": (today + timedelta(days=30)).isoformat(),
         }
+        contract_metadata = self._get_option_contract_metadata(
+            symbol,
+            expiration_date_gte=base_params["expiration_date_gte"],
+            expiration_date_lte=base_params["expiration_date_lte"],
+        )
         snapshots: dict[str, dict[str, Any]] = {}
         page_token: str | None = None
-        for _ in range(10):
+        seen_page_tokens: set[str] = set()
+        while True:
             params = dict(base_params)
             if page_token:
                 params["page_token"] = page_token
-            payload = self._get_json(
+            payload = self._get_json_with_retry(
                 self.config.data_base_url,
                 f"/v1beta1/options/snapshots/{symbol.upper()}",
                 params,
             )
             page_snapshots = payload.get("snapshots") or payload.get("option_snapshots") or {}
-            snapshots.update({option_symbol: dict(row) for option_symbol, row in page_snapshots.items()})
-            page_token = payload.get("next_page_token")
-            if not page_token:
+            snapshots.update({option_symbol.upper(): dict(row) for option_symbol, row in page_snapshots.items()})
+            next_page_token = payload.get("next_page_token")
+            if not next_page_token:
                 break
-        return snapshots
+            if next_page_token in seen_page_tokens:
+                raise ValueError("option_chain_pagination_token_cycle")
+            seen_page_tokens.add(next_page_token)
+            page_token = next_page_token
+        return {
+            option_symbol: _merge_option_contract_metadata(snapshot, contract_metadata.get(option_symbol))
+            for option_symbol, snapshot in snapshots.items()
+            if option_symbol in contract_metadata
+        }
+
+    def get_latest_option_quotes(self, option_symbols: list[str]) -> dict[str, dict[str, Any]]:
+        symbols = [symbol.strip().upper() for symbol in option_symbols if symbol.strip()]
+        if not symbols:
+            return {}
+        if len(symbols) > 100:
+            raise ValueError("latest_option_quotes_symbol_limit_exceeded")
+        payload = self._get_json_with_retry(
+            self.config.data_base_url,
+            "/v1beta1/options/quotes/latest",
+            {"symbols": ",".join(symbols), "feed": "indicative"},
+        )
+        return {
+            str(option_symbol).upper(): dict(quote)
+            for option_symbol, quote in (payload.get("quotes") or {}).items()
+        }
+
+    def _get_option_contract_metadata(
+        self,
+        symbol: str,
+        *,
+        expiration_date_gte: str,
+        expiration_date_lte: str,
+    ) -> dict[str, dict[str, Any]]:
+        """Fetch contract fields that are absent from the market-data snapshot.
+
+        Alpaca's chain snapshot contains quotes, trades, and Greeks. Open
+        interest and canonical contract details live on the trading API's
+        option-contract endpoint, so the two responses must be joined before
+        liquidity rules can evaluate a live chain.
+        """
+
+        base_params = {
+            "underlying_symbols": symbol.upper(),
+            "status": "active",
+            "expiration_date_gte": expiration_date_gte,
+            "expiration_date_lte": expiration_date_lte,
+            "limit": "10000",
+        }
+        cache_key = (
+            self.config.trading_base_url,
+            symbol.upper(),
+            expiration_date_gte,
+            expiration_date_lte,
+        )
+        with _OPTION_CONTRACT_METADATA_CACHE_LOCK:
+            cached = _OPTION_CONTRACT_METADATA_CACHE.get(cache_key)
+        if cached is not None:
+            return cached
+        metadata: dict[str, dict[str, Any]] = {}
+        page_token: str | None = None
+        seen_page_tokens: set[str] = set()
+        while True:
+            params = dict(base_params)
+            if page_token:
+                params["page_token"] = page_token
+            payload = self._get_json_with_retry(
+                self.config.trading_base_url,
+                "/v2/options/contracts",
+                params,
+            )
+            for contract in payload.get("option_contracts") or []:
+                if contract.get("tradable") is not True:
+                    continue
+                option_symbol = str(contract.get("symbol") or "").upper()
+                if option_symbol:
+                    metadata[option_symbol] = dict(contract)
+            next_page_token = payload.get("next_page_token")
+            if not next_page_token:
+                break
+            if next_page_token in seen_page_tokens:
+                raise ValueError("option_contract_pagination_token_cycle")
+            seen_page_tokens.add(next_page_token)
+            page_token = next_page_token
+        if not metadata:
+            raise ValueError(f"option_contract_metadata_empty:{symbol.upper()}")
+        with _OPTION_CONTRACT_METADATA_CACHE_LOCK:
+            _OPTION_CONTRACT_METADATA_CACHE[cache_key] = metadata
+        return metadata
 
     def get_positions(self) -> list[dict[str, Any]]:
         payload = self._get_json(self.config.trading_base_url, "/v2/positions")
@@ -126,6 +226,53 @@ class AlpacaPaperClient:
         with urllib.request.urlopen(request, timeout=30) as response:
             return json.loads(response.read().decode("utf-8"))
 
+    def _get_json_with_retry(
+        self,
+        base_url: str,
+        path: str,
+        params: dict[str, str] | None = None,
+    ) -> Any:
+        for attempt in range(3):
+            try:
+                return self._get_json(base_url, path, params)
+            except urllib.error.HTTPError as exc:
+                if exc.code != 429 and exc.code < 500:
+                    raise
+                if attempt == 2:
+                    raise
+            except (urllib.error.URLError, TimeoutError):
+                if attempt == 2:
+                    raise
+            time.sleep(0.25 * (2**attempt))
+        raise RuntimeError("alpaca_request_retry_exhausted")
+
+
+def _clear_option_contract_metadata_cache() -> None:
+    with _OPTION_CONTRACT_METADATA_CACHE_LOCK:
+        _OPTION_CONTRACT_METADATA_CACHE.clear()
+
 
 def _isoformat_z(value: datetime) -> str:
     return value.astimezone(UTC).isoformat().replace("+00:00", "Z")
+
+
+def _merge_option_contract_metadata(
+    snapshot: dict[str, Any],
+    metadata: dict[str, Any] | None,
+) -> dict[str, Any]:
+    merged = dict(snapshot)
+    if not metadata:
+        return merged
+    details = dict(merged.get("details") or merged.get("option_details") or {})
+    details.update(
+        {
+            "expiration_date": metadata.get("expiration_date"),
+            "strike_price": metadata.get("strike_price"),
+            "type": metadata.get("type"),
+        }
+    )
+    merged["details"] = {key: value for key, value in details.items() if value is not None}
+    merged["open_interest"] = metadata.get("open_interest") or 0
+    merged["open_interest_date"] = metadata.get("open_interest_date")
+    merged["tradable"] = metadata.get("tradable") is True
+    return merged

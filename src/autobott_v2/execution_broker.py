@@ -41,7 +41,14 @@ class BrokerAdapter(Protocol):
     def replace_order(self, broker_order_id: str, *, limit_price: float) -> dict:
         ...
 
-    def list_orders(self, *, status: str = "open", limit: int = 100, direction: str = "desc") -> list[dict]:
+    def list_orders(
+        self,
+        *,
+        status: str = "open",
+        limit: int = 100,
+        direction: str = "desc",
+        nested: bool = False,
+    ) -> list[dict]:
         ...
 
 
@@ -186,13 +193,20 @@ class AlpacaExecutionBroker:
         payload = self._request_json("GET", "/v2/positions")
         return payload if isinstance(payload, list) else []
 
-    def list_orders(self, *, status: str = "open", limit: int = 100, direction: str = "desc") -> list[dict]:
+    def list_orders(
+        self,
+        *,
+        status: str = "open",
+        limit: int = 100,
+        direction: str = "desc",
+        nested: bool = False,
+    ) -> list[dict]:
         query = urllib.parse.urlencode(
             {
                 "status": status,
                 "limit": str(limit),
                 "direction": direction,
-                "nested": "false",
+                "nested": "true" if nested else "false",
             }
         )
         payload = self._request_json("GET", f"/v2/orders?{query}")

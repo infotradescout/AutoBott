@@ -94,8 +94,8 @@ def _config(**overrides) -> AlpacaExecutionConfig:
 
 
 class FakeBroker:
-    def __init__(self) -> None:
-        self.config = _config()
+    def __init__(self, **config_overrides) -> None:
+        self.config = _config(**config_overrides)
         self.last_intent = None
         self.intents = []
         self.mleg_calls = []
@@ -133,7 +133,7 @@ def test_build_trade_intent_from_decision_uses_marketable_paper_limit() -> None:
     assert intent.take_profit_price == 3.75
 
 
-def test_build_trade_intent_from_decision_caps_marketable_limit_at_position_cost() -> None:
+def test_build_trade_intent_does_not_distort_quote_to_fit_position_cost() -> None:
     decision = _decision_card(
         selected_contract=_decision_card().selected_contract.__class__(
             **(_decision_card().selected_contract.__dict__ | {"bid": 0.91, "ask": 1.05, "mid": 0.98})
@@ -142,7 +142,7 @@ def test_build_trade_intent_from_decision_caps_marketable_limit_at_position_cost
 
     intent = build_trade_intent_from_decision(decision, max_position_cost=100.0)
 
-    assert intent.limit_price == 1.0
+    assert intent.limit_price == 1.05
 
 
 def test_build_trade_intent_from_decision_can_disable_extra_marketable_cents(monkeypatch) -> None:
@@ -167,7 +167,7 @@ def test_build_trade_intent_from_decision_rejects_non_trade_candidate() -> None:
 
 
 def test_submit_decision_to_broker_writes_journal_and_returns_order(tmp_path) -> None:
-    broker = FakeBroker()
+    broker = FakeBroker(max_position_cost=100.0, paper_ignore_position_cost_limit=True)
     journal_path = tmp_path / "execution_orders.jsonl"
 
     order = submit_decision_to_broker(
@@ -203,7 +203,7 @@ def test_submit_decision_to_broker_raises_exact_risk_rejection(tmp_path) -> None
     assert '"event_type": "risk_check"' in lines[0]
 
 
-def test_submit_core_runner_uses_two_distinct_contracts_under_group_budget(tmp_path, monkeypatch) -> None:
+def test_submit_core_runner_uses_two_distinct_contracts_atomically(tmp_path, monkeypatch) -> None:
     import autobott_v2.execution_orchestrator as orchestrator
 
     broker = FakeBroker()
@@ -252,41 +252,44 @@ def test_submit_core_runner_uses_two_distinct_contracts_under_group_budget(tmp_p
     assert len(journal_path.read_text(encoding="utf-8").splitlines()) == 4
 
 
-def test_submit_core_runner_rejects_actual_debit_above_pair_budget(tmp_path) -> None:
-    broker = FakeBroker()
+def test_submit_core_runner_allows_pair_above_manual_mirror_budget(tmp_path, monkeypatch) -> None:
+    import autobott_v2.execution_orchestrator as orchestrator
+
+    broker = FakeBroker(max_position_cost=100.0, paper_ignore_position_cost_limit=True)
     selected = _decision_card().selected_contract
     assert selected is not None
     primary = replace(
         selected,
         option_symbol="AAPL260117C00195000",
         strike=195.0,
-        bid=0.60,
-        ask=0.70,
-        mid=0.65,
-        target_exit_mid=1.05,
-        stop_exit_mid=0.38,
+        bid=1.40,
+        ask=1.50,
+        mid=1.45,
+        target_exit_mid=2.20,
+        stop_exit_mid=0.80,
     )
     runner = replace(
         selected,
         option_symbol="AAPL260117C00200000",
         strike=200.0,
-        bid=0.20,
-        ask=0.25,
-        mid=0.225,
-        target_exit_mid=0.50,
-        stop_exit_mid=0.08,
+        bid=0.45,
+        ask=0.50,
+        mid=0.475,
+        target_exit_mid=0.95,
+        stop_exit_mid=0.15,
     )
-    pair = CoreRunnerPair(primary, runner, estimated_group_cost=90.0, max_group_cost=90.0)
+    pair = CoreRunnerPair(primary, runner, estimated_group_cost=200.0)
+    monkeypatch.setattr(orchestrator, "upsert_open_position_from_order", lambda *args, **kwargs: None)
 
-    with pytest.raises(ExecutionRejectedError, match="core_runner_group_cost_exceeds_budget"):
-        submit_core_runner_to_broker(
-            _decision_card(),
-            pair,
-            broker=broker,
-            journal_path=str(tmp_path / "execution_orders.jsonl"),
-        )
+    submit_core_runner_to_broker(
+        _decision_card(),
+        pair,
+        broker=broker,
+        journal_path=str(tmp_path / "execution_orders.jsonl"),
+    )
 
-    assert broker.intents == []
+    assert sum(intent.estimated_notional for intent in broker.intents) == 200.0
+    assert len(broker.mleg_calls) == 1
 
 
 def test_submit_core_runner_fails_closed_without_atomic_mleg_support(tmp_path) -> None:

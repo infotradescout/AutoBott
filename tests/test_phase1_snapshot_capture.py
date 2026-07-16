@@ -1,10 +1,17 @@
 from __future__ import annotations
 
 import json
-from datetime import UTC, datetime, timedelta, timezone
+from datetime import UTC, date, datetime, timedelta, timezone
 from pathlib import Path
 
-from autobott_v2.phase1_snapshot_capture import CaptureRules, capture_snapshot_session, capture_symbol_snapshot, write_snapshot_day_manifest
+from autobott_v2.phase1_snapshot_capture import (
+    CaptureRules,
+    _select_manual_mirror_candidates,
+    _select_chain_subset,
+    capture_snapshot_session,
+    capture_symbol_snapshot,
+    write_snapshot_day_manifest,
+)
 
 
 class FakeCaptureClient:
@@ -219,3 +226,161 @@ def test_snapshot_capture_retries_short_context_bar_response(tmp_path) -> None:
 
     assert client.calls_by_symbol["UVXY"] == 2
     assert len(snapshot["context"]["vix_bars"]) == 35
+
+
+def test_chain_subset_preserves_farther_otm_runner_from_dense_chain() -> None:
+    deltas = [0.58, 0.56, 0.54, 0.52, 0.50]
+    contracts = [
+        {
+            "option_symbol": f"VXX260701C{int(strike * 1000):08d}",
+            "expiration": "2026-07-01",
+            "option_type": "call",
+            "strike": strike,
+            "delta": delta,
+            "bid": 4.8 - index * 0.3,
+            "ask": 5.0 - index * 0.3,
+            "spread_pct": 0.04,
+            "open_interest": 1000,
+            "volume": 500,
+        }
+        for index, (strike, delta) in enumerate(zip([45, 46, 47, 48, 49], deltas))
+    ]
+    runner_symbol = "VXX260701C00052000"
+    contracts.append(
+        {
+            "option_symbol": runner_symbol,
+            "expiration": "2026-07-01",
+            "option_type": "call",
+            "strike": 52.0,
+            "delta": 0.14,
+            "bid": 0.20,
+            "ask": 0.24,
+            "spread_pct": 0.1818,
+            "open_interest": 700,
+            "volume": 220,
+        }
+    )
+
+    selected = _select_chain_subset(
+        contracts,
+        underlying_price=47.0,
+        as_of_date=date(2026, 6, 30),
+        rules=CaptureRules(),
+    )
+
+    assert runner_symbol in {contract["option_symbol"] for contract in selected}
+    assert len([contract for contract in selected if contract["option_type"] == "call"]) <= 8
+
+
+def test_chain_subset_prunes_wide_spread_runner_in_favor_of_executable_runner() -> None:
+    contracts = [
+        {
+            "option_symbol": f"C{index}",
+            "expiration": "2026-07-01",
+            "option_type": "call",
+            "strike": 45.0 + index,
+            "delta": 0.58 - index * 0.02,
+            "bid": 4.8 - index * 0.3,
+            "ask": 5.0 - index * 0.3,
+            "spread_pct": 0.05,
+            "open_interest": 1000,
+            "volume": 500,
+        }
+        for index in range(4)
+    ]
+    contracts.extend(
+        [
+            {
+                "option_symbol": "WIDE",
+                "expiration": "2026-07-01",
+                "option_type": "call",
+                "strike": 52.0,
+                "delta": 0.15,
+                "bid": 0.50,
+                "ask": 1.00,
+                "spread_pct": 0.6667,
+                "open_interest": 900,
+                "volume": 300,
+            },
+            {
+                "option_symbol": "VALID",
+                "expiration": "2026-07-01",
+                "option_type": "call",
+                "strike": 53.0,
+                "delta": 0.10,
+                "bid": 0.90,
+                "ask": 1.00,
+                "spread_pct": 0.1053,
+                "open_interest": 800,
+                "volume": 250,
+            },
+        ]
+    )
+
+    selected = _select_chain_subset(
+        contracts,
+        underlying_price=47.0,
+        as_of_date=date(2026, 6, 30),
+        rules=CaptureRules(),
+    )
+    symbols = {contract["option_symbol"] for contract in selected}
+
+    assert "VALID" in symbols
+    assert "WIDE" not in symbols
+
+
+def test_manual_mirror_candidates_preserve_affordable_contract_pruned_from_execution_subset() -> None:
+    contracts = [
+        {
+            "option_symbol": f"CORE{index}",
+            "expiration": "2026-07-01",
+            "option_type": "call",
+            "strike": 45.0 + index,
+            "delta": 0.58 - index * 0.04,
+            "bid": 4.8 - index * 0.3,
+            "ask": 5.0 - index * 0.3,
+            "spread_pct": 0.05,
+            "open_interest": 1000,
+            "volume": 500,
+        }
+        for index in range(4)
+    ]
+    contracts.extend(
+        [
+            {
+                "option_symbol": "PAIR_RUNNER",
+                "expiration": "2026-07-01",
+                "option_type": "call",
+                "strike": 52.0,
+                "delta": 0.30,
+                "bid": 1.40,
+                "ask": 1.50,
+                "spread_pct": 0.069,
+                "open_interest": 900,
+                "volume": 300,
+            },
+            {
+                "option_symbol": "MANUAL_UNDER_100",
+                "expiration": "2026-07-01",
+                "option_type": "call",
+                "strike": 53.0,
+                "delta": 0.10,
+                "bid": 0.74,
+                "ask": 0.80,
+                "spread_pct": 0.0779,
+                "open_interest": 800,
+                "volume": 250,
+            },
+        ]
+    )
+
+    execution_subset = _select_chain_subset(
+        contracts,
+        underlying_price=47.0,
+        as_of_date=date(2026, 6, 30),
+        rules=CaptureRules(),
+    )
+    manual_subset = _select_manual_mirror_candidates(contracts, max_contract_cost=100.0)
+
+    assert "MANUAL_UNDER_100" not in {contract["option_symbol"] for contract in execution_subset}
+    assert {contract["option_symbol"] for contract in manual_subset} == {"MANUAL_UNDER_100"}

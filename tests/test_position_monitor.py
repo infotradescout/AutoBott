@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 
+import autobott_v2.position_monitor as position_monitor
 from autobott_v2.execution_config import AlpacaExecutionConfig
 from autobott_v2.execution_models import BrokerEnvironment, ExecutionOrder, ExecutionState
 from autobott_v2.position_monitor import PositionMonitorRules, run_position_monitor
@@ -472,6 +473,71 @@ def test_position_monitor_cancels_pending_entry_over_cost_cap_without_positions(
     ]
     assert broker.canceled == ["pending-buy-1"]
     assert broker.submitted == []
+
+
+def test_position_monitor_cancels_stale_atomic_entry_parent_only(monkeypatch, tmp_path) -> None:
+    save_runtime_state(default_runtime_state())
+    monkeypatch.setattr(position_monitor, "_monitor_now", lambda: datetime(2026, 7, 16, 15, 35, tzinfo=UTC))
+    broker = FakeBroker(
+        [],
+        orders=[
+            {
+                "id": "mleg-parent-stale",
+                "client_order_id": "autobott-entry-stale",
+                "order_class": "mleg",
+                "status": "accepted",
+                "submitted_at": "2026-07-16T15:30:00Z",
+                "limit_price": "3.20",
+                "qty": "1",
+                "filled_qty": "0",
+                "legs": [
+                    {"id": "leg-primary", "symbol": "VXX260717C00022000", "side": "buy"},
+                    {"id": "leg-runner", "symbol": "VXX260717C00025000", "side": "buy"},
+                ],
+            },
+            {
+                "id": "mleg-parent-fresh",
+                "client_order_id": "autobott-entry-fresh",
+                "order_class": "mleg",
+                "status": "accepted",
+                "submitted_at": "2026-07-16T15:34:00Z",
+                "legs": [],
+            },
+            {
+                "id": "foreign-mleg-stale",
+                "client_order_id": "manual-spread-1",
+                "order_class": "mleg",
+                "status": "accepted",
+                "submitted_at": "2026-07-16T15:20:00Z",
+                "legs": [],
+            },
+            {
+                "id": "single-leg-old",
+                "order_class": "simple",
+                "status": "accepted",
+                "submitted_at": "2026-07-16T15:20:00Z",
+                "symbol": "SPY260717C00600000",
+            },
+        ],
+    )
+
+    result = run_position_monitor(
+        broker=broker,
+        rules=PositionMonitorRules(pending_entry_max_age_seconds=180),
+        journal_path=str(tmp_path / "journal.jsonl"),
+        trailing_state_path=str(tmp_path / "trailing_peaks.json"),
+    )
+
+    assert result["actions"] == [
+        {
+            "reason": "stale_atomic_entry_canceled",
+            "broker_order_id": "mleg-parent-stale",
+            "symbols": ["VXX260717C00022000", "VXX260717C00025000"],
+            "age_seconds": 300.0,
+            "max_age_seconds": 180,
+        }
+    ]
+    assert broker.canceled == ["mleg-parent-stale"]
 
 
 def test_position_monitor_trims_excess_contracts_before_profit_loss(tmp_path) -> None:
