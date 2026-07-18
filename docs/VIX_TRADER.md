@@ -60,6 +60,11 @@ RTH, curb, and final-trading-day timing. Hosted preflight fails closed if that s
 broker/exchange contract metadata; client-entered product, strike, expiration, and settlement descriptions are not
 treated as contract truth.
 
+The durable calendar file is `data/vix_trader/cboe_calendar.json`. It must contain `source` beginning with `cboe`, a
+`source_url` on `cboe.com`, timezone-aware `published_at`, `coverage_start`, `coverage_end`, `holidays`, and
+`early_closes`. Preflight rejects a valid-looking artifact when its coverage does not span the decision through the
+selected expiration. The status API reports the loaded provenance and coverage window.
+
 Client timestamps and override identities are ignored by the hosted route. The server supplies the decision timestamp,
 and overrides require authenticated server-side authorization. Broker fills and quotes—not editable performance fields—
 derive committed capital, proceeds, open value, realized P&L, and unrealized P&L.

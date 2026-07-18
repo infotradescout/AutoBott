@@ -137,6 +137,8 @@ def handle_request(method: str, path: str, headers: dict[str, str], body: bytes)
             return 200, "application/json; charset=utf-8", {"ok": True, "config": config.to_json_dict(), "missing": config.missing_required_fields()}
         if path == "/api/vix-trader/config" and method == "PUT":
             config = vix_strategy_config_from_dict(_json_body(body))
+            if config.validation_errors():
+                return 400, "application/json; charset=utf-8", {"ok": False, "error": "invalid_vix_strategy_config", "details": config.validation_errors()}
             save_vix_strategy_config(config)
             return 200, "application/json; charset=utf-8", {"ok": True, "config": config.to_json_dict(), "missing": config.missing_required_fields()}
         if path == "/api/vix-trader/cycles" and method == "GET":
@@ -2967,7 +2969,7 @@ def _parse_datetime(value: Any) -> datetime | None:
 
 
 def _reason(status_code: int) -> str:
-    return {200: "OK", 401: "Unauthorized", 404: "Not Found", 409: "Conflict", 500: "Internal Server Error"}.get(status_code, "OK")
+    return {200: "OK", 400: "Bad Request", 401: "Unauthorized", 404: "Not Found", 409: "Conflict", 500: "Internal Server Error"}.get(status_code, "OK")
 
 
 def _corpus_root() -> Path:

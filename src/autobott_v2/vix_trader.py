@@ -64,6 +64,7 @@ class CboeCalendar(Protocol):
     def session_at(self, at: datetime) -> TradingSession: ...
     def final_tradable_timestamp(self, expiration: date) -> datetime: ...
     def full_regular_sessions_remaining(self, start: datetime, expiration: date) -> int: ...
+    def covers(self, start: date, end: date) -> bool: ...
 
 
 @dataclass(frozen=True)
@@ -73,7 +74,14 @@ class AuthoritativeCboeCalendar:
     holidays: frozenset[date]
     early_closes: dict[date, time] = field(default_factory=dict)
     source: str = "cboe_published_schedule"
+    source_url: str = "https://www.cboe.com/about/hours/us-options/"
+    coverage_start: date = date.min
+    coverage_end: date = date.max
+    published_at: datetime | None = None
     authoritative: bool = True
+
+    def covers(self, start: date, end: date) -> bool:
+        return self.coverage_start <= start <= end <= self.coverage_end
 
     def _is_trading_day(self, value: date) -> bool:
         return value.weekday() < 5 and value not in self.holidays
@@ -121,6 +129,11 @@ class AuthoritativeCboeCalendar:
 @dataclass(frozen=True)
 class UnavailableCboeCalendar:
     authoritative: bool = False
+    source: str = "unavailable"
+    source_url: str = ""
+    coverage_start: date | None = None
+    coverage_end: date | None = None
+    published_at: datetime | None = None
 
     def session_at(self, _at: datetime) -> TradingSession:
         return TradingSession.CLOSED
@@ -130,6 +143,9 @@ class UnavailableCboeCalendar:
 
     def full_regular_sessions_remaining(self, _start: datetime, _expiration: date) -> int:
         return 0
+
+    def covers(self, _start: date, _end: date) -> bool:
+        return False
 
 
 def cboe_calendar_path() -> Path:
@@ -142,14 +158,32 @@ def load_cboe_calendar(*, path: str | Path | None = None) -> CboeCalendar:
         return UnavailableCboeCalendar()
     payload = json.loads(target.read_text(encoding="utf-8"))
     source = str(payload.get("source") or "")
-    if not source.startswith("cboe"):
+    source_url = str(payload.get("source_url") or "")
+    if (
+        not source.startswith("cboe")
+        or "cboe.com/" not in source_url.lower()
+        or not payload.get("published_at")
+        or not payload.get("coverage_start")
+        or not payload.get("coverage_end")
+    ):
         return UnavailableCboeCalendar()
     holidays = frozenset(date.fromisoformat(str(item)[:10]) for item in payload.get("holidays", []))
     early_closes = {
         date.fromisoformat(str(day)[:10]): time.fromisoformat(str(close))
         for day, close in (payload.get("early_closes") or {}).items()
     }
-    return AuthoritativeCboeCalendar(holidays=holidays, early_closes=early_closes, source=source)
+    published_at = datetime.fromisoformat(str(payload["published_at"]).replace("Z", "+00:00"))
+    if published_at.tzinfo is None:
+        return UnavailableCboeCalendar()
+    return AuthoritativeCboeCalendar(
+        holidays=holidays,
+        early_closes=early_closes,
+        source=source,
+        source_url=source_url,
+        coverage_start=date.fromisoformat(str(payload["coverage_start"])[:10]),
+        coverage_end=date.fromisoformat(str(payload["coverage_end"])[:10]),
+        published_at=published_at,
+    )
 
 
 class VixBrokerAdapter(Protocol):
@@ -157,6 +191,7 @@ class VixBrokerAdapter(Protocol):
 
     def get_account(self) -> dict[str, Any]: ...
     def get_option_chain(self, product: VixProduct, expiration: date) -> list[dict[str, Any]]: ...
+    def get_contract_metadata(self, option_symbol: str) -> VixContractMetadata: ...
     def get_session_status(self, at: datetime) -> dict[str, Any]: ...
     def get_quote(self, option_symbol: str) -> dict[str, Any]: ...
     def preview_order(self, order: dict[str, Any]) -> dict[str, Any]: ...
@@ -211,6 +246,45 @@ class VixStrategyConfig:
             "addition_trigger": self.addition_trigger,
         }
         return sorted(key for key, value in required.items() if value is None or value == "")
+
+    def validation_errors(self) -> list[str]:
+        errors: list[str] = []
+        numeric_values = {
+            "preferred_entry_min": self.preferred_entry_min,
+            "preferred_entry_max": self.preferred_entry_max,
+            "enabled_entry_min": self.enabled_entry_min,
+            "enabled_entry_max": self.enabled_entry_max,
+        }
+        optional_positive = {
+            "maximum_combined_debit": self.maximum_combined_debit,
+            "maximum_cycle_allocation": self.maximum_cycle_allocation,
+            "maximum_additional_capital": self.maximum_additional_capital,
+            "first_leg_exit_target_pct": self.first_leg_exit_target_pct,
+        }
+        for name, value in {**numeric_values, **optional_positive}.items():
+            if value is not None and (not math.isfinite(value) or value <= 0):
+                errors.append(f"{name}_must_be_positive_finite")
+        for name, value in {
+            "minimum_full_trading_sessions_remaining": self.minimum_full_trading_sessions_remaining,
+            "maximum_days_to_expiration": self.maximum_days_to_expiration,
+            "addition_sizing": self.addition_sizing,
+            "mandatory_exit_buffer_minutes": self.mandatory_exit_buffer_minutes,
+        }.items():
+            if value is not None and value <= 0:
+                errors.append(f"{name}_must_be_positive")
+        if self.maximum_additions is not None and self.maximum_additions < 0:
+            errors.append("maximum_additions_must_be_nonnegative")
+        if self.preferred_entry_min > self.preferred_entry_max:
+            errors.append("preferred_entry_range_inverted")
+        if self.enabled_entry_min > self.enabled_entry_max:
+            errors.append("enabled_entry_range_inverted")
+        if self.preferred_entry_min < self.enabled_entry_min or self.preferred_entry_max > self.enabled_entry_max:
+            errors.append("preferred_entry_range_outside_enabled_range")
+        if self.first_leg_exit_target_pct is not None and self.first_leg_exit_target_pct > 1:
+            errors.append("first_leg_exit_target_pct_above_one")
+        if not self.accepted_products:
+            errors.append("accepted_products_required")
+        return sorted(set(errors))
 
 
 def vix_strategy_config_path() -> Path:
@@ -278,6 +352,8 @@ def load_vix_strategy_config(*, path: str | Path | None = None, environ: dict[st
 
 
 def save_vix_strategy_config(config: VixStrategyConfig, *, path: str | Path | None = None) -> Path:
+    if config.validation_errors():
+        raise ValueError("invalid_vix_strategy_config:" + ",".join(config.validation_errors()))
     target = Path(path) if path is not None else vix_strategy_config_path()
     target.parent.mkdir(parents=True, exist_ok=True)
     temporary = target.with_suffix(".tmp")
@@ -596,9 +672,14 @@ def validate_vix_preflight(
     missing_config = config.missing_required_fields()
     if missing_config:
         block("strategy_configuration_incomplete", f"Configure before entry: {', '.join(missing_config)}.", "strategy")
+    invalid_config = config.validation_errors()
+    if invalid_config:
+        block("strategy_configuration_invalid", f"Invalid strategy configuration: {', '.join(invalid_config)}.", "strategy")
 
     if not resolved_calendar.authoritative:
         block("authoritative_calendar_required", "Current Cboe holiday and early-close calendar is unavailable.", "calendar")
+    elif not resolved_calendar.covers(request.actual_timestamp.date(), request.expiration):
+        block("calendar_coverage_incomplete", "Authoritative Cboe calendar does not cover the decision-through-expiration window.", "calendar")
     if request.timestamp_source not in {"server", "broker"}:
         block("untrusted_timestamp", "Preflight time must come from the server or broker.", "session")
     if request.requested_override_codes and not authorized_override_actor:
@@ -825,6 +906,7 @@ def load_vix_cycles(*, path: str | Path | None = None, limit: int = 100) -> list
 
 def vix_strategy_status() -> dict[str, Any]:
     config = load_vix_strategy_config()
+    calendar = load_cboe_calendar()
     cycles = load_vix_cycles(limit=20)
     active = [row for row in cycles if row.get("lifecycle_state") in ACTIVE_EXPOSURE_STATES]
     return {
@@ -838,6 +920,16 @@ def vix_strategy_status() -> dict[str, Any]:
         "config": config.to_json_dict(),
         "configuration_complete": not config.missing_required_fields(),
         "missing_configuration": config.missing_required_fields(),
+        "configuration_valid": not config.validation_errors(),
+        "configuration_errors": config.validation_errors(),
+        "calendar": {
+            "authoritative": calendar.authoritative,
+            "source": calendar.source,
+            "source_url": calendar.source_url,
+            "published_at": calendar.published_at.astimezone(UTC).isoformat() if calendar.published_at else None,
+            "coverage_start": calendar.coverage_start.isoformat() if calendar.coverage_start else None,
+            "coverage_end": calendar.coverage_end.isoformat() if calendar.coverage_end else None,
+        },
         "cycle_count": len(cycles),
         "active_cycle_count": len(active),
         "cycles": list(reversed(cycles)),

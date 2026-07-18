@@ -19,6 +19,7 @@ from autobott_v2.vix_trader import (
     create_vix_cycle,
     append_vix_cycle,
     load_vix_cycles,
+    load_cboe_calendar,
     load_vix_strategy_config,
     save_vix_strategy_config,
     validate_vix_preflight,
@@ -222,6 +223,31 @@ def test_configuration_round_trips_and_environment_overrides(tmp_path) -> None:
     loaded = load_vix_strategy_config(path=path, environ={"AUTOBOTT_VIX_MAX_DTE": "7"})
     assert loaded.maximum_days_to_expiration == 7
     assert loaded.maximum_combined_debit == 10.0
+
+
+def test_invalid_configuration_fails_closed() -> None:
+    config = _config(maximum_combined_debit=float("nan"), maximum_cycle_allocation=-1, preferred_entry_min=20, preferred_entry_max=19)
+    result = validate_vix_preflight(_request(), config, calendar=_calendar())
+    assert "strategy_configuration_invalid" in {issue.code for issue in result.issues}
+    assert "maximum_combined_debit_must_be_positive_finite" in config.validation_errors()
+    assert "maximum_cycle_allocation_must_be_positive_finite" in config.validation_errors()
+    assert "preferred_entry_range_inverted" in config.validation_errors()
+
+
+def test_calendar_file_requires_provenance_and_coverage(tmp_path) -> None:
+    path = tmp_path / "calendar.json"
+    path.write_text('{"source":"cboe_published_schedule","holidays":[]}', encoding="utf-8")
+    assert load_cboe_calendar(path=path).authoritative is False
+    path.write_text(
+        '{"source":"cboe_published_schedule","source_url":"https://www.cboe.com/about/hours/us-options/","published_at":"2026-07-01T00:00:00Z",'
+        '"coverage_start":"2026-01-01","coverage_end":"2026-07-20","holidays":[],"early_closes":{}}',
+        encoding="utf-8",
+    )
+    calendar = load_cboe_calendar(path=path)
+    assert calendar.authoritative is True
+    assert calendar.covers(date(2026, 7, 13), date(2026, 7, 22)) is False
+    result = validate_vix_preflight(_request(), _config(), calendar=calendar)
+    assert "calendar_coverage_incomplete" in {issue.code for issue in result.issues}
 
 
 def test_cycle_store_duplicate_check_is_atomic(tmp_path) -> None:

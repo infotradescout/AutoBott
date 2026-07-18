@@ -1319,6 +1319,20 @@ def test_vix_configuration_api_persists_required_strategy_values(monkeypatch, tm
     assert json.loads(get_body)["config"]["maximum_cycle_allocation"] == 1500.0
 
 
+def test_vix_configuration_api_rejects_invalid_values(monkeypatch, tmp_path) -> None:
+    _auth_env(monkeypatch, tmp_path)
+    status, body = _invoke_app(
+        "PUT",
+        "/api/vix-trader/config",
+        token="dashboard-token",
+        payload={"maximum_combined_debit": -1, "preferred_entry_min": 20, "preferred_entry_max": 19},
+    )
+    response = json.loads(body)
+    assert status.startswith("400")
+    assert response["error"] == "invalid_vix_strategy_config"
+    assert "maximum_combined_debit_must_be_positive_finite" in response["details"]
+
+
 def test_frontend_contains_no_buy_sell_submit_order_controls() -> None:
     _status, body = _invoke_app("GET", "/")
     lowered = body.lower()
