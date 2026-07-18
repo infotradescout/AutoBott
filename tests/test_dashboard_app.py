@@ -1288,7 +1288,35 @@ def test_vix_cycle_store_enforces_server_side_duplicate_detection(monkeypatch, t
 
     assert first_status.startswith("200")
     assert second_status.startswith("200")
-    assert {row["code"] for row in second["issues"]} >= {"duplicate_cycle", "duplicate_order", "overlapping_exposure"}
+    issue_codes = {row["code"] for row in second["issues"]}
+    assert "duplicate_order" in issue_codes
+    assert "duplicate_cycle" not in issue_codes
+    assert "overlapping_exposure" not in issue_codes
+    duplicate_status, duplicate_body = _invoke_app("POST", "/api/vix-trader/cycles", token="dashboard-token", payload=request)
+    assert duplicate_status.startswith("409")
+    assert json.loads(duplicate_body)["error"] == "duplicate_client_request_id"
+
+
+def test_vix_configuration_api_persists_required_strategy_values(monkeypatch, tmp_path) -> None:
+    _auth_env(monkeypatch, tmp_path)
+    config = {
+        "minimum_full_trading_sessions_remaining": 3,
+        "maximum_days_to_expiration": 10,
+        "maximum_combined_debit": 8.5,
+        "maximum_cycle_allocation": 1500,
+        "first_leg_exit_target_pct": 0.3,
+        "second_leg_management_rule": "hold_remaining_leg_until_reversal_or_deadline",
+        "maximum_additions": 1,
+        "maximum_additional_capital": 300,
+        "addition_sizing": 1,
+        "addition_trigger": "confirmed_opposite_move",
+    }
+    put_status, put_body = _invoke_app("PUT", "/api/vix-trader/config", token="dashboard-token", payload=config)
+    get_status, get_body = _invoke_app("GET", "/api/vix-trader/config", token="dashboard-token")
+    assert put_status.startswith("200")
+    assert json.loads(put_body)["missing"] == []
+    assert get_status.startswith("200")
+    assert json.loads(get_body)["config"]["maximum_cycle_allocation"] == 1500.0
 
 
 def test_frontend_contains_no_buy_sell_submit_order_controls() -> None:

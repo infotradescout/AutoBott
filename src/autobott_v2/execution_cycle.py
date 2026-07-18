@@ -49,6 +49,48 @@ class BrokerOrderState(str, Enum):
     REPLACED = "REPLACED"
 
 
+ALLOWED_CYCLE_TRANSITIONS: dict[CycleLifecycleState, set[CycleLifecycleState]] = {
+    CycleLifecycleState.DRAFT: {CycleLifecycleState.PREFLIGHT_REQUIRED},
+    CycleLifecycleState.PREFLIGHT_REQUIRED: {
+        CycleLifecycleState.PREFLIGHT_VALIDATED,
+        CycleLifecycleState.PREFLIGHT_BLOCKED,
+        CycleLifecycleState.SESSION_BLOCKED,
+        CycleLifecycleState.EXPIRATION_BLOCKED,
+        CycleLifecycleState.RISK_BLOCKED,
+    },
+    CycleLifecycleState.PREFLIGHT_VALIDATED: {CycleLifecycleState.ENTRY_READY, CycleLifecycleState.MANUAL_REVIEW_REQUIRED},
+    CycleLifecycleState.ENTRY_READY: {CycleLifecycleState.ENTRY_SUBMITTED, CycleLifecycleState.RISK_BLOCKED},
+    CycleLifecycleState.ENTRY_SUBMITTED: {
+        CycleLifecycleState.ENTRY_PARTIALLY_FILLED,
+        CycleLifecycleState.ACTIVE,
+        CycleLifecycleState.ORDER_REJECTED,
+        CycleLifecycleState.MANUAL_REVIEW_REQUIRED,
+    },
+    CycleLifecycleState.ENTRY_PARTIALLY_FILLED: {
+        CycleLifecycleState.ACTIVE,
+        CycleLifecycleState.ORDER_REJECTED,
+        CycleLifecycleState.MANUAL_REVIEW_REQUIRED,
+    },
+    CycleLifecycleState.ACTIVE: {CycleLifecycleState.FIRST_LEG_EXIT_WORKING, CycleLifecycleState.EXIT_REQUIRED},
+    CycleLifecycleState.FIRST_LEG_EXIT_WORKING: {
+        CycleLifecycleState.FIRST_LEG_EXITED,
+        CycleLifecycleState.EXIT_CANCELED,
+        CycleLifecycleState.EXIT_REPLACEMENT_REQUIRED,
+        CycleLifecycleState.ORDER_REJECTED,
+    },
+    CycleLifecycleState.EXIT_CANCELED: {CycleLifecycleState.EXIT_REPLACEMENT_REQUIRED, CycleLifecycleState.MANUAL_REVIEW_REQUIRED},
+    CycleLifecycleState.EXIT_REPLACEMENT_REQUIRED: {CycleLifecycleState.FIRST_LEG_EXIT_WORKING, CycleLifecycleState.MANUAL_REVIEW_REQUIRED},
+    CycleLifecycleState.FIRST_LEG_EXITED: {CycleLifecycleState.REBALANCE_ELIGIBLE, CycleLifecycleState.EXIT_REQUIRED},
+    CycleLifecycleState.REBALANCE_ELIGIBLE: {CycleLifecycleState.REBALANCE_SUBMITTED, CycleLifecycleState.EXIT_REQUIRED},
+    CycleLifecycleState.REBALANCE_SUBMITTED: {CycleLifecycleState.REBALANCED, CycleLifecycleState.ORDER_REJECTED},
+    CycleLifecycleState.REBALANCED: {CycleLifecycleState.EXIT_REQUIRED, CycleLifecycleState.CLOSING},
+    CycleLifecycleState.EXIT_REQUIRED: {CycleLifecycleState.CLOSING, CycleLifecycleState.MANUAL_REVIEW_REQUIRED},
+    CycleLifecycleState.CLOSING: {CycleLifecycleState.CLOSED, CycleLifecycleState.EXIT_REPLACEMENT_REQUIRED},
+    CycleLifecycleState.CLOSED: {CycleLifecycleState.RECONCILED, CycleLifecycleState.RECONCILIATION_MISMATCH},
+    CycleLifecycleState.RECONCILIATION_MISMATCH: {CycleLifecycleState.RECONCILED, CycleLifecycleState.MANUAL_REVIEW_REQUIRED},
+}
+
+
 @dataclass(frozen=True)
 class AuditEvent:
     event_type: str
@@ -61,6 +103,28 @@ class AuditEvent:
         payload = asdict(self)
         payload["timestamp"] = self.timestamp.astimezone(UTC).isoformat()
         return payload
+
+
+@dataclass(frozen=True)
+class BrokerFill:
+    fill_id: str
+    quantity: int
+    price: float
+    timestamp: datetime
+
+    def __post_init__(self) -> None:
+        if self.quantity <= 0:
+            raise ValueError("fill_quantity_must_be_positive")
+        if self.price <= 0:
+            raise ValueError("fill_price_must_be_positive")
+
+    def to_json_dict(self) -> dict[str, Any]:
+        return {
+            "fill_id": self.fill_id,
+            "quantity": self.quantity,
+            "price": self.price,
+            "timestamp": self.timestamp.astimezone(UTC).isoformat(),
+        }
 
 
 @dataclass
@@ -78,12 +142,27 @@ class ManagedOrder:
     replaced_by_order_id: str | None = None
     submitted_at: datetime | None = None
     confirmed_at: datetime | None = None
+    fills: list[BrokerFill] = field(default_factory=list)
+
+    @property
+    def confirmed_quantity(self) -> int:
+        return sum(fill.quantity for fill in self.fills)
+
+    @property
+    def confirmed_value(self) -> float:
+        return round(sum(fill.quantity * fill.price * 100 for fill in self.fills), 2)
 
     @property
     def confirmed_proceeds(self) -> float:
-        if self.purpose not in {"exit", "reduce"} or self.state is not BrokerOrderState.FILLED:
+        if self.purpose not in {"exit", "reduce"}:
             return 0.0
-        return round(float(self.broker_confirmed_fill_price or 0.0) * self.filled_quantity * 100, 2)
+        return self.confirmed_value
+
+    @property
+    def confirmed_cost(self) -> float:
+        if self.purpose not in {"entry", "addition", "rebalance"}:
+            return 0.0
+        return self.confirmed_value
 
     def apply_broker_update(
         self,
@@ -100,15 +179,29 @@ class ManagedOrder:
             raise ValueError("filled_order_requires_broker_fill")
         if state is BrokerOrderState.PARTIALLY_FILLED and filled_quantity <= 0:
             raise ValueError("partial_fill_requires_positive_quantity")
+        incremental_quantity = filled_quantity - self.confirmed_quantity
+        if incremental_quantity > 0:
+            if fill_price is None or fill_price <= 0:
+                raise ValueError("new_fill_requires_positive_price")
+            self.fills.append(
+                BrokerFill(
+                    fill_id=f"{broker_order_id or self.broker_order_id or self.order_id}:{filled_quantity}",
+                    quantity=incremental_quantity,
+                    price=fill_price,
+                    timestamp=confirmed_at or datetime.now(UTC),
+                )
+            )
         self.state = state
-        self.filled_quantity = filled_quantity
-        self.broker_confirmed_fill_price = fill_price
+        self.filled_quantity = self.confirmed_quantity
+        if fill_price is not None:
+            self.broker_confirmed_fill_price = fill_price
         self.broker_order_id = broker_order_id or self.broker_order_id
         self.confirmed_at = confirmed_at or datetime.now(UTC)
 
     def to_json_dict(self) -> dict[str, Any]:
         payload = asdict(self)
         payload["state"] = self.state.value
+        payload["fills"] = [fill.to_json_dict() for fill in self.fills]
         for key in ("submitted_at", "confirmed_at"):
             value = getattr(self, key)
             payload[key] = value.astimezone(UTC).isoformat() if value else None
@@ -129,9 +222,7 @@ class ExecutionCycle:
     cycle_id: str = field(default_factory=lambda: str(uuid4()))
     lifecycle_state: CycleLifecycleState = CycleLifecycleState.DRAFT
     orders: list[ManagedOrder] = field(default_factory=list)
-    realized_proceeds: float = 0.0
-    current_open_value: float = 0.0
-    capital_committed: float = 0.0
+    current_market_estimates: dict[str, float] = field(default_factory=dict)
     risk_policy_result: dict[str, Any] = field(default_factory=dict)
     next_required_action: str = "run_preflight"
     audit_events: list[AuditEvent] = field(default_factory=list)
@@ -139,9 +230,40 @@ class ExecutionCycle:
     def record_event(self, event_type: str, detail: str, *, actor: str = "system", payload: dict[str, Any] | None = None) -> None:
         self.audit_events.append(AuditEvent(event_type, datetime.now(UTC), actor, detail, payload or {}))
 
-    def recalculate_confirmed_proceeds(self) -> float:
-        self.realized_proceeds = round(sum(order.confirmed_proceeds for order in self.orders), 2)
-        return self.realized_proceeds
+    @property
+    def realized_proceeds(self) -> float:
+        return round(sum(order.confirmed_proceeds for order in self.orders), 2)
+
+    @property
+    def capital_committed(self) -> float:
+        return round(sum(order.confirmed_cost for order in self.orders), 2)
+
+    @property
+    def current_open_value(self) -> float:
+        entry_qty: dict[str, int] = {}
+        exit_qty: dict[str, int] = {}
+        for order in self.orders:
+            if order.purpose in {"entry", "addition", "rebalance"}:
+                entry_qty[order.leg_id] = entry_qty.get(order.leg_id, 0) + order.confirmed_quantity
+            elif order.purpose in {"exit", "reduce"}:
+                exit_qty[order.leg_id] = exit_qty.get(order.leg_id, 0) + order.confirmed_quantity
+        return round(
+            sum(max(0, quantity - exit_qty.get(leg_id, 0)) * float(self.current_market_estimates.get(leg_id, 0.0)) * 100 for leg_id, quantity in entry_qty.items()),
+            2,
+        )
+
+    def transition(self, target: CycleLifecycleState, *, actor: str, reason: str) -> None:
+        allowed = ALLOWED_CYCLE_TRANSITIONS.get(self.lifecycle_state, set())
+        if target not in allowed:
+            raise ValueError(f"invalid_cycle_transition:{self.lifecycle_state.value}->{target.value}")
+        previous = self.lifecycle_state
+        self.lifecycle_state = target
+        self.record_event(
+            "lifecycle_transition",
+            reason,
+            actor=actor,
+            payload={"from": previous.value, "to": target.value},
+        )
 
     def to_json_dict(self) -> dict[str, Any]:
         return {

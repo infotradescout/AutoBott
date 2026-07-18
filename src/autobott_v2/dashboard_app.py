@@ -42,6 +42,7 @@ from .runtime_paths import phase1_replay_campaign_root, phase1_snapshots_root
 from .trade_outcomes import record_trade_outcomes_from_orders
 from .strategy_registry import strategy_registry_payload
 from .vix_trader import (
+    ACTIVE_EXPOSURE_STATES,
     SettlementType,
     TradingSession,
     VixPreflightRequest,
@@ -49,8 +50,12 @@ from .vix_trader import (
     VixStrategyConfig,
     append_vix_cycle,
     create_vix_cycle,
+    load_cboe_calendar,
     load_vix_cycles,
+    load_vix_strategy_config,
+    save_vix_strategy_config,
     validate_vix_preflight,
+    vix_strategy_config_from_dict,
     vix_strategy_status,
 )
 
@@ -127,14 +132,26 @@ def handle_request(method: str, path: str, headers: dict[str, str], body: bytes)
             return 200, "application/json; charset=utf-8", strategy_registry_payload()
         if path == "/api/vix-trader/status" and method == "GET":
             return 200, "application/json; charset=utf-8", vix_strategy_status()
+        if path == "/api/vix-trader/config" and method == "GET":
+            config = load_vix_strategy_config()
+            return 200, "application/json; charset=utf-8", {"ok": True, "config": config.to_json_dict(), "missing": config.missing_required_fields()}
+        if path == "/api/vix-trader/config" and method == "PUT":
+            config = vix_strategy_config_from_dict(_json_body(body))
+            save_vix_strategy_config(config)
+            return 200, "application/json; charset=utf-8", {"ok": True, "config": config.to_json_dict(), "missing": config.missing_required_fields()}
         if path == "/api/vix-trader/cycles" and method == "GET":
             return 200, "application/json; charset=utf-8", {"ok": True, "cycles": list(reversed(load_vix_cycles()))}
         if path == "/api/vix-trader/preflight" and method == "POST":
             request = _vix_preflight_request(_json_body(body))
-            return 200, "application/json; charset=utf-8", {"ok": True, "preflight": validate_vix_preflight(request).to_json_dict()}
+            return 200, "application/json; charset=utf-8", {"ok": True, "preflight": validate_vix_preflight(request, load_vix_strategy_config(), calendar=load_cboe_calendar()).to_json_dict()}
         if path == "/api/vix-trader/cycles" and method == "POST":
-            cycle = create_vix_cycle(_vix_preflight_request(_json_body(body)))
-            append_vix_cycle(cycle)
+            cycle = create_vix_cycle(_vix_preflight_request(_json_body(body)), load_vix_strategy_config(), calendar=load_cboe_calendar())
+            try:
+                append_vix_cycle(cycle)
+            except ValueError as exc:
+                if str(exc) in {"duplicate_client_request_id", "overlapping_active_expiration"}:
+                    return 409, "application/json; charset=utf-8", {"ok": False, "error": str(exc)}
+                raise
             return 200, "application/json; charset=utf-8", {"ok": True, "cycle": cycle.to_json_dict()}
         if path == "/api/runtime/arm-paper" and method == "POST":
             return 200, "application/json; charset=utf-8", _runtime_arm_paper_payload(_json_body(body))
@@ -1565,12 +1582,11 @@ def _execution_replace_payload(payload: JsonDict) -> JsonDict:
 
 
 def _vix_preflight_request(payload: JsonDict) -> VixPreflightRequest:
-    actual_timestamp = _parse_datetime(payload.get("actual_timestamp")) or datetime.now(UTC)
     call_expiration = date.fromisoformat(str(payload["call_expiration"])[:10])
     put_expiration = date.fromisoformat(str(payload.get("put_expiration") or payload["call_expiration"])[:10])
     product = VixProduct(str(payload.get("product") or "VIXW").upper())
     saved_cycles = load_vix_cycles(limit=500)
-    nonterminal = [row for row in saved_cycles if row.get("lifecycle_state") not in {"CLOSED", "RECONCILED"}]
+    nonterminal = [row for row in saved_cycles if row.get("lifecycle_state") in ACTIVE_EXPOSURE_STATES]
     matching_cycles = [
         str(row.get("cycle_id"))
         for row in nonterminal
@@ -1596,7 +1612,7 @@ def _vix_preflight_request(payload: JsonDict) -> VixPreflightRequest:
         put_expiration=put_expiration,
         settlement_type=SettlementType(str(payload.get("settlement_type") or "AM").upper()),
         intended_session=TradingSession(str(payload.get("intended_session") or "REGULAR").upper()),
-        actual_timestamp=actual_timestamp,
+        actual_timestamp=datetime.now(UTC),
         call_strike=float(payload["call_strike"]),
         put_strike=float(payload["put_strike"]),
         call_quantity=int(payload["call_quantity"]),
@@ -1608,8 +1624,8 @@ def _vix_preflight_request(payload: JsonDict) -> VixPreflightRequest:
         overlapping_expirations=tuple(sorted({*(date.fromisoformat(str(item)[:10]) for item in payload.get("overlapping_expirations", [])), *saved_expirations})),
         client_request_id=str(payload["client_request_id"]) if payload.get("client_request_id") else None,
         prior_client_request_ids=tuple(sorted({*(str(item) for item in payload.get("prior_client_request_ids", [])), *saved_request_ids})),
-        requested_override_codes=tuple(str(item) for item in payload.get("requested_override_codes", [])),
-        override_actor=str(payload["override_actor"]) if payload.get("override_actor") else None,
+        requested_override_codes=(),
+        override_actor=None,
         expected_settlement_type=SettlementType(str(payload.get("expected_settlement_type") or "AM").upper()),
     )
 
@@ -2951,7 +2967,7 @@ def _parse_datetime(value: Any) -> datetime | None:
 
 
 def _reason(status_code: int) -> str:
-    return {200: "OK", 401: "Unauthorized", 404: "Not Found", 500: "Internal Server Error"}.get(status_code, "OK")
+    return {200: "OK", 401: "Unauthorized", 404: "Not Found", 409: "Conflict", 500: "Internal Server Error"}.get(status_code, "OK")
 
 
 def _corpus_root() -> Path:

@@ -13,7 +13,8 @@ controls.
   requests, overlapping exposure, quantities, debit, and cycle capital.
 - Separate strategy-performance and execution-quality reports.
 - Dedicated `/vix-trader` workspace inside the existing dashboard service.
-- JSONL draft-cycle persistence under the configured AutoBott data root.
+- Locked JSONL cycle persistence under the configured AutoBott data root, with atomic duplicate-request and active-expiration checks.
+- Durable strategy configuration through environment variables, `data/vix_trader/config.json`, or the authenticated configuration API.
 
 ## Truthful execution status
 
@@ -36,8 +37,10 @@ to `null`, including:
 - second-leg rule;
 - addition count, capital, sizing, and trigger.
 
-Preflight returns `strategy_configuration_incomplete` until Thomas supplies those rules. This prevents placeholder
-values from silently becoming executable strategy logic.
+Preflight returns `strategy_configuration_incomplete` until Thomas supplies those rules. Values can be supplied with
+the `AUTOBOTT_VIX_*` environment variables declared in `render.yaml`, persisted through `PUT /api/vix-trader/config`,
+or stored in the data-root configuration file. This prevents placeholder values from silently becoming executable
+strategy logic while allowing hosted configuration to survive restarts.
 
 ## Settlement and session basis
 
@@ -51,8 +54,15 @@ Primary references:
 - https://www.cboe.com/en/tradable-products/vix/vix-options/
 - https://www.cboe.com/about/hours/us-options/
 
-Exchange calendars and holiday exceptions must come from an authoritative calendar provider before broker execution.
-The pure preflight functions accept an explicit holiday set for deterministic tests.
+Exchange calendars and holiday/early-close exceptions must come from an authoritative Cboe-sourced calendar snapshot
+before preflight can pass. The calendar model handles Sunday GTH, the Friday-evening closure, holidays, early closes,
+RTH, curb, and final-trading-day timing. Hosted preflight fails closed if that snapshot is absent. It also requires
+broker/exchange contract metadata; client-entered product, strike, expiration, and settlement descriptions are not
+treated as contract truth.
+
+Client timestamps and override identities are ignored by the hosted route. The server supplies the decision timestamp,
+and overrides require authenticated server-side authorization. Broker fills and quotes—not editable performance fields—
+derive committed capital, proceeds, open value, realized P&L, and unrealized P&L.
 
 ## Existing platform preservation
 
@@ -61,6 +71,8 @@ The existing `/` dashboard and all pre-existing API routes remain present. VIX T
 - `GET /vix-trader`
 - `GET /api/strategies`
 - `GET /api/vix-trader/status`
+- `GET /api/vix-trader/config`
+- `PUT /api/vix-trader/config`
 - `GET /api/vix-trader/cycles`
 - `POST /api/vix-trader/preflight`
 - `POST /api/vix-trader/cycles`

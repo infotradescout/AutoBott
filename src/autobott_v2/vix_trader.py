@@ -1,8 +1,12 @@
 from __future__ import annotations
 
 import json
+import math
+import os
+import time as time_module
+from contextlib import contextmanager
 from dataclasses import asdict, dataclass, field
-from datetime import UTC, date, datetime, time, timedelta, timezone, tzinfo
+from datetime import UTC, date, datetime, time, timedelta, tzinfo
 from enum import Enum
 from pathlib import Path
 from typing import Any, Protocol
@@ -21,12 +25,6 @@ def _eastern_timezone(reference: date) -> tzinfo:
     return _market_timezone_info("America/New_York", reference)
 
 
-def _central_timezone(reference: date) -> tzinfo:
-    eastern = _eastern_timezone(reference)
-    offset = eastern.utcoffset(datetime.combine(reference, time(12, 0))) or timedelta(hours=-5)
-    return timezone(offset - timedelta(hours=1), name="America/Chicago")
-
-
 class VixProduct(str, Enum):
     VIX = "VIX"
     VIXW = "VIXW"
@@ -42,6 +40,116 @@ class TradingSession(str, Enum):
     GLOBAL = "GLOBAL"
     CURB = "CURB"
     CLOSED = "CLOSED"
+
+
+@dataclass(frozen=True)
+class VixContractMetadata:
+    option_symbol: str
+    product: VixProduct
+    option_type: str
+    expiration: date
+    strike: float
+    settlement_type: SettlementType
+    source: str
+    observed_at: datetime
+
+    @property
+    def authoritative(self) -> bool:
+        return self.source in {"broker", "exchange"}
+
+
+class CboeCalendar(Protocol):
+    authoritative: bool
+
+    def session_at(self, at: datetime) -> TradingSession: ...
+    def final_tradable_timestamp(self, expiration: date) -> datetime: ...
+    def full_regular_sessions_remaining(self, start: datetime, expiration: date) -> int: ...
+
+
+@dataclass(frozen=True)
+class AuthoritativeCboeCalendar:
+    """Explicit Cboe calendar snapshot; callers must load current holiday exceptions."""
+
+    holidays: frozenset[date]
+    early_closes: dict[date, time] = field(default_factory=dict)
+    source: str = "cboe_published_schedule"
+    authoritative: bool = True
+
+    def _is_trading_day(self, value: date) -> bool:
+        return value.weekday() < 5 and value not in self.holidays
+
+    def _previous_trading_day(self, value: date) -> date:
+        cursor = value - timedelta(days=1)
+        while not self._is_trading_day(cursor):
+            cursor -= timedelta(days=1)
+        return cursor
+
+    def session_at(self, at: datetime) -> TradingSession:
+        localized = at.astimezone(_eastern_timezone(at.date()))
+        day = localized.date()
+        current = localized.time().replace(tzinfo=None)
+        if self._is_trading_day(day):
+            regular_close = self.early_closes.get(day, time(16, 15))
+            if time(9, 30) <= current <= regular_close:
+                return TradingSession.REGULAR
+            if day not in self.early_closes and time(16, 15) < current <= time(17, 0):
+                return TradingSession.CURB
+            if current <= time(9, 25):
+                return TradingSession.GLOBAL
+        next_day = day + timedelta(days=1)
+        evening_gth_day = day.weekday() in {0, 1, 2, 3, 6}
+        if evening_gth_day and current >= time(20, 15) and self._is_trading_day(next_day):
+            return TradingSession.GLOBAL
+        return TradingSession.CLOSED
+
+    def final_tradable_timestamp(self, expiration: date) -> datetime:
+        last_day = self._previous_trading_day(expiration)
+        close = self.early_closes.get(last_day, time(17, 0))
+        return datetime.combine(last_day, close, tzinfo=_eastern_timezone(last_day))
+
+    def full_regular_sessions_remaining(self, start: datetime, expiration: date) -> int:
+        final_day = self._previous_trading_day(expiration)
+        cursor = start.astimezone(_eastern_timezone(start.date())).date() + timedelta(days=1)
+        count = 0
+        while cursor <= final_day:
+            if self._is_trading_day(cursor):
+                count += 1
+            cursor += timedelta(days=1)
+        return count
+
+
+@dataclass(frozen=True)
+class UnavailableCboeCalendar:
+    authoritative: bool = False
+
+    def session_at(self, _at: datetime) -> TradingSession:
+        return TradingSession.CLOSED
+
+    def final_tradable_timestamp(self, expiration: date) -> datetime:
+        return datetime.combine(expiration, time(0, 0), tzinfo=UTC)
+
+    def full_regular_sessions_remaining(self, _start: datetime, _expiration: date) -> int:
+        return 0
+
+
+def cboe_calendar_path() -> Path:
+    return data_root() / "vix_trader" / "cboe_calendar.json"
+
+
+def load_cboe_calendar(*, path: str | Path | None = None) -> CboeCalendar:
+    target = Path(path) if path is not None else cboe_calendar_path()
+    if not target.exists():
+        return UnavailableCboeCalendar()
+    payload = json.loads(target.read_text(encoding="utf-8"))
+    source = str(payload.get("source") or "")
+    if not source.startswith("cboe"):
+        return UnavailableCboeCalendar()
+    holidays = frozenset(date.fromisoformat(str(item)[:10]) for item in payload.get("holidays", []))
+    early_closes = {
+        date.fromisoformat(str(day)[:10]): time.fromisoformat(str(close))
+        for day, close in (payload.get("early_closes") or {}).items()
+    }
+    return AuthoritativeCboeCalendar(holidays=holidays, early_closes=early_closes, source=source)
 
 
 class VixBrokerAdapter(Protocol):
@@ -89,6 +197,94 @@ class VixStrategyConfig:
         payload["accepted_products"] = [item.value for item in self.accepted_products]
         return payload
 
+    def missing_required_fields(self) -> list[str]:
+        required = {
+            "minimum_full_trading_sessions_remaining": self.minimum_full_trading_sessions_remaining,
+            "maximum_days_to_expiration": self.maximum_days_to_expiration,
+            "maximum_combined_debit": self.maximum_combined_debit,
+            "maximum_cycle_allocation": self.maximum_cycle_allocation,
+            "first_leg_exit_target_pct": self.first_leg_exit_target_pct,
+            "second_leg_management_rule": self.second_leg_management_rule,
+            "maximum_additions": self.maximum_additions,
+            "maximum_additional_capital": self.maximum_additional_capital,
+            "addition_sizing": self.addition_sizing,
+            "addition_trigger": self.addition_trigger,
+        }
+        return sorted(key for key, value in required.items() if value is None or value == "")
+
+
+def vix_strategy_config_path() -> Path:
+    return data_root() / "vix_trader" / "config.json"
+
+
+def _bool_value(value: Any) -> bool:
+    if isinstance(value, bool):
+        return value
+    return str(value).strip().lower() in {"1", "true", "yes", "on"}
+
+
+def vix_strategy_config_from_dict(payload: dict[str, Any]) -> VixStrategyConfig:
+    defaults = VixStrategyConfig()
+    accepted = payload.get("accepted_products", [item.value for item in defaults.accepted_products])
+    return VixStrategyConfig(
+        enabled=_bool_value(payload.get("enabled", defaults.enabled)),
+        preferred_entry_min=float(payload.get("preferred_entry_min", defaults.preferred_entry_min)),
+        preferred_entry_max=float(payload.get("preferred_entry_max", defaults.preferred_entry_max)),
+        enabled_entry_min=float(payload.get("enabled_entry_min", defaults.enabled_entry_min)),
+        enabled_entry_max=float(payload.get("enabled_entry_max", defaults.enabled_entry_max)),
+        minimum_full_trading_sessions_remaining=int(payload["minimum_full_trading_sessions_remaining"]) if payload.get("minimum_full_trading_sessions_remaining") is not None else None,
+        maximum_days_to_expiration=int(payload["maximum_days_to_expiration"]) if payload.get("maximum_days_to_expiration") is not None else None,
+        regular_hours_only=_bool_value(payload.get("regular_hours_only", defaults.regular_hours_only)),
+        accepted_products=tuple(VixProduct(str(item).upper()) for item in accepted),
+        strike_selection_method=str(payload.get("strike_selection_method", defaults.strike_selection_method)),
+        maximum_combined_debit=float(payload["maximum_combined_debit"]) if payload.get("maximum_combined_debit") is not None else None,
+        maximum_cycle_allocation=float(payload["maximum_cycle_allocation"]) if payload.get("maximum_cycle_allocation") is not None else None,
+        first_leg_exit_target_pct=float(payload["first_leg_exit_target_pct"]) if payload.get("first_leg_exit_target_pct") is not None else None,
+        second_leg_management_rule=str(payload["second_leg_management_rule"]) if payload.get("second_leg_management_rule") else None,
+        maximum_additions=int(payload["maximum_additions"]) if payload.get("maximum_additions") is not None else None,
+        maximum_additional_capital=float(payload["maximum_additional_capital"]) if payload.get("maximum_additional_capital") is not None else None,
+        addition_sizing=int(payload["addition_sizing"]) if payload.get("addition_sizing") is not None else None,
+        addition_trigger=str(payload["addition_trigger"]) if payload.get("addition_trigger") else None,
+        require_first_leg_exit_before_addition=_bool_value(payload.get("require_first_leg_exit_before_addition", defaults.require_first_leg_exit_before_addition)),
+        mandatory_exit_buffer_minutes=int(payload.get("mandatory_exit_buffer_minutes", defaults.mandatory_exit_buffer_minutes)),
+        settlement_trading_authorized=_bool_value(payload.get("settlement_trading_authorized", defaults.settlement_trading_authorized)),
+    )
+
+
+_VIX_ENV_FIELDS = {
+    "AUTOBOTT_VIX_MIN_FULL_SESSIONS": "minimum_full_trading_sessions_remaining",
+    "AUTOBOTT_VIX_MAX_DTE": "maximum_days_to_expiration",
+    "AUTOBOTT_VIX_MAX_COMBINED_DEBIT": "maximum_combined_debit",
+    "AUTOBOTT_VIX_MAX_CYCLE_ALLOCATION": "maximum_cycle_allocation",
+    "AUTOBOTT_VIX_FIRST_LEG_TARGET_PCT": "first_leg_exit_target_pct",
+    "AUTOBOTT_VIX_SECOND_LEG_RULE": "second_leg_management_rule",
+    "AUTOBOTT_VIX_MAX_ADDITIONS": "maximum_additions",
+    "AUTOBOTT_VIX_MAX_ADDITIONAL_CAPITAL": "maximum_additional_capital",
+    "AUTOBOTT_VIX_ADDITION_SIZING": "addition_sizing",
+    "AUTOBOTT_VIX_ADDITION_TRIGGER": "addition_trigger",
+}
+
+
+def load_vix_strategy_config(*, path: str | Path | None = None, environ: dict[str, str] | None = None) -> VixStrategyConfig:
+    target = Path(path) if path is not None else vix_strategy_config_path()
+    payload: dict[str, Any] = {}
+    if target.exists():
+        payload.update(json.loads(target.read_text(encoding="utf-8")))
+    source_env = environ if environ is not None else os.environ
+    for env_name, field_name in _VIX_ENV_FIELDS.items():
+        if source_env.get(env_name) not in {None, ""}:
+            payload[field_name] = source_env[env_name]
+    return vix_strategy_config_from_dict(payload)
+
+
+def save_vix_strategy_config(config: VixStrategyConfig, *, path: str | Path | None = None) -> Path:
+    target = Path(path) if path is not None else vix_strategy_config_path()
+    target.parent.mkdir(parents=True, exist_ok=True)
+    temporary = target.with_suffix(".tmp")
+    temporary.write_text(json.dumps(config.to_json_dict(), indent=2, sort_keys=True), encoding="utf-8")
+    temporary.replace(target)
+    return target
+
 
 @dataclass(frozen=True)
 class VixPreflightRequest:
@@ -115,6 +311,9 @@ class VixPreflightRequest:
     requested_override_codes: tuple[str, ...] = ()
     override_actor: str | None = None
     expected_settlement_type: SettlementType = SettlementType.AM
+    call_contract: VixContractMetadata | None = None
+    put_contract: VixContractMetadata | None = None
+    timestamp_source: str = "server"
 
     @property
     def expiration(self) -> date:
@@ -185,14 +384,33 @@ class VixPairedCycle:
     first_leg_sold: str | None = None
     remaining_leg: str | None = None
     additions: list[dict[str, Any]] = field(default_factory=list)
-    realized_pnl: float = 0.0
-    unrealized_pnl: float = 0.0
-    maximum_drawdown: float = 0.0
+    equity_curve: list[float] = field(default_factory=list)
     execution_deviations: list[dict[str, Any]] = field(default_factory=list)
 
     @property
+    def accounting(self) -> dict[str, float]:
+        return _derived_cycle_accounting(self.execution_cycle)
+
+    @property
     def combined_cycle_pnl(self) -> float:
-        return round(self.realized_pnl + self.unrealized_pnl, 2)
+        return self.accounting["combined_cycle_pnl"]
+
+    @property
+    def maximum_drawdown(self) -> float:
+        peak = 0.0
+        drawdown = 0.0
+        for value in self.equity_curve:
+            peak = max(peak, value)
+            drawdown = max(drawdown, peak - value)
+        return round(drawdown, 2)
+
+    def apply_market_estimates(self, estimates: dict[str, float], *, source: str) -> None:
+        if source not in {"broker", "exchange"}:
+            raise ValueError("authoritative_quote_source_required")
+        if any(not math.isfinite(float(value)) or float(value) < 0 for value in estimates.values()):
+            raise ValueError("invalid_market_estimate")
+        self.execution_cycle.current_market_estimates = {str(key): float(value) for key, value in estimates.items()}
+        self.equity_curve.append(self.combined_cycle_pnl)
 
     def to_json_dict(self) -> dict[str, Any]:
         payload = self.execution_cycle.to_json_dict()
@@ -205,8 +423,8 @@ class VixPairedCycle:
                 "first_leg_sold": self.first_leg_sold,
                 "remaining_leg": self.remaining_leg,
                 "additions": self.additions,
-                "realized_pnl": self.realized_pnl,
-                "unrealized_pnl": self.unrealized_pnl,
+                "realized_pnl": self.accounting["realized_pnl"],
+                "unrealized_pnl": self.accounting["unrealized_pnl"],
                 "combined_cycle_pnl": self.combined_cycle_pnl,
                 "maximum_drawdown": self.maximum_drawdown,
                 "execution_deviations": self.execution_deviations,
@@ -221,6 +439,8 @@ class VixPairedCycle:
         quantity: int,
         debit: float,
         reason: str,
+        trigger_condition_met: bool,
+        trigger_evidence: dict[str, Any],
         config: VixStrategyConfig | None = None,
         actor: str = "operator",
     ) -> dict[str, Any]:
@@ -235,12 +455,19 @@ class VixPairedCycle:
             raise ValueError("first_leg_exit_required_before_addition")
         if leg == self.first_leg_sold:
             raise ValueError("addition_must_target_opposite_leg")
+        if not trigger_condition_met or not trigger_evidence:
+            raise ValueError("configured_addition_trigger_not_proven")
+        if quantity != config.addition_sizing:
+            raise ValueError("addition_sizing_mismatch")
         if quantity <= 0 or debit <= 0:
             raise ValueError("addition_quantity_and_debit_required")
         incremental_capital = round(quantity * debit * 100, 2)
         if incremental_capital > config.maximum_additional_capital:
             raise ValueError("maximum_additional_capital_exceeded")
-        if self.execution_cycle.capital_committed + incremental_capital > config.maximum_cycle_allocation:
+        cumulative_addition_capital = sum(float(item.get("capital") or 0.0) for item in self.additions) + incremental_capital
+        if cumulative_addition_capital > config.maximum_additional_capital:
+            raise ValueError("cumulative_additional_capital_exceeded")
+        if self.execution_cycle.capital_committed + cumulative_addition_capital > config.maximum_cycle_allocation:
             raise ValueError("maximum_cycle_allocation_exceeded")
         addition = {
             "addition_id": f"addition-{uuid4()}",
@@ -249,25 +476,31 @@ class VixPairedCycle:
             "intended_debit": debit,
             "capital": incremental_capital,
             "reason": reason,
+            "configured_trigger": config.addition_trigger,
+            "trigger_evidence": trigger_evidence,
             "state": "PLANNED",
             "created_at": datetime.now(UTC).isoformat(),
         }
         self.additions.append(addition)
         self.execution_cycle.record_event("opposite_leg_addition_planned", reason, actor=actor, payload=addition)
-        self.execution_cycle.lifecycle_state = CycleLifecycleState.REBALANCE_ELIGIBLE
+        if self.execution_cycle.lifecycle_state is CycleLifecycleState.FIRST_LEG_EXITED:
+            self.execution_cycle.transition(CycleLifecycleState.REBALANCE_ELIGIBLE, actor=actor, reason=reason)
+        elif self.execution_cycle.lifecycle_state is not CycleLifecycleState.REBALANCE_ELIGIBLE:
+            raise ValueError("cycle_not_rebalance_eligible")
         self.execution_cycle.next_required_action = "review_addition_order"
         return addition
 
 
 def vix_cycle_analytics(cycle: VixPairedCycle) -> dict[str, Any]:
-    addition_capital = round(sum(float(item.get("capital") or 0.0) for item in cycle.additions), 2)
-    capital_committed = round(cycle.execution_cycle.capital_committed + addition_capital, 2)
+    accounting = cycle.accounting
     return {
         "strategy_performance": {
-            "combined_cycle_pnl": cycle.combined_cycle_pnl,
-            "realized_pnl": cycle.realized_pnl,
-            "unrealized_pnl": cycle.unrealized_pnl,
-            "capital_committed": capital_committed,
+            "combined_cycle_pnl": accounting["combined_cycle_pnl"],
+            "realized_pnl": accounting["realized_pnl"],
+            "unrealized_pnl": accounting["unrealized_pnl"],
+            "realized_proceeds": accounting["realized_proceeds"],
+            "open_value": accounting["open_value"],
+            "capital_committed": accounting["capital_committed"],
             "maximum_drawdown": cycle.maximum_drawdown,
             "addition_count": len(cycle.additions),
             "profitability_claim": "measured_only_from_confirmed_fills_and_current_quotes",
@@ -284,81 +517,94 @@ def vix_cycle_analytics(cycle: VixPairedCycle) -> dict[str, Any]:
     }
 
 
-def classify_vix_session(at: datetime) -> TradingSession:
-    localized = at.astimezone(_eastern_timezone(at.date()))
-    if localized.weekday() >= 5:
-        return TradingSession.CLOSED
-    current = localized.time().replace(tzinfo=None)
-    if time(9, 30) <= current <= time(16, 15):
-        return TradingSession.REGULAR
-    if time(16, 15) < current <= time(17, 0):
-        return TradingSession.CURB
-    if current >= time(20, 15) or current <= time(9, 25):
-        return TradingSession.GLOBAL
-    return TradingSession.CLOSED
+def _derived_cycle_accounting(cycle: ExecutionCycle) -> dict[str, float]:
+    entry_cost_by_leg: dict[str, float] = {}
+    entry_qty_by_leg: dict[str, int] = {}
+    exit_proceeds_by_leg: dict[str, float] = {}
+    exit_qty_by_leg: dict[str, int] = {}
+    for order in cycle.orders:
+        if order.purpose in {"entry", "addition", "rebalance"}:
+            entry_cost_by_leg[order.leg_id] = entry_cost_by_leg.get(order.leg_id, 0.0) + order.confirmed_cost
+            entry_qty_by_leg[order.leg_id] = entry_qty_by_leg.get(order.leg_id, 0) + order.confirmed_quantity
+        elif order.purpose in {"exit", "reduce"}:
+            exit_proceeds_by_leg[order.leg_id] = exit_proceeds_by_leg.get(order.leg_id, 0.0) + order.confirmed_proceeds
+            exit_qty_by_leg[order.leg_id] = exit_qty_by_leg.get(order.leg_id, 0) + order.confirmed_quantity
+    realized_cost = 0.0
+    remaining_cost = 0.0
+    for leg_id, entry_qty in entry_qty_by_leg.items():
+        average_cost = entry_cost_by_leg.get(leg_id, 0.0) / entry_qty if entry_qty else 0.0
+        exited = min(entry_qty, exit_qty_by_leg.get(leg_id, 0))
+        realized_cost += average_cost * exited
+        remaining_cost += average_cost * max(0, entry_qty - exited)
+    realized_proceeds = round(sum(exit_proceeds_by_leg.values()), 2)
+    open_value = cycle.current_open_value
+    capital_committed = round(sum(entry_cost_by_leg.values()), 2)
+    realized_pnl = round(realized_proceeds - realized_cost, 2)
+    unrealized_pnl = round(open_value - remaining_cost, 2)
+    return {
+        "capital_committed": capital_committed,
+        "realized_proceeds": realized_proceeds,
+        "open_value": open_value,
+        "realized_pnl": realized_pnl,
+        "unrealized_pnl": unrealized_pnl,
+        "combined_cycle_pnl": round(realized_proceeds + open_value - capital_committed, 2),
+    }
 
 
-def previous_business_day(value: date, *, holidays: set[date] | None = None) -> date:
-    holidays = holidays or set()
-    cursor = value - timedelta(days=1)
-    while cursor.weekday() >= 5 or cursor in holidays:
-        cursor -= timedelta(days=1)
-    return cursor
+def classify_vix_session(at: datetime, *, calendar: CboeCalendar | None = None) -> TradingSession:
+    return (calendar or UnavailableCboeCalendar()).session_at(at)
 
 
-def vix_final_tradable_timestamp(expiration: date, *, holidays: set[date] | None = None) -> datetime:
-    last_day = previous_business_day(expiration, holidays=holidays)
-    return datetime.combine(last_day, time(16, 0), tzinfo=_central_timezone(last_day))
+def vix_final_tradable_timestamp(expiration: date, *, calendar: CboeCalendar | None = None) -> datetime:
+    return (calendar or UnavailableCboeCalendar()).final_tradable_timestamp(expiration)
 
 
-def full_regular_sessions_remaining(start: datetime, expiration: date, *, holidays: set[date] | None = None) -> int:
-    holidays = holidays or set()
-    final_day = previous_business_day(expiration, holidays=holidays)
-    cursor = start.astimezone(_eastern_timezone(start.date())).date() + timedelta(days=1)
-    count = 0
-    while cursor <= final_day:
-        if cursor.weekday() < 5 and cursor not in holidays:
-            count += 1
-        cursor += timedelta(days=1)
-    return count
+def full_regular_sessions_remaining(start: datetime, expiration: date, *, calendar: CboeCalendar | None = None) -> int:
+    return (calendar or UnavailableCboeCalendar()).full_regular_sessions_remaining(start, expiration)
 
 
 def validate_vix_preflight(
     request: VixPreflightRequest,
     config: VixStrategyConfig | None = None,
     *,
-    holidays: set[date] | None = None,
+    calendar: CboeCalendar | None = None,
+    authorized_override_actor: str | None = None,
+    allowed_override_codes: set[str] | None = None,
 ) -> VixPreflightResult:
-    config = config or VixStrategyConfig()
-    actual_session = classify_vix_session(request.actual_timestamp)
-    final_tradable = vix_final_tradable_timestamp(request.expiration, holidays=holidays)
+    config = config or load_vix_strategy_config()
+    resolved_calendar = calendar or UnavailableCboeCalendar()
+    actual_session = resolved_calendar.session_at(request.actual_timestamp)
+    final_tradable = resolved_calendar.final_tradable_timestamp(request.expiration)
     automatic_exit = final_tradable - timedelta(minutes=config.mandatory_exit_buffer_minutes)
     days = (request.expiration - request.actual_timestamp.astimezone(_eastern_timezone(request.actual_timestamp.date())).date()).days
-    sessions = full_regular_sessions_remaining(request.actual_timestamp, request.expiration, holidays=holidays)
+    sessions = resolved_calendar.full_regular_sessions_remaining(request.actual_timestamp, request.expiration)
     issues: list[PreflightIssue] = []
     warnings: list[PreflightIssue] = []
 
     def block(code: str, message: str, category: str, *, overridable: bool = False) -> None:
-        if code in request.requested_override_codes and overridable and request.override_actor:
+        can_override = (
+            code in request.requested_override_codes
+            and overridable
+            and authorized_override_actor is not None
+            and code in (allowed_override_codes or set())
+        )
+        if can_override:
             warnings.append(PreflightIssue(code, message, category, overridable=True))
             return
         issues.append(PreflightIssue(code, message, category, overridable=overridable))
 
-    required_config = {
-        "minimum_full_trading_sessions_remaining": config.minimum_full_trading_sessions_remaining,
-        "maximum_days_to_expiration": config.maximum_days_to_expiration,
-        "maximum_combined_debit": config.maximum_combined_debit,
-        "maximum_cycle_allocation": config.maximum_cycle_allocation,
-        "first_leg_exit_target_pct": config.first_leg_exit_target_pct,
-        "second_leg_management_rule": config.second_leg_management_rule,
-        "maximum_additions": config.maximum_additions,
-        "maximum_additional_capital": config.maximum_additional_capital,
-        "addition_sizing": config.addition_sizing,
-        "addition_trigger": config.addition_trigger,
-    }
-    missing_config = sorted(key for key, value in required_config.items() if value is None or value == "")
+    missing_config = config.missing_required_fields()
     if missing_config:
         block("strategy_configuration_incomplete", f"Configure before entry: {', '.join(missing_config)}.", "strategy")
+
+    if not resolved_calendar.authoritative:
+        block("authoritative_calendar_required", "Current Cboe holiday and early-close calendar is unavailable.", "calendar")
+    if request.timestamp_source not in {"server", "broker"}:
+        block("untrusted_timestamp", "Preflight time must come from the server or broker.", "session")
+    if request.requested_override_codes and not authorized_override_actor:
+        block("unauthorized_override_request", "Override identity must come from authenticated server context.", "override")
+    if not request.client_request_id or not request.client_request_id.strip():
+        block("client_request_id_required", "A unique client request ID is required.", "duplicate")
 
     if not config.enabled:
         block("strategy_disabled", "VIX paired-options strategy is disabled.", "strategy")
@@ -366,6 +612,8 @@ def validate_vix_preflight(
         block("wrong_underlying", f"{request.product.value} is not an accepted configured product.", "contract")
     if request.call_product is not request.product or request.put_product is not request.product:
         block("vix_vixw_mismatch", "Call and put must use the exact reviewed VIX or VIXW product.", "contract")
+    _validate_contract_metadata(request, request.call_contract, expected_type="call", block=block)
+    _validate_contract_metadata(request, request.put_contract, expected_type="put", block=block)
     if request.call_expiration != request.put_expiration:
         block("mismatched_expirations", "Call and put expirations must match.", "expiration")
     if request.settlement_type is not request.expected_settlement_type:
@@ -380,12 +628,14 @@ def validate_vix_preflight(
         block("too_few_trading_sessions", f"Only {sessions} full regular sessions remain; {config.minimum_full_trading_sessions_remaining} required.", "expiration")
     if config.maximum_days_to_expiration is not None and days > config.maximum_days_to_expiration:
         block("expiration_too_distant", f"Expiration is {days} days away; configured maximum is {config.maximum_days_to_expiration}.", "expiration", overridable=True)
-    if request.call_strike <= 0 or request.put_strike <= 0:
+    if not all(math.isfinite(value) and value > 0 for value in (request.call_strike, request.put_strike)):
         block("invalid_strike", "Both reviewed strikes must be positive.", "contract")
     if request.call_quantity <= 0 or request.put_quantity <= 0:
         block("invalid_quantity", "Both legs require a positive quantity.", "risk")
     if request.call_quantity != request.put_quantity:
         block("quantity_mismatch", "Paired entry quantities must match unless explicitly overridden.", "risk", overridable=True)
+    if not all(math.isfinite(value) and value > 0 for value in (request.call_debit, request.put_debit, request.combined_debit)):
+        block("invalid_debit", "Call and put debit values must be positive finite numbers.", "risk")
     if config.maximum_combined_debit is not None and request.combined_debit > config.maximum_combined_debit:
         block("combined_debit_exceeded", "Combined per-pair debit exceeds strategy configuration.", "risk", overridable=True)
     if config.maximum_cycle_allocation is not None and request.maximum_cycle_loss > config.maximum_cycle_allocation:
@@ -404,19 +654,57 @@ def validate_vix_preflight(
     override_audit = [
         {
             "code": issue.code,
-            "actor": request.override_actor,
+            "actor": authorized_override_actor,
             "timestamp": datetime.now(UTC).isoformat(),
             "detail": issue.message,
         }
         for issue in warnings
-        if issue.code in request.requested_override_codes
+        if issue.code in request.requested_override_codes and issue.code in (allowed_override_codes or set())
     ]
     return VixPreflightResult(request, issues, warnings, actual_session, days, sessions, final_tradable, automatic_exit, override_audit)
 
 
-def create_vix_cycle(request: VixPreflightRequest, config: VixStrategyConfig | None = None) -> VixPairedCycle:
-    config = config or VixStrategyConfig()
-    preflight = validate_vix_preflight(request, config)
+def _validate_contract_metadata(
+    request: VixPreflightRequest,
+    contract: VixContractMetadata | None,
+    *,
+    expected_type: str,
+    block: Any,
+) -> None:
+    if contract is None or not contract.authoritative:
+        block("authoritative_contract_metadata_required", f"Authoritative {expected_type} contract metadata is required.", "contract")
+        return
+    described_product = request.call_product if expected_type == "call" else request.put_product
+    described_expiration = request.call_expiration if expected_type == "call" else request.put_expiration
+    described_strike = request.call_strike if expected_type == "call" else request.put_strike
+    if contract.option_type.lower() != expected_type:
+        block("contract_type_mismatch", f"Authoritative contract is not a {expected_type}.", "contract")
+    if contract.product is not described_product or contract.product is not request.product:
+        block("contract_product_mismatch", "Authoritative contract root does not match the reviewed VIX/VIXW product.", "contract")
+    if contract.expiration != described_expiration:
+        block("contract_expiration_mismatch", "Authoritative contract expiration differs from the reviewed expiration.", "contract")
+    if not math.isclose(contract.strike, described_strike, rel_tol=0.0, abs_tol=1e-9):
+        block("contract_strike_mismatch", "Authoritative contract strike differs from the reviewed strike.", "contract")
+    if contract.settlement_type is not request.settlement_type:
+        block("contract_settlement_mismatch", "Authoritative settlement metadata differs from the reviewed settlement.", "expiration")
+
+
+def create_vix_cycle(
+    request: VixPreflightRequest,
+    config: VixStrategyConfig | None = None,
+    *,
+    calendar: CboeCalendar | None = None,
+    authorized_override_actor: str | None = None,
+    allowed_override_codes: set[str] | None = None,
+) -> VixPairedCycle:
+    config = config or load_vix_strategy_config()
+    preflight = validate_vix_preflight(
+        request,
+        config,
+        calendar=calendar,
+        authorized_override_actor=authorized_override_actor,
+        allowed_override_codes=allowed_override_codes,
+    )
     now = request.actual_timestamp.astimezone(UTC)
     execution = ExecutionCycle(
         cycle_id=f"vix-{uuid4()}",
@@ -453,7 +741,6 @@ def create_vix_cycle(request: VixPreflightRequest, config: VixStrategyConfig | N
             "client_request_id": request.client_request_id,
         },
         lifecycle_state=CycleLifecycleState.PREFLIGHT_VALIDATED if preflight.passed else CycleLifecycleState.PREFLIGHT_BLOCKED,
-        capital_committed=0.0,
         risk_policy_result={"passed": preflight.passed, "issues": [asdict(issue) for issue in preflight.issues]},
         next_required_action="review_and_submit_entry" if preflight.passed else "correct_preflight_issues",
     )
@@ -467,11 +754,64 @@ def vix_cycle_store_path() -> Path:
     return data_root() / "vix_trader" / "cycles.jsonl"
 
 
+ACTIVE_EXPOSURE_STATES = {
+    CycleLifecycleState.ENTRY_SUBMITTED.value,
+    CycleLifecycleState.ENTRY_PARTIALLY_FILLED.value,
+    CycleLifecycleState.ACTIVE.value,
+    CycleLifecycleState.FIRST_LEG_EXIT_WORKING.value,
+    CycleLifecycleState.FIRST_LEG_EXITED.value,
+    CycleLifecycleState.REBALANCE_ELIGIBLE.value,
+    CycleLifecycleState.REBALANCE_SUBMITTED.value,
+    CycleLifecycleState.REBALANCED.value,
+    CycleLifecycleState.EXIT_REQUIRED.value,
+    CycleLifecycleState.CLOSING.value,
+    CycleLifecycleState.EXIT_CANCELED.value,
+    CycleLifecycleState.EXIT_REPLACEMENT_REQUIRED.value,
+}
+
+
+@contextmanager
+def _cycle_store_lock(target: Path, *, timeout_seconds: float = 5.0):
+    lock_path = target.with_suffix(target.suffix + ".lock")
+    deadline = time_module.monotonic() + timeout_seconds
+    descriptor: int | None = None
+    while descriptor is None:
+        try:
+            descriptor = os.open(lock_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+        except FileExistsError:
+            if time_module.monotonic() >= deadline:
+                raise TimeoutError("vix_cycle_store_lock_timeout")
+            time_module.sleep(0.01)
+    try:
+        os.write(descriptor, str(os.getpid()).encode("ascii"))
+        yield
+    finally:
+        os.close(descriptor)
+        lock_path.unlink(missing_ok=True)
+
+
 def append_vix_cycle(cycle: VixPairedCycle, *, path: str | Path | None = None) -> Path:
     target = Path(path) if path is not None else vix_cycle_store_path()
     target.parent.mkdir(parents=True, exist_ok=True)
-    with target.open("a", encoding="utf-8") as handle:
-        handle.write(json.dumps(cycle.to_json_dict(), sort_keys=True) + "\n")
+    payload = cycle.to_json_dict()
+    request_id = str((payload.get("strategy_payload") or {}).get("client_request_id") or "").strip()
+    if not request_id:
+        raise ValueError("client_request_id_required")
+    expiration = str((payload.get("strategy_payload") or {}).get("expiration") or "")
+    with _cycle_store_lock(target):
+        existing = load_vix_cycles(path=target, limit=100_000)
+        if any(str((row.get("strategy_payload") or {}).get("client_request_id") or "") == request_id for row in existing):
+            raise ValueError("duplicate_client_request_id")
+        if payload.get("lifecycle_state") in ACTIVE_EXPOSURE_STATES and any(
+            row.get("lifecycle_state") in ACTIVE_EXPOSURE_STATES
+            and str((row.get("strategy_payload") or {}).get("expiration") or "") == expiration
+            for row in existing
+        ):
+            raise ValueError("overlapping_active_expiration")
+        with target.open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps(payload, sort_keys=True) + "\n")
+            handle.flush()
+            os.fsync(handle.fileno())
     return target
 
 
@@ -484,9 +824,9 @@ def load_vix_cycles(*, path: str | Path | None = None, limit: int = 100) -> list
 
 
 def vix_strategy_status() -> dict[str, Any]:
-    config = VixStrategyConfig()
+    config = load_vix_strategy_config()
     cycles = load_vix_cycles(limit=20)
-    active = [row for row in cycles if row.get("lifecycle_state") not in {"CLOSED", "RECONCILED"}]
+    active = [row for row in cycles if row.get("lifecycle_state") in ACTIVE_EXPOSURE_STATES]
     return {
         "ok": True,
         "strategy_id": VIX_STRATEGY_ID,
@@ -496,6 +836,8 @@ def vix_strategy_status() -> dict[str, Any]:
         "broker_blocker": "current Alpaca adapter does not expose actual Cboe VIX/VIXW index options",
         "profitability_status": "unproven",
         "config": config.to_json_dict(),
+        "configuration_complete": not config.missing_required_fields(),
+        "missing_configuration": config.missing_required_fields(),
         "cycle_count": len(cycles),
         "active_cycle_count": len(active),
         "cycles": list(reversed(cycles)),
