@@ -1677,13 +1677,35 @@ def _vix_trader_html() -> str:
     </section>
     <section class="panel"><h2>Execution-critical review</h2><pre id="result">Authenticate and run preflight.</pre></section>
   </div>
+  <section class="panel" style="margin-top:16px"><h2>Strategy configuration</h2>
+    <p class="muted">No placeholder values are executable. Enter only the reviewed strategy rules; invalid values are rejected before persistence.</p>
+    <div class="fields">
+      <label>Minimum full sessions<input id="cfg-min-sessions" type="number" min="1"></label>
+      <label>Maximum DTE<input id="cfg-max-dte" type="number" min="1"></label>
+      <label>Maximum combined debit<input id="cfg-max-debit" type="number" min="0.01" step="0.01"></label>
+      <label>Maximum cycle allocation<input id="cfg-max-allocation" type="number" min="0.01" step="0.01"></label>
+      <label>First-leg target (decimal)<input id="cfg-first-target" type="number" min="0.01" max="1" step="0.01"></label>
+      <label>Maximum additions<input id="cfg-max-additions" type="number" min="0"></label>
+      <label>Maximum additional capital<input id="cfg-max-additional" type="number" min="0.01" step="0.01"></label>
+      <label>Addition sizing (contracts)<input id="cfg-addition-sizing" type="number" min="1"></label>
+      <label class="wide">Second-leg management rule<input id="cfg-second-rule"></label>
+      <label class="wide">Addition trigger<input id="cfg-addition-trigger"></label>
+      <div class="wide"><button onclick="saveConfig()">Save reviewed configuration</button></div>
+    </div>
+    <pre id="configuration">Authenticate to load configuration.</pre>
+  </section>
+  <section class="panel" style="margin-top:16px"><h2>Authoritative dependencies</h2><pre id="dependencies">Authenticate to inspect calendar and broker blockers.</pre></section>
   <section class="panel" style="margin-top:16px"><h2>Managed cycles</h2><pre id="cycles">No cycle data loaded.</pre></section>
 </div>
 <script>
   const el=id=>document.getElementById(id); const auth=()=>({'Authorization':`Bearer ${el('token').value}`,'Content-Type':'application/json'});
   function payload(){const p=el('product').value;return {spot_vix:Number(el('spot').value),product:p,call_product:p,put_product:p,call_expiration:el('expiration').value,put_expiration:el('expiration').value,settlement_type:el('settlement').value,expected_settlement_type:'AM',intended_session:'REGULAR',actual_timestamp:new Date().toISOString(),call_strike:Number(el('call-strike').value),put_strike:Number(el('put-strike').value),call_quantity:Number(el('call-qty').value),put_quantity:Number(el('put-qty').value),call_debit:Number(el('call-debit').value),put_debit:Number(el('put-debit').value),client_request_id:el('request-id').value};}
+  const valueOrNull=id=>el(id).value===''?null:Number(el(id).value);
+  function configPayload(){return {minimum_full_trading_sessions_remaining:valueOrNull('cfg-min-sessions'),maximum_days_to_expiration:valueOrNull('cfg-max-dte'),maximum_combined_debit:valueOrNull('cfg-max-debit'),maximum_cycle_allocation:valueOrNull('cfg-max-allocation'),first_leg_exit_target_pct:valueOrNull('cfg-first-target'),second_leg_management_rule:el('cfg-second-rule').value||null,maximum_additions:valueOrNull('cfg-max-additions'),maximum_additional_capital:valueOrNull('cfg-max-additional'),addition_sizing:valueOrNull('cfg-addition-sizing'),addition_trigger:el('cfg-addition-trigger').value||null};}
+  function populateConfig(c){const values={'cfg-min-sessions':c.minimum_full_trading_sessions_remaining,'cfg-max-dte':c.maximum_days_to_expiration,'cfg-max-debit':c.maximum_combined_debit,'cfg-max-allocation':c.maximum_cycle_allocation,'cfg-first-target':c.first_leg_exit_target_pct,'cfg-second-rule':c.second_leg_management_rule,'cfg-max-additions':c.maximum_additions,'cfg-max-additional':c.maximum_additional_capital,'cfg-addition-sizing':c.addition_sizing,'cfg-addition-trigger':c.addition_trigger};Object.entries(values).forEach(([id,value])=>el(id).value=value??'');}
   async function api(path,opts={}){const r=await fetch(path,{...opts,headers:auth()});const j=await r.json();if(!r.ok)throw new Error(j.detail||j.error||r.status);return j}
-  async function refresh(){try{const s=await api('/api/vix-trader/status');el('mode').textContent=s.mode;el('broker').textContent=s.broker_execution_supported?'Ready':'Blocked';el('profit').textContent=s.profitability_status;el('cycles').textContent=JSON.stringify(s.cycles,null,2)}catch(e){el('result').textContent=e.message}}
+  async function refresh(){try{const s=await api('/api/vix-trader/status');el('mode').textContent=s.mode;el('broker').textContent=s.broker_execution_supported?'Ready':'Blocked';el('profit').textContent=s.profitability_status;el('next').textContent=!s.configuration_complete?'Complete configuration':!s.configuration_valid?'Correct configuration':!s.calendar.authoritative?'Load Cboe calendar':'Select VIX broker adapter';el('cycles').textContent=JSON.stringify(s.cycles,null,2);populateConfig(s.config);el('configuration').textContent=JSON.stringify({complete:s.configuration_complete,valid:s.configuration_valid,missing:s.missing_configuration,errors:s.configuration_errors},null,2);el('dependencies').textContent=JSON.stringify({broker_execution_supported:s.broker_execution_supported,broker_blocker:s.broker_blocker,calendar:s.calendar},null,2)}catch(e){el('result').textContent=e.message}}
+  async function saveConfig(){try{const j=await api('/api/vix-trader/config',{method:'PUT',body:JSON.stringify(configPayload())});el('configuration').textContent=JSON.stringify(j,null,2);await refresh()}catch(e){el('configuration').textContent=e.message}}
   async function runPreflight(save){try{const path=save?'/api/vix-trader/cycles':'/api/vix-trader/preflight';const j=await api(path,{method:'POST',body:JSON.stringify(payload())});el('result').textContent=JSON.stringify(j.cycle||j.preflight,null,2);if(save)await refresh()}catch(e){el('result').textContent=e.message}}
   el('token').addEventListener('change',refresh);
 </script></body></html>"""

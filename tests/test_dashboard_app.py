@@ -1200,6 +1200,11 @@ def test_vix_trader_workspace_is_additive_and_platform_home_still_renders() -> N
     assert "VIX Trader" in vix
     assert "Platform dashboard" in vix
     assert "broker-confirmed fills" in vix
+    assert "Strategy configuration" in vix
+    assert "Save reviewed configuration" in vix
+    assert "Authoritative dependencies" in vix
+    assert "configuration_valid" in vix
+    assert "calendar.authoritative" in vix
 
 
 def test_preexisting_dashboard_route_inventory_is_preserved() -> None:
