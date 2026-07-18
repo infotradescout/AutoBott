@@ -9,6 +9,14 @@ capabilities that exist to improve and supervise the bot rather than substitute 
 
 ## Product Domains
 
+### Strategy registry
+
+Strategies are additive modules registered with identifiers, supported underlying types, configuration schemas,
+preflight validators, lifecycle handlers, risk extensions, analytics definitions, screens, and simulation/broker
+capability flags. Generic execution code must not assume a strategy has one call and one put.
+
+The first registered specialized module is `vix_paired_options`; see `docs/VIX_TRADER.md`.
+
 ### `signal`
 
 What the bot wants to trade and why.

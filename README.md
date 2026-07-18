@@ -23,6 +23,11 @@ Supporting systems exist to improve and audit the bot:
 - `history`: historical corpus generation and backtest-style analysis
 - `scorecards`: edge review, drift review, and gate reporting
 
+Strategy modules register through a platform boundary rather than redefining the application. `VIX Trader` is the
+first paired-options module: it has a dedicated `/vix-trader` workspace, configurable preflight guardrails, managed
+cycle records, and strict broker-order truth. It is currently simulation/preflight-only until a broker adapter proves
+actual Cboe VIX/VIXW index-options support. Existing AutoBott surfaces remain available.
+
 Today the repository is still weighted toward the support layers. The execution product is not complete yet.
 
 ## Current State
@@ -72,3 +77,4 @@ Read:
 - docs/BUILD_PLAN.md
 - docs/REPO_LANES.md
 - docs/TRADESCOUT_DEFAULT_PROFILE.md
+- docs/VIX_TRADER.md

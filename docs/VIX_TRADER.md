@@ -1,0 +1,68 @@
+# VIX Trader
+
+VIX Trader is an additive strategy module inside AutoBott / Trader's Corner. It does not replace the platform
+dashboard, generic execution infrastructure, existing options workflows, analytics, capture, replay, or account
+controls.
+
+## Current capability
+
+- Strategy registration through `autobott_v2.strategy_registry`.
+- Strategy-agnostic cycle, order-state, and immutable audit models in `autobott_v2.execution_cycle`.
+- Paired VIX/VIXW call-and-put cycle representation in `autobott_v2.vix_trader`.
+- Preflight checks for product mismatch, expiration mismatch, session, settlement, remaining sessions, duplicate
+  requests, overlapping exposure, quantities, debit, and cycle capital.
+- Separate strategy-performance and execution-quality reports.
+- Dedicated `/vix-trader` workspace inside the existing dashboard service.
+- JSONL draft-cycle persistence under the configured AutoBott data root.
+
+## Truthful execution status
+
+VIX Trader is currently `simulation_and_preflight_only`. The existing Alpaca integration in this repository reads
+and trades equity/ETF options. It does not prove the required actual Cboe VIX/VIXW index-option chain and order
+capabilities. No VIX/VIXW order is submitted, no fill is fabricated, and no profitability is claimed.
+
+The broker boundary requires account, chain, session, quote, preview, submit, cancel, replace, order, fill, and
+position reconciliation capabilities before broker execution can be enabled.
+
+## Configuration status
+
+The working thesis records the preferred spot VIX range as the 17s. Unprovided strategy values deliberately default
+to `null`, including:
+
+- minimum full sessions remaining;
+- maximum DTE;
+- combined-debit and cycle-allocation caps;
+- first-leg target;
+- second-leg rule;
+- addition count, capital, sizing, and trigger.
+
+Preflight returns `strategy_configuration_incomplete` until Thomas supplies those rules. This prevents placeholder
+values from silently becoming executable strategy logic.
+
+## Settlement and session basis
+
+The safety defaults reflect Cboe's published VIX/VIXW specifications: VIX options have regular hours, separate
+global/curb sessions, morning settlement, and a last trading day immediately before settlement. AutoBott defaults to
+regular-hours-only entry and schedules an exit deadline before the final tradable timestamp.
+
+Primary references:
+
+- https://www.cboe.com/tradable-products/vix/vix-options/specifications
+- https://www.cboe.com/en/tradable-products/vix/vix-options/
+- https://www.cboe.com/about/hours/us-options/
+
+Exchange calendars and holiday exceptions must come from an authoritative calendar provider before broker execution.
+The pure preflight functions accept an explicit holiday set for deterministic tests.
+
+## Existing platform preservation
+
+The existing `/` dashboard and all pre-existing API routes remain present. VIX Trader adds:
+
+- `GET /vix-trader`
+- `GET /api/strategies`
+- `GET /api/vix-trader/status`
+- `GET /api/vix-trader/cycles`
+- `POST /api/vix-trader/preflight`
+- `POST /api/vix-trader/cycles`
+
+No existing route, module, data model, migration, or test was removed.

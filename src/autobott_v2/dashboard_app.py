@@ -40,6 +40,19 @@ from .runtime_control import (
 from .runtime_paths import gate_path as default_gate_path
 from .runtime_paths import phase1_replay_campaign_root, phase1_snapshots_root
 from .trade_outcomes import record_trade_outcomes_from_orders
+from .strategy_registry import strategy_registry_payload
+from .vix_trader import (
+    SettlementType,
+    TradingSession,
+    VixPreflightRequest,
+    VixProduct,
+    VixStrategyConfig,
+    append_vix_cycle,
+    create_vix_cycle,
+    load_vix_cycles,
+    validate_vix_preflight,
+    vix_strategy_status,
+)
 
 
 JsonDict = dict[str, Any]
@@ -75,6 +88,8 @@ def app(environ: dict[str, Any], start_response: Callable[..., Any]) -> list[byt
 def handle_request(method: str, path: str, headers: dict[str, str], body: bytes) -> tuple[int, str, JsonDict | str]:
     if path == "/":
         return 200, "text/html; charset=utf-8", _dashboard_html()
+    if path == "/vix-trader":
+        return 200, "text/html; charset=utf-8", _vix_trader_html()
     if path == "/api/health":
         payload = _health_payload()
         return (200 if payload["ok"] else 503), "application/json; charset=utf-8", payload
@@ -108,6 +123,19 @@ def handle_request(method: str, path: str, headers: dict[str, str], body: bytes)
             return 200, "application/json; charset=utf-8", _execution_state_payload()
         if path == "/api/session/status" and method == "GET":
             return 200, "application/json; charset=utf-8", _session_status_payload()
+        if path == "/api/strategies" and method == "GET":
+            return 200, "application/json; charset=utf-8", strategy_registry_payload()
+        if path == "/api/vix-trader/status" and method == "GET":
+            return 200, "application/json; charset=utf-8", vix_strategy_status()
+        if path == "/api/vix-trader/cycles" and method == "GET":
+            return 200, "application/json; charset=utf-8", {"ok": True, "cycles": list(reversed(load_vix_cycles()))}
+        if path == "/api/vix-trader/preflight" and method == "POST":
+            request = _vix_preflight_request(_json_body(body))
+            return 200, "application/json; charset=utf-8", {"ok": True, "preflight": validate_vix_preflight(request).to_json_dict()}
+        if path == "/api/vix-trader/cycles" and method == "POST":
+            cycle = create_vix_cycle(_vix_preflight_request(_json_body(body)))
+            append_vix_cycle(cycle)
+            return 200, "application/json; charset=utf-8", {"ok": True, "cycle": cycle.to_json_dict()}
         if path == "/api/runtime/arm-paper" and method == "POST":
             return 200, "application/json; charset=utf-8", _runtime_arm_paper_payload(_json_body(body))
         if path == "/api/runtime/disable-execution" and method == "POST":
@@ -1536,6 +1564,113 @@ def _execution_replace_payload(payload: JsonDict) -> JsonDict:
     return {"ok": True, "result": result}
 
 
+def _vix_preflight_request(payload: JsonDict) -> VixPreflightRequest:
+    actual_timestamp = _parse_datetime(payload.get("actual_timestamp")) or datetime.now(UTC)
+    call_expiration = date.fromisoformat(str(payload["call_expiration"])[:10])
+    put_expiration = date.fromisoformat(str(payload.get("put_expiration") or payload["call_expiration"])[:10])
+    product = VixProduct(str(payload.get("product") or "VIXW").upper())
+    saved_cycles = load_vix_cycles(limit=500)
+    nonterminal = [row for row in saved_cycles if row.get("lifecycle_state") not in {"CLOSED", "RECONCILED"}]
+    matching_cycles = [
+        str(row.get("cycle_id"))
+        for row in nonterminal
+        if (row.get("strategy_payload") or {}).get("product") == product.value
+        and (row.get("strategy_payload") or {}).get("expiration") == call_expiration.isoformat()
+    ]
+    saved_expirations = {
+        date.fromisoformat(str((row.get("strategy_payload") or {}).get("expiration"))[:10])
+        for row in nonterminal
+        if (row.get("strategy_payload") or {}).get("expiration")
+    }
+    saved_request_ids = {
+        str((row.get("strategy_payload") or {}).get("client_request_id"))
+        for row in saved_cycles
+        if (row.get("strategy_payload") or {}).get("client_request_id")
+    }
+    return VixPreflightRequest(
+        spot_vix=float(payload["spot_vix"]),
+        product=product,
+        call_product=VixProduct(str(payload.get("call_product") or product.value).upper()),
+        put_product=VixProduct(str(payload.get("put_product") or product.value).upper()),
+        call_expiration=call_expiration,
+        put_expiration=put_expiration,
+        settlement_type=SettlementType(str(payload.get("settlement_type") or "AM").upper()),
+        intended_session=TradingSession(str(payload.get("intended_session") or "REGULAR").upper()),
+        actual_timestamp=actual_timestamp,
+        call_strike=float(payload["call_strike"]),
+        put_strike=float(payload["put_strike"]),
+        call_quantity=int(payload["call_quantity"]),
+        put_quantity=int(payload["put_quantity"]),
+        call_debit=float(payload["call_debit"]),
+        put_debit=float(payload["put_debit"]),
+        account_id=str(payload.get("account_id") or "paper"),
+        existing_cycle_ids=tuple(dict.fromkeys([*(str(item) for item in payload.get("existing_cycle_ids", [])), *matching_cycles])),
+        overlapping_expirations=tuple(sorted({*(date.fromisoformat(str(item)[:10]) for item in payload.get("overlapping_expirations", [])), *saved_expirations})),
+        client_request_id=str(payload["client_request_id"]) if payload.get("client_request_id") else None,
+        prior_client_request_ids=tuple(sorted({*(str(item) for item in payload.get("prior_client_request_ids", [])), *saved_request_ids})),
+        requested_override_codes=tuple(str(item) for item in payload.get("requested_override_codes", [])),
+        override_actor=str(payload["override_actor"]) if payload.get("override_actor") else None,
+        expected_settlement_type=SettlementType(str(payload.get("expected_settlement_type") or "AM").upper()),
+    )
+
+
+def _vix_trader_html() -> str:
+    return """<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>VIX Trader | AutoBott</title>
+  <style>
+    :root{--bg:#090d12;--panel:#121a24;--line:#28384b;--text:#ecf2f9;--muted:#94a4b8;--accent:#f4b860;--safe:#3ddc97;--bad:#ff6b6b}
+    *{box-sizing:border-box} body{margin:0;background:var(--bg);color:var(--text);font:15px system-ui,sans-serif}
+    .shell{max-width:1180px;margin:auto;padding:22px}.top{display:flex;justify-content:space-between;gap:16px;align-items:center;border-bottom:1px solid var(--line);padding-bottom:18px}
+    a{color:var(--accent)} h1{margin:5px 0}.muted{color:var(--muted)}.badge{padding:6px 10px;border:1px solid var(--line);border-radius:999px;font-size:12px}
+    .grid{display:grid;grid-template-columns:1fr 1fr;gap:16px;margin-top:18px}.panel{background:var(--panel);border:1px solid var(--line);border-radius:14px;padding:18px}
+    label{display:grid;gap:6px;color:var(--muted)}input,select{background:#0b1119;color:var(--text);border:1px solid var(--line);border-radius:8px;padding:10px}
+    .fields{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px}.wide{grid-column:1/-1}button{background:var(--accent);color:#17120a;border:0;border-radius:9px;padding:11px 16px;font-weight:700;cursor:pointer}
+    pre{white-space:pre-wrap;word-break:break-word;background:#0b1119;border:1px solid var(--line);border-radius:10px;padding:14px;max-height:520px;overflow:auto}
+    .critical{border-left:4px solid var(--accent)}.truth{display:grid;grid-template-columns:repeat(4,1fr);gap:8px}.truth div{background:#0b1119;padding:10px;border-radius:8px}.truth strong{display:block;color:var(--accent)}
+    @media(max-width:800px){.grid,.fields,.truth{grid-template-columns:1fr}}
+  </style>
+</head>
+<body><div class="shell">
+  <header class="top"><div><div class="muted">AutoBott / Trader's Corner</div><h1>VIX Trader</h1><div class="muted">Paired VIX/VIXW options workspace · additive strategy module</div></div><div><a href="/">← Platform dashboard</a></div></header>
+  <section class="panel critical" style="margin-top:18px">
+    <div class="truth"><div><strong>MODE</strong><span id="mode">Checking</span></div><div><strong>BROKER</strong><span id="broker">Checking</span></div><div><strong>PROFITABILITY</strong><span id="profit">Unproven</span></div><div><strong>NEXT ACTION</strong><span id="next">Run preflight</span></div></div>
+    <p class="muted">A submitted or canceled order is never proceeds. Only broker-confirmed fills change realized P&amp;L. Current implementation is preflight/simulation until a broker adapter proves VIX/VIXW support.</p>
+  </section>
+  <div class="grid">
+    <section class="panel"><h2>Cycle preflight</h2>
+      <div class="fields">
+        <label class="wide">Dashboard token<input id="token" type="password" autocomplete="off"></label>
+        <label>Product<select id="product"><option>VIXW</option><option>VIX</option></select></label>
+        <label>Spot VIX<input id="spot" type="number" step="0.01" value="17.50"></label>
+        <label>Expiration<input id="expiration" type="date"></label>
+        <label>Settlement<select id="settlement"><option>AM</option><option>PM</option></select></label>
+        <label>Call strike<input id="call-strike" type="number" step="0.5"></label>
+        <label>Put strike<input id="put-strike" type="number" step="0.5"></label>
+        <label>Call quantity<input id="call-qty" type="number" min="1" value="1"></label>
+        <label>Put quantity<input id="put-qty" type="number" min="1" value="1"></label>
+        <label>Call debit<input id="call-debit" type="number" min="0" step="0.01"></label>
+        <label>Put debit<input id="put-debit" type="number" min="0" step="0.01"></label>
+        <label class="wide">Client request ID<input id="request-id" placeholder="required for duplicate protection"></label>
+        <div class="wide"><button onclick="runPreflight(false)">Validate preflight</button> <button onclick="runPreflight(true)">Save draft cycle</button></div>
+      </div>
+    </section>
+    <section class="panel"><h2>Execution-critical review</h2><pre id="result">Authenticate and run preflight.</pre></section>
+  </div>
+  <section class="panel" style="margin-top:16px"><h2>Managed cycles</h2><pre id="cycles">No cycle data loaded.</pre></section>
+</div>
+<script>
+  const el=id=>document.getElementById(id); const auth=()=>({'Authorization':`Bearer ${el('token').value}`,'Content-Type':'application/json'});
+  function payload(){const p=el('product').value;return {spot_vix:Number(el('spot').value),product:p,call_product:p,put_product:p,call_expiration:el('expiration').value,put_expiration:el('expiration').value,settlement_type:el('settlement').value,expected_settlement_type:'AM',intended_session:'REGULAR',actual_timestamp:new Date().toISOString(),call_strike:Number(el('call-strike').value),put_strike:Number(el('put-strike').value),call_quantity:Number(el('call-qty').value),put_quantity:Number(el('put-qty').value),call_debit:Number(el('call-debit').value),put_debit:Number(el('put-debit').value),client_request_id:el('request-id').value};}
+  async function api(path,opts={}){const r=await fetch(path,{...opts,headers:auth()});const j=await r.json();if(!r.ok)throw new Error(j.detail||j.error||r.status);return j}
+  async function refresh(){try{const s=await api('/api/vix-trader/status');el('mode').textContent=s.mode;el('broker').textContent=s.broker_execution_supported?'Ready':'Blocked';el('profit').textContent=s.profitability_status;el('cycles').textContent=JSON.stringify(s.cycles,null,2)}catch(e){el('result').textContent=e.message}}
+  async function runPreflight(save){try{const path=save?'/api/vix-trader/cycles':'/api/vix-trader/preflight';const j=await api(path,{method:'POST',body:JSON.stringify(payload())});el('result').textContent=JSON.stringify(j.cycle||j.preflight,null,2);if(save)await refresh()}catch(e){el('result').textContent=e.message}}
+  el('token').addEventListener('change',refresh);
+</script></body></html>"""
+
+
 def _dashboard_html() -> str:
     return """<!doctype html>
 <html lang="en">
@@ -1825,6 +1960,7 @@ def _dashboard_html() -> str:
         <p>Live-market command center for Alpaca paper trading, position monitoring, replay, and performance review.</p>
         <div class="muted mono" id="mode-banner-text">ALPACA PAPER | LIVE MARKET TRADING | REAL MONEY OFF | EXECUTION CHECKING</div>
         <div class="chip-row">
+          <a class="chip warn" href="/vix-trader" style="text-decoration:none;">OPEN VIX TRADER</a>
           <span class="chip info">Current Service <span id="service-name">autobott-phase1-dashboard</span></span>
           <span class="chip warn" id="auth-badge">LOCKED</span>
           <span class="chip safe" id="service-badge">BOOT CHECK RUNNING</span>
