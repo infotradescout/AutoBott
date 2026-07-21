@@ -1200,8 +1200,8 @@ def test_vix_trader_workspace_is_additive_and_platform_home_still_renders() -> N
     assert "VIX Trader" in vix
     assert "Platform dashboard" in vix
     assert "broker-confirmed fills" in vix
-    assert "Strategy configuration" in vix
-    assert "Save reviewed configuration" in vix
+    assert "Evidence-selected strategy" in vix
+    assert "Save operator ceilings" in vix
     assert "Authoritative dependencies" in vix
     assert "configuration_valid" in vix
     assert "calendar.authoritative" in vix
@@ -1235,7 +1235,9 @@ def test_strategy_registry_and_vix_status_routes(monkeypatch, tmp_path) -> None:
     assert any(row["strategy_id"] == "vix_paired_options" for row in registry_payload["strategies"])
     assert vix_status.startswith("200")
     assert vix_payload["broker_execution_supported"] is False
-    assert vix_payload["profitability_status"] == "unproven"
+    assert vix_payload["profitability_status"] == "insufficient_evidence"
+    assert vix_payload["next_action"] == "collect_vix_cycle_evidence"
+    assert "evidence" in vix_payload
 
 
 def test_vix_preflight_route_blocks_mismatched_products(monkeypatch, tmp_path) -> None:
@@ -1302,7 +1304,7 @@ def test_vix_cycle_store_enforces_server_side_duplicate_detection(monkeypatch, t
     assert json.loads(duplicate_body)["error"] == "duplicate_client_request_id"
 
 
-def test_vix_configuration_api_persists_required_strategy_values(monkeypatch, tmp_path) -> None:
+def test_vix_configuration_api_persists_operator_ceilings(monkeypatch, tmp_path) -> None:
     _auth_env(monkeypatch, tmp_path)
     config = {
         "minimum_full_trading_sessions_remaining": 3,
@@ -1319,9 +1321,11 @@ def test_vix_configuration_api_persists_required_strategy_values(monkeypatch, tm
     put_status, put_body = _invoke_app("PUT", "/api/vix-trader/config", token="dashboard-token", payload=config)
     get_status, get_body = _invoke_app("GET", "/api/vix-trader/config", token="dashboard-token")
     assert put_status.startswith("200")
-    assert json.loads(put_body)["missing"] == []
+    put_payload = json.loads(put_body)
+    assert put_payload["operator_ceilings"]["maximum_cycle_allocation"] == 1500.0
+    assert put_payload["evidence"]["profitability_status"] == "insufficient_evidence"
     assert get_status.startswith("200")
-    assert json.loads(get_body)["config"]["maximum_cycle_allocation"] == 1500.0
+    assert json.loads(get_body)["operator_ceilings"]["maximum_cycle_allocation"] == 1500.0
 
 
 def test_vix_configuration_api_rejects_invalid_values(monkeypatch, tmp_path) -> None:

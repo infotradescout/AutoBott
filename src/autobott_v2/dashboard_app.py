@@ -134,20 +134,39 @@ def handle_request(method: str, path: str, headers: dict[str, str], body: bytes)
             return 200, "application/json; charset=utf-8", vix_strategy_status()
         if path == "/api/vix-trader/config" and method == "GET":
             config = load_vix_strategy_config()
-            return 200, "application/json; charset=utf-8", {"ok": True, "config": config.to_json_dict(), "missing": config.missing_required_fields()}
+            from .vix_evidence import resolve_vix_strategy_config
+
+            resolution = resolve_vix_strategy_config(ceilings=config)
+            return 200, "application/json; charset=utf-8", {
+                "ok": True,
+                "operator_ceilings": config.to_json_dict(),
+                "config": (resolution.config or config).to_json_dict(),
+                "evidence": resolution.to_json_dict(),
+                "missing": [] if resolution.config is not None else list(resolution.blocking_reasons),
+            }
         if path == "/api/vix-trader/config" and method == "PUT":
             config = vix_strategy_config_from_dict(_json_body(body))
             if config.validation_errors():
                 return 400, "application/json; charset=utf-8", {"ok": False, "error": "invalid_vix_strategy_config", "details": config.validation_errors()}
             save_vix_strategy_config(config)
-            return 200, "application/json; charset=utf-8", {"ok": True, "config": config.to_json_dict(), "missing": config.missing_required_fields()}
+            from .vix_evidence import resolve_vix_strategy_config
+
+            resolution = resolve_vix_strategy_config(ceilings=config)
+            return 200, "application/json; charset=utf-8", {
+                "ok": True,
+                "operator_ceilings": config.to_json_dict(),
+                "config": (resolution.config or config).to_json_dict(),
+                "evidence": resolution.to_json_dict(),
+                "missing": [] if resolution.config is not None else list(resolution.blocking_reasons),
+                "note": "Saved values are operator risk ceilings only; executable params come from evidence.",
+            }
         if path == "/api/vix-trader/cycles" and method == "GET":
             return 200, "application/json; charset=utf-8", {"ok": True, "cycles": list(reversed(load_vix_cycles()))}
         if path == "/api/vix-trader/preflight" and method == "POST":
             request = _vix_preflight_request(_json_body(body))
-            return 200, "application/json; charset=utf-8", {"ok": True, "preflight": validate_vix_preflight(request, load_vix_strategy_config(), calendar=load_cboe_calendar()).to_json_dict()}
+            return 200, "application/json; charset=utf-8", {"ok": True, "preflight": validate_vix_preflight(request, calendar=load_cboe_calendar()).to_json_dict()}
         if path == "/api/vix-trader/cycles" and method == "POST":
-            cycle = create_vix_cycle(_vix_preflight_request(_json_body(body)), load_vix_strategy_config(), calendar=load_cboe_calendar())
+            cycle = create_vix_cycle(_vix_preflight_request(_json_body(body)), calendar=load_cboe_calendar())
             try:
                 append_vix_cycle(cycle)
             except ValueError as exc:
@@ -1677,22 +1696,22 @@ def _vix_trader_html() -> str:
     </section>
     <section class="panel"><h2>Execution-critical review</h2><pre id="result">Authenticate and run preflight.</pre></section>
   </div>
-  <section class="panel" style="margin-top:16px"><h2>Strategy configuration</h2>
-    <p class="muted">No placeholder values are executable. Enter only the reviewed strategy rules; invalid values are rejected before persistence.</p>
+  <section class="panel" style="margin-top:16px"><h2>Evidence-selected strategy</h2>
+    <p class="muted">Executable parameters are chosen only from closed VIX cycle outcomes that beat the evidence gate. Manual fields below are optional risk ceilings that can only tighten a promoted candidate.</p>
     <div class="fields">
-      <label>Minimum full sessions<input id="cfg-min-sessions" type="number" min="1"></label>
-      <label>Maximum DTE<input id="cfg-max-dte" type="number" min="1"></label>
-      <label>Maximum combined debit<input id="cfg-max-debit" type="number" min="0.01" step="0.01"></label>
-      <label>Maximum cycle allocation<input id="cfg-max-allocation" type="number" min="0.01" step="0.01"></label>
-      <label>First-leg target (decimal)<input id="cfg-first-target" type="number" min="0.01" max="1" step="0.01"></label>
-      <label>Maximum additions<input id="cfg-max-additions" type="number" min="0"></label>
-      <label>Maximum additional capital<input id="cfg-max-additional" type="number" min="0.01" step="0.01"></label>
-      <label>Addition sizing (contracts)<input id="cfg-addition-sizing" type="number" min="1"></label>
-      <label class="wide">Second-leg management rule<input id="cfg-second-rule"></label>
-      <label class="wide">Addition trigger<input id="cfg-addition-trigger"></label>
-      <div class="wide"><button onclick="saveConfig()">Save reviewed configuration</button></div>
+      <label>Ceiling: min full sessions<input id="cfg-min-sessions" type="number" min="1"></label>
+      <label>Ceiling: maximum DTE<input id="cfg-max-dte" type="number" min="1"></label>
+      <label>Ceiling: maximum combined debit<input id="cfg-max-debit" type="number" min="0.01" step="0.01"></label>
+      <label>Ceiling: maximum cycle allocation<input id="cfg-max-allocation" type="number" min="0.01" step="0.01"></label>
+      <label>Ceiling: first-leg target (decimal)<input id="cfg-first-target" type="number" min="0.01" max="1" step="0.01"></label>
+      <label>Ceiling: maximum additions<input id="cfg-max-additions" type="number" min="0"></label>
+      <label>Ceiling: maximum additional capital<input id="cfg-max-additional" type="number" min="0.01" step="0.01"></label>
+      <label>Ceiling: addition sizing<input id="cfg-addition-sizing" type="number" min="1"></label>
+      <label class="wide">Second-leg management rule (candidate label)<input id="cfg-second-rule"></label>
+      <label class="wide">Addition trigger (candidate label)<input id="cfg-addition-trigger"></label>
+      <div class="wide"><button onclick="saveConfig()">Save operator ceilings</button></div>
     </div>
-    <pre id="configuration">Authenticate to load configuration.</pre>
+    <pre id="configuration">Authenticate to load evidence status.</pre>
   </section>
   <section class="panel" style="margin-top:16px"><h2>Authoritative dependencies</h2><pre id="dependencies">Authenticate to inspect calendar and broker blockers.</pre></section>
   <section class="panel" style="margin-top:16px"><h2>Managed cycles</h2><pre id="cycles">No cycle data loaded.</pre></section>
@@ -1704,7 +1723,7 @@ def _vix_trader_html() -> str:
   function configPayload(){return {minimum_full_trading_sessions_remaining:valueOrNull('cfg-min-sessions'),maximum_days_to_expiration:valueOrNull('cfg-max-dte'),maximum_combined_debit:valueOrNull('cfg-max-debit'),maximum_cycle_allocation:valueOrNull('cfg-max-allocation'),first_leg_exit_target_pct:valueOrNull('cfg-first-target'),second_leg_management_rule:el('cfg-second-rule').value||null,maximum_additions:valueOrNull('cfg-max-additions'),maximum_additional_capital:valueOrNull('cfg-max-additional'),addition_sizing:valueOrNull('cfg-addition-sizing'),addition_trigger:el('cfg-addition-trigger').value||null};}
   function populateConfig(c){const values={'cfg-min-sessions':c.minimum_full_trading_sessions_remaining,'cfg-max-dte':c.maximum_days_to_expiration,'cfg-max-debit':c.maximum_combined_debit,'cfg-max-allocation':c.maximum_cycle_allocation,'cfg-first-target':c.first_leg_exit_target_pct,'cfg-second-rule':c.second_leg_management_rule,'cfg-max-additions':c.maximum_additions,'cfg-max-additional':c.maximum_additional_capital,'cfg-addition-sizing':c.addition_sizing,'cfg-addition-trigger':c.addition_trigger};Object.entries(values).forEach(([id,value])=>el(id).value=value??'');}
   async function api(path,opts={}){const r=await fetch(path,{...opts,headers:auth()});const j=await r.json();if(!r.ok)throw new Error(j.detail||j.error||r.status);return j}
-  async function refresh(){try{const s=await api('/api/vix-trader/status');el('mode').textContent=s.mode;el('broker').textContent=s.broker_execution_supported?'Ready':'Blocked';el('profit').textContent=s.profitability_status;el('next').textContent=!s.configuration_complete?'Complete configuration':!s.configuration_valid?'Correct configuration':!s.calendar.authoritative?'Load Cboe calendar':'Select VIX broker adapter';el('cycles').textContent=JSON.stringify(s.cycles,null,2);populateConfig(s.config);el('configuration').textContent=JSON.stringify({complete:s.configuration_complete,valid:s.configuration_valid,missing:s.missing_configuration,errors:s.configuration_errors},null,2);el('dependencies').textContent=JSON.stringify({broker_execution_supported:s.broker_execution_supported,broker_blocker:s.broker_blocker,calendar:s.calendar},null,2)}catch(e){el('result').textContent=e.message}}
+  async function refresh(){try{const s=await api('/api/vix-trader/status');el('mode').textContent=s.mode;el('broker').textContent=s.broker_execution_supported?'Ready':'Blocked';el('profit').textContent=s.profitability_status;el('next').textContent=s.next_action||(!s.configuration_complete?'Collect VIX cycle evidence':!s.configuration_valid?'Correct configuration':!s.calendar.authoritative?'Load Cboe calendar':'Select VIX broker adapter');el('cycles').textContent=JSON.stringify(s.cycles,null,2);populateConfig(s.operator_ceilings||s.config);el('configuration').textContent=JSON.stringify({source:s.configuration_source,fingerprint:s.configuration_fingerprint,complete:s.configuration_complete,valid:s.configuration_valid,evidence:s.evidence,errors:s.configuration_errors},null,2);el('dependencies').textContent=JSON.stringify({broker_execution_supported:s.broker_execution_supported,broker_blocker:s.broker_blocker,calendar:s.calendar},null,2)}catch(e){el('result').textContent=e.message}}
   async function saveConfig(){try{const j=await api('/api/vix-trader/config',{method:'PUT',body:JSON.stringify(configPayload())});el('configuration').textContent=JSON.stringify(j,null,2);await refresh()}catch(e){el('configuration').textContent=e.message}}
   async function runPreflight(save){try{const path=save?'/api/vix-trader/cycles':'/api/vix-trader/preflight';const j=await api(path,{method:'POST',body:JSON.stringify(payload())});el('result').textContent=JSON.stringify(j.cycle||j.preflight,null,2);if(save)await refresh()}catch(e){el('result').textContent=e.message}}
   el('token').addEventListener('change',refresh);

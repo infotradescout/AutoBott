@@ -1,0 +1,24 @@
+{
+  "source": "cboe_published_schedule",
+  "source_url": "https://www.cboe.com/about/hours/us-options/",
+  "published_at": "2026-07-21T17:00:00+00:00",
+  "coverage_start": "2026-01-01",
+  "coverage_end": "2026-12-31",
+  "holidays": [
+    "2026-01-01",
+    "2026-01-19",
+    "2026-02-16",
+    "2026-04-03",
+    "2026-05-25",
+    "2026-06-19",
+    "2026-07-03",
+    "2026-09-07",
+    "2026-11-26",
+    "2026-12-25"
+  ],
+  "early_closes": {
+    "2026-11-27": "13:00:00",
+    "2026-12-24": "13:00:00"
+  },
+  "notes": "Captured from Cboe U.S. Options Hours & Holidays 2026 schedule. Early-close days are not holidays."
+}

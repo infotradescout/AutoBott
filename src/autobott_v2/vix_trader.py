@@ -646,8 +646,21 @@ def validate_vix_preflight(
     calendar: CboeCalendar | None = None,
     authorized_override_actor: str | None = None,
     allowed_override_codes: set[str] | None = None,
+    require_evidence: bool | None = None,
 ) -> VixPreflightResult:
-    config = config or load_vix_strategy_config()
+    config_was_provided = config is not None
+    if require_evidence is None:
+        require_evidence = not config_was_provided
+
+    evidence_resolution = None
+    if require_evidence:
+        from .vix_evidence import resolve_vix_strategy_config
+
+        evidence_resolution = resolve_vix_strategy_config()
+        config = evidence_resolution.config or VixStrategyConfig()
+    else:
+        config = config or VixStrategyConfig()
+
     resolved_calendar = calendar or UnavailableCboeCalendar()
     actual_session = resolved_calendar.session_at(request.actual_timestamp)
     final_tradable = resolved_calendar.final_tradable_timestamp(request.expiration)
@@ -669,9 +682,16 @@ def validate_vix_preflight(
             return
         issues.append(PreflightIssue(code, message, category, overridable=overridable))
 
+    if require_evidence and evidence_resolution is not None and evidence_resolution.config is None:
+        reasons = ", ".join(evidence_resolution.blocking_reasons) or "insufficient_evidence"
+        block(
+            "strategy_evidence_insufficient",
+            f"No VIX parameter set has proven itself yet ({reasons}).",
+            "strategy",
+        )
     missing_config = config.missing_required_fields()
-    if missing_config:
-        block("strategy_configuration_incomplete", f"Configure before entry: {', '.join(missing_config)}.", "strategy")
+    if missing_config and not require_evidence:
+        block("strategy_configuration_incomplete", f"Candidate configuration incomplete: {', '.join(missing_config)}.", "strategy")
     invalid_config = config.validation_errors()
     if invalid_config:
         block("strategy_configuration_invalid", f"Invalid strategy configuration: {', '.join(invalid_config)}.", "strategy")
@@ -778,13 +798,25 @@ def create_vix_cycle(
     authorized_override_actor: str | None = None,
     allowed_override_codes: set[str] | None = None,
 ) -> VixPairedCycle:
-    config = config or load_vix_strategy_config()
+    from .vix_evidence import resolve_vix_strategy_config, vix_strategy_fingerprint
+
+    require_evidence = config is None
+    configuration_source = "explicit_candidate"
+    fingerprint = None
+    if require_evidence:
+        evidence_resolution = resolve_vix_strategy_config()
+        config = evidence_resolution.config or VixStrategyConfig()
+        configuration_source = evidence_resolution.source if evidence_resolution.config is not None else "none"
+        fingerprint = evidence_resolution.fingerprint
+    else:
+        fingerprint = vix_strategy_fingerprint(config) if not config.missing_required_fields() else None
     preflight = validate_vix_preflight(
         request,
-        config,
+        None if require_evidence else config,
         calendar=calendar,
         authorized_override_actor=authorized_override_actor,
         allowed_override_codes=allowed_override_codes,
+        require_evidence=require_evidence,
     )
     now = request.actual_timestamp.astimezone(UTC)
     execution = ExecutionCycle(
@@ -818,7 +850,9 @@ def create_vix_cycle(
             "second_leg_management_rule": config.second_leg_management_rule,
             "maximum_additions": config.maximum_additions,
             "maximum_cycle_capital": config.maximum_cycle_allocation,
-            "configuration_source": "default",
+            "configuration_source": configuration_source,
+            "configuration_fingerprint": fingerprint,
+            "strategy_configuration": config.to_json_dict() if not config.missing_required_fields() else None,
             "client_request_id": request.client_request_id,
         },
         lifecycle_state=CycleLifecycleState.PREFLIGHT_VALIDATED if preflight.passed else CycleLifecycleState.PREFLIGHT_BLOCKED,
@@ -905,23 +939,39 @@ def load_vix_cycles(*, path: str | Path | None = None, limit: int = 100) -> list
 
 
 def vix_strategy_status() -> dict[str, Any]:
-    config = load_vix_strategy_config()
+    from .vix_evidence import resolve_vix_strategy_config
+
+    ceilings = load_vix_strategy_config()
+    resolution = resolve_vix_strategy_config(ceilings=ceilings)
+    config = resolution.config or ceilings
     calendar = load_cboe_calendar()
     cycles = load_vix_cycles(limit=20)
     active = [row for row in cycles if row.get("lifecycle_state") in ACTIVE_EXPOSURE_STATES]
+    if resolution.config is not None:
+        next_action = "ready_for_broker_adapter" if calendar.authoritative else "load_cboe_calendar"
+    else:
+        next_action = "collect_vix_cycle_evidence"
     return {
         "ok": True,
         "strategy_id": VIX_STRATEGY_ID,
         "name": "VIX Trader",
         "mode": "simulation_and_preflight_only",
         "broker_execution_supported": False,
-        "broker_blocker": "current Alpaca adapter does not expose actual Cboe VIX/VIXW index options",
-        "profitability_status": "unproven",
+        "broker_blocker": (
+            "selected next adapter is Interactive Brokers for actual Cboe VIX/VIXW; "
+            "current Alpaca path is equity/ETF options only (Alpaca index options not available on this account class)"
+        ),
+        "profitability_status": resolution.profitability_status,
         "config": config.to_json_dict(),
-        "configuration_complete": not config.missing_required_fields(),
-        "missing_configuration": config.missing_required_fields(),
+        "configuration_complete": resolution.config is not None and not config.missing_required_fields(),
+        "configuration_source": resolution.source,
+        "configuration_fingerprint": resolution.fingerprint,
+        "missing_configuration": config.missing_required_fields() if resolution.config is None else [],
         "configuration_valid": not config.validation_errors(),
         "configuration_errors": config.validation_errors(),
+        "evidence": resolution.to_json_dict(),
+        "operator_ceilings": ceilings.to_json_dict(),
+        "next_action": next_action,
         "calendar": {
             "authoritative": calendar.authoritative,
             "source": calendar.source,

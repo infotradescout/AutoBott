@@ -27,20 +27,15 @@ position reconciliation capabilities before broker execution can be enabled.
 
 ## Configuration status
 
-The working thesis records the preferred spot VIX range as the 17s. Unprovided strategy values deliberately default
-to `null`, including:
+The working thesis records the preferred spot VIX range as the 17s.
 
-- minimum full sessions remaining;
-- maximum DTE;
-- combined-debit and cycle-allocation caps;
-- first-leg target;
-- second-leg rule;
-- addition count, capital, sizing, and trigger.
+Executable strategy parameters are **not** typed in by the operator. AutoBott selects them from a
+predeclared candidate grid by measuring closed VIX cycle outcomes (sample size, expectancy, profit
+factor, drawdown). Preflight returns `strategy_evidence_insufficient` until a candidate clears the
+evidence gate.
 
-Preflight returns `strategy_configuration_incomplete` until Thomas supplies those rules. Values can be supplied with
-the `AUTOBOTT_VIX_*` environment variables declared in `render.yaml`, persisted through `PUT /api/vix-trader/config`,
-or stored in the data-root configuration file. This prevents placeholder values from silently becoming executable
-strategy logic while allowing hosted configuration to survive restarts.
+Operator-saved values and `AUTOBOTT_VIX_*` environment variables are optional **risk ceilings** only.
+They may tighten a promoted candidate; they cannot invent an unproven strategy.
 
 ## Settlement and session basis
 
@@ -68,6 +63,21 @@ selected expiration. The status API reports the loaded provenance and coverage w
 Client timestamps and override identities are ignored by the hosted route. The server supplies the decision timestamp,
 and overrides require authenticated server-side authorization. Broker fills and quotes—not editable performance fields—
 derive committed capital, proceeds, open value, realized P&L, and unrealized P&L.
+
+## Broker adapter selection
+
+`VixBrokerAdapter` is the capability boundary. Current status: **not implemented**;
+`broker_execution_supported` remains `false`.
+
+| Candidate | VIX / VIXW | Fit with AutoBott today | Decision |
+|-----------|------------|-------------------------|----------|
+| Alpaca (current) | Index options including VIX for **broker-partner** accounts; retail still blocked as of mid-2026; VIXW not confirmed | Already integrated for equity/ETF options paper | **Not sufficient** for this module yet |
+| Interactive Brokers (TWS / Client Portal API) | Supports Cboe index options including VIX and weekly VIXW with proper market-data subscriptions | Separate adapter; Gateway/TWS ops cost | **Selected next adapter** |
+| Proxies (VXX / UVXY equity options) | Not actual VIX/VIXW index options | Would fake product identity | **Rejected** |
+
+Until an IBKR (or future Alpaca retail) adapter proves account, chain, session, quote, preview,
+submit, cancel, replace, fill, and position reconciliation for VIX/VIXW, the module stays
+simulation/preflight-only. No fills are fabricated.
 
 ## Existing platform preservation
 

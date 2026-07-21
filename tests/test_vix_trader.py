@@ -103,10 +103,57 @@ def test_valid_pair_passes_preflight_and_retains_expiration_truth() -> None:
     assert result.automatic_exit_deadline < result.final_tradable_timestamp
 
 
-def test_unprovided_strategy_numbers_fail_closed_instead_of_becoming_defaults() -> None:
+def test_unprovided_strategy_numbers_fail_closed_on_insufficient_evidence() -> None:
     result = validate_vix_preflight(_request(), calendar=_calendar())
     assert result.passed is False
-    assert "strategy_configuration_incomplete" in {issue.code for issue in result.issues}
+    assert "strategy_evidence_insufficient" in {issue.code for issue in result.issues}
+
+
+def test_manual_config_alone_does_not_unlock_evidence_gated_preflight(tmp_path, monkeypatch) -> None:
+    from autobott_v2.vix_trader import save_vix_strategy_config
+
+    monkeypatch.setenv("AUTOBOTT_DATA_ROOT", str(tmp_path))
+    save_vix_strategy_config(_config())
+    result = validate_vix_preflight(_request(), calendar=_calendar())
+    assert result.passed is False
+    assert "strategy_evidence_insufficient" in {issue.code for issue in result.issues}
+
+
+def test_evidence_promotes_winning_candidate_and_ceilings_only_tighten() -> None:
+    from autobott_v2.vix_evidence import (
+        VixEvidenceRules,
+        resolve_vix_strategy_config,
+        vix_parameter_candidates,
+        vix_strategy_fingerprint,
+    )
+
+    candidate = vix_parameter_candidates()[0]
+    fingerprint = vix_strategy_fingerprint(candidate)
+    cycles = [
+        {
+            "lifecycle_state": "CLOSED",
+            "combined_cycle_pnl": 40.0,
+            "maximum_drawdown": 5.0,
+            "capital_committed": 800.0,
+            "strategy_payload": {
+                "configuration_fingerprint": fingerprint,
+                "maximum_cycle_capital": 1500.0,
+            },
+        }
+        for _ in range(50)
+    ]
+    cycles[0]["combined_cycle_pnl"] = -10.0
+    resolution = resolve_vix_strategy_config(
+        cycles=cycles,
+        candidates=(candidate,),
+        rules=VixEvidenceRules(min_closed_cycles=50, min_profit_factor=1.25, min_expectancy=0.0),
+        ceilings=_config(maximum_cycle_allocation=900.0, maximum_combined_debit=5.0),
+    )
+    assert resolution.config is not None
+    assert resolution.profitability_status == "evidence_selected"
+    assert resolution.config.maximum_cycle_allocation == 900.0
+    assert resolution.config.maximum_combined_debit == 5.0
+    assert resolution.config.first_leg_exit_target_pct == candidate.first_leg_exit_target_pct
 
 
 @pytest.mark.parametrize(
@@ -248,6 +295,19 @@ def test_calendar_file_requires_provenance_and_coverage(tmp_path) -> None:
     assert calendar.covers(date(2026, 7, 13), date(2026, 7, 22)) is False
     result = validate_vix_preflight(_request(), _config(), calendar=calendar)
     assert "calendar_coverage_incomplete" in {issue.code for issue in result.issues}
+
+
+def test_committed_cboe_calendar_loads_as_authoritative() -> None:
+    from pathlib import Path
+
+    from autobott_v2.vix_trader import cboe_calendar_path
+
+    repo_calendar = Path(__file__).resolve().parents[1] / "data" / "vix_trader" / "cboe_calendar.json"
+    assert repo_calendar.exists()
+    calendar = load_cboe_calendar(path=repo_calendar)
+    assert calendar.authoritative is True
+    assert calendar.covers(date(2026, 7, 21), date(2026, 12, 31)) is True
+    assert cboe_calendar_path().name == "cboe_calendar.json"
 
 
 def test_cycle_store_duplicate_check_is_atomic(tmp_path) -> None:
