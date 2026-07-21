@@ -41,23 +41,6 @@ from .runtime_paths import gate_path as default_gate_path
 from .runtime_paths import phase1_replay_campaign_root, phase1_snapshots_root
 from .trade_outcomes import record_trade_outcomes_from_orders
 from .strategy_registry import strategy_registry_payload
-from .vix_trader import (
-    ACTIVE_EXPOSURE_STATES,
-    SettlementType,
-    TradingSession,
-    VixPreflightRequest,
-    VixProduct,
-    VixStrategyConfig,
-    append_vix_cycle,
-    create_vix_cycle,
-    load_cboe_calendar,
-    load_vix_cycles,
-    load_vix_strategy_config,
-    save_vix_strategy_config,
-    validate_vix_preflight,
-    vix_strategy_config_from_dict,
-    vix_strategy_status,
-)
 
 
 JsonDict = dict[str, Any]
@@ -129,13 +112,21 @@ def handle_request(method: str, path: str, headers: dict[str, str], body: bytes)
         if path == "/api/session/status" and method == "GET":
             return 200, "application/json; charset=utf-8", _session_status_payload()
         if path == "/api/strategies" and method == "GET":
+            _ensure_vix_strategy_registered()
             return 200, "application/json; charset=utf-8", strategy_registry_payload()
         if path == "/api/vix-trader/status" and method == "GET":
-            return 200, "application/json; charset=utf-8", vix_strategy_status()
-        if path == "/api/vix-trader/config" and method == "GET":
-            config = load_vix_strategy_config()
-            from .vix_evidence import resolve_vix_strategy_config
+            from .vix_ibkr_broker import describe_vix_broker
+            from .vix_trader import vix_strategy_status
 
+            payload = vix_strategy_status()
+            payload["vix_broker"] = describe_vix_broker().to_json_dict()
+            payload["alpaca_paper_isolated"] = True
+            return 200, "application/json; charset=utf-8", payload
+        if path == "/api/vix-trader/config" and method == "GET":
+            from .vix_evidence import resolve_vix_strategy_config
+            from .vix_trader import load_vix_strategy_config
+
+            config = load_vix_strategy_config()
             resolution = resolve_vix_strategy_config(ceilings=config)
             return 200, "application/json; charset=utf-8", {
                 "ok": True,
@@ -145,12 +136,13 @@ def handle_request(method: str, path: str, headers: dict[str, str], body: bytes)
                 "missing": [] if resolution.config is not None else list(resolution.blocking_reasons),
             }
         if path == "/api/vix-trader/config" and method == "PUT":
+            from .vix_evidence import resolve_vix_strategy_config
+            from .vix_trader import save_vix_strategy_config, vix_strategy_config_from_dict
+
             config = vix_strategy_config_from_dict(_json_body(body))
             if config.validation_errors():
                 return 400, "application/json; charset=utf-8", {"ok": False, "error": "invalid_vix_strategy_config", "details": config.validation_errors()}
             save_vix_strategy_config(config)
-            from .vix_evidence import resolve_vix_strategy_config
-
             resolution = resolve_vix_strategy_config(ceilings=config)
             return 200, "application/json; charset=utf-8", {
                 "ok": True,
@@ -161,11 +153,17 @@ def handle_request(method: str, path: str, headers: dict[str, str], body: bytes)
                 "note": "Saved values are operator risk ceilings only; executable params come from evidence.",
             }
         if path == "/api/vix-trader/cycles" and method == "GET":
+            from .vix_trader import load_vix_cycles
+
             return 200, "application/json; charset=utf-8", {"ok": True, "cycles": list(reversed(load_vix_cycles()))}
         if path == "/api/vix-trader/preflight" and method == "POST":
+            from .vix_trader import load_cboe_calendar, validate_vix_preflight
+
             request = _vix_preflight_request(_json_body(body))
             return 200, "application/json; charset=utf-8", {"ok": True, "preflight": validate_vix_preflight(request, calendar=load_cboe_calendar()).to_json_dict()}
         if path == "/api/vix-trader/cycles" and method == "POST":
+            from .vix_trader import append_vix_cycle, create_vix_cycle, load_cboe_calendar
+
             cycle = create_vix_cycle(_vix_preflight_request(_json_body(body)), calendar=load_cboe_calendar())
             try:
                 append_vix_cycle(cycle)
@@ -174,6 +172,29 @@ def handle_request(method: str, path: str, headers: dict[str, str], body: bytes)
                     return 409, "application/json; charset=utf-8", {"ok": False, "error": str(exc)}
                 raise
             return 200, "application/json; charset=utf-8", {"ok": True, "cycle": cycle.to_json_dict()}
+        if path == "/api/vix-trader/sim/run" and method == "POST":
+            from .vix_sim_runner import run_vix_simulation_campaign, vix_sim_enabled
+
+            if not vix_sim_enabled():
+                return 403, "application/json; charset=utf-8", {
+                    "ok": False,
+                    "error": "vix_sim_disabled",
+                    "detail": "Set AUTOBOTT_VIX_SIM_ENABLED=true to run the isolated VIX evidence simulator.",
+                    "alpaca_paper_isolated": True,
+                }
+            payload = _json_body(body)
+            cycles = int(payload.get("cycles_per_candidate") or 50)
+            result = run_vix_simulation_campaign(cycles_per_candidate=max(1, min(cycles, 200)))
+            return 200, "application/json; charset=utf-8", {"ok": True, **result.to_json_dict()}
+        if path == "/api/vix-trader/broker" and method == "GET":
+            from .vix_ibkr_broker import describe_vix_broker, load_vix_broker_adapter
+
+            selection = describe_vix_broker()
+            probe = None
+            if selection.broker_id == "ibkr" and selection.execution_enabled:
+                adapter = load_vix_broker_adapter()
+                probe = getattr(adapter, "capability_probe", lambda: None)()
+            return 200, "application/json; charset=utf-8", {"ok": True, "selection": selection.to_json_dict(), "probe": probe}
         if path == "/api/runtime/arm-paper" and method == "POST":
             return 200, "application/json; charset=utf-8", _runtime_arm_paper_payload(_json_body(body))
         if path == "/api/runtime/disable-execution" and method == "POST":
@@ -1602,7 +1623,21 @@ def _execution_replace_payload(payload: JsonDict) -> JsonDict:
     return {"ok": True, "result": result}
 
 
-def _vix_preflight_request(payload: JsonDict) -> VixPreflightRequest:
+def _ensure_vix_strategy_registered() -> None:
+    # Import registers the additive VIX strategy without affecting Alpaca paper modules.
+    from . import vix_trader as _vix_trader  # noqa: F401
+
+
+def _vix_preflight_request(payload: JsonDict):
+    from .vix_trader import (
+        ACTIVE_EXPOSURE_STATES,
+        SettlementType,
+        TradingSession,
+        VixPreflightRequest,
+        VixProduct,
+        load_vix_cycles,
+    )
+
     call_expiration = date.fromisoformat(str(payload["call_expiration"])[:10])
     put_expiration = date.fromisoformat(str(payload.get("put_expiration") or payload["call_expiration"])[:10])
     product = VixProduct(str(payload.get("product") or "VIXW").upper())
@@ -3067,6 +3102,7 @@ def main() -> int:
     bootstrap_env_file()
     host = os.getenv("HOST", "0.0.0.0")
     port = int(os.getenv("PORT", "8000"))
+    # Paper session starts first. VIX is additive and loaded only on VIX routes.
     maybe_start_session_supervisor()
     with make_server(host, port, app) as httpd:
         print(f"AutoBott dashboard serving on http://{host}:{port}")

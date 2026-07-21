@@ -79,6 +79,24 @@ Until an IBKR (or future Alpaca retail) adapter proves account, chain, session, 
 submit, cancel, replace, fill, and position reconciliation for VIX/VIXW, the module stays
 simulation/preflight-only. No fills are fabricated.
 
+Dual opt-in is required before any VIX broker object can do work:
+
+- `AUTOBOTT_VIX_BROKER=ibkr`
+- `AUTOBOTT_VIX_EXECUTION_ENABLED=true`
+
+Defaults keep both off. The IBKR scaffold lives in `vix_ibkr_broker.py` and is unreachable from
+`trading_cycle`, `session_runner`, or `AlpacaExecutionBroker`.
+
+## Isolated evidence simulation
+
+`python -m autobott_v2.vix_sim_runner` (or `POST /api/vix-trader/sim/run` with
+`AUTOBOTT_VIX_SIM_ENABLED=true`) accumulates fingerprinted CLOSED cycles offline so the evidence
+gate can promote a candidate. This path:
+
+- never submits Alpaca orders
+- never arms or pauses paper execution
+- never runs inside the paper session supervisor
+
 ## Existing platform preservation
 
 The existing `/` dashboard and all pre-existing API routes remain present. VIX Trader adds:

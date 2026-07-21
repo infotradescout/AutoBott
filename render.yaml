@@ -184,3 +184,9 @@ services:
         sync: false
       - key: AUTOBOTT_VIX_ADDITION_TRIGGER
         sync: false
+      - key: AUTOBOTT_VIX_SIM_ENABLED
+        value: "false"
+      - key: AUTOBOTT_VIX_BROKER
+        value: disabled
+      - key: AUTOBOTT_VIX_EXECUTION_ENABLED
+        value: "false"

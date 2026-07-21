@@ -1238,6 +1238,26 @@ def test_strategy_registry_and_vix_status_routes(monkeypatch, tmp_path) -> None:
     assert vix_payload["profitability_status"] == "insufficient_evidence"
     assert vix_payload["next_action"] == "collect_vix_cycle_evidence"
     assert "evidence" in vix_payload
+    assert vix_payload["alpaca_paper_isolated"] is True
+    assert vix_payload["vix_broker"]["broker_id"] == "disabled"
+
+
+def test_vix_sim_route_is_disabled_by_default(monkeypatch, tmp_path) -> None:
+    _auth_env(monkeypatch, tmp_path)
+    status, body = _invoke_app("POST", "/api/vix-trader/sim/run", token="dashboard-token", payload={"cycles_per_candidate": 1})
+    payload = json.loads(body)
+    assert status.startswith("403")
+    assert payload["error"] == "vix_sim_disabled"
+    assert payload["alpaca_paper_isolated"] is True
+
+
+def test_vix_broker_status_route_defaults_disabled(monkeypatch, tmp_path) -> None:
+    _auth_env(monkeypatch, tmp_path)
+    status, body = _invoke_app("GET", "/api/vix-trader/broker", token="dashboard-token")
+    payload = json.loads(body)
+    assert status.startswith("200")
+    assert payload["selection"]["broker_id"] == "disabled"
+    assert payload["selection"]["affects_alpaca_paper"] is False
 
 
 def test_vix_preflight_route_blocks_mismatched_products(monkeypatch, tmp_path) -> None:
