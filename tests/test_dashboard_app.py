@@ -1197,14 +1197,11 @@ def test_vix_trader_workspace_is_additive_and_platform_home_still_renders() -> N
     assert home_status.startswith("200")
     assert "AutoBott Phase 1 Operator Console" in home
     assert vix_status.startswith("200")
-    assert "VIX Trader" in vix
+    assert "VIX Paper → Robinhood Mirror" in vix
     assert "Platform dashboard" in vix
-    assert "broker-confirmed fills" in vix
-    assert "Evidence-selected strategy" in vix
-    assert "Save operator ceilings" in vix
-    assert "Authoritative dependencies" in vix
-    assert "configuration_valid" in vix
-    assert "calendar.authoritative" in vix
+    assert "Robinhood action queue" in vix
+    assert "Paper performance report" in vix
+    assert "Save paper cycle" in vix
 
 
 def test_preexisting_dashboard_route_inventory_is_preserved() -> None:
@@ -1235,11 +1232,15 @@ def test_strategy_registry_and_vix_status_routes(monkeypatch, tmp_path) -> None:
     assert any(row["strategy_id"] == "vix_paired_options" for row in registry_payload["strategies"])
     assert vix_status.startswith("200")
     assert vix_payload["broker_execution_supported"] is False
-    assert vix_payload["profitability_status"] == "insufficient_evidence"
-    assert vix_payload["next_action"] == "collect_vix_cycle_evidence"
-    assert "evidence" in vix_payload
+    assert vix_payload["mode"] == "paper_trading_with_robinhood_reporting"
+    assert "robinhood_mirror" in vix_payload
     assert vix_payload["alpaca_paper_isolated"] is True
     assert vix_payload["vix_broker"]["broker_id"] == "disabled"
+    mirror_status, mirror_body = _invoke_app("GET", "/api/vix-trader/robinhood-mirror", token="dashboard-token")
+    mirror = json.loads(mirror_body)
+    assert mirror_status.startswith("200")
+    assert mirror["real_money_venue"] == "robinhood_manual"
+    assert mirror["autobott_submits_live_orders"] is False
 
 
 def test_vix_sim_route_is_disabled_by_default(monkeypatch, tmp_path) -> None:

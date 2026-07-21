@@ -940,38 +940,48 @@ def load_vix_cycles(*, path: str | Path | None = None, limit: int = 100) -> list
 
 def vix_strategy_status() -> dict[str, Any]:
     from .vix_evidence import resolve_vix_strategy_config
+    from .vix_robinhood_mirror import build_robinhood_mirror_report, paper_vix_operating_config
 
     ceilings = load_vix_strategy_config()
     resolution = resolve_vix_strategy_config(ceilings=ceilings)
-    config = resolution.config or ceilings
+    operating = paper_vix_operating_config()
+    config_payload = operating["config"]
     calendar = load_cboe_calendar()
     cycles = load_vix_cycles(limit=20)
     active = [row for row in cycles if row.get("lifecycle_state") in ACTIVE_EXPOSURE_STATES]
-    if resolution.config is not None:
-        next_action = "ready_for_broker_adapter" if calendar.authoritative else "load_cboe_calendar"
+    mirror = build_robinhood_mirror_report(limit=50)
+    if mirror["open_count"] > 0:
+        next_action = "mirror_open_vix_actions_on_robinhood"
+    elif operating.get("proven"):
+        next_action = "paper_next_vix_entry_for_robinhood_mirror"
     else:
-        next_action = "collect_vix_cycle_evidence"
+        next_action = "paper_trade_vix_and_review_robinhood_mirror_report"
     return {
         "ok": True,
         "strategy_id": VIX_STRATEGY_ID,
         "name": "VIX Trader",
-        "mode": "simulation_and_preflight_only",
+        "mode": "paper_trading_with_robinhood_reporting",
+        "product_intent": "Paper the VIX paired trade in AutoBott; copy the same trade on Robinhood for real money.",
         "broker_execution_supported": False,
-        "broker_blocker": (
-            "selected next adapter is Interactive Brokers for actual Cboe VIX/VIXW; "
-            "current Alpaca path is equity/ETF options only (Alpaca index options not available on this account class)"
-        ),
-        "profitability_status": resolution.profitability_status,
-        "config": config.to_json_dict(),
-        "configuration_complete": resolution.config is not None and not config.missing_required_fields(),
-        "configuration_source": resolution.source,
-        "configuration_fingerprint": resolution.fingerprint,
-        "missing_configuration": config.missing_required_fields() if resolution.config is None else [],
-        "configuration_valid": not config.validation_errors(),
-        "configuration_errors": config.validation_errors(),
+        "broker_blocker": "AutoBott does not submit live VIX orders; real-money venue is manual Robinhood mirroring.",
+        "profitability_status": operating.get("profitability_status") or resolution.profitability_status,
+        "config": config_payload,
+        "configuration_complete": True,
+        "configuration_source": operating.get("source"),
+        "configuration_fingerprint": operating.get("fingerprint"),
+        "missing_configuration": [],
+        "configuration_valid": not ceilings.validation_errors(),
+        "configuration_errors": ceilings.validation_errors(),
         "evidence": resolution.to_json_dict(),
+        "operating": operating,
         "operator_ceilings": ceilings.to_json_dict(),
         "next_action": next_action,
+        "robinhood_mirror": {
+            "open_count": mirror["open_count"],
+            "closed_count": mirror["closed_count"],
+            "action_count": len(mirror["robinhood_action_queue"]),
+            "performance_report": mirror["performance_report"],
+        },
         "calendar": {
             "authoritative": calendar.authoritative,
             "source": calendar.source,
@@ -983,6 +993,7 @@ def vix_strategy_status() -> dict[str, Any]:
         "cycle_count": len(cycles),
         "active_cycle_count": len(active),
         "cycles": list(reversed(cycles)),
+        "alpaca_paper_isolated": True,
     }
 
 

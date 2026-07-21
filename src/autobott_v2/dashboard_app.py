@@ -157,21 +157,35 @@ def handle_request(method: str, path: str, headers: dict[str, str], body: bytes)
 
             return 200, "application/json; charset=utf-8", {"ok": True, "cycles": list(reversed(load_vix_cycles()))}
         if path == "/api/vix-trader/preflight" and method == "POST":
-            from .vix_trader import load_cboe_calendar, validate_vix_preflight
+            from .vix_robinhood_mirror import paper_vix_operating_config
+            from .vix_trader import load_cboe_calendar, validate_vix_preflight, vix_strategy_config_from_dict
 
+            operating = paper_vix_operating_config()
+            config = vix_strategy_config_from_dict(operating["config"])
             request = _vix_preflight_request(_json_body(body))
-            return 200, "application/json; charset=utf-8", {"ok": True, "preflight": validate_vix_preflight(request, calendar=load_cboe_calendar()).to_json_dict()}
+            return 200, "application/json; charset=utf-8", {
+                "ok": True,
+                "preflight": validate_vix_preflight(request, config, calendar=load_cboe_calendar()).to_json_dict(),
+                "operating": operating,
+            }
         if path == "/api/vix-trader/cycles" and method == "POST":
-            from .vix_trader import append_vix_cycle, create_vix_cycle, load_cboe_calendar
+            from .vix_robinhood_mirror import paper_vix_operating_config
+            from .vix_trader import append_vix_cycle, create_vix_cycle, load_cboe_calendar, vix_strategy_config_from_dict
 
-            cycle = create_vix_cycle(_vix_preflight_request(_json_body(body)), calendar=load_cboe_calendar())
+            operating = paper_vix_operating_config()
+            config = vix_strategy_config_from_dict(operating["config"])
+            cycle = create_vix_cycle(_vix_preflight_request(_json_body(body)), config, calendar=load_cboe_calendar())
             try:
                 append_vix_cycle(cycle)
             except ValueError as exc:
                 if str(exc) in {"duplicate_client_request_id", "overlapping_active_expiration"}:
                     return 409, "application/json; charset=utf-8", {"ok": False, "error": str(exc)}
                 raise
-            return 200, "application/json; charset=utf-8", {"ok": True, "cycle": cycle.to_json_dict()}
+            return 200, "application/json; charset=utf-8", {"ok": True, "cycle": cycle.to_json_dict(), "operating": operating}
+        if path == "/api/vix-trader/robinhood-mirror" and method == "GET":
+            from .vix_robinhood_mirror import build_robinhood_mirror_report
+
+            return 200, "application/json; charset=utf-8", build_robinhood_mirror_report()
         if path == "/api/vix-trader/sim/run" and method == "POST":
             from .vix_sim_runner import run_vix_simulation_campaign, vix_sim_enabled
 
@@ -1691,7 +1705,7 @@ def _vix_trader_html() -> str:
 <html lang="en">
 <head>
   <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>VIX Trader | AutoBott</title>
+  <title>VIX Paper → Robinhood Mirror | AutoBott</title>
   <style>
     :root{--bg:#090d12;--panel:#121a24;--line:#28384b;--text:#ecf2f9;--muted:#94a4b8;--accent:#f4b860;--safe:#3ddc97;--bad:#ff6b6b}
     *{box-sizing:border-box} body{margin:0;background:var(--bg);color:var(--text);font:15px system-ui,sans-serif}
@@ -1702,19 +1716,22 @@ def _vix_trader_html() -> str:
     .fields{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px}.wide{grid-column:1/-1}button{background:var(--accent);color:#17120a;border:0;border-radius:9px;padding:11px 16px;font-weight:700;cursor:pointer}
     pre{white-space:pre-wrap;word-break:break-word;background:#0b1119;border:1px solid var(--line);border-radius:10px;padding:14px;max-height:520px;overflow:auto}
     .critical{border-left:4px solid var(--accent)}.truth{display:grid;grid-template-columns:repeat(4,1fr);gap:8px}.truth div{background:#0b1119;padding:10px;border-radius:8px}.truth strong{display:block;color:var(--accent)}
+    .action{border:1px solid var(--line);border-radius:10px;padding:12px;margin:8px 0;background:#0b1119}.action code{color:var(--accent)}
     @media(max-width:800px){.grid,.fields,.truth{grid-template-columns:1fr}}
   </style>
 </head>
 <body><div class="shell">
-  <header class="top"><div><div class="muted">AutoBott / Trader's Corner</div><h1>VIX Trader</h1><div class="muted">Paired VIX/VIXW options workspace · additive strategy module</div></div><div><a href="/">← Platform dashboard</a></div></header>
+  <header class="top"><div><div class="muted">AutoBott / Trader's Corner</div><h1>VIX Paper → Robinhood Mirror</h1><div class="muted">Paper the paired VIX trade here. Copy the same trade on Robinhood for real money.</div></div><div><a href="/">← Platform dashboard</a></div></header>
   <section class="panel critical" style="margin-top:18px">
-    <div class="truth"><div><strong>MODE</strong><span id="mode">Checking</span></div><div><strong>BROKER</strong><span id="broker">Checking</span></div><div><strong>PROFITABILITY</strong><span id="profit">Unproven</span></div><div><strong>NEXT ACTION</strong><span id="next">Run preflight</span></div></div>
-    <p class="muted">A submitted or canceled order is never proceeds. Only broker-confirmed fills change realized P&amp;L. Current implementation is preflight/simulation until a broker adapter proves VIX/VIXW support.</p>
+    <div class="truth"><div><strong>MODE</strong><span id="mode">Checking</span></div><div><strong>REAL MONEY</strong><span id="broker">Robinhood manual</span></div><div><strong>PAPER P&amp;L</strong><span id="profit">—</span></div><div><strong>NEXT</strong><span id="next">Authenticate</span></div></div>
+    <p class="muted">AutoBott never submits live VIX orders. It papers the trade and reports exact Robinhood copy actions.</p>
+    <label class="wide" style="margin-top:12px">Dashboard token<input id="token" type="password" autocomplete="off"></label>
   </section>
+  <section class="panel" style="margin-top:16px"><h2>Robinhood action queue</h2><div id="actions" class="muted">Authenticate to load mirror actions.</div></section>
+  <section class="panel" style="margin-top:16px"><h2>Paper performance report</h2><pre id="report">Authenticate to load closed-cycle paper results.</pre></section>
   <div class="grid">
-    <section class="panel"><h2>Cycle preflight</h2>
+    <section class="panel"><h2>Log paper entry</h2>
       <div class="fields">
-        <label class="wide">Dashboard token<input id="token" type="password" autocomplete="off"></label>
         <label>Product<select id="product"><option>VIXW</option><option>VIX</option></select></label>
         <label>Spot VIX<input id="spot" type="number" step="0.01" value="17.50"></label>
         <label>Expiration<input id="expiration" type="date"></label>
@@ -1725,41 +1742,23 @@ def _vix_trader_html() -> str:
         <label>Put quantity<input id="put-qty" type="number" min="1" value="1"></label>
         <label>Call debit<input id="call-debit" type="number" min="0" step="0.01"></label>
         <label>Put debit<input id="put-debit" type="number" min="0" step="0.01"></label>
-        <label class="wide">Client request ID<input id="request-id" placeholder="required for duplicate protection"></label>
-        <div class="wide"><button onclick="runPreflight(false)">Validate preflight</button> <button onclick="runPreflight(true)">Save draft cycle</button></div>
+        <label class="wide">Client request ID<input id="request-id" placeholder="unique id for this paper entry"></label>
+        <div class="wide"><button onclick="runPreflight(false)">Validate paper entry</button> <button onclick="runPreflight(true)">Save paper cycle</button></div>
       </div>
     </section>
-    <section class="panel"><h2>Execution-critical review</h2><pre id="result">Authenticate and run preflight.</pre></section>
+    <section class="panel"><h2>Paper entry result</h2><pre id="result">Validate or save a paper cycle.</pre></section>
   </div>
-  <section class="panel" style="margin-top:16px"><h2>Evidence-selected strategy</h2>
-    <p class="muted">Executable parameters are chosen only from closed VIX cycle outcomes that beat the evidence gate. Manual fields below are optional risk ceilings that can only tighten a promoted candidate.</p>
-    <div class="fields">
-      <label>Ceiling: min full sessions<input id="cfg-min-sessions" type="number" min="1"></label>
-      <label>Ceiling: maximum DTE<input id="cfg-max-dte" type="number" min="1"></label>
-      <label>Ceiling: maximum combined debit<input id="cfg-max-debit" type="number" min="0.01" step="0.01"></label>
-      <label>Ceiling: maximum cycle allocation<input id="cfg-max-allocation" type="number" min="0.01" step="0.01"></label>
-      <label>Ceiling: first-leg target (decimal)<input id="cfg-first-target" type="number" min="0.01" max="1" step="0.01"></label>
-      <label>Ceiling: maximum additions<input id="cfg-max-additions" type="number" min="0"></label>
-      <label>Ceiling: maximum additional capital<input id="cfg-max-additional" type="number" min="0.01" step="0.01"></label>
-      <label>Ceiling: addition sizing<input id="cfg-addition-sizing" type="number" min="1"></label>
-      <label class="wide">Second-leg management rule (candidate label)<input id="cfg-second-rule"></label>
-      <label class="wide">Addition trigger (candidate label)<input id="cfg-addition-trigger"></label>
-      <div class="wide"><button onclick="saveConfig()">Save operator ceilings</button></div>
-    </div>
-    <pre id="configuration">Authenticate to load evidence status.</pre>
-  </section>
-  <section class="panel" style="margin-top:16px"><h2>Authoritative dependencies</h2><pre id="dependencies">Authenticate to inspect calendar and broker blockers.</pre></section>
-  <section class="panel" style="margin-top:16px"><h2>Managed cycles</h2><pre id="cycles">No cycle data loaded.</pre></section>
+  <section class="panel" style="margin-top:16px"><h2>Open paper positions</h2><pre id="cycles">No open paper cycles.</pre></section>
 </div>
 <script>
   const el=id=>document.getElementById(id); const auth=()=>({'Authorization':`Bearer ${el('token').value}`,'Content-Type':'application/json'});
   function payload(){const p=el('product').value;return {spot_vix:Number(el('spot').value),product:p,call_product:p,put_product:p,call_expiration:el('expiration').value,put_expiration:el('expiration').value,settlement_type:el('settlement').value,expected_settlement_type:'AM',intended_session:'REGULAR',actual_timestamp:new Date().toISOString(),call_strike:Number(el('call-strike').value),put_strike:Number(el('put-strike').value),call_quantity:Number(el('call-qty').value),put_quantity:Number(el('put-qty').value),call_debit:Number(el('call-debit').value),put_debit:Number(el('put-debit').value),client_request_id:el('request-id').value};}
-  const valueOrNull=id=>el(id).value===''?null:Number(el(id).value);
-  function configPayload(){return {minimum_full_trading_sessions_remaining:valueOrNull('cfg-min-sessions'),maximum_days_to_expiration:valueOrNull('cfg-max-dte'),maximum_combined_debit:valueOrNull('cfg-max-debit'),maximum_cycle_allocation:valueOrNull('cfg-max-allocation'),first_leg_exit_target_pct:valueOrNull('cfg-first-target'),second_leg_management_rule:el('cfg-second-rule').value||null,maximum_additions:valueOrNull('cfg-max-additions'),maximum_additional_capital:valueOrNull('cfg-max-additional'),addition_sizing:valueOrNull('cfg-addition-sizing'),addition_trigger:el('cfg-addition-trigger').value||null};}
-  function populateConfig(c){const values={'cfg-min-sessions':c.minimum_full_trading_sessions_remaining,'cfg-max-dte':c.maximum_days_to_expiration,'cfg-max-debit':c.maximum_combined_debit,'cfg-max-allocation':c.maximum_cycle_allocation,'cfg-first-target':c.first_leg_exit_target_pct,'cfg-second-rule':c.second_leg_management_rule,'cfg-max-additions':c.maximum_additions,'cfg-max-additional':c.maximum_additional_capital,'cfg-addition-sizing':c.addition_sizing,'cfg-addition-trigger':c.addition_trigger};Object.entries(values).forEach(([id,value])=>el(id).value=value??'');}
   async function api(path,opts={}){const r=await fetch(path,{...opts,headers:auth()});const j=await r.json();if(!r.ok)throw new Error(j.detail||j.error||r.status);return j}
-  async function refresh(){try{const s=await api('/api/vix-trader/status');el('mode').textContent=s.mode;el('broker').textContent=s.broker_execution_supported?'Ready':'Blocked';el('profit').textContent=s.profitability_status;el('next').textContent=s.next_action||(!s.configuration_complete?'Collect VIX cycle evidence':!s.configuration_valid?'Correct configuration':!s.calendar.authoritative?'Load Cboe calendar':'Select VIX broker adapter');el('cycles').textContent=JSON.stringify(s.cycles,null,2);populateConfig(s.operator_ceilings||s.config);el('configuration').textContent=JSON.stringify({source:s.configuration_source,fingerprint:s.configuration_fingerprint,complete:s.configuration_complete,valid:s.configuration_valid,evidence:s.evidence,errors:s.configuration_errors},null,2);el('dependencies').textContent=JSON.stringify({broker_execution_supported:s.broker_execution_supported,broker_blocker:s.broker_blocker,calendar:s.calendar},null,2)}catch(e){el('result').textContent=e.message}}
-  async function saveConfig(){try{const j=await api('/api/vix-trader/config',{method:'PUT',body:JSON.stringify(configPayload())});el('configuration').textContent=JSON.stringify(j,null,2);await refresh()}catch(e){el('configuration').textContent=e.message}}
+  function renderActions(queue){
+    if(!queue||!queue.length){el('actions').innerHTML='<div class="muted">No open Robinhood actions. Save a paper cycle to populate the queue.</div>';return;}
+    el('actions').innerHTML=queue.map(a=>`<div class="action"><div><strong>${a.action}</strong> · ${a.copy_line||a.reason||''}</div><div class="muted">${a.robinhood_search_hint||''}</div><div><code>${JSON.stringify(a)}</code></div></div>`).join('');
+  }
+  async function refresh(){try{const s=await api('/api/vix-trader/status');const m=await api('/api/vix-trader/robinhood-mirror');el('mode').textContent=s.mode;el('broker').textContent='Robinhood manual';el('profit').textContent=String(m.performance_report.net_paper_pnl);el('next').textContent=s.next_action;renderActions(m.robinhood_action_queue);el('report').textContent=JSON.stringify({how_to_use:m.how_to_use,performance:m.performance_report,operating:m.operating_config},null,2);el('cycles').textContent=JSON.stringify(m.open_positions,null,2)}catch(e){el('result').textContent=e.message}}
   async function runPreflight(save){try{const path=save?'/api/vix-trader/cycles':'/api/vix-trader/preflight';const j=await api(path,{method:'POST',body:JSON.stringify(payload())});el('result').textContent=JSON.stringify(j.cycle||j.preflight,null,2);if(save)await refresh()}catch(e){el('result').textContent=e.message}}
   el('token').addEventListener('change',refresh);
 </script></body></html>"""
