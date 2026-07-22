@@ -1158,7 +1158,7 @@ def test_render_config_has_health_check() -> None:
     assert "key: AUTOBOTT_PAPER_MAX_OPEN_ENTRY_BUY_ORDERS" in render_config
     assert 'key: AUTOBOTT_MAX_POSITION_COST\n        value: "1000"' in render_config
     assert 'key: AUTOBOTT_MAX_DAILY_LOSS\n        value: "5000"' in render_config
-    assert 'key: AUTOBOTT_PAPER_IGNORE_POSITION_COST_LIMIT\n        value: "true"' in render_config
+    assert 'key: AUTOBOTT_PAPER_IGNORE_POSITION_COST_LIMIT\n        value: "false"' in render_config
     assert 'key: AUTOBOTT_MANUAL_MIRROR_MAX_CONTRACT_COST\n        value: "100"' in render_config
     assert 'key: AUTOBOTT_MANUAL_MIRROR_MAX_SIGNAL_AGE_MINUTES\n        value: "30"' in render_config
     assert 'key: AUTOBOTT_VOLATILITY_HEDGE_SYMBOLS\n        value: VXX,UVXY' in render_config
