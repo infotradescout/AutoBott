@@ -1268,6 +1268,12 @@ def test_run_trading_cycle_paper_opportunistic_mode_does_not_override_spread_blo
         trading_cycle.load_open_positions = original_positions
 
     assert result.decisions[0]["decision"] == "BLOCKED_BY_SPREAD"
+    assert result.decisions[0]["contract_diagnostics"]
+    assert any(
+        reason.startswith("contract_filter:")
+        for reason in result.skipped[0]["reasons"]
+    )
+    assert result.skipped[0]["detail"] == "no_contract_passed_edge_liquidity_risk_reward_filters"
     assert len(result.decisions) == 1
     assert result.scanner_candidates_count == 0
     assert result.trade_attempted_count == 0

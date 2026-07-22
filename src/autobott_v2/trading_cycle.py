@@ -334,7 +334,13 @@ def run_trading_cycle(
                 )
             continue
         if not is_candidate:
-            _append_skip(skipped, symbol=symbol.upper(), reason=decision_payload["decision"])
+            _append_skip(
+                skipped,
+                symbol=symbol.upper(),
+                reason=decision_payload["decision"],
+                detail=decision.blocked_reason,
+                reasons=list(decision.reason_codes),
+            )
             continue
         if not daily_pnl_available:
             _append_skip(

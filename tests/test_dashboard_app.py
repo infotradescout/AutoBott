@@ -980,6 +980,18 @@ def test_dashboard_options_timeline_pairs_round_trips_and_clusters(monkeypatch, 
 
     monkeypatch.setattr(dashboard_app, "load_alpaca_paper_config", lambda: FakeConfig())
     monkeypatch.setattr(dashboard_app, "AlpacaPaperClient", FakeClient)
+    monkeypatch.setattr(
+        dashboard_app,
+        "record_trade_outcomes_from_orders",
+        lambda _orders: {
+            "summary_policy_version": "hosted-vix-profit-v1",
+            "group_summary": {
+                "completed_groups": 4,
+                "net_pnl": 125.0,
+                "expectancy": 31.25,
+            },
+        },
+    )
 
     status, body = _invoke_app("GET", "/api/options/timeline", token="dashboard-token")
     payload = json.loads(body)
@@ -987,6 +999,11 @@ def test_dashboard_options_timeline_pairs_round_trips_and_clusters(monkeypatch, 
     assert status.startswith("200")
     assert payload["summary"]["round_trips"] == 1
     assert payload["summary"]["pending_orders"] == 1
+    assert payload["summary"]["realized_pnl"] == -99.0
+    assert payload["summary"]["current_policy_version"] == "hosted-vix-profit-v1"
+    assert payload["summary"]["current_policy_completed_pairs"] == 4
+    assert payload["summary"]["current_policy_pair_pnl"] == 125.0
+    assert payload["summary"]["current_policy_pair_expectancy"] == 31.25
     assert payload["round_trips"][0]["pnl"] == -99.0
     assert payload["round_trips"][0]["classification"] == "loss_cut"
     assert any(warning["type"] == "reversal_with_pending_entries" for warning in payload["warnings"])
@@ -1012,13 +1029,20 @@ def test_dashboard_execution_exit_endpoint_returns_order(monkeypatch, tmp_path) 
         broker_order_id = "alpaca-exit-1"
         state = type("State", (), {"value": "submitted"})()
 
+    captured = {}
+
+    def fake_submit_exit(position, broker, limit_price, exit_reason):
+        captured["exit_reason"] = exit_reason
+        return FakeOrder()
+
     monkeypatch.setattr(dashboard_app, "load_open_positions", lambda: [FakePosition()])
     monkeypatch.setattr(dashboard_app, "AlpacaExecutionBroker", lambda: object())
-    monkeypatch.setattr(dashboard_app, "submit_exit_for_position", lambda position, broker, limit_price: FakeOrder())
+    monkeypatch.setattr(dashboard_app, "submit_exit_for_position", fake_submit_exit)
     status, body = _invoke_app("POST", "/api/execution/exit", token="dashboard-token", payload={"broker_order_id": "alpaca-entry-1", "limit_price": 3.1})
     payload = json.loads(body)
     assert status.startswith("200")
     assert payload["broker_order_id"] == "alpaca-exit-1"
+    assert captured["exit_reason"] == "manual_exit"
 
 
 def test_dashboard_execution_cancel_and_replace_endpoints(monkeypatch, tmp_path) -> None:

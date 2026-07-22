@@ -45,6 +45,10 @@
     "regime": { "type": "object" },
     "direction": { "type": "object" },
     "volatility": { "type": "object" },
-    "selected_contract": { "type": ["object", "null"] }
+    "selected_contract": { "type": ["object", "null"] },
+    "contract_diagnostics": {
+      "type": "array",
+      "items": { "type": "object" }
+    }
   }
 }

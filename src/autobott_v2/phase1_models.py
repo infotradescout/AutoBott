@@ -310,6 +310,11 @@ class DecisionCard:
     confidence_score: float
     explanation: str
     forward_outcomes: ForwardOutcomes = field(default_factory=ForwardOutcomes)
+    # Machine-readable evidence for contract-selection failures.  The engine
+    # deliberately keeps this optional so historical decision-card fixtures
+    # remain valid, while live BLOCKED_BY_SPREAD cards can say exactly which
+    # quote/Greek/DTE/risk-reward gate rejected each contract and layer.
+    contract_diagnostics: list[dict[str, Any]] = field(default_factory=list)
 
     def to_json_dict(self) -> dict[str, Any]:
         return _json_safe(asdict(self))

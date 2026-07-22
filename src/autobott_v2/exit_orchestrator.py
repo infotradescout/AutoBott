@@ -13,10 +13,14 @@ def build_exit_intent_from_position(
     position: OpenPosition,
     *,
     limit_price: float,
+    exit_reason: str,
     environment: BrokerEnvironment = BrokerEnvironment.PAPER,
 ) -> TradeIntent:
     if limit_price <= 0:
         raise ValueError("limit_price_must_be_positive")
+    resolved_exit_reason = exit_reason.strip()
+    if not resolved_exit_reason:
+        raise ValueError("exit_reason_required")
     return TradeIntent(
         symbol=position.symbol,
         option_symbol=position.option_symbol,
@@ -30,6 +34,14 @@ def build_exit_intent_from_position(
         metadata={
             "source_broker_order_id": position.broker_order_id,
             "exit": True,
+            "exit_reason": resolved_exit_reason,
+            # Preserve pair identity on the exit itself. The execution journal
+            # is intentionally bounded, so the original buy row may no longer
+            # be available when outcome reconciliation eventually runs.
+            "trade_group_id": position.trade_group_id,
+            "leg_role": position.leg_role,
+            "paired_option_symbol": position.paired_option_symbol,
+            "entry_decision_id": position.decision_id,
             "entry_policy_version": position.entry_policy_version,
             "entry_build_sha": position.entry_build_sha,
         },
@@ -41,6 +53,7 @@ def submit_exit_for_position(
     *,
     broker: AlpacaExecutionBroker,
     limit_price: float,
+    exit_reason: str,
     current_daily_realized_pnl: float = 0.0,
     open_positions: int | None = None,
     journal_path: str | None = None,
@@ -54,7 +67,12 @@ def submit_exit_for_position(
     if broker.config.environment is BrokerEnvironment.LIVE and not runtime_state.live_mode_enabled:
         raise ValueError("live_mode_not_enabled")
 
-    intent = build_exit_intent_from_position(position, limit_price=limit_price, environment=broker.config.environment)
+    intent = build_exit_intent_from_position(
+        position,
+        limit_price=limit_price,
+        exit_reason=exit_reason,
+        environment=broker.config.environment,
+    )
     risk_check = RiskCheckResult(
         approved=True,
         reasons=(),
