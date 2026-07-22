@@ -201,9 +201,10 @@ def _execution_blockers(execution_config: Any, runtime_state: Any, *, account: d
 
 def _core_runner_atomic_mleg_required() -> bool:
     value = os.getenv("AUTOBOTT_CORE_RUNNER_ATOMIC_MLEG_REQUIRED")
-    if value is None:
-        return True
-    return value.strip().lower() in {"1", "true", "yes", "on"}
+    if value is not None:
+        return value.strip().lower() in {"1", "true", "yes", "on"}
+    hosted_autostart = (os.getenv("AUTOBOTT_SESSION_AUTOSTART") or "").strip().lower()
+    return hosted_autostart not in {"1", "true", "yes", "on"}
 
 
 def _account_level(value: Any) -> int | None:
