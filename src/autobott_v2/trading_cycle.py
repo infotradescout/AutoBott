@@ -19,16 +19,11 @@ from .ghost_trades import append_ghost_trade, observe_ghost_trades
 from .phase1_alpaca_client import AlpacaPaperClient
 from .phase1_engine import build_decision_card
 from .phase1_models import (
-    ContractScore,
     DecisionCard,
     DecisionStatus,
     DirectionBias,
-    DirectionResult,
     ExecutionLayer,
-    OptionContractSnapshot,
-    OptionType,
     Phase1Rules,
-    SelectedContract,
     TradeSetup,
 )
 from .phase1_snapshot_capture import CaptureRules, capture_symbol_snapshot
@@ -178,7 +173,7 @@ def run_trading_cycle(
                     journal_path=execution_log_path,
                     payload={"observations": ghost_observations},
                 )
-            decision = build_decision_card(decision_input)
+            decision = build_decision_card(decision_input, _hosted_execution_rules())
             spread_candidate = select_defined_risk_spread(decision_input, decision.direction.bias)
             if spread_candidate is not None:
                 spread_journal_path = _spread_journal_for_execution_log(execution_log_path)
@@ -209,32 +204,6 @@ def run_trading_cycle(
         decision_payload = decision.to_json_dict()
         decisions.append(decision_payload)
         append_decision_card(decision_payload, snapshot_path=snapshot_path, log_path=decision_log_path)
-        strict_decision = decision
-        opportunistic_decision = _paper_opportunistic_decision(
-            strict_decision,
-            decision_input=decision_input,
-            broker=resolved_broker,
-        )
-        if opportunistic_decision is not None:
-            decision = opportunistic_decision
-            decision_payload = decision.to_json_dict()
-            decisions.append(decision_payload)
-            append_decision_card(decision_payload, snapshot_path=snapshot_path, log_path=decision_log_path)
-            _record_execution_outcome(
-                execution_outcomes,
-                ticker=symbol.upper(),
-                decision_id=decision.decision_id,
-                thesis_id=_decision_thesis_id(decision),
-                disposition="paper_opportunistic_override",
-                detail=str(strict_decision.blocked_reason or strict_decision.decision.value),
-                journal_path=execution_log_path,
-                payload={
-                    "strict_decision": strict_decision.decision.value,
-                    "strict_blocked_reason": strict_decision.blocked_reason,
-                    "override_reason_codes": list(decision.reason_codes),
-                    "selected_contract": decision.selected_contract.option_symbol if decision.selected_contract else None,
-                },
-            )
         is_candidate = decision.decision is DecisionStatus.TRADE_CANDIDATE
         thesis_id = _decision_thesis_id(decision)
 
@@ -778,230 +747,23 @@ def _decision_thesis_id(decision: DecisionCard) -> str:
     return f"{decision.ticker}:{decision.trade_setup.value}:{decision.execution_layer.value}"
 
 
-def _paper_opportunistic_decision(
-    strict_decision: DecisionCard,
-    *,
-    decision_input: Any,
-    broker: AlpacaExecutionBroker,
-) -> DecisionCard | None:
-    if broker.config.environment is not BrokerEnvironment.PAPER:
-        return None
-    if not _paper_opportunistic_mode_enabled():
-        return None
-    if strict_decision.decision is DecisionStatus.TRADE_CANDIDATE:
-        return None
-    volatility_hedge_regime_override = (
-        strict_decision.decision is DecisionStatus.BLOCKED_BY_REGIME
-        and strict_decision.direction.bias is DirectionBias.BULLISH
-        and strict_decision.ticker.upper() in _paper_volatility_hedge_symbols()
-    )
-    directional_discovery_override = (
-        strict_decision.decision is not DecisionStatus.TRADE_CANDIDATE
-        and _paper_directional_discovery_enabled()
-    )
-    if strict_decision.decision not in {
-        DecisionStatus.BLOCKED_BY_VOLATILITY,
-        DecisionStatus.BLOCKED_BY_SPREAD,
-        DecisionStatus.NO_TRADE,
-    } and not volatility_hedge_regime_override and not directional_discovery_override:
-        return None
-    if (
-        strict_decision.decision is DecisionStatus.NO_TRADE
-        and strict_decision.blocked_reason != "confidence_below_threshold"
-        and not directional_discovery_override
-    ):
-        return None
+def _hosted_execution_rules() -> Phase1Rules:
+    """Apply deployment contract horizons without changing replay defaults."""
 
-    discovery_decision = strict_decision
-    if directional_discovery_override:
-        discovery_direction = _paper_discovery_direction(strict_decision, decision_input=decision_input)
-        if discovery_direction is None:
-            return None
-        discovery_decision = replace(
-            strict_decision,
-            direction=discovery_direction,
-            trade_setup=(
-                TradeSetup.BULLISH_CONTINUATION
-                if discovery_direction.bias is DirectionBias.BULLISH
-                else TradeSetup.BEARISH_CONTINUATION
-            ),
-        )
-
-    rules = _paper_opportunistic_rules()
-    relaxed = build_decision_card(decision_input, rules)
-    if relaxed.decision is not DecisionStatus.TRADE_CANDIDATE or relaxed.selected_contract is None:
-        fallback = _paper_discovery_contract(discovery_decision, decision_input=decision_input, rules=rules)
-        if fallback is None:
-            return None
-        relaxed = fallback
-    reason_codes = list(relaxed.reason_codes)
-    reason_codes.extend(
-        [
-            "paper_opportunistic_discovery",
-            f"strict_decision_{strict_decision.decision.value.lower()}",
-        ]
-    )
-    if volatility_hedge_regime_override:
-        reason_codes.append("paper_volatility_hedge_risk_off_override")
-    if directional_discovery_override:
-        reason_codes.append("paper_directional_discovery_override")
-    if strict_decision.blocked_reason:
-        reason_codes.append(f"strict_blocked_{strict_decision.blocked_reason}")
+    rules = Phase1Rules()
+    min_dte = int(os.getenv("AUTOBOTT_ENTRY_MIN_DTE", str(rules.intraday_min_dte)))
+    tactical_max_dte = int(os.getenv("AUTOBOTT_ENTRY_TACTICAL_MAX_DTE", str(rules.intraday_max_dte)))
+    rider_min_dte = int(os.getenv("AUTOBOTT_ENTRY_RIDER_MIN_DTE", str(rules.rider_min_dte)))
+    rider_max_dte = int(os.getenv("AUTOBOTT_ENTRY_RIDER_MAX_DTE", str(rules.rider_max_dte)))
+    if not 1 <= min_dte <= tactical_max_dte < rider_min_dte <= rider_max_dte <= rules.max_dte:
+        raise ValueError("invalid_hosted_entry_dte_windows")
     return replace(
-        relaxed,
-        reason_codes=reason_codes,
-        explanation=(
-            f"{relaxed.explanation}; paper_opportunistic_discovery override from "
-            f"{strict_decision.decision.value}:{strict_decision.blocked_reason or 'none'}"
-        ),
+        rules,
+        intraday_min_dte=min_dte,
+        intraday_max_dte=tactical_max_dte,
+        rider_min_dte=rider_min_dte,
+        rider_max_dte=rider_max_dte,
     )
-
-
-def _paper_directional_discovery_enabled() -> bool:
-    value = os.getenv("AUTOBOTT_PAPER_DIRECTIONAL_DISCOVERY")
-    if value is None:
-        return False
-    return value.strip().lower() in {"1", "true", "yes", "on"}
-
-
-def _paper_discovery_direction(
-    strict_decision: DecisionCard,
-    *,
-    decision_input: Any,
-) -> DirectionResult | None:
-    """Select the strongest observable direction for paper-only data collection."""
-
-    bars = list(decision_input.market_bars)
-    if len(bars) < 2:
-        return None
-    first_close = float(bars[0].close)
-    short_start_close = float(bars[max(0, len(bars) - 6)].close)
-    last_close = float(bars[-1].close)
-    if first_close <= 0 or short_start_close <= 0 or last_close <= 0:
-        return None
-    full_move = (last_close - first_close) / first_close
-    short_move = (last_close - short_start_close) / short_start_close
-    signal = short_move * 0.70 + full_move * 0.30
-    if abs(signal) < 0.000001:
-        last_open = float(bars[-1].open)
-        if last_open > 0:
-            signal = (last_close - last_open) / last_open
-    if abs(signal) < 0.000001:
-        return None
-
-    bias = DirectionBias.BULLISH if signal > 0 else DirectionBias.BEARISH
-    magnitude = min(0.49, max(0.20, abs(signal) * 50))
-    score = magnitude if bias is DirectionBias.BULLISH else -magnitude
-    return DirectionResult(
-        bias=bias,
-        score=score,
-        momentum=full_move,
-        relative_strength=signal,
-        volume_confirmation=strict_decision.direction.volume_confirmation,
-        failed_breakout=strict_decision.direction.failed_breakout,
-        explanation=(
-            f"{bias.value} paper directional discovery from "
-            f"short_move={short_move:.4f}, full_move={full_move:.4f}."
-        ),
-    )
-
-
-def _paper_opportunistic_mode_enabled() -> bool:
-    value = os.getenv("AUTOBOTT_PAPER_OPPORTUNISTIC_ENTRIES")
-    if value is None:
-        return True
-    return value.strip().lower() in {"1", "true", "yes", "on"}
-
-
-def _paper_volatility_hedge_symbols() -> set[str]:
-    value = os.getenv("AUTOBOTT_VOLATILITY_HEDGE_SYMBOLS") or "VXX,UVXY"
-    return {symbol.strip().upper() for symbol in value.split(",") if symbol.strip()}
-
-
-def _paper_opportunistic_rules() -> Phase1Rules:
-    # Discovery mode relaxes signal-strength gates (confidence, direction score,
-    # delta range) to generate more paper reps -- but it must never relax
-    # liquidity below the strict engine's floor. A thin, wide-spread contract
-    # bleeds the same real bid/ask cost in paper as it would live; the strict
-    # defaults (spread<=18%, OI>=100, volume>=10) are the actual floor, not a
-    # discovery-mode toggle.
-    strict_defaults = Phase1Rules()
-    return Phase1Rules(
-        min_direction_score=0.20,
-        min_volatility_score=-1.0,
-        min_confidence=0.12,
-        max_spread_pct=strict_defaults.max_spread_pct,
-        min_open_interest=strict_defaults.min_open_interest,
-        min_contract_volume=strict_defaults.min_contract_volume,
-        min_abs_delta=0.15,
-        max_abs_delta=0.85,
-        intraday_min_abs_delta=0.20,
-        intraday_max_abs_delta=0.85,
-        min_vega=0.001,
-        max_theta_abs=1.0,
-        min_reward_risk_ratio=0.05,
-    )
-
-
-def _paper_discovery_contract(
-    strict_decision: DecisionCard,
-    *,
-    decision_input: Any,
-    rules: Phase1Rules,
-) -> DecisionCard | None:
-    if strict_decision.direction.bias is DirectionBias.NEUTRAL:
-        return None
-    option_type = OptionType.CALL if strict_decision.direction.bias is DirectionBias.BULLISH else OptionType.PUT
-    candidates = [
-        contract
-        for contract in decision_input.option_chain
-        if contract.option_type is option_type
-        and contract.bid > 0
-        and contract.ask > 0
-        and contract.ask >= contract.bid
-        and contract.spread_pct <= rules.max_spread_pct
-    ]
-    if not candidates:
-        return None
-    selected_contract = _best_paper_discovery_contract(candidates, decision_input.timestamp.date())
-    spread_penalty = min(1.0, selected_contract.spread_pct / max(rules.max_spread_pct, 0.01))
-    delta_fit = max(0.0, 1 - abs(abs(selected_contract.delta) - 0.50) / 0.50)
-    score = round(max(0.05, delta_fit * 0.55 + (1 - spread_penalty) * 0.30 + min(1.0, selected_contract.volume / 200) * 0.15), 4)
-    contract_score = ContractScore(
-        contract=selected_contract,
-        score=score,
-        reward_risk_ratio=0.0,
-        reasons=[
-            "paper_discovery_contract_selected",
-            "soft_contract_filters_overridden",
-            f"spread_pct={round(selected_contract.spread_pct, 4)}",
-        ],
-    )
-    selected = SelectedContract.from_score(contract_score, rules)
-    return replace(
-        strict_decision,
-        selected_contract=selected,
-        tactical_contract=selected,
-        rider_contract=None,
-        execution_layer=ExecutionLayer.TACTICAL,
-        decision=DecisionStatus.TRADE_CANDIDATE,
-        blocked_reason=None,
-        confidence_score=max(0.12, strict_decision.confidence_score),
-    )
-
-
-def _best_paper_discovery_contract(contracts: list[OptionContractSnapshot], as_of: Any) -> OptionContractSnapshot:
-    return sorted(
-        contracts,
-        key=lambda contract: (
-            abs((contract.expiration - as_of).days - 2),
-            contract.spread_pct,
-            abs(abs(contract.delta) - 0.50),
-            -contract.volume,
-            -contract.open_interest,
-            contract.mid,
-        ),
-    )[0]
 
 
 def _append_skip(
