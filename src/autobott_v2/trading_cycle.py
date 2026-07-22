@@ -37,6 +37,7 @@ from .position_store import load_open_positions
 from .position_monitor import run_position_monitor
 from .runtime_control import load_runtime_state
 from .runtime_paths import data_root, phase1_snapshots_root
+from .storage_retention import prune_snapshot_storage
 from .trade_outcomes import recent_loss_guard, recent_winner_bias, sync_trade_outcomes_from_broker
 
 
@@ -98,6 +99,15 @@ def run_trading_cycle(
     resolved_broker = broker or AlpacaExecutionBroker()
     resolved_data_client = data_client or AlpacaPaperClient()
     resolved_corpus_root = Path(corpus_root) if corpus_root is not None else phase1_snapshots_root()
+    try:
+        storage_retention = prune_snapshot_storage(resolved_corpus_root)
+    except Exception as exc:
+        storage_retention = {
+            "ok": False,
+            "enabled": True,
+            "root": str(resolved_corpus_root),
+            "error": f"{type(exc).__name__}: {exc}",
+        }
     snapshot_time = scheduled_market_time or datetime.now(tz=UTC)
     captured_at = captured_at_utc or datetime.now(tz=UTC)
     resolved_rules = rules or CaptureRules()
@@ -557,6 +567,7 @@ def run_trading_cycle(
         skipped=skipped,
         runtime_state=runtime_state.to_json_dict(),
         execution_outcomes=[
+            {"disposition": "snapshot_storage_retention_summary", **storage_retention},
             {"disposition": "position_monitor_summary", **monitor_summary},
             {"disposition": "trade_outcome_learning_summary", **outcome_learning_summary, "winner_bias": winner_bias},
             {"disposition": "open_drawdown_guard_summary", **open_drawdown_guard},
