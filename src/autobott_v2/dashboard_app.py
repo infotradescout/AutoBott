@@ -1,12 +1,16 @@
 from __future__ import annotations
 
+import copy
 import json
 import os
+import threading
+import time
 from datetime import UTC, date, datetime, timedelta
 from hashlib import sha256
 from pathlib import Path
+from socketserver import ThreadingMixIn
 from typing import Any, Callable
-from wsgiref.simple_server import make_server
+from wsgiref.simple_server import WSGIServer, make_server
 
 from .execution_config import load_alpaca_execution_config
 from .hosted_policy import (
@@ -55,6 +59,25 @@ JsonDict = dict[str, Any]
 DECISION_LAB_MAX_SYNC_SYMBOLS = 2
 DECISION_LAB_MAX_SYNC_DAYS = 3
 DECISION_LAB_MIN_SYNC_INTERVAL_MINUTES = 30
+DASHBOARD_BROKER_CACHE_TTL_SECONDS = 5.0
+DASHBOARD_BROKER_ERROR_CACHE_TTL_SECONDS = 2.0
+DASHBOARD_READINESS_CACHE_TTL_SECONDS = 30.0
+
+
+class _ThreadingWSGIServer(ThreadingMixIn, WSGIServer):
+    """Serve dashboard panels concurrently without blocking the trader UI."""
+
+    daemon_threads = True
+    request_queue_size = 64
+
+
+_DASHBOARD_BROKER_CACHE_LOCK = threading.RLock()
+_DASHBOARD_BROKER_CACHE: dict[tuple[Any, ...], tuple[float, bool, Any]] = {}
+_DASHBOARD_BROKER_RESOURCE_LOCKS: dict[tuple[Any, ...], threading.Lock] = {}
+
+
+class _DashboardBrokerReadError(RuntimeError):
+    """A short-lived shared failure from one dashboard broker read."""
 
 
 def app(environ: dict[str, Any], start_response: Callable[..., Any]) -> list[bytes]:
@@ -350,8 +373,8 @@ def _alpaca_status_payload() -> JsonDict:
 
     client = AlpacaPaperClient(config)
     try:
-        account = client.get_account()
-        quotes = client.get_latest_stock_quotes(["SPY", "QQQ"])
+        account = _dashboard_account(client, config)
+        quotes = _dashboard_stock_quotes(client, config, ["SPY", "QQQ"])
         response.update(
             {
                 "ok": True,
@@ -373,7 +396,22 @@ def _alpaca_status_payload() -> JsonDict:
 
 
 def _paper_readiness_payload() -> JsonDict:
-    return run_paper_readiness_probe()
+    config = load_alpaca_paper_config()
+
+    def load_probe() -> JsonDict:
+        try:
+            client = AlpacaPaperClient(config)
+        except Exception:
+            # The readiness probe owns the user-facing invalid-config response.
+            return run_paper_readiness_probe()
+        return run_paper_readiness_probe(client=_DashboardReadinessClient(client, config))
+
+    return _dashboard_cached_broker_read(
+        "paper_readiness:SPY",
+        config,
+        load_probe,
+        ttl_seconds=DASHBOARD_READINESS_CACHE_TTL_SECONDS,
+    )
 
 
 def _paper_execution_status_payload(*, config: Any, execution_config: Any, runtime_state: Any) -> JsonDict:
@@ -438,6 +476,128 @@ def _open_positions_payload() -> JsonDict:
     }
 
 
+def _dashboard_broker_cache_key(resource: str, config: Any) -> tuple[Any, ...]:
+    return (
+        id(AlpacaPaperClient),
+        str(getattr(config, "env", "paper")),
+        str(getattr(config, "trading_base_url", "")),
+        str(getattr(config, "data_base_url", "")),
+        resource,
+    )
+
+
+def _dashboard_cached_broker_read(
+    resource: str,
+    config: Any,
+    loader: Callable[[], Any],
+    *,
+    ttl_seconds: float = DASHBOARD_BROKER_CACHE_TTL_SECONDS,
+    error_ttl_seconds: float = DASHBOARD_BROKER_ERROR_CACHE_TTL_SECONDS,
+) -> Any:
+    """Share one in-flight Alpaca read across concurrently loaded panels.
+
+    The dashboard loads many panels at once. Without a single-flight cache,
+    account, position, and order endpoints repeat the same broker calls and
+    can exhaust both the one-process HTTP queue and Alpaca's read allowance.
+    Values are copied on return so one renderer cannot mutate another panel's
+    view of the broker response.
+    """
+
+    key = _dashboard_broker_cache_key(resource, config)
+    now = time.monotonic()
+    with _DASHBOARD_BROKER_CACHE_LOCK:
+        cached = _DASHBOARD_BROKER_CACHE.get(key)
+        if cached is not None:
+            cached_at, succeeded, payload = cached
+            cache_ttl = ttl_seconds if succeeded else error_ttl_seconds
+            if now - cached_at <= cache_ttl:
+                if succeeded:
+                    return copy.deepcopy(payload)
+                raise _DashboardBrokerReadError(str(payload))
+        resource_lock = _DASHBOARD_BROKER_RESOURCE_LOCKS.setdefault(key, threading.Lock())
+
+    # Only callers for this exact resource wait for one another. Account,
+    # position, and order reads may proceed concurrently on the threaded WSGI
+    # server, while duplicate order reads collapse into a single broker call.
+    with resource_lock:
+        now = time.monotonic()
+        with _DASHBOARD_BROKER_CACHE_LOCK:
+            cached = _DASHBOARD_BROKER_CACHE.get(key)
+            if cached is not None:
+                cached_at, succeeded, payload = cached
+                cache_ttl = ttl_seconds if succeeded else error_ttl_seconds
+                if now - cached_at <= cache_ttl:
+                    if succeeded:
+                        return copy.deepcopy(payload)
+                    raise _DashboardBrokerReadError(str(payload))
+        try:
+            value = loader()
+        except Exception as exc:
+            failure = f"broker_read_failed:{type(exc).__name__}:{exc}"
+            with _DASHBOARD_BROKER_CACHE_LOCK:
+                _DASHBOARD_BROKER_CACHE[key] = (time.monotonic(), False, failure)
+            raise _DashboardBrokerReadError(failure) from exc
+        with _DASHBOARD_BROKER_CACHE_LOCK:
+            _DASHBOARD_BROKER_CACHE[key] = (time.monotonic(), True, copy.deepcopy(value))
+        return copy.deepcopy(value)
+
+
+def _clear_dashboard_broker_cache() -> None:
+    with _DASHBOARD_BROKER_CACHE_LOCK:
+        _DASHBOARD_BROKER_CACHE.clear()
+        _DASHBOARD_BROKER_RESOURCE_LOCKS.clear()
+
+
+def _dashboard_account(client: Any, config: Any) -> dict[str, Any]:
+    return _dashboard_cached_broker_read("account", config, client.get_account)
+
+
+def _dashboard_positions(client: Any, config: Any) -> list[dict[str, Any]]:
+    return _dashboard_cached_broker_read("positions", config, client.get_positions)
+
+
+def _dashboard_stock_quotes(client: Any, config: Any, symbols: list[str]) -> dict[str, dict[str, Any]]:
+    normalized = sorted({symbol.strip().upper() for symbol in symbols if symbol.strip()})
+    return _dashboard_cached_broker_read(
+        f"stock_quotes:{','.join(normalized)}",
+        config,
+        lambda: client.get_latest_stock_quotes(normalized),
+    )
+
+
+def _dashboard_all_orders(client: Any, config: Any) -> list[dict[str, Any]]:
+    return _dashboard_cached_broker_read(
+        "orders:all:200",
+        config,
+        lambda: client.get_orders(status="all", limit=200),
+    )
+
+
+def _dashboard_open_orders(client: Any, config: Any) -> list[dict[str, Any]]:
+    return _dashboard_cached_broker_read(
+        "orders:open:100",
+        config,
+        lambda: client.get_orders(status="open", limit=100),
+    )
+
+
+class _DashboardReadinessClient:
+    """Reuse cheap readiness reads while leaving its chain/bar probe intact."""
+
+    def __init__(self, client: Any, config: Any) -> None:
+        self._client = client
+        self._config = config
+
+    def get_account(self) -> dict[str, Any]:
+        return _dashboard_account(self._client, self._config)
+
+    def get_latest_stock_quotes(self, symbols: list[str]) -> dict[str, dict[str, Any]]:
+        return _dashboard_stock_quotes(self._client, self._config, symbols)
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._client, name)
+
+
 def _account_positions_payload() -> JsonDict:
     config = load_alpaca_paper_config()
     try:
@@ -446,8 +606,8 @@ def _account_positions_payload() -> JsonDict:
         return {"ok": False, "status": "config_invalid", "detail": str(exc)}
     client = AlpacaPaperClient(config)
     try:
-        account = client.get_account()
-        positions = client.get_positions()
+        account = _dashboard_account(client, config)
+        positions = _dashboard_positions(client, config)
     except Exception as exc:
         return {"ok": False, "status": "alpaca_request_failed", "detail": str(exc)}
     equity = float(account.get("equity") or 0.0)
@@ -500,7 +660,7 @@ def _account_orders_payload() -> JsonDict:
         return {"ok": False, "status": "config_invalid", "detail": str(exc)}
     client = AlpacaPaperClient(config)
     try:
-        orders = client.get_orders(status="all", limit=50)
+        orders = _dashboard_all_orders(client, config)[:50]
     except Exception as exc:
         return {"ok": False, "status": "alpaca_request_failed", "detail": str(exc)}
     return {
@@ -530,8 +690,8 @@ def _options_scout_payload() -> JsonDict:
         return {"ok": False, "status": "config_invalid", "detail": str(exc)}
     client = AlpacaPaperClient(config)
     try:
-        positions = client.get_positions()
-        orders = client.get_orders(status="open", limit=100)
+        positions = _dashboard_positions(client, config)
+        orders = _dashboard_open_orders(client, config)
     except Exception as exc:
         return {"ok": False, "status": "alpaca_request_failed", "detail": str(exc)}
 
@@ -600,7 +760,7 @@ def _options_timeline_payload() -> JsonDict:
         return {"ok": False, "status": "config_invalid", "detail": str(exc)}
     client = AlpacaPaperClient(config)
     try:
-        orders = client.get_orders(status="all", limit=200)
+        orders = _dashboard_all_orders(client, config)
     except Exception as exc:
         return {"ok": False, "status": "alpaca_request_failed", "detail": str(exc)}
 
@@ -2878,7 +3038,7 @@ def main() -> int:
     host = os.getenv("HOST", "0.0.0.0")
     port = int(os.getenv("PORT", "8000"))
     maybe_start_session_supervisor()
-    with make_server(host, port, app) as httpd:
+    with make_server(host, port, app, server_class=_ThreadingWSGIServer) as httpd:
         print(f"AutoBott dashboard serving on http://{host}:{port}")
         httpd.serve_forever()
     return 0

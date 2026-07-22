@@ -1,5 +1,7 @@
 import io
 import json
+import threading
+from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -34,6 +36,7 @@ def _invoke_app(method: str, path: str, *, token: str | None = None, payload: di
 
 
 def _auth_env(monkeypatch, tmp_path: Path) -> None:
+    dashboard_app._clear_dashboard_broker_cache()
     monkeypatch.setenv("AUTOBOTT_DATA_ROOT", str(tmp_path / "data"))
     monkeypatch.setenv("AUTOBOTT_ARTIFACTS_ROOT", str(tmp_path / "artifacts"))
     monkeypatch.setenv("AUTOBOTT_GATE_PATH", str(tmp_path / "data" / "PHASE1_CYCLE_GATE.json"))
@@ -41,6 +44,153 @@ def _auth_env(monkeypatch, tmp_path: Path) -> None:
     gate_path.parent.mkdir(parents=True, exist_ok=True)
     gate_path.write_text(json.dumps({"sentinel": True}, sort_keys=True), encoding="utf-8")
     save_runtime_state(default_runtime_state())
+
+
+def test_dashboard_broker_reads_are_single_flight_and_copied() -> None:
+    dashboard_app._clear_dashboard_broker_cache()
+    config = type(
+        "Config",
+        (),
+        {
+            "env": "paper",
+            "trading_base_url": "https://paper-api.alpaca.markets",
+            "data_base_url": "https://data.alpaca.markets",
+        },
+    )()
+    calls = 0
+    calls_lock = threading.Lock()
+    loader_started = threading.Event()
+    release_loader = threading.Event()
+
+    def loader():
+        nonlocal calls
+        with calls_lock:
+            calls += 1
+        loader_started.set()
+        assert release_loader.wait(timeout=2)
+        return [{"id": "order-1"}]
+
+    with ThreadPoolExecutor(max_workers=6) as pool:
+        futures = [
+            pool.submit(
+                dashboard_app._dashboard_cached_broker_read,
+                "orders:all:200",
+                config,
+                loader,
+            )
+            for _ in range(6)
+        ]
+        assert loader_started.wait(timeout=2)
+        release_loader.set()
+        results = [future.result(timeout=2) for future in futures]
+
+    assert calls == 1
+    results[0].append({"id": "mutated"})
+    assert results[1] == [{"id": "order-1"}]
+    dashboard_app._clear_dashboard_broker_cache()
+
+
+def test_dashboard_broker_failures_are_single_flight() -> None:
+    dashboard_app._clear_dashboard_broker_cache()
+    config = type("Config", (), {"env": "paper", "trading_base_url": "paper", "data_base_url": "data"})()
+    calls = 0
+    calls_lock = threading.Lock()
+    loader_started = threading.Event()
+    release_loader = threading.Event()
+
+    def loader():
+        nonlocal calls
+        with calls_lock:
+            calls += 1
+        loader_started.set()
+        assert release_loader.wait(timeout=2)
+        raise TimeoutError("alpaca timed out")
+
+    with ThreadPoolExecutor(max_workers=6) as pool:
+        futures = [
+            pool.submit(
+                dashboard_app._dashboard_cached_broker_read,
+                "positions",
+                config,
+                loader,
+            )
+            for _ in range(6)
+        ]
+        assert loader_started.wait(timeout=2)
+        release_loader.set()
+        for future in futures:
+            with pytest.raises(
+                dashboard_app._DashboardBrokerReadError,
+                match="broker_read_failed:TimeoutError:alpaca timed out",
+            ):
+                future.result(timeout=2)
+
+    assert calls == 1
+    dashboard_app._clear_dashboard_broker_cache()
+
+
+def test_readiness_and_status_share_account_and_quote_reads() -> None:
+    dashboard_app._clear_dashboard_broker_cache()
+    config = type("Config", (), {"env": "paper", "trading_base_url": "paper", "data_base_url": "data"})()
+    calls = {"account": 0, "quotes": 0}
+
+    class FakeClient:
+        def get_account(self):
+            calls["account"] += 1
+            return {"status": "ACTIVE"}
+
+        def get_latest_stock_quotes(self, symbols):
+            calls["quotes"] += 1
+            return {symbol: {} for symbol in symbols}
+
+    readiness_client = dashboard_app._DashboardReadinessClient(FakeClient(), config)
+    assert readiness_client.get_account()["status"] == "ACTIVE"
+    assert dashboard_app._dashboard_account(FakeClient(), config)["status"] == "ACTIVE"
+    assert readiness_client.get_latest_stock_quotes(["SPY", "QQQ"])
+    assert dashboard_app._dashboard_stock_quotes(FakeClient(), config, ["QQQ", "SPY"])
+    assert calls == {"account": 1, "quotes": 1}
+    dashboard_app._clear_dashboard_broker_cache()
+
+
+def test_dashboard_main_uses_threaded_wsgi_server(monkeypatch) -> None:
+    captured = {}
+
+    class FakeServer:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return None
+
+        def serve_forever(self):
+            captured["served"] = True
+
+    def fake_make_server(host, port, application, *, server_class):
+        captured.update(
+            {
+                "host": host,
+                "port": port,
+                "application": application,
+                "server_class": server_class,
+            }
+        )
+        return FakeServer()
+
+    monkeypatch.setattr(dashboard_app, "bootstrap_env_file", lambda: None)
+    monkeypatch.setattr(dashboard_app, "maybe_start_session_supervisor", lambda: None)
+    monkeypatch.setattr(dashboard_app, "make_server", fake_make_server)
+    monkeypatch.setenv("HOST", "127.0.0.1")
+    monkeypatch.setenv("PORT", "8123")
+
+    assert dashboard_app.main() == 0
+    assert captured == {
+        "host": "127.0.0.1",
+        "port": 8123,
+        "application": dashboard_app.app,
+        "server_class": dashboard_app._ThreadingWSGIServer,
+        "served": True,
+    }
+    assert dashboard_app._ThreadingWSGIServer.daemon_threads is True
 
 
 def _stub_latest_option_quotes(monkeypatch, quotes: dict[str, dict]) -> None:
@@ -666,10 +816,12 @@ def test_dashboard_does_not_expose_alpaca_secrets(monkeypatch, tmp_path) -> None
 
 def test_dashboard_paper_readiness_endpoint_returns_probe(monkeypatch, tmp_path) -> None:
     _auth_env(monkeypatch, tmp_path)
-    monkeypatch.setattr(
-        dashboard_app,
-        "run_paper_readiness_probe",
-        lambda: {
+    calls = 0
+
+    def fake_probe():
+        nonlocal calls
+        calls += 1
+        return {
             "ok": True,
             "status": "paper_trading_ready",
             "paper_execution_ready": True,
@@ -678,13 +830,18 @@ def test_dashboard_paper_readiness_endpoint_returns_probe(monkeypatch, tmp_path)
             "option_chain_count": 8,
             "decision_status": "TRADE_CANDIDATE",
             "selected_contract": "SPY260703C00600000",
-        },
-    )
+        }
+
+    monkeypatch.setattr(dashboard_app, "run_paper_readiness_probe", fake_probe)
     status, body = _invoke_app("GET", "/api/paper/readiness", token="dashboard-token")
     payload = json.loads(body)
+    cached_status, cached_body = _invoke_app("GET", "/api/paper/readiness", token="dashboard-token")
     assert status.startswith("200")
+    assert cached_status.startswith("200")
     assert payload["status"] == "paper_trading_ready"
     assert payload["option_chain_count"] == 8
+    assert json.loads(cached_body) == payload
+    assert calls == 1
 
 
 def test_dashboard_has_no_order_endpoints() -> None:
