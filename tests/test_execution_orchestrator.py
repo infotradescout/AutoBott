@@ -252,6 +252,55 @@ def test_submit_core_runner_uses_two_distinct_contracts_atomically(tmp_path, mon
     assert len(journal_path.read_text(encoding="utf-8").splitlines()) == 4
 
 
+def test_submit_core_runner_can_use_linked_simple_orders_for_paper_collection(tmp_path, monkeypatch) -> None:
+    import autobott_v2.execution_orchestrator as orchestrator
+
+    monkeypatch.setenv("AUTOBOTT_CORE_RUNNER_ATOMIC_MLEG_REQUIRED", "false")
+    monkeypatch.setattr(orchestrator, "upsert_open_position_from_order", lambda *args, **kwargs: None)
+    broker = FakeBroker()
+    selected = _decision_card().selected_contract
+    assert selected is not None
+    primary = replace(
+        selected,
+        option_symbol="AAPL260117C00195000",
+        strike=195.0,
+        bid=0.60,
+        ask=0.70,
+        mid=0.65,
+        delta=0.40,
+        target_exit_mid=0.98,
+        stop_exit_mid=0.36,
+    )
+    runner = replace(
+        selected,
+        option_symbol="AAPL260117C00200000",
+        strike=200.0,
+        bid=0.20,
+        ask=0.25,
+        mid=0.225,
+        delta=0.15,
+        target_exit_mid=0.45,
+        stop_exit_mid=0.07,
+    )
+    pair = CoreRunnerPair(primary, runner, estimated_group_cost=95.0)
+
+    primary_order, runner_order = submit_core_runner_to_broker(
+        _decision_card(),
+        pair,
+        broker=broker,
+        journal_path=str(tmp_path / "execution_orders.jsonl"),
+    )
+
+    assert broker.mleg_calls == []
+    assert [intent.option_symbol for intent in broker.intents] == [
+        primary.option_symbol,
+        runner.option_symbol,
+    ]
+    assert primary_order.intent.metadata["trade_group_id"] == runner_order.intent.metadata["trade_group_id"]
+    assert primary_order.intent.metadata["leg_role"] == "primary"
+    assert runner_order.intent.metadata["leg_role"] == "runner"
+
+
 def test_submit_core_runner_allows_pair_above_manual_mirror_budget(tmp_path, monkeypatch) -> None:
     import autobott_v2.execution_orchestrator as orchestrator
 
