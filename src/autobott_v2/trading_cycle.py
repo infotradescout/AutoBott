@@ -12,10 +12,27 @@ from .core_runner import load_core_runner_rules, select_core_runner_pair
 from .execution_broker import AlpacaExecutionBroker
 from .defined_risk_spreads import append_defined_risk_spread_candidate, select_defined_risk_spread
 from .execution_models import BrokerEnvironment
-from .execution_journal import append_execution_outcome
+from .execution_journal import append_execution_outcome, execution_journal_path
 from .execution_reconciler import reconcile_open_positions
 from .execution_orchestrator import ExecutionRejectedError, submit_core_runner_to_broker, submit_decision_to_broker
 from .ghost_trades import append_ghost_trade, observe_ghost_trades
+from .hosted_policy import (
+    HOSTED_BAR_TIMEFRAME,
+    HOSTED_LOOKBACK_BARS,
+    HOSTED_LOOKBACK_CALENDAR_DAYS,
+    HOSTED_MIN_OPEN_INTEREST,
+    HOSTED_OPEN_DRAWDOWN_LOSS_RATE,
+    HOSTED_OPEN_DRAWDOWN_MAX_LOSS,
+    HOSTED_OPEN_DRAWDOWN_MIN_LOSERS,
+    HOSTED_POLICY_VERSION,
+    HOSTED_RIDER_MAX_DTE,
+    HOSTED_RIDER_MIN_DTE,
+    HOSTED_TACTICAL_MAX_DTE,
+    HOSTED_TACTICAL_MIN_DTE,
+    is_hosted_paper_runtime,
+    is_volatility_symbol,
+)
+from .jsonl_retention import compact_jsonl_tail, read_jsonl_tail
 from .phase1_alpaca_client import AlpacaPaperClient
 from .phase1_engine import build_decision_card
 from .phase1_models import (
@@ -105,7 +122,7 @@ def run_trading_cycle(
         }
     snapshot_time = scheduled_market_time or datetime.now(tz=UTC)
     captured_at = captured_at_utc or datetime.now(tz=UTC)
-    resolved_rules = rules or CaptureRules()
+    resolved_rules = rules or _hosted_capture_rules()
     if hasattr(resolved_broker, "get_order"):
         try:
             reconcile_open_positions(
@@ -125,9 +142,40 @@ def run_trading_cycle(
     else:
         monitor_summary = {"ok": True, "enabled": True, "checked": 0, "actions": []}
     outcome_journal_path = _trade_outcome_journal_for_execution_log(execution_log_path)
-    outcome_learning_summary = sync_trade_outcomes_from_broker(resolved_broker, journal_path=outcome_journal_path)
-    loss_guard = recent_loss_guard(journal_path=outcome_journal_path)
-    winner_bias = recent_winner_bias(journal_path=outcome_journal_path)
+    try:
+        outcome_learning_summary = sync_trade_outcomes_from_broker(
+            resolved_broker,
+            journal_path=outcome_journal_path,
+            execution_journal_path=execution_log_path,
+            limit=500,
+        )
+    except Exception as exc:
+        outcome_learning_summary = {
+            "ok": False,
+            "recorded": 0,
+            "outcomes": [],
+            "error": f"{type(exc).__name__}: {exc}",
+        }
+    hosted_policy_version = HOSTED_POLICY_VERSION if is_hosted_paper_runtime() else None
+    loss_guard = recent_loss_guard(
+        journal_path=outcome_journal_path,
+        policy_version=hosted_policy_version,
+    )
+    winner_bias = recent_winner_bias(
+        journal_path=outcome_journal_path,
+        policy_version=hosted_policy_version,
+    )
+    hosted_paper = is_hosted_paper_runtime()
+    broker_daily_pnl_available = (
+        bool(outcome_learning_summary.get("ok"))
+        and outcome_learning_summary.get("daily_realized_pnl") is not None
+    )
+    daily_pnl_available = not hosted_paper or broker_daily_pnl_available
+    effective_daily_realized_pnl = (
+        float(outcome_learning_summary["daily_realized_pnl"])
+        if broker_daily_pnl_available
+        else (current_daily_realized_pnl if not hosted_paper else None)
+    )
     cycle_symbols = _prioritize_symbols_by_winners(symbols, winner_bias)
 
     snapshot_paths: list[str] = []
@@ -142,8 +190,9 @@ def run_trading_cycle(
     active_underlyings = _active_underlying_symbols(resolved_broker)
     open_drawdown_guard = _open_drawdown_guard(resolved_broker)
     max_new_entry_attempts_per_loop = resolved_broker.config.effective_max_new_entry_attempts_per_loop()
-    core_runner_enabled = _env_bool("AUTOBOTT_CORE_RUNNER_ENABLED", default=True)
+    core_runner_enabled = True if is_hosted_paper_runtime() else _env_bool("AUTOBOTT_CORE_RUNNER_ENABLED", default=True)
     core_runner_rules = load_core_runner_rules() if core_runner_enabled else None
+    recent_setup_events = _recent_entry_setup_event_ids(execution_log_path)
 
     for symbol in cycle_symbols:
         try:
@@ -154,12 +203,26 @@ def run_trading_cycle(
                 captured_at_utc=captured_at,
                 corpus_type="production_capture" if resolved_broker.config.environment.value == "live" else "paper_capture",
                 market_timezone="America/New_York",
-                volatility_proxy_symbol="UVXY",
+                volatility_proxy_symbol="VIXY",
                 data_client=resolved_data_client,
                 rules=resolved_rules,
             )
             snapshot = _load_snapshot(Path(snapshot_path))
             decision_input = _decision_input_from_snapshot(snapshot)
+            decision = build_decision_card(decision_input, _hosted_execution_rules())
+        except Exception as exc:
+            _append_skip(
+                skipped,
+                symbol=symbol.upper(),
+                reason=(
+                    "vix_index_lane_unavailable_using_proxy_fallback"
+                    if symbol.upper() in {"VIX", "VIXW"}
+                    else "snapshot_or_decision_failed"
+                ),
+                detail=str(exc),
+            )
+            continue
+        try:
             ghost_journal_path = _ghost_trade_journal_for_execution_log(execution_log_path)
             ghost_observations = observe_ghost_trades(decision_input, journal_path=ghost_journal_path)
             if ghost_observations:
@@ -173,7 +236,15 @@ def run_trading_cycle(
                     journal_path=execution_log_path,
                     payload={"observations": ghost_observations},
                 )
-            decision = build_decision_card(decision_input, _hosted_execution_rules())
+        except Exception as exc:
+            execution_outcomes.append(
+                {
+                    "symbol": symbol.upper(),
+                    "disposition": "ghost_trade_telemetry_failed",
+                    "detail": f"{type(exc).__name__}: {exc}",
+                }
+            )
+        try:
             spread_candidate = select_defined_risk_spread(decision_input, decision.direction.bias)
             if spread_candidate is not None:
                 spread_journal_path = _spread_journal_for_execution_log(execution_log_path)
@@ -193,17 +264,27 @@ def run_trading_cycle(
                     payload=spread_candidate.to_json_dict(),
                 )
         except Exception as exc:
-            _append_skip(
-                skipped,
-                symbol=symbol.upper(),
-                reason="snapshot_or_decision_failed",
-                detail=str(exc),
+            execution_outcomes.append(
+                {
+                    "symbol": symbol.upper(),
+                    "disposition": "defined_risk_spread_telemetry_failed",
+                    "detail": f"{type(exc).__name__}: {exc}",
+                }
             )
-            continue
         snapshot_paths.append(snapshot_path)
         decision_payload = decision.to_json_dict()
         decisions.append(decision_payload)
-        append_decision_card(decision_payload, snapshot_path=snapshot_path, log_path=decision_log_path)
+        try:
+            append_decision_card(decision_payload, snapshot_path=snapshot_path, log_path=decision_log_path)
+        except Exception as exc:
+            execution_outcomes.append(
+                {
+                    "symbol": symbol.upper(),
+                    "decision_id": decision.decision_id,
+                    "disposition": "decision_journal_failed",
+                    "detail": f"{type(exc).__name__}: {exc}",
+                }
+            )
         is_candidate = decision.decision is DecisionStatus.TRADE_CANDIDATE
         thesis_id = _decision_thesis_id(decision)
 
@@ -255,6 +336,25 @@ def run_trading_cycle(
         if not is_candidate:
             _append_skip(skipped, symbol=symbol.upper(), reason=decision_payload["decision"])
             continue
+        if not daily_pnl_available:
+            _append_skip(
+                skipped,
+                symbol=symbol.upper(),
+                reason="daily_pnl_unavailable",
+                detail=str(outcome_learning_summary.get("error") or "broker fill history unavailable"),
+            )
+            _record_execution_rejection(
+                execution_outcomes,
+                execution_rejected_count_by_reason,
+                ticker=symbol.upper(),
+                decision_id=decision.decision_id,
+                thesis_id=thesis_id,
+                reason="daily_pnl_unavailable",
+                detail="new entries fail closed until account-wide realized P/L is available",
+                journal_path=execution_log_path,
+                payload={"outcome_sync": outcome_learning_summary},
+            )
+            continue
         if _env_bool("AUTOBOTT_SINGLE_LEG_REAL_ENTRIES_DISABLED", default=False) and not core_runner_enabled:
             if decision.selected_contract is not None:
                 ghost = append_ghost_trade(
@@ -283,12 +383,14 @@ def run_trading_cycle(
                 payload={"ghost": ghost},
             )
             continue
-        if symbol.upper() in set(loss_guard.get("blocked_underlyings") or []):
+        blocked_underlyings = set(loss_guard.get("blocked_underlyings") or [])
+        learning_underlying = "VOLATILITY" if is_volatility_symbol(symbol) else symbol.upper()
+        if symbol.upper() in blocked_underlyings or learning_underlying in blocked_underlyings:
             _append_skip(
                 skipped,
                 symbol=symbol.upper(),
                 reason="recent_loss_guard",
-                detail=json.dumps((loss_guard.get("reasons") or {}).get(symbol.upper(), {}), sort_keys=True),
+                detail=json.dumps((loss_guard.get("reasons") or {}).get(learning_underlying, {}), sort_keys=True),
             )
             _record_execution_rejection(
                 execution_outcomes,
@@ -299,19 +401,57 @@ def run_trading_cycle(
                 reason="recent_loss_guard",
                 detail="recent outcomes for this underlying are underperforming",
                 journal_path=execution_log_path,
-                payload=(loss_guard.get("reasons") or {}).get(symbol.upper(), {}),
+                payload=(loss_guard.get("reasons") or {}).get(learning_underlying, {}),
             )
             continue
-        if symbol.upper() in active_underlyings:
-            _append_skip(skipped, symbol=symbol.upper(), reason="underlying_exposure_already_open")
+        setup_event_id = _decision_setup_event_id(decision)
+        if _SETUP_REGISTRY_UNAVAILABLE in recent_setup_events or setup_event_id in recent_setup_events:
+            cooldown_unavailable = _SETUP_REGISTRY_UNAVAILABLE in recent_setup_events
+            cooldown_reason = "setup_event_registry_unavailable" if cooldown_unavailable else "setup_event_already_traded"
+            _append_skip(
+                skipped,
+                symbol=symbol.upper(),
+                reason=cooldown_reason,
+                detail=setup_event_id,
+            )
             _record_execution_rejection(
                 execution_outcomes,
                 execution_rejected_count_by_reason,
                 ticker=symbol.upper(),
                 decision_id=decision.decision_id,
                 thesis_id=thesis_id,
-                reason="underlying_exposure_already_open",
-                detail=f"active_underlying={symbol.upper()}",
+                reason=cooldown_reason,
+                detail=(
+                    "setup registry unavailable; new entries fail closed"
+                    if cooldown_unavailable
+                    else "the same setup and hourly evidence already produced an entry"
+                ),
+                journal_path=execution_log_path,
+                payload={"setup_event_id": setup_event_id},
+            )
+            continue
+        volatility_exposure_open = is_volatility_symbol(symbol) and any(
+            is_volatility_symbol(active_symbol) for active_symbol in active_underlyings
+        )
+        if symbol.upper() in active_underlyings or volatility_exposure_open:
+            rejection_reason = (
+                "volatility_exposure_already_open"
+                if volatility_exposure_open
+                else "underlying_exposure_already_open"
+            )
+            _append_skip(skipped, symbol=symbol.upper(), reason=rejection_reason)
+            _record_execution_rejection(
+                execution_outcomes,
+                execution_rejected_count_by_reason,
+                ticker=symbol.upper(),
+                decision_id=decision.decision_id,
+                thesis_id=thesis_id,
+                reason=rejection_reason,
+                detail=(
+                    "one VIX/VXX/UVXY exposure group is already active"
+                    if volatility_exposure_open
+                    else f"active_underlying={symbol.upper()}"
+                ),
                 journal_path=execution_log_path,
                 payload={"active_underlyings": sorted(active_underlyings)},
             )
@@ -420,6 +560,7 @@ def run_trading_cycle(
 
         def _mark_submission_attempt(intent: Any) -> None:
             nonlocal trade_attempted_count, submission_attempted
+            _remember_setup_event(setup_event_id, execution_log_path, recent_setup_events)
             submission_attempted = True
             trade_attempted_count += 1
             _record_execution_outcome(
@@ -443,7 +584,7 @@ def run_trading_cycle(
                     decision,
                     core_runner_pair,
                     broker=resolved_broker,
-                    current_daily_realized_pnl=current_daily_realized_pnl,
+                    current_daily_realized_pnl=float(effective_daily_realized_pnl),
                     open_positions=open_positions,
                     journal_path=execution_log_path,
                     on_submission_attempt=_mark_submission_attempt,
@@ -454,7 +595,7 @@ def run_trading_cycle(
                         decision,
                         broker=resolved_broker,
                         quantity=quantity,
-                        current_daily_realized_pnl=current_daily_realized_pnl,
+                        current_daily_realized_pnl=float(effective_daily_realized_pnl),
                         open_positions=open_positions,
                         journal_path=execution_log_path,
                         on_submission_attempt=_mark_submission_attempt,
@@ -475,6 +616,13 @@ def run_trading_cycle(
                     }
                 )
         except ExecutionRejectedError as exc:
+            if exc.reason == "core_runner_paired_submission_partial_failure":
+                # The first ordinary paper leg may already be accepted or
+                # filled when the second leg fails. Reserve this underlying
+                # (and therefore the shared volatility group) immediately so
+                # the same scan cannot stack a VXX/UVXY fallback on the orphan.
+                active_underlyings.add(symbol.upper())
+                open_positions += 1
             _append_skip(
                 skipped,
                 symbol=symbol.upper(),
@@ -539,6 +687,15 @@ def run_trading_cycle(
             {"disposition": "snapshot_storage_retention_summary", **storage_retention},
             {"disposition": "position_monitor_summary", **monitor_summary},
             {"disposition": "trade_outcome_learning_summary", **outcome_learning_summary, "winner_bias": winner_bias},
+            {
+                "disposition": "daily_realized_pnl_summary",
+                "daily_realized_pnl": effective_daily_realized_pnl,
+                "source": (
+                    "broker_fill_outcomes"
+                    if broker_daily_pnl_available
+                    else ("unavailable" if hosted_paper else "cycle_argument")
+                ),
+            },
             {"disposition": "open_drawdown_guard_summary", **open_drawdown_guard},
             *execution_outcomes,
         ],
@@ -562,9 +719,17 @@ def append_decision_card(payload: dict[str, Any], *, snapshot_path: str, log_pat
         "snapshot_path": snapshot_path,
         "decision_card": payload,
     }
+    needs_separator = False
+    if path.exists() and path.stat().st_size:
+        with path.open("rb") as existing:
+            existing.seek(-1, 2)
+            needs_separator = existing.read(1) != b"\n"
     with path.open("a", encoding="utf-8") as handle:
+        if needs_separator:
+            handle.write("\n")
         handle.write(json.dumps(record, sort_keys=True))
         handle.write("\n")
+    compact_jsonl_tail(path)
     return path
 
 
@@ -572,7 +737,17 @@ def load_decision_cards(*, log_path: str | Path | None = None, limit: int | None
     path = Path(log_path) if log_path is not None else decision_journal_path()
     if not path.exists():
         return []
-    rows = [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
+    max_tail_bytes = 16 * 1024 * 1024 if limit is not None else None
+    rows: list[dict[str, Any]] = []
+    for raw_line in read_jsonl_tail(path, max_tail_bytes=max_tail_bytes):
+        if not raw_line.strip():
+            continue
+        try:
+            decoded = json.loads(raw_line)
+        except (json.JSONDecodeError, UnicodeDecodeError, TypeError):
+            continue
+        if isinstance(decoded, dict):
+            rows.append(decoded)
     return rows[-limit:] if limit is not None else rows
 
 
@@ -623,7 +798,8 @@ def _selected_contract_real_cost(decision: DecisionCard) -> float:
 
 
 def _open_drawdown_guard(broker: Any) -> dict[str, Any]:
-    if not _env_bool("AUTOBOTT_OPEN_DRAWDOWN_GUARD_ENABLED", default=True):
+    hosted_paper = is_hosted_paper_runtime()
+    if not hosted_paper and not _env_bool("AUTOBOTT_OPEN_DRAWDOWN_GUARD_ENABLED", default=True):
         return {"enabled": False, "blocked": False}
     if not hasattr(broker, "list_open_positions"):
         return {"enabled": True, "blocked": False, "reason": "broker_positions_unavailable"}
@@ -637,9 +813,21 @@ def _open_drawdown_guard(broker: Any) -> dict[str, Any]:
     unrealized = round(sum(_float_value(position.get("unrealized_pl")) for position in positions), 2)
     losers = sum(1 for position in positions if _float_value(position.get("unrealized_pl")) < 0)
     loss_rate = round(losers / total, 4)
-    max_unrealized_loss = abs(float(os.getenv("AUTOBOTT_OPEN_DRAWDOWN_GUARD_MAX_UNREALIZED_LOSS", "20")))
-    min_losers = int(os.getenv("AUTOBOTT_OPEN_DRAWDOWN_GUARD_MIN_LOSERS", "3"))
-    min_loss_rate = float(os.getenv("AUTOBOTT_OPEN_DRAWDOWN_GUARD_LOSS_RATE", "0.60"))
+    max_unrealized_loss = (
+        HOSTED_OPEN_DRAWDOWN_MAX_LOSS
+        if hosted_paper
+        else abs(float(os.getenv("AUTOBOTT_OPEN_DRAWDOWN_GUARD_MAX_UNREALIZED_LOSS", "20")))
+    )
+    min_losers = (
+        HOSTED_OPEN_DRAWDOWN_MIN_LOSERS
+        if hosted_paper
+        else int(os.getenv("AUTOBOTT_OPEN_DRAWDOWN_GUARD_MIN_LOSERS", "3"))
+    )
+    min_loss_rate = (
+        HOSTED_OPEN_DRAWDOWN_LOSS_RATE
+        if hosted_paper
+        else float(os.getenv("AUTOBOTT_OPEN_DRAWDOWN_GUARD_LOSS_RATE", "0.60"))
+    )
     blocked = unrealized <= -max_unrealized_loss and losers >= min_losers and loss_rate >= min_loss_rate
     return {
         "enabled": True,
@@ -670,24 +858,40 @@ def _float_value(value: Any) -> float:
 
 def _prioritize_symbols_by_winners(symbols: list[str], winner_bias: dict[str, Any]) -> list[str]:
     preferred = [str(symbol).upper() for symbol in winner_bias.get("preferred_underlyings") or []]
-    normalized = [symbol.upper() for symbol in symbols]
-    preferred_in_cycle = [symbol for symbol in preferred if symbol in normalized]
-    remaining = [symbol for symbol in normalized if symbol not in set(preferred_in_cycle)]
-    return preferred_in_cycle + remaining
+    normalized = list(dict.fromkeys(symbol.upper() for symbol in symbols))
+    # Keep the direct VIX lane and its two explicit fallbacks ahead of equity
+    # winner reordering. With a three-pair cycle cap, historical equity winners
+    # must not silently starve volatility discovery.
+    volatility_priority = [symbol for symbol in ("VIX", "VXX", "UVXY") if symbol in normalized]
+    non_volatility = [symbol for symbol in normalized if symbol not in set(volatility_priority)]
+    preferred_in_cycle = [symbol for symbol in preferred if symbol in non_volatility]
+    remaining = [symbol for symbol in non_volatility if symbol not in set(preferred_in_cycle)]
+    return volatility_priority + preferred_in_cycle + remaining
 
 
 def _active_underlying_symbols(broker: Any | None = None) -> set[str]:
     if broker is not None and hasattr(broker, "list_open_positions"):
+        positions_read = False
+        symbols: set[str] = set()
         try:
-            symbols = {
+            symbols.update(
+                {
                 _underlying_from_option_symbol(str(position.get("symbol") or "")) or str(position.get("symbol") or "").upper()
                 for position in broker.list_open_positions()
                 if _broker_position_is_active(position)
-            }
-            symbols.update(_pending_entry_underlying_symbols(broker))
-            return {symbol for symbol in symbols if symbol}
+                }
+            )
+            positions_read = True
         except Exception:
             pass
+        try:
+            symbols.update(_pending_entry_underlying_symbols(broker))
+        except Exception:
+            # A transient order-list failure must not discard live positions
+            # that were already read successfully.
+            pass
+        if positions_read:
+            return {symbol for symbol in symbols if symbol}
     return {
         position.symbol.upper()
         for position in load_open_positions()
@@ -747,10 +951,136 @@ def _decision_thesis_id(decision: DecisionCard) -> str:
     return f"{decision.ticker}:{decision.trade_setup.value}:{decision.execution_layer.value}"
 
 
+def _decision_setup_event_id(decision: DecisionCard) -> str:
+    completed_bar_bucket = decision.timestamp.astimezone(UTC).replace(minute=0, second=0, microsecond=0)
+    learning_symbol = "VOLATILITY" if is_volatility_symbol(decision.ticker) else decision.ticker.upper()
+    return ":".join(
+        (
+            learning_symbol,
+            completed_bar_bucket.isoformat(),
+            decision.trade_setup.value,
+            decision.direction.bias.value,
+        )
+    )
+
+
+_SETUP_REGISTRY_UNAVAILABLE = "__SETUP_REGISTRY_UNAVAILABLE__"
+
+
+def _recent_entry_setup_event_ids(
+    execution_log_path: str | Path | None,
+) -> set[str]:
+    """Load the bounded setup registry, bootstrapping it from the journal."""
+
+    path = Path(execution_log_path) if execution_log_path is not None else execution_journal_path()
+    registry_path = path.with_name("setup_events.json")
+    registry = _load_setup_event_registry(registry_path)
+    if registry is not None:
+        return set(registry)
+    if not path.exists():
+        return set()
+    try:
+        raw_lines = read_jsonl_tail(path, max_tail_bytes=64 * 1024 * 1024)
+    except OSError:
+        return {_SETUP_REGISTRY_UNAVAILABLE}
+    setup_events: list[str] = []
+    for raw_line in raw_lines:
+        try:
+            row = json.loads(raw_line)
+        except (json.JSONDecodeError, UnicodeDecodeError, TypeError):
+            continue
+        if row.get("event_type") != "order_submission":
+            continue
+        intent = (row.get("payload") or {}).get("intent") or {}
+        if str(intent.get("side") or "").lower() != "buy_to_open":
+            continue
+        setup_event_id = str((intent.get("metadata") or {}).get("setup_event_id") or "").strip()
+        if setup_event_id and setup_event_id not in setup_events:
+            setup_events.append(setup_event_id)
+    retained = setup_events[-500:]
+    try:
+        _write_setup_event_registry(registry_path, retained)
+    except OSError:
+        pass
+    return set(retained)
+
+
+def _remember_setup_event(
+    setup_event_id: str,
+    execution_log_path: str | Path | None,
+    in_memory: set[str],
+) -> None:
+    path = Path(execution_log_path) if execution_log_path is not None else execution_journal_path()
+    registry_path = path.with_name("setup_events.json")
+    existing = _load_setup_event_registry(registry_path) or list(in_memory)
+    retained = [value for value in existing if value != setup_event_id]
+    retained.append(setup_event_id)
+    try:
+        _write_setup_event_registry(registry_path, retained[-500:])
+    except OSError as exc:
+        # This write happens immediately before the broker POST.  If the
+        # durable reservation cannot be made, do not submit: an ambiguous POST
+        # followed by a process restart could otherwise repeat the same setup.
+        in_memory.add(_SETUP_REGISTRY_UNAVAILABLE)
+        raise ExecutionRejectedError(
+            "setup_event_registry_unavailable",
+            detail=f"setup event could not be reserved before submission: {exc}",
+            reasons=("setup_event_registry_unavailable",),
+        ) from exc
+    in_memory.add(setup_event_id)
+
+
+def _load_setup_event_registry(path: Path) -> list[str] | None:
+    if not path.exists():
+        return None
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except OSError:
+        return [_SETUP_REGISTRY_UNAVAILABLE]
+    except (UnicodeError, json.JSONDecodeError):
+        return None
+    if not isinstance(payload, list):
+        return None
+    return [str(value) for value in payload if str(value).strip()][-500:]
+
+
+def _write_setup_event_registry(path: Path, setup_events: list[str]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(f".{path.name}.tmp")
+    temporary.write_text(json.dumps(setup_events[-500:], indent=2), encoding="utf-8")
+    temporary.replace(path)
+
+
+def _hosted_capture_rules() -> CaptureRules:
+    if not is_hosted_paper_runtime():
+        return CaptureRules()
+    return CaptureRules(
+        lookback_bars=HOSTED_LOOKBACK_BARS,
+        bar_timeframe=HOSTED_BAR_TIMEFRAME,
+        lookback_calendar_days=HOSTED_LOOKBACK_CALENDAR_DAYS,
+        option_chain_min_dte=HOSTED_TACTICAL_MIN_DTE,
+        option_chain_max_dte=HOSTED_RIDER_MAX_DTE,
+        tactical_min_dte=HOSTED_TACTICAL_MIN_DTE,
+        tactical_max_dte=HOSTED_TACTICAL_MAX_DTE,
+        rider_min_dte=HOSTED_RIDER_MIN_DTE,
+        rider_max_dte=HOSTED_RIDER_MAX_DTE,
+    )
+
+
 def _hosted_execution_rules() -> Phase1Rules:
     """Apply deployment contract horizons without changing replay defaults."""
 
     rules = Phase1Rules()
+    if is_hosted_paper_runtime():
+        return replace(
+            rules,
+            intraday_min_dte=HOSTED_TACTICAL_MIN_DTE,
+            intraday_max_dte=HOSTED_TACTICAL_MAX_DTE,
+            rider_min_dte=HOSTED_RIDER_MIN_DTE,
+            rider_max_dte=HOSTED_RIDER_MAX_DTE,
+            min_open_interest=HOSTED_MIN_OPEN_INTEREST,
+            risk_off_bullish_exempt_symbols=("VIX", "VIXW", "VXX", "UVXY"),
+        )
     min_dte = int(os.getenv("AUTOBOTT_ENTRY_MIN_DTE", str(rules.intraday_min_dte)))
     tactical_max_dte = int(os.getenv("AUTOBOTT_ENTRY_TACTICAL_MAX_DTE", str(rules.intraday_max_dte)))
     rider_min_dte = int(os.getenv("AUTOBOTT_ENTRY_RIDER_MIN_DTE", str(rules.rider_min_dte)))
@@ -831,15 +1161,21 @@ def _record_execution_outcome(
     if payload:
         outcome.update(payload)
     execution_outcomes.append(outcome)
-    append_execution_outcome(
-        decision_id=decision_id,
-        thesis_id=thesis_id,
-        symbol=ticker,
-        disposition=disposition,
-        detail=detail,
-        payload=payload,
-        journal_path=journal_path,
-    )
+    try:
+        append_execution_outcome(
+            decision_id=decision_id,
+            thesis_id=thesis_id,
+            symbol=ticker,
+            disposition=disposition,
+            detail=detail,
+            payload=payload,
+            journal_path=journal_path,
+        )
+    except Exception as exc:
+        # Telemetry is valuable but not part of entry eligibility. A journal
+        # write/compaction failure must remain visible without suppressing a
+        # qualified broker submission.
+        outcome["journal_error"] = f"{type(exc).__name__}: {exc}"
 
 
 def main(argv: list[str] | None = None) -> int:

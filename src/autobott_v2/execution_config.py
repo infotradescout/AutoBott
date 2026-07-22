@@ -4,6 +4,13 @@ import os
 from dataclasses import dataclass
 
 from .execution_models import BrokerEnvironment, ExecutionRiskControls
+from .hosted_policy import (
+    HOSTED_MAX_DAILY_LOSS,
+    HOSTED_MAX_NEW_PAIRS_PER_CYCLE,
+    HOSTED_MAX_OPEN_LEGS,
+    HOSTED_MAX_POSITION_COST,
+    is_hosted_paper_runtime,
+)
 
 
 def _normalize_bool(value: str | None, *, default: bool = False) -> bool:
@@ -94,7 +101,8 @@ class AlpacaExecutionConfig:
 
 
 def load_alpaca_execution_config() -> AlpacaExecutionConfig:
-    env = (os.getenv("ALPACA_ENV") or "paper").strip().lower()
+    hosted_paper = is_hosted_paper_runtime()
+    env = "paper" if hosted_paper else (os.getenv("ALPACA_ENV") or "paper").strip().lower()
     environment = BrokerEnvironment.LIVE if env == "live" else BrokerEnvironment.PAPER
     default_trading_base = (
         "https://api.alpaca.markets"
@@ -105,30 +113,69 @@ def load_alpaca_execution_config() -> AlpacaExecutionConfig:
         os.getenv("AUTOBOTT_PAPER_TRADE_ALL_PASSED_SIGNALS"),
         default=True,
     )
-
     return AlpacaExecutionConfig(
         environment=environment,
         api_key=os.getenv("ALPACA_API_KEY_ID"),
         secret_key=os.getenv("ALPACA_API_SECRET_KEY"),
-        trading_base_url=(os.getenv("ALPACA_TRADING_BASE_URL") or default_trading_base).rstrip("/"),
-        data_base_url=(os.getenv("ALPACA_DATA_BASE_URL") or "https://data.alpaca.markets").rstrip("/"),
-        allow_live_trading=_normalize_bool(os.getenv("AUTOBOTT_LIVE_TRADING_ENABLED"), default=False),
-        allow_order_placement=_normalize_bool(os.getenv("AUTOBOTT_ALLOW_ORDER_PLACEMENT"), default=False),
-        max_position_cost=float(os.getenv("AUTOBOTT_MAX_POSITION_COST", "100")),
-        max_daily_loss=float(os.getenv("AUTOBOTT_MAX_DAILY_LOSS", "500")),
-        max_open_positions=int(os.getenv("AUTOBOTT_MAX_OPEN_POSITIONS", "3")),
-        paper_trade_all_passed_signals=paper_trade_all_passed_signals,
-        paper_max_new_entry_attempts_per_loop=_normalize_optional_int(
-            os.getenv("AUTOBOTT_PAPER_MAX_NEW_ENTRY_ATTEMPTS_PER_LOOP"),
-            default=25 if paper_trade_all_passed_signals else None,
+        trading_base_url=(
+            "https://paper-api.alpaca.markets"
+            if hosted_paper
+            else (os.getenv("ALPACA_TRADING_BASE_URL") or default_trading_base).rstrip("/")
         ),
-        paper_max_open_entry_buy_orders=_normalize_optional_int(
-            os.getenv("AUTOBOTT_PAPER_MAX_OPEN_ENTRY_BUY_ORDERS"),
-            default=25 if paper_trade_all_passed_signals else None,
+        data_base_url=(
+            "https://data.alpaca.markets"
+            if hosted_paper
+            else (os.getenv("ALPACA_DATA_BASE_URL") or "https://data.alpaca.markets").rstrip("/")
         ),
-        paper_ignore_position_cost_limit=_normalize_bool(
-            os.getenv("AUTOBOTT_PAPER_IGNORE_POSITION_COST_LIMIT"),
-            default=True,
+        allow_live_trading=(
+            False
+            if hosted_paper
+            else _normalize_bool(os.getenv("AUTOBOTT_LIVE_TRADING_ENABLED"), default=False)
+        ),
+        allow_order_placement=(
+            True
+            if hosted_paper
+            else _normalize_bool(os.getenv("AUTOBOTT_ALLOW_ORDER_PLACEMENT"), default=False)
+        ),
+        max_position_cost=(
+            HOSTED_MAX_POSITION_COST
+            if hosted_paper
+            else float(os.getenv("AUTOBOTT_MAX_POSITION_COST", "100"))
+        ),
+        max_daily_loss=(
+            HOSTED_MAX_DAILY_LOSS
+            if hosted_paper
+            else float(os.getenv("AUTOBOTT_MAX_DAILY_LOSS", "500"))
+        ),
+        max_open_positions=(
+            HOSTED_MAX_OPEN_LEGS
+            if hosted_paper
+            else int(os.getenv("AUTOBOTT_MAX_OPEN_POSITIONS", "3"))
+        ),
+        paper_trade_all_passed_signals=True if hosted_paper else paper_trade_all_passed_signals,
+        paper_max_new_entry_attempts_per_loop=(
+            HOSTED_MAX_NEW_PAIRS_PER_CYCLE
+            if hosted_paper
+            else _normalize_optional_int(
+                os.getenv("AUTOBOTT_PAPER_MAX_NEW_ENTRY_ATTEMPTS_PER_LOOP"),
+                default=25 if paper_trade_all_passed_signals else None,
+            )
+        ),
+        paper_max_open_entry_buy_orders=(
+            HOSTED_MAX_OPEN_LEGS
+            if hosted_paper
+            else _normalize_optional_int(
+                os.getenv("AUTOBOTT_PAPER_MAX_OPEN_ENTRY_BUY_ORDERS"),
+                default=25 if paper_trade_all_passed_signals else None,
+            )
+        ),
+        paper_ignore_position_cost_limit=(
+            False
+            if hosted_paper
+            else _normalize_bool(
+                os.getenv("AUTOBOTT_PAPER_IGNORE_POSITION_COST_LIMIT"),
+                default=True,
+            )
         ),
     )
 

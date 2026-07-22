@@ -45,7 +45,10 @@ def build_decision_card(decision_input: DecisionInput, rules: Phase1Rules | None
     volatility = score_volatility(decision_input, direction)
     setup = determine_trade_setup(direction, cycle)
 
-    if RegimeLabel.RISK_OFF in regime.labels and direction.bias == DirectionBias.BULLISH:
+    risk_off_exempt = decision_input.ticker.upper() in {
+        symbol.upper() for symbol in rules.risk_off_bullish_exempt_symbols
+    }
+    if RegimeLabel.RISK_OFF in regime.labels and direction.bias == DirectionBias.BULLISH and not risk_off_exempt:
         return _card(decision_input, regime, direction, cycle, volatility, None, None, None, setup, ExecutionLayer.NONE, DecisionStatus.BLOCKED_BY_REGIME, "bullish_options_blocked_in_risk_off", 0.0)
 
     if direction.bias == DirectionBias.NEUTRAL or abs(direction.score) < rules.min_direction_score:
@@ -90,8 +93,8 @@ def classify_regime(bars: list[MarketBar], vix_bars: list[MarketBar], spy_bars: 
     older = closes[-30:-20]
     momentum = _pct_change(older[0], recent[-1]) if older else 0.0
     recent_range = (max(recent) - min(recent)) / recent[-1]
-    realized_now = _realized_volatility(closes[-15:])
-    realized_then = _realized_volatility(closes[-30:-15])
+    realized_now = _realized_volatility_from_bars(bars[-15:])
+    realized_then = _realized_volatility_from_bars(bars[-30:-15])
 
     labels: list[RegimeLabel] = []
     if abs(momentum) >= 0.015 and recent_range > 0.01:
@@ -222,8 +225,16 @@ def score_volatility(decision_input: DecisionInput, direction: DirectionResult) 
     target_type = OptionType.CALL if direction.bias == DirectionBias.BULLISH else OptionType.PUT
     ivs = [contract.implied_volatility for contract in decision_input.option_chain if contract.option_type == target_type]
     current_iv = sum(ivs) / len(ivs) if ivs else sum(c.implied_volatility for c in decision_input.option_chain) / len(decision_input.option_chain)
-    iv_percentile = _percentile_rank(decision_input.iv_history, current_iv) if decision_input.iv_history else None
-    realized = _realized_volatility([bar.close for bar in decision_input.market_bars[-20:]])
+    # A one-snapshot "history" is the current IV repeated back to us, not a
+    # percentile sample. Treating it as the 100th percentile blocked the first
+    # genuine setup of every session.
+    volatility_sample_ready = len(decision_input.iv_history) >= 5
+    iv_percentile = (
+        _percentile_rank(decision_input.iv_history, current_iv)
+        if volatility_sample_ready
+        else None
+    )
+    realized = _realized_volatility_from_bars(decision_input.market_bars[-20:])
     iv_realized_ratio = current_iv / realized if realized > 0 else None
     event_risk = decision_input.context.blackout_event
     iv_crush_risk = bool(event_risk and current_iv >= 0.40)
@@ -231,14 +242,17 @@ def score_volatility(decision_input: DecisionInput, direction: DirectionResult) 
     score = 0.0
     if iv_percentile is not None:
         score += 0.35 if iv_percentile <= 0.60 else -0.35
-    if iv_realized_ratio is not None:
+    if volatility_sample_ready and iv_realized_ratio is not None:
         score += 0.25 if iv_realized_ratio <= 1.40 else -0.25
     if event_risk:
         score -= 0.50
     if iv_crush_risk:
         score -= 0.50
     score = max(-1.0, min(1.0, score))
-    explanation = f"vol_score={score:.2f}, iv_percentile={iv_percentile}, iv_realized_ratio={iv_realized_ratio}."
+    explanation = (
+        f"vol_score={score:.2f}, iv_percentile={iv_percentile}, "
+        f"iv_realized_ratio={iv_realized_ratio}, sample_ready={volatility_sample_ready}."
+    )
     return VolatilityResult(score, iv_percentile, iv_realized_ratio, iv_crush_risk, event_risk, explanation)
 
 
@@ -300,7 +314,7 @@ def _score_contract(
         return None
     if contract.volume_available and contract.volume < rules.min_contract_volume:
         return None
-    if strike_distance > rules.max_strike_distance_pct:
+    if contract.underlying.upper() not in {"VIX", "VIXW"} and strike_distance > rules.max_strike_distance_pct:
         return None
     min_abs_delta = rules.intraday_min_abs_delta if layer == ExecutionLayer.TACTICAL else rules.min_abs_delta
     max_abs_delta = rules.intraday_max_abs_delta if layer == ExecutionLayer.TACTICAL else rules.max_abs_delta
@@ -324,7 +338,13 @@ def _score_contract(
     reasons.append(f"{layer.value}_window_passed")
     open_interest_liquidity = min(1.0, contract.open_interest / 1000)
     volume_liquidity = min(1.0, contract.volume / 200) if contract.volume_available else open_interest_liquidity
-    liquidity = open_interest_liquidity * 0.55 + volume_liquidity * 0.45
+    if rules.min_open_interest == 0 and contract.open_interest == 0:
+        # Alpaca's indicative paper feed sometimes omits OI entirely. In that
+        # case use observed volume rather than treating "unknown" as proven
+        # illiquidity. Spread and all contract-quality gates still apply.
+        liquidity = volume_liquidity
+    else:
+        liquidity = open_interest_liquidity * 0.55 + volume_liquidity * 0.45
     bid_ask_quality = max(0.0, 1 - contract.spread_pct / rules.max_spread_pct)
     edge_fit = _contract_edge_fit(abs_delta, direction, volatility, layer)
     risk_reward = min(1.0, reward_risk_ratio / 1.25)
@@ -417,13 +437,30 @@ def _returns(values: list[float]) -> list[float]:
     return [_pct_change(values[index - 1], values[index]) for index in range(1, len(values)) if values[index - 1] > 0]
 
 
-def _realized_volatility(values: list[float]) -> float:
-    returns = _returns(values)
+def _realized_volatility_from_bars(bars: list[MarketBar]) -> float:
+    """Annualize realized volatility on the bars' actual time interval."""
+
+    if len(bars) < 3:
+        return 0.0
+    returns = _returns([bar.close for bar in bars])
     if len(returns) < 2:
         return 0.0
     mean = sum(returns) / len(returns)
     variance = sum((item - mean) ** 2 for item in returns) / (len(returns) - 1)
-    return math.sqrt(variance) * math.sqrt(252)
+    intervals = sorted(
+        (bars[index].timestamp - bars[index - 1].timestamp).total_seconds()
+        for index in range(1, len(bars))
+        if (bars[index].timestamp - bars[index - 1].timestamp).total_seconds() > 0
+    )
+    if not intervals:
+        return math.sqrt(variance) * math.sqrt(252)
+    median_seconds = intervals[len(intervals) // 2]
+    periods_per_year = (
+        252.0
+        if median_seconds >= 4 * 60 * 60
+        else 252.0 * 6.5 * 60 * 60 / median_seconds
+    )
+    return math.sqrt(variance) * math.sqrt(max(252.0, periods_per_year))
 
 
 def _benchmark_momentum(spy_bars: list[MarketBar], qqq_bars: list[MarketBar]) -> float:
@@ -624,8 +661,16 @@ def _percentile_rank(history: list[float], current: float) -> float:
     ordered = [value for value in history if value >= 0]
     if not ordered:
         return 0.0
-    below_or_equal = sum(1 for value in ordered if value <= current)
-    return round(below_or_equal / len(ordered), 4)
+    equal = sum(1 for value in ordered if math.isclose(value, current, rel_tol=1e-9, abs_tol=1e-9))
+    below = sum(
+        1
+        for value in ordered
+        if value < current and not math.isclose(value, current, rel_tol=1e-9, abs_tol=1e-9)
+    )
+    # Use the midpoint of a tied rank. Counting every equal observation below
+    # the current value makes a flat IV history look like the 100th percentile
+    # and incorrectly blocks an otherwise unchanged options market.
+    return round((below + equal * 0.5) / len(ordered), 4)
 
 
 def _validate_numeric_inputs(decision_input: DecisionInput) -> None:

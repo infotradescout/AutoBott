@@ -4,6 +4,8 @@ import os
 from dataclasses import dataclass
 from typing import Any
 
+from .hosted_policy import is_hosted_paper_runtime
+
 
 def _normalize_bool(value: str | None, *, default: bool = False) -> bool:
     if value is None:
@@ -49,15 +51,36 @@ class AlpacaPaperConfig:
 
 
 def load_alpaca_paper_config() -> AlpacaPaperConfig:
+    hosted_paper = is_hosted_paper_runtime()
     return AlpacaPaperConfig(
-        env=(os.getenv("ALPACA_ENV", "") or "").strip().lower(),
+        env="paper" if hosted_paper else (os.getenv("ALPACA_ENV", "") or "").strip().lower(),
         api_key=os.getenv("ALPACA_API_KEY_ID"),
         secret_key=os.getenv("ALPACA_API_SECRET_KEY"),
-        trading_base_url=(os.getenv("ALPACA_TRADING_BASE_URL") or "https://paper-api.alpaca.markets").rstrip("/"),
-        data_base_url=(os.getenv("ALPACA_DATA_BASE_URL") or "https://data.alpaca.markets").rstrip("/"),
-        live_trading_enabled=_normalize_bool(os.getenv("AUTOBOTT_LIVE_TRADING_ENABLED"), default=False),
-        paper_only=_normalize_bool(os.getenv("AUTOBOTT_PAPER_ONLY"), default=True),
-        allow_order_placement=_normalize_bool(os.getenv("AUTOBOTT_ALLOW_ORDER_PLACEMENT"), default=False),
+        trading_base_url=(
+            "https://paper-api.alpaca.markets"
+            if hosted_paper
+            else (os.getenv("ALPACA_TRADING_BASE_URL") or "https://paper-api.alpaca.markets").rstrip("/")
+        ),
+        data_base_url=(
+            "https://data.alpaca.markets"
+            if hosted_paper
+            else (os.getenv("ALPACA_DATA_BASE_URL") or "https://data.alpaca.markets").rstrip("/")
+        ),
+        live_trading_enabled=(
+            False
+            if hosted_paper
+            else _normalize_bool(os.getenv("AUTOBOTT_LIVE_TRADING_ENABLED"), default=False)
+        ),
+        paper_only=(
+            True
+            if hosted_paper
+            else _normalize_bool(os.getenv("AUTOBOTT_PAPER_ONLY"), default=True)
+        ),
+        allow_order_placement=(
+            True
+            if hosted_paper
+            else _normalize_bool(os.getenv("AUTOBOTT_ALLOW_ORDER_PLACEMENT"), default=False)
+        ),
     )
 
 

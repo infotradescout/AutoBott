@@ -82,9 +82,51 @@ def test_submit_order_returns_submitted_execution_order(monkeypatch) -> None:
     assert captured["url"] == "https://paper-api.alpaca.markets/v2/orders"
     assert captured["method"] == "POST"
     assert captured["body"]["symbol"] == "AAPL260117C00190000"
+    assert captured["body"]["client_order_id"] == order.client_order_id
     assert "legs" not in captured["body"]
     assert captured["body"]["limit_price"] == "2.50"
     assert captured["body"]["position_intent"] == "buy_to_open"
+
+
+def test_submit_order_reconciles_ambiguous_post_timeout(monkeypatch) -> None:
+    broker = AlpacaExecutionBroker(_config())
+    monkeypatch.setattr(
+        broker,
+        "_submit_alpaca_order",
+        lambda *args, **kwargs: (_ for _ in ()).throw(TimeoutError("post timed out")),
+    )
+    monkeypatch.setattr(
+        broker,
+        "_get_order_by_client_order_id",
+        lambda client_order_id: {
+            "id": "alpaca-reconciled",
+            "client_order_id": client_order_id,
+            "status": "filled",
+            "submitted_at": "2026-07-01T15:31:00Z",
+        },
+    )
+
+    order = broker.submit_order(_intent())
+
+    assert order.state is ExecutionState.FILLED
+    assert order.broker_order_id == "alpaca-reconciled"
+    assert order.client_order_id.startswith("autobott-")
+
+
+def test_list_order_history_pages_until_complete(monkeypatch) -> None:
+    broker = AlpacaExecutionBroker(_config())
+    first = [
+        {"id": f"order-{index}", "submitted_at": f"2026-07-22T15:{index % 60:02d}:00Z"}
+        for index in range(500)
+    ]
+    second = [{"id": "old-order", "submitted_at": "2026-07-21T15:00:00Z"}]
+    pages = [first, second]
+    monkeypatch.setattr(broker, "list_orders", lambda **kwargs: pages.pop(0))
+
+    rows = broker.list_order_history()
+
+    assert len(rows) == 501
+    assert rows[-1]["id"] == "old-order"
 
 
 def test_submit_mleg_order_sends_one_atomic_two_leg_request(monkeypatch) -> None:

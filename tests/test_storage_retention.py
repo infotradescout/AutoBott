@@ -41,3 +41,17 @@ def test_prune_snapshot_storage_never_touches_files_outside_snapshot_root(tmp_pa
 
     assert result["files_deleted"] == 1
     assert journal.exists()
+
+
+def test_hosted_retention_ignores_poisoned_render_thresholds(monkeypatch, tmp_path: Path) -> None:
+    root = tmp_path / "phase1_snapshots"
+    root.mkdir()
+    monkeypatch.setenv("RENDER", "true")
+    monkeypatch.setenv("ALPACA_ENV", "live")
+    monkeypatch.setenv("AUTOBOTT_SNAPSHOT_MAX_BYTES", "999999999999")
+    monkeypatch.setenv("AUTOBOTT_MIN_FREE_BYTES", "0")
+
+    result = prune_snapshot_storage(root)
+
+    assert result["max_bytes"] == 128 * 1024 * 1024
+    assert result["min_free_bytes"] == 128 * 1024 * 1024

@@ -4,6 +4,7 @@ import os
 from dataclasses import dataclass
 from typing import Iterable
 
+from .hosted_policy import HOSTED_MIN_OPEN_INTEREST, is_hosted_paper_runtime
 from .phase1_models import OptionContractSnapshot, OptionType, SelectedContract
 
 
@@ -53,6 +54,21 @@ class CoreRunnerPair:
 
 
 def load_core_runner_rules() -> CoreRunnerRules:
+    if is_hosted_paper_runtime():
+        return CoreRunnerRules(
+            runner_max_cost_ratio=0.40,
+            core_max_spread_pct=0.18,
+            runner_max_spread_pct=0.25,
+            core_min_open_interest=HOSTED_MIN_OPEN_INTEREST,
+            runner_min_open_interest=HOSTED_MIN_OPEN_INTEREST,
+            core_min_volume=10,
+            runner_min_volume=1,
+            core_min_abs_delta=0.25,
+            primary_target_profit_pct=0.30,
+            primary_stop_loss_pct=0.22,
+            runner_target_profit_pct=1.00,
+            runner_stop_loss_pct=0.70,
+        ).validate()
     return CoreRunnerRules(
         runner_max_cost_ratio=float(os.getenv("AUTOBOTT_RUNNER_MAX_COST_RATIO", "0.40")),
         core_max_spread_pct=float(os.getenv("AUTOBOTT_CORE_MAX_SPREAD_PCT", "0.18")),

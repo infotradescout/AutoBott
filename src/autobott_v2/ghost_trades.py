@@ -6,6 +6,7 @@ from datetime import UTC, date, datetime
 from pathlib import Path
 from typing import Any
 
+from .jsonl_retention import compact_jsonl_tail, read_jsonl_tail
 from .phase1_models import DecisionCard, DecisionInput
 from .runtime_paths import data_root
 
@@ -90,7 +91,15 @@ def load_ghost_trades(*, journal_path: str | Path | None = None) -> list[dict[st
     path = Path(journal_path) if journal_path is not None else ghost_trade_journal_path()
     if not path.exists():
         return []
-    return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
+    rows: list[dict[str, Any]] = []
+    for raw_line in read_jsonl_tail(path, max_tail_bytes=16 * 1024 * 1024):
+        try:
+            decoded = json.loads(raw_line)
+        except (json.JSONDecodeError, UnicodeDecodeError, TypeError):
+            continue
+        if isinstance(decoded, dict):
+            rows.append(decoded)
+    return rows
 
 
 def _append_row(row: dict[str, Any], *, journal_path: str | Path | None = None) -> Path:
@@ -99,6 +108,7 @@ def _append_row(row: dict[str, Any], *, journal_path: str | Path | None = None) 
     with path.open("a", encoding="utf-8") as handle:
         handle.write(json.dumps(row, sort_keys=True))
         handle.write("\n")
+    compact_jsonl_tail(path)
     return path
 
 

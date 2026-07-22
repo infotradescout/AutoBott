@@ -227,6 +227,11 @@ def test_dashboard_health_returns_ok() -> None:
     payload = json.loads(body)
     assert status.startswith("200")
     assert payload["ok"] is True
+    assert payload["policy_version"] == "hosted-vix-profit-v1"
+    assert payload["volatility_lane"] == ["VIX", "VXX", "UVXY"]
+    assert payload["vix_execution_contracts"] == ["VIX", "VIXW"]
+    assert payload["vix_signal_proxy"] == "VIXY"
+    assert payload["entry_dte_windows"] == {"tactical": [5, 10], "rider": [14, 45]}
 
 
 def test_dashboard_session_panel_exposes_live_cycle_execution_counts() -> None:
@@ -254,6 +259,30 @@ def test_dashboard_health_fails_when_session_loop_has_died(monkeypatch) -> None:
     assert payload["ok"] is False
     assert payload["session_supervisor"]["stalled"] is True
     assert payload["session_supervisor"]["last_error"] == "boom"
+
+
+def test_dashboard_health_fails_when_run_forever_session_crashed_and_finished(monkeypatch) -> None:
+    monkeypatch.setattr(
+        dashboard_app,
+        "session_supervisor_status",
+        lambda: {
+            "config": {"enabled": True, "run_forever": True},
+            "state": {
+                "started_at": "2026-07-07T14:00:00+00:00",
+                "finished_at": "2026-07-07T14:01:00+00:00",
+                "running": False,
+                "last_error": "session_crashed",
+            },
+            "thread_alive": False,
+        },
+    )
+
+    status, body = _invoke_app("GET", "/api/health")
+    payload = json.loads(body)
+
+    assert status.startswith("503")
+    assert payload["ok"] is False
+    assert payload["session_supervisor"] == {"stalled": True, "last_error": "session_crashed"}
 
 
 def test_dashboard_safety_reports_live_locked(monkeypatch, tmp_path) -> None:
@@ -1161,7 +1190,7 @@ def test_render_config_has_health_check() -> None:
     assert "key: AUTOBOTT_GATE_PATH" in render_config
     assert "key: AUTOBOTT_SESSION_AUTOSTART" in render_config
     assert "key: AUTOBOTT_SESSION_SYMBOLS" in render_config
-    assert 'key: AUTOBOTT_SESSION_PRIORITY_SYMBOLS\n        value: VXX,UVXY,SPY,QQQ' in render_config
+    assert 'key: AUTOBOTT_SESSION_PRIORITY_SYMBOLS\n        value: VIX,VXX,UVXY,SPY,QQQ' in render_config
     assert "key: AUTOBOTT_SESSION_START_TIME" in render_config
     assert "key: AUTOBOTT_SESSION_END_TIME" in render_config
     assert "key: AUTOBOTT_SESSION_MARKET_TIMEZONE" in render_config
@@ -1170,18 +1199,18 @@ def test_render_config_has_health_check() -> None:
     assert "key: AUTOBOTT_PAPER_MAX_NEW_ENTRY_ATTEMPTS_PER_LOOP" in render_config
     assert "key: AUTOBOTT_PAPER_MAX_OPEN_ENTRY_BUY_ORDERS" in render_config
     assert 'key: AUTOBOTT_MAX_POSITION_COST\n        value: "1000"' in render_config
-    assert 'key: AUTOBOTT_MAX_DAILY_LOSS\n        value: "5000"' in render_config
+    assert 'key: AUTOBOTT_MAX_DAILY_LOSS\n        value: "750"' in render_config
     assert 'key: AUTOBOTT_PAPER_IGNORE_POSITION_COST_LIMIT\n        value: "false"' in render_config
     assert 'key: AUTOBOTT_CORE_RUNNER_ATOMIC_MLEG_REQUIRED\n        value: "false"' in render_config
     assert 'key: AUTOBOTT_MANUAL_MIRROR_MAX_CONTRACT_COST\n        value: "100"' in render_config
     assert 'key: AUTOBOTT_MANUAL_MIRROR_MAX_SIGNAL_AGE_MINUTES\n        value: "30"' in render_config
-    assert 'key: AUTOBOTT_VOLATILITY_HEDGE_SYMBOLS\n        value: VXX,UVXY' in render_config
+    assert 'key: AUTOBOTT_VOLATILITY_HEDGE_SYMBOLS\n        value: VIX,VXX,UVXY' in render_config
     assert 'key: AUTOBOTT_ENTRY_LIMIT_EXTRA\n        value: "0.02"' in render_config
     assert 'key: AUTOBOTT_PENDING_ENTRY_MAX_AGE_SECONDS\n        value: "180"' in render_config
     assert "AUTOBOTT_PAPER_DISCOVERY_MAX_CONTRACT_PRICE" not in render_config
     assert "AUTOBOTT_MAX_TRADE_GROUP_COST" not in render_config
-    assert 'key: AUTOBOTT_OPEN_DRAWDOWN_GUARD_ENABLED\n        value: "false"' in render_config
-    assert 'key: AUTOBOTT_RECENT_LOSS_GUARD_ENABLED\n        value: "false"' in render_config
+    assert 'key: AUTOBOTT_OPEN_DRAWDOWN_GUARD_ENABLED\n        value: "true"' in render_config
+    assert 'key: AUTOBOTT_RECENT_LOSS_GUARD_ENABLED\n        value: "true"' in render_config
 
 
 def test_frontend_identifies_live_market_paper_trading_and_real_money_off() -> None:

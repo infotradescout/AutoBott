@@ -15,8 +15,9 @@ from typing import Any
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from .core_runner import CoreRunnerRules, load_core_runner_rules
+from .hosted_policy import HOSTED_CAPTURE_OPTION_QUOTE_FILES, is_hosted_paper_runtime, signal_proxy_for
 from .options_math import solve_iv_and_greeks
-from .phase1_alpaca_client import _merge_option_contract_metadata
+from .phase1_alpaca_client import _merge_option_contract_metadata, _option_chain_request_symbols
 from .phase1_config import AlpacaReadOnlyConfig, load_alpaca_read_only_config
 from .phase1_snapshot_contract import validate_market_snapshot
 
@@ -32,10 +33,16 @@ SNAPSHOT_SCHEMA_VERSION = "phase1.snapshot.v1"
 @dataclass(frozen=True)
 class CaptureRules:
     lookback_bars: int = DEFAULT_LOOKBACK_BARS
+    bar_timeframe: str = "1Min"
+    lookback_calendar_days: int = 0
     iv_history_limit: int = DEFAULT_IV_HISTORY_LIMIT
     option_chain_max_contracts_per_type: int = 8
-    option_chain_max_dte: int = 30
+    option_chain_max_dte: int = 45
     option_chain_min_dte: int = 1
+    tactical_min_dte: int = 1
+    tactical_max_dte: int = 3
+    rider_min_dte: int = 7
+    rider_max_dte: int = 30
     # Capture far enough OTM to retain a truly convex runner. Primary contract
     # selection still applies its tighter strategy-level strike-distance rule.
     max_strike_distance_pct: float = 0.35
@@ -53,7 +60,7 @@ class AlpacaMarketDataClient:
         ).rstrip("/")
         self.feed = feed
         self.stock_feed = stock_feed
-        self._option_contract_metadata_cache: dict[tuple[str, str, str], dict[str, dict[str, Any]]] = {}
+        self._option_contract_metadata_cache: dict[tuple[str, str, str, str], dict[str, dict[str, Any]]] = {}
 
     def get_stock_bars(self, symbols: list[str], *, start: datetime, end: datetime, timeframe: str = "1Min", limit: int = 35, feed: str | None = None) -> dict[str, list[dict[str, Any]]]:
         payload = self._get_json(
@@ -82,18 +89,22 @@ class AlpacaMarketDataClient:
         return {symbol.upper(): dict(row) for symbol, row in quotes.items()}
 
     def get_option_chain_snapshots(self, symbol: str) -> dict[str, dict[str, Any]]:
+        underlying_symbol, root_symbol = _option_chain_request_symbols(symbol)
         today = datetime.now(UTC).date()
         base_params = {
             "feed": self.feed,
             "limit": "1000",
             "expiration_date_gte": (today + timedelta(days=1)).isoformat(),
-            "expiration_date_lte": (today + timedelta(days=30)).isoformat(),
+            "expiration_date_lte": (today + timedelta(days=45)).isoformat(),
         }
         metadata = self._get_option_contract_metadata(
-            symbol,
+            underlying_symbol,
             expiration_date_gte=base_params["expiration_date_gte"],
             expiration_date_lte=base_params["expiration_date_lte"],
+            root_symbol=root_symbol,
         )
+        if root_symbol is not None:
+            base_params["root_symbol"] = root_symbol
         snapshots: dict[str, dict[str, Any]] = {}
         page_token: str | None = None
         seen_page_tokens: set[str] = set()
@@ -101,7 +112,7 @@ class AlpacaMarketDataClient:
             params = dict(base_params)
             if page_token:
                 params["page_token"] = page_token
-            payload = self._get_json_with_retry(f"/v1beta1/options/snapshots/{symbol.upper()}", params)
+            payload = self._get_json_with_retry(f"/v1beta1/options/snapshots/{underlying_symbol}", params)
             page = payload.get("snapshots") or payload.get("option_snapshots") or {}
             snapshots.update({option_symbol.upper(): dict(row) for option_symbol, row in page.items()})
             next_page_token = payload.get("next_page_token")
@@ -123,6 +134,7 @@ class AlpacaMarketDataClient:
         *,
         expiration_date_gte: str,
         expiration_date_lte: str,
+        root_symbol: str | None = None,
     ) -> dict[str, dict[str, Any]]:
         base_params = {
             "underlying_symbols": symbol.upper(),
@@ -131,7 +143,11 @@ class AlpacaMarketDataClient:
             "expiration_date_lte": expiration_date_lte,
             "limit": "10000",
         }
-        cache_key = (symbol.upper(), expiration_date_gte, expiration_date_lte)
+        if symbol.upper() in {"VIX", "VIXW"}:
+            base_params["style"] = "european"
+        if root_symbol is not None:
+            base_params["root_symbol"] = root_symbol
+        cache_key = (symbol.upper(), expiration_date_gte, expiration_date_lte, root_symbol or "")
         cached = self._option_contract_metadata_cache.get(cache_key)
         if cached is not None:
             return cached
@@ -146,6 +162,14 @@ class AlpacaMarketDataClient:
             for contract in payload.get("option_contracts") or []:
                 if contract.get("tradable") is not True:
                     continue
+                if symbol.upper() in {"VIX", "VIXW"}:
+                    if str(contract.get("style") or "").lower() != "european":
+                        continue
+                    contract_root = str(contract.get("root_symbol") or "").upper()
+                    if root_symbol is not None and contract_root != root_symbol:
+                        continue
+                    if root_symbol is None and contract_root and contract_root not in {"VIX", "VIXW"}:
+                        continue
                 option_symbol = str(contract.get("symbol") or "").upper()
                 if option_symbol:
                     metadata[option_symbol] = dict(contract)
@@ -302,9 +326,14 @@ def capture_symbol_snapshot(
     snapshot_dir.mkdir(parents=True, exist_ok=True)
     option_quote_dir.mkdir(parents=True, exist_ok=True)
 
+    signal_symbol = signal_proxy_for(symbol)
     context_symbols = _context_symbols(symbol, volatility_proxy_symbol)
-    bar_symbols = sorted({symbol, *context_symbols.values()})
-    lookback_start = as_of_utc - timedelta(minutes=max(40, rules.lookback_bars + 5))
+    bar_symbols = sorted({signal_symbol, *context_symbols.values()})
+    lookback_start = (
+        as_of_utc - timedelta(days=rules.lookback_calendar_days)
+        if rules.lookback_calendar_days > 0
+        else as_of_utc - timedelta(minutes=max(40, rules.lookback_bars + 5))
+    )
     bars: dict[str, list[dict[str, Any]]] = {}
     for bar_symbol in bar_symbols:
         bars[bar_symbol.upper()] = _fetch_stock_bars_with_retries(
@@ -313,15 +342,28 @@ def capture_symbol_snapshot(
             start=lookback_start,
             end=as_of_utc,
             lookback_bars=rules.lookback_bars,
+            timeframe=rules.bar_timeframe,
+            lookback_calendar_days=rules.lookback_calendar_days,
         )
     quotes = data_client.get_latest_stock_quotes(bar_symbols)
     option_snapshots = data_client.get_option_chain_snapshots(symbol)
 
-    underlying_bars = _normalize_stock_bars(symbol, bars, rules.lookback_bars)
+    signal_bars = _normalize_stock_bars(signal_symbol, bars, rules.lookback_bars)
     spy_bars = _normalize_stock_bars(context_symbols["spy"], bars, rules.lookback_bars)
     qqq_bars = _normalize_stock_bars(context_symbols["qqq"], bars, rules.lookback_bars)
     vix_bars = _normalize_stock_bars(context_symbols["vix"], bars, rules.lookback_bars)
-    underlying_quote = _normalize_stock_quote(symbol, quotes, fallback_price=underlying_bars[-1]["close"])
+    signal_quote = _normalize_stock_quote(signal_symbol, quotes, fallback_price=signal_bars[-1]["close"])
+    if signal_symbol != symbol:
+        underlying_price = _estimate_index_underlying_price(symbol, option_snapshots)
+        underlying_bars = _rescale_proxy_bars(signal_bars, target_close=underlying_price)
+        underlying_quote = _synthetic_index_quote(
+            symbol,
+            underlying_price,
+            quote_timestamp=signal_quote["quote_timestamp"],
+        )
+    else:
+        underlying_bars = signal_bars
+        underlying_quote = signal_quote
     normalized_option_chain = _normalize_option_chain(
         symbol=symbol,
         option_snapshots=option_snapshots,
@@ -335,7 +377,7 @@ def capture_symbol_snapshot(
         normalized_option_chain,
         max_contract_cost=_manual_mirror_capture_max_contract_cost(),
     )
-    iv_history = _load_iv_history(symbol_dir, limit=rules.iv_history_limit)
+    iv_history = _load_iv_history(Path(corpus_root), symbol, limit=rules.iv_history_limit)
     if not iv_history:
         iv_history = [round(sum(float(contract["implied_volatility"]) for contract in option_chain) / len(option_chain), 4)]
 
@@ -405,6 +447,8 @@ def capture_symbol_snapshot(
 
 
 def _capture_option_quote_files_enabled() -> bool:
+    if is_hosted_paper_runtime():
+        return HOSTED_CAPTURE_OPTION_QUOTE_FILES
     value = os.getenv("AUTOBOTT_CAPTURE_OPTION_QUOTE_FILES")
     if value is None:
         return True
@@ -418,23 +462,35 @@ def _fetch_stock_bars_with_retries(
     start: datetime,
     end: datetime,
     lookback_bars: int,
+    timeframe: str = "1Min",
+    lookback_calendar_days: int = 0,
 ) -> list[dict[str, Any]]:
     symbol_key = symbol.upper()
     best_rows: list[dict[str, Any]] = []
-    windows = [
-        start,
-        end - timedelta(minutes=max(90, lookback_bars * 3)),
-        end - timedelta(minutes=max(180, lookback_bars * 6)),
-        end - timedelta(minutes=max(390, lookback_bars * 12)),
-    ]
+    windows = (
+        [
+            start,
+            end - timedelta(days=max(lookback_calendar_days * 2, 7)),
+            end - timedelta(days=max(lookback_calendar_days * 3, 21)),
+        ]
+        if lookback_calendar_days > 0
+        else [
+            start,
+            end - timedelta(minutes=max(90, lookback_bars * 3)),
+            end - timedelta(minutes=max(180, lookback_bars * 6)),
+            end - timedelta(minutes=max(390, lookback_bars * 12)),
+        ]
+    )
     for window_start in windows:
         try:
-            payload = data_client.get_stock_bars(
-                [symbol_key],
-                start=window_start,
-                end=end,
-                limit=lookback_bars,
-            )
+            kwargs = {
+                "start": window_start,
+                "end": end,
+                "limit": lookback_bars,
+            }
+            if timeframe != "1Min":
+                kwargs["timeframe"] = timeframe
+            payload = data_client.get_stock_bars([symbol_key], **kwargs)
         except Exception:
             continue
         rows = list(payload.get(symbol_key, []))
@@ -654,7 +710,7 @@ def _normalize_option_chain(
         strike_distance_pct = abs(strike - underlying_price) / underlying_price if underlying_price > 0 else 1.0
         if dte < rules.option_chain_min_dte or dte > rules.option_chain_max_dte:
             continue
-        if strike_distance_pct > rules.max_strike_distance_pct:
+        if symbol.upper() not in {"VIX", "VIXW"} and strike_distance_pct > rules.max_strike_distance_pct:
             continue
         bid = float(quote.get("bp") or quote.get("bid_price") or 0.0)
         ask = float(quote.get("ap") or quote.get("ask_price") or 0.0)
@@ -672,6 +728,12 @@ def _normalize_option_chain(
         theta = greeks.get("theta")
         vega = greeks.get("vega")
         if iv is None or delta is None or theta is None or vega is None:
+            if symbol.upper() in {"VIX", "VIXW"}:
+                # VIX options are priced from VIX futures term structure, not a
+                # stock-style spot Black-Scholes input. Provider Greeks are
+                # required; manufacturing them from VIXY would create false
+                # contract rankings.
+                continue
             # Alpaca's indicative options feed does not reliably return Greeks/IV.
             # Fall back to solving them from the observed market price so contract
             # selection (which targets specific deltas) still has real values.
@@ -731,13 +793,23 @@ def _select_chain_subset(
         by_type = [contract for contract in contracts if contract["option_type"] == option_type]
         bucket_size = rules.option_chain_max_contracts_per_type // 2
         tactical = _select_bucket_with_runner_candidates(
-            [contract for contract in by_type if 1 <= _dte(contract, as_of_date) <= 3],
+            [
+                contract
+                for contract in by_type
+                if rules.tactical_min_dte <= _dte(contract, as_of_date) <= rules.tactical_max_dte
+            ],
             target_delta=0.55,
             underlying_price=underlying_price,
             max_contracts=bucket_size,
         )
         rider = _select_bucket_with_runner_candidates(
-            [contract for contract in by_type if 7 <= _dte(contract, as_of_date) <= rules.option_chain_max_dte],
+            [
+                contract
+                for contract in by_type
+                if rules.rider_min_dte
+                <= _dte(contract, as_of_date)
+                <= min(rules.rider_max_dte, rules.option_chain_max_dte)
+            ],
             target_delta=0.45,
             underlying_price=underlying_price,
             max_contracts=bucket_size,
@@ -876,6 +948,8 @@ def _capture_core_is_eligible(contract: dict[str, Any], rules: CoreRunnerRules) 
 
 
 def _manual_mirror_capture_max_contract_cost() -> float:
+    if is_hosted_paper_runtime():
+        return 100.0
     value = os.getenv("AUTOBOTT_MANUAL_MIRROR_MAX_CONTRACT_COST")
     if value is None or not value.strip():
         return 100.0
@@ -924,17 +998,86 @@ def _manual_mirror_capture_score(contract: dict[str, Any]) -> tuple[float, ...]:
     )
 
 
-def _load_iv_history(symbol_dir: Path, *, limit: int) -> list[float]:
-    snapshot_dir = symbol_dir / "snapshots"
-    if not snapshot_dir.exists():
-        return []
+def _load_iv_history(corpus_root: Path, symbol: str, *, limit: int) -> list[float]:
+    """Load IV observations across retained trading days, not only today."""
+
     history: list[float] = []
-    for path in sorted(snapshot_dir.glob("*.json"))[-limit:]:
+    paths = sorted(corpus_root.glob(f"*/{symbol.upper()}/snapshots/*.json"))
+    for path in paths[-limit:]:
         payload = _read_snapshot(path)
         ivs = [float(contract["implied_volatility"]) for contract in payload.get("option_chain", []) if contract.get("implied_volatility") is not None]
         if ivs:
             history.append(round(sum(ivs) / len(ivs), 4))
     return history[-limit:]
+
+
+def _estimate_index_underlying_price(symbol: str, option_snapshots: dict[str, dict[str, Any]]) -> float:
+    """Estimate index spot from provider deltas when stock quotes do not exist.
+
+    Alpaca's paper index-option rollout exposes contracts before it exposes the
+    underlying through the stock quote API. Near-50-delta call/put strikes give
+    a bounded spot estimate sufficient for strike-distance filtering. We never
+    substitute the VIXY dollar price or synthesize missing option Greeks.
+    """
+
+    provider_prices: list[float] = []
+    delta_strikes: list[tuple[float, float]] = []
+    for snapshot in option_snapshots.values():
+        for key in ("underlying_price", "underlyingPrice"):
+            value = snapshot.get(key)
+            if value is not None and float(value) > 0:
+                provider_prices.append(float(value))
+        underlying = snapshot.get("underlying_asset") or snapshot.get("underlyingAsset") or {}
+        if isinstance(underlying, dict):
+            value = underlying.get("price") or underlying.get("last")
+            if value is not None and float(value) > 0:
+                provider_prices.append(float(value))
+        details = snapshot.get("details") or snapshot.get("option_details") or {}
+        greeks = snapshot.get("greeks") or {}
+        delta = greeks.get("delta")
+        strike = details.get("strike_price") or details.get("strike")
+        option_type = str(details.get("type") or details.get("option_type") or "").lower()
+        if delta is None or strike is None or option_type not in {"call", "put"}:
+            continue
+        target = 0.50 if option_type == "call" else -0.50
+        delta_strikes.append((abs(float(delta) - target), float(strike)))
+    if provider_prices:
+        ordered = sorted(provider_prices)
+        return ordered[len(ordered) // 2]
+    if not delta_strikes:
+        raise ValueError(f"index_underlying_price_unavailable:{symbol.upper()}")
+    nearest = sorted(delta_strikes)[: min(6, len(delta_strikes))]
+    strikes = sorted(strike for _, strike in nearest)
+    return strikes[len(strikes) // 2]
+
+
+def _rescale_proxy_bars(bars: list[dict[str, Any]], *, target_close: float) -> list[dict[str, Any]]:
+    if not bars or target_close <= 0 or float(bars[-1]["close"]) <= 0:
+        raise ValueError("index_signal_proxy_scale_invalid")
+    scale = target_close / float(bars[-1]["close"])
+    return [
+        {
+            **bar,
+            "open": round(float(bar["open"]) * scale, 4),
+            "high": round(float(bar["high"]) * scale, 4),
+            "low": round(float(bar["low"]) * scale, 4),
+            "close": round(float(bar["close"]) * scale, 4),
+        }
+        for bar in bars
+    ]
+
+
+def _synthetic_index_quote(symbol: str, price: float, *, quote_timestamp: str) -> dict[str, Any]:
+    rounded = round(price, 4)
+    return {
+        "symbol": symbol.upper(),
+        "bid": rounded,
+        "ask": rounded,
+        "last": rounded,
+        "spread": 0.0,
+        "spread_pct": 0.0,
+        "quote_timestamp": quote_timestamp,
+    }
 
 
 def _context_symbols(symbol: str, volatility_proxy_symbol: str) -> dict[str, str]:

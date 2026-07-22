@@ -5,7 +5,7 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Protocol
 
 from .execution_config import AlpacaExecutionConfig, require_alpaca_execution_config
@@ -72,10 +72,18 @@ class AlpacaExecutionBroker:
         )
         order = build_execution_order(intent, risk_check)
 
-        payload = self._submit_alpaca_order(order.intent)
+        try:
+            payload = self._submit_alpaca_order(order.intent, client_order_id=order.client_order_id)
+        except Exception as exc:
+            if not _submission_result_is_ambiguous(exc):
+                raise
+            try:
+                payload = self._get_order_by_client_order_id(order.client_order_id)
+            except Exception:
+                raise exc
         return ExecutionOrder(
             order_id=order.order_id,
-            client_order_id=order.client_order_id,
+            client_order_id=str(payload.get("client_order_id") or order.client_order_id),
             intent=order.intent,
             state=_map_alpaca_status(payload.get("status")),
             submitted_at=_parse_dt(payload.get("submitted_at")),
@@ -157,7 +165,7 @@ class AlpacaExecutionBroker:
             raise ValueError("alpaca_mleg_response_missing_order_id")
         return tuple(submitted_orders)
 
-    def _submit_alpaca_order(self, intent: TradeIntent) -> dict:
+    def _submit_alpaca_order(self, intent: TradeIntent, *, client_order_id: str) -> dict:
         side = "buy" if intent.side is OrderSide.BUY_TO_OPEN else "sell"
         request_payload = {
             "symbol": intent.option_symbol,
@@ -166,6 +174,7 @@ class AlpacaExecutionBroker:
             "type": "limit" if intent.order_type is OrderType.LIMIT else "market",
             "time_in_force": "day",
             "position_intent": "buy_to_open" if intent.side is OrderSide.BUY_TO_OPEN else "sell_to_close",
+            "client_order_id": client_order_id,
         }
         if intent.order_type is OrderType.LIMIT:
             request_payload["limit_price"] = f"{intent.limit_price:.2f}"
@@ -201,17 +210,85 @@ class AlpacaExecutionBroker:
         limit: int = 100,
         direction: str = "desc",
         nested: bool = False,
+        after: str | None = None,
+        until: str | None = None,
     ) -> list[dict]:
-        query = urllib.parse.urlencode(
-            {
-                "status": status,
-                "limit": str(limit),
-                "direction": direction,
-                "nested": "true" if nested else "false",
-            }
-        )
+        params = {
+            "status": status,
+            "limit": str(limit),
+            "direction": direction,
+            "nested": "true" if nested else "false",
+        }
+        if after:
+            params["after"] = after
+        if until:
+            params["until"] = until
+        query = urllib.parse.urlencode(params)
         payload = self._request_json("GET", f"/v2/orders?{query}")
         return payload if isinstance(payload, list) else []
+
+    def list_order_history(
+        self,
+        *,
+        status: str = "all",
+        lookback_days: int = 60,
+        page_size: int = 500,
+        max_pages: int = 20,
+    ) -> list[dict]:
+        """Page the complete policy-relevant order window.
+
+        Hosted entries expire within 45 days. A 60-day window includes every
+        possible entry basis needed for today's realized-P/L calculation.
+        """
+
+        after = (datetime.now(tz=UTC) - timedelta(days=lookback_days)).isoformat()
+        until: str | None = None
+        rows: list[dict] = []
+        seen_ids: set[str] = set()
+        for _ in range(max_pages):
+            page = self.list_orders(
+                status=status,
+                limit=page_size,
+                direction="desc",
+                nested=False,
+                after=after,
+                until=until,
+            )
+            new_rows = []
+            for row in page:
+                order_id = str(row.get("id") or row.get("client_order_id") or "")
+                if order_id and order_id in seen_ids:
+                    continue
+                if order_id:
+                    seen_ids.add(order_id)
+                new_rows.append(row)
+            rows.extend(new_rows)
+            if len(page) < page_size:
+                return rows
+            timestamps = [
+                str(row.get("submitted_at") or row.get("created_at") or "")
+                for row in page
+                if row.get("submitted_at") or row.get("created_at")
+            ]
+            if not timestamps or not new_rows:
+                raise RuntimeError("broker_order_history_pagination_stalled")
+            until = min(timestamps)
+        raise RuntimeError("broker_order_history_pagination_limit")
+
+    def _get_order_by_client_order_id(self, client_order_id: str) -> dict:
+        query = urllib.parse.urlencode({"client_order_id": client_order_id})
+        last_error: Exception | None = None
+        for attempt in range(3):
+            try:
+                payload = self._request_json("GET", f"/v2/orders:by_client_order_id?{query}")
+                if isinstance(payload, dict) and payload.get("id"):
+                    return payload
+            except Exception as exc:
+                last_error = exc
+            time.sleep(0.25 * (2**attempt))
+        if last_error is not None:
+            raise last_error
+        raise RuntimeError("alpaca_order_reconciliation_not_found")
 
     def _request_json(self, method: str, path: str, *, payload: dict | None = None) -> dict | list:
         if method == "GET":
@@ -278,6 +355,13 @@ def _map_alpaca_status(status: str | None) -> ExecutionState:
         "rejected": ExecutionState.REJECTED,
         "suspended": ExecutionState.REJECTED,
     }.get(normalized, ExecutionState.FAILED)
+
+
+def _submission_result_is_ambiguous(exc: Exception) -> bool:
+    if isinstance(exc, (TimeoutError, urllib.error.URLError)):
+        return True
+    detail = str(exc).lower()
+    return "alpaca_http_5" in detail or "alpaca_http_429" in detail
 
 
 def _parse_dt(value: str | None) -> datetime | None:
