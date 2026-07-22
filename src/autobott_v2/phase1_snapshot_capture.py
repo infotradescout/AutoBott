@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import math
 import os
 import time
 import urllib.error
@@ -16,7 +17,7 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from .core_runner import CoreRunnerRules, load_core_runner_rules
 from .hosted_policy import HOSTED_CAPTURE_OPTION_QUOTE_FILES, is_hosted_paper_runtime, signal_proxy_for
-from .options_math import solve_iv_and_greeks
+from .options_math import RISK_FREE_RATE, solve_forward_iv_and_greeks, solve_iv_and_greeks
 from .phase1_alpaca_client import _merge_option_contract_metadata, _option_chain_request_symbols
 from .phase1_config import AlpacaReadOnlyConfig, load_alpaca_read_only_config
 from .phase1_snapshot_contract import validate_market_snapshot
@@ -353,8 +354,15 @@ def capture_symbol_snapshot(
     qqq_bars = _normalize_stock_bars(context_symbols["qqq"], bars, rules.lookback_bars)
     vix_bars = _normalize_stock_bars(context_symbols["vix"], bars, rules.lookback_bars)
     signal_quote = _normalize_stock_quote(signal_symbol, quotes, fallback_price=signal_bars[-1]["close"])
+    index_expiry_forwards: dict[tuple[str, str], float] = {}
     if signal_symbol != symbol:
-        underlying_price = _estimate_index_underlying_price(symbol, option_snapshots)
+        index_expiry_forwards = _estimate_index_expiry_forwards(option_snapshots, as_of_date=market_date)
+        underlying_price = _estimate_index_underlying_price(
+            symbol,
+            option_snapshots,
+            as_of_date=market_date,
+            expiry_forwards=index_expiry_forwards,
+        )
         underlying_bars = _rescale_proxy_bars(signal_bars, target_close=underlying_price)
         underlying_quote = _synthetic_index_quote(
             symbol,
@@ -371,6 +379,7 @@ def capture_symbol_snapshot(
         as_of_date=market_date,
         rules=rules,
         select_subset=False,
+        index_expiry_forwards=index_expiry_forwards,
     )
     option_chain = _select_chain_subset(normalized_option_chain, float(underlying_quote["last"]), market_date, rules)
     manual_mirror_chain = _select_manual_mirror_candidates(
@@ -694,6 +703,7 @@ def _normalize_option_chain(
     as_of_date: date,
     rules: CaptureRules,
     select_subset: bool = True,
+    index_expiry_forwards: dict[tuple[str, str], float] | None = None,
 ) -> list[dict[str, Any]]:
     normalized: list[dict[str, Any]] = []
     for option_symbol, snapshot in option_snapshots.items():
@@ -717,7 +727,7 @@ def _normalize_option_chain(
         if bid < 0 or ask < 0 or (ask > 0 and ask < bid):
             continue
         last = latest_trade.get("p") if latest_trade.get("p") is not None else latest_trade.get("price")
-        mid = (bid + ask) / 2 if bid > 0 and ask > 0 else float(last or 0.0)
+        mid = (bid + ask) / 2 if bid >= 0 and ask > 0 else float(last or 0.0)
         spread = max(0.0, ask - bid)
         iv = (
             greeks.get("iv")
@@ -729,21 +739,34 @@ def _normalize_option_chain(
         vega = greeks.get("vega")
         if iv is None or delta is None or theta is None or vega is None:
             if symbol.upper() in {"VIX", "VIXW"}:
-                # VIX options are priced from VIX futures term structure, not a
-                # stock-style spot Black-Scholes input. Provider Greeks are
-                # required; manufacturing them from VIXY would create false
-                # contract rankings.
-                continue
-            # Alpaca's indicative options feed does not reliably return Greeks/IV.
-            # Fall back to solving them from the observed market price so contract
-            # selection (which targets specific deltas) still has real values.
-            solved = solve_iv_and_greeks(
-                price=mid,
-                s=underlying_price,
-                k=strike,
-                dte_days=dte,
-                option_type=str(option_type).lower(),
-            )
+                # VIX options are European options on an expiry-specific VIX
+                # forward. Derive that forward only from same-expiration
+                # call/put mids; never substitute the VIXY dollar price.
+                forward = (index_expiry_forwards or {}).get(
+                    (_option_root_from_occ(option_symbol), str(expiration))
+                )
+                solved = (
+                    solve_forward_iv_and_greeks(
+                        price=mid,
+                        forward=forward,
+                        k=strike,
+                        dte_days=dte,
+                        option_type=str(option_type).lower(),
+                    )
+                    if forward is not None
+                    else None
+                )
+            else:
+                # Alpaca's indicative options feed does not reliably return
+                # Greeks/IV. Solve them from the observed market price so
+                # contract selection still has real values.
+                solved = solve_iv_and_greeks(
+                    price=mid,
+                    s=underlying_price,
+                    k=strike,
+                    dte_days=dte,
+                    option_type=str(option_type).lower(),
+                )
             if solved is None:
                 continue
             iv, delta, theta, vega = solved
@@ -1011,13 +1034,88 @@ def _load_iv_history(corpus_root: Path, symbol: str, *, limit: int) -> list[floa
     return history[-limit:]
 
 
-def _estimate_index_underlying_price(symbol: str, option_snapshots: dict[str, dict[str, Any]]) -> float:
-    """Estimate index spot from provider deltas when stock quotes do not exist.
+def _estimate_index_expiry_forwards(
+    option_snapshots: dict[str, dict[str, Any]],
+    *,
+    as_of_date: date,
+) -> dict[tuple[str, str], float]:
+    """Derive robust VIX forward references from same-series put-call parity.
 
-    Alpaca's paper index-option rollout exposes contracts before it exposes the
-    underlying through the stock quote API. Near-50-delta call/put strikes give
-    a bounded spot estimate sufficient for strike-distance filtering. We never
-    substitute the VIXY dollar price or synthesize missing option Greeks.
+    Each estimate uses ``F = K + exp(rT) * (C - P)`` from observed quote mids.
+    The median and a median-absolute-deviation filter keep one stale strike from
+    distorting an otherwise coherent expiration. VIX and VIXW series remain
+    separate even when they share a calendar expiration.
+    """
+
+    paired_quotes: dict[tuple[str, str, float], dict[str, tuple[float, float]]] = {}
+    for option_symbol, snapshot in option_snapshots.items():
+        details = snapshot.get("details") or snapshot.get("option_details") or {}
+        expiration = details.get("expiration_date") or details.get("expiration") or _expiration_from_occ(option_symbol)
+        option_type = str(
+            details.get("type") or details.get("option_type") or _option_type_from_occ(option_symbol) or ""
+        ).lower()
+        strike_value = details.get("strike_price") or details.get("strike")
+        strike = float(strike_value) if strike_value is not None else _strike_from_occ(option_symbol)
+        if not expiration or option_type not in {"call", "put"} or strike <= 0:
+            continue
+        try:
+            dte = (date.fromisoformat(str(expiration)) - as_of_date).days
+        except ValueError:
+            continue
+        if dte <= 0:
+            continue
+        observed = _observed_option_mid(snapshot)
+        if observed is None:
+            continue
+        mid, relative_spread = observed
+        key = (_option_root_from_occ(option_symbol), str(expiration), strike)
+        previous = paired_quotes.setdefault(key, {}).get(option_type)
+        if previous is None or relative_spread < previous[1]:
+            paired_quotes[key][option_type] = (mid, relative_spread)
+
+    estimates: dict[tuple[str, str], list[float]] = {}
+    for (root_symbol, expiration, strike), quotes in paired_quotes.items():
+        if "call" not in quotes or "put" not in quotes:
+            continue
+        dte = (date.fromisoformat(expiration) - as_of_date).days
+        call_mid = quotes["call"][0]
+        put_mid = quotes["put"][0]
+        forward = strike + math.exp(RISK_FREE_RATE * dte / 365.0) * (call_mid - put_mid)
+        if not math.isfinite(forward) or forward <= 0:
+            continue
+        # Reject obviously mismatched contract metadata before robust
+        # aggregation. This is intentionally broad enough for a stressed VIX
+        # curve while excluding a call and put from different strike scales.
+        if forward < strike * 0.20 or forward > strike * 5.0:
+            continue
+        estimates.setdefault((root_symbol, expiration), []).append(forward)
+
+    forwards: dict[tuple[str, str], float] = {}
+    for key, values in estimates.items():
+        center = _median(values)
+        if len(values) >= 3:
+            absolute_deviations = [abs(value - center) for value in values]
+            mad = _median(absolute_deviations)
+            tolerance = max(0.50, center * 0.05, mad * 4.5)
+            inliers = [value for value in values if abs(value - center) <= tolerance]
+            if inliers:
+                center = _median(inliers)
+        forwards[key] = round(center, 6)
+    return forwards
+
+
+def _estimate_index_underlying_price(
+    symbol: str,
+    option_snapshots: dict[str, dict[str, Any]],
+    *,
+    as_of_date: date,
+    expiry_forwards: dict[tuple[str, str], float] | None = None,
+) -> float:
+    """Choose an index reference without ever borrowing the VIXY dollar price.
+
+    Provider underlying values win, followed by near-50-delta strikes. When
+    both are absent, the nearest-expiration same-series parity forward is used.
+    Expiry-specific forwards are still used for every missing-Greek solve.
     """
 
     provider_prices: list[float] = []
@@ -1044,11 +1142,48 @@ def _estimate_index_underlying_price(symbol: str, option_snapshots: dict[str, di
     if provider_prices:
         ordered = sorted(provider_prices)
         return ordered[len(ordered) // 2]
-    if not delta_strikes:
-        raise ValueError(f"index_underlying_price_unavailable:{symbol.upper()}")
-    nearest = sorted(delta_strikes)[: min(6, len(delta_strikes))]
-    strikes = sorted(strike for _, strike in nearest)
-    return strikes[len(strikes) // 2]
+    if delta_strikes:
+        nearest = sorted(delta_strikes)[: min(6, len(delta_strikes))]
+        strikes = sorted(strike for _, strike in nearest)
+        return strikes[len(strikes) // 2]
+
+    derived_forwards = expiry_forwards or _estimate_index_expiry_forwards(
+        option_snapshots,
+        as_of_date=as_of_date,
+    )
+    if derived_forwards:
+        nearest_expiration = min(date.fromisoformat(expiration) for _, expiration in derived_forwards)
+        nearest_values = [
+            forward
+            for (_, expiration), forward in derived_forwards.items()
+            if date.fromisoformat(expiration) == nearest_expiration
+        ]
+        return round(_median(nearest_values), 6)
+    raise ValueError(f"index_underlying_price_unavailable:{symbol.upper()}")
+
+
+def _observed_option_mid(snapshot: dict[str, Any]) -> tuple[float, float] | None:
+    quote = snapshot.get("latestQuote") or snapshot.get("latest_quote") or snapshot.get("quote") or {}
+    bid_value = quote.get("bp") if quote.get("bp") is not None else quote.get("bid_price")
+    ask_value = quote.get("ap") if quote.get("ap") is not None else quote.get("ask_price")
+    if bid_value is None or ask_value is None:
+        return None
+    bid = float(bid_value)
+    ask = float(ask_value)
+    if not math.isfinite(bid) or not math.isfinite(ask) or bid < 0 or ask <= 0 or ask < bid:
+        return None
+    mid = (bid + ask) / 2.0
+    if mid <= 0:
+        return None
+    return mid, (ask - bid) / mid
+
+
+def _median(values: list[float]) -> float:
+    ordered = sorted(values)
+    midpoint = len(ordered) // 2
+    if len(ordered) % 2:
+        return ordered[midpoint]
+    return (ordered[midpoint - 1] + ordered[midpoint]) / 2.0
 
 
 def _rescale_proxy_bars(bars: list[dict[str, Any]], *, target_close: float) -> list[dict[str, Any]]:
@@ -1175,6 +1310,12 @@ def _option_type_from_occ(option_symbol: str) -> str | None:
     if marker == "P":
         return "put"
     return None
+
+
+def _option_root_from_occ(option_symbol: str) -> str:
+    if len(option_symbol) < 15:
+        return option_symbol.upper()
+    return option_symbol[:-15].strip().upper()
 
 
 def _dte(contract: dict[str, Any], as_of_date: date) -> int:

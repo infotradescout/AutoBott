@@ -37,6 +37,8 @@ def _position() -> OpenPosition:
         take_profit_price=3.75,
         stop_loss_price=1.75,
         status="filled",
+        entry_policy_version="entry-policy-v1",
+        entry_build_sha="entry-sha",
     )
 
 
@@ -65,6 +67,8 @@ def test_build_exit_intent_from_position_creates_sell_to_close() -> None:
     intent = build_exit_intent_from_position(_position(), limit_price=3.1)
     assert intent.side is OrderSide.SELL_TO_CLOSE
     assert intent.limit_price == 3.1
+    assert intent.metadata["entry_policy_version"] == "entry-policy-v1"
+    assert intent.metadata["entry_build_sha"] == "entry-sha"
 
 
 def test_submit_exit_for_position_marks_position_closing(tmp_path) -> None:
@@ -82,6 +86,8 @@ def test_submit_exit_for_position_marks_position_closing(tmp_path) -> None:
     positions = load_open_positions(store_path=store_path)
     assert order.broker_order_id == "alpaca-exit-1"
     assert positions[0].status == "closing:alpaca-exit-1"
+    assert positions[0].entry_policy_version == "entry-policy-v1"
+    assert positions[0].entry_build_sha == "entry-sha"
 
 
 def test_cancel_and_replace_open_order_append_journal(tmp_path) -> None:

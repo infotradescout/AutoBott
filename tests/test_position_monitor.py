@@ -207,6 +207,8 @@ def test_position_monitor_harvests_primary_but_keeps_runner_open(tmp_path) -> No
                 trade_group_id="core-runner:decision-1",
                 leg_role="primary",
                 paired_option_symbol=runner_symbol,
+                entry_policy_version="entry-policy-v1",
+                entry_build_sha="entry-sha",
             ),
             OpenPosition(
                 broker_order_id="runner-order",
@@ -246,6 +248,9 @@ def test_position_monitor_harvests_primary_but_keeps_runner_open(tmp_path) -> No
     assert result["actions"][0]["leg_role"] == "primary"
     assert broker.submitted[0].option_symbol == primary_symbol
     assert broker.submitted[0].metadata["leg_role"] == "primary"
+    assert broker.submitted[0].metadata["entry_policy_version"] == "entry-policy-v1"
+    assert broker.submitted[0].metadata["entry_build_sha"] == "entry-sha"
+    assert "policy_version" not in broker.submitted[0].metadata
 
 
 def test_position_monitor_tightens_exit_ladder_for_harvest_winner(tmp_path) -> None:

@@ -27,7 +27,12 @@ def build_exit_intent_from_position(
         environment=environment,
         decision_id=position.decision_id,
         thesis_id=position.decision_id,
-        metadata={"source_broker_order_id": position.broker_order_id, "exit": True},
+        metadata={
+            "source_broker_order_id": position.broker_order_id,
+            "exit": True,
+            "entry_policy_version": position.entry_policy_version,
+            "entry_build_sha": position.entry_build_sha,
+        },
     )
 
 
@@ -136,6 +141,11 @@ def _mark_position_closing(source_broker_order_id: str, exit_order: ExecutionOrd
                     take_profit_price=position.take_profit_price,
                     stop_loss_price=position.stop_loss_price,
                     status=f"closing:{exit_order.broker_order_id or exit_order.order_id}",
+                    trade_group_id=position.trade_group_id,
+                    leg_role=position.leg_role,
+                    paired_option_symbol=position.paired_option_symbol,
+                    entry_policy_version=position.entry_policy_version,
+                    entry_build_sha=position.entry_build_sha,
                 )
             )
         else:

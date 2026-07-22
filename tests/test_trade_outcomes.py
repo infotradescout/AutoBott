@@ -302,6 +302,7 @@ def test_hosted_learning_thresholds_are_code_owned_and_require_minimum_sample(mo
             "pnl": -10.0,
             "outcome_id": f"loss-{index}",
             "policy_version": "hosted-vix-profit-v1",
+            "policy_attribution_source": "entry_execution_metadata",
         }
         for index in range(5)
     ]
@@ -311,6 +312,7 @@ def test_hosted_learning_thresholds_are_code_owned_and_require_minimum_sample(mo
             "pnl": 10.0,
             "outcome_id": f"win-{index}",
             "policy_version": "hosted-vix-profit-v1",
+            "policy_attribution_source": "entry_execution_metadata",
         }
         for index in range(5)
     ]
@@ -432,6 +434,7 @@ def test_hosted_summary_is_current_policy_but_daily_pnl_is_account_wide(tmp_path
             "pnl": 40.0,
             "exit_time": exit_time,
             "policy_version": "hosted-vix-profit-v1",
+            "policy_attribution_source": "entry_execution_metadata",
         },
     ]
     journal_path.write_text("".join(f"{json.dumps(row)}\n" for row in rows), encoding="utf-8")
@@ -572,11 +575,132 @@ def test_sync_fails_closed_on_unmatched_terminal_sell(tmp_path) -> None:
     result = sync_trade_outcomes_from_broker(
         UnmatchedSellBroker(),
         journal_path=tmp_path / "trade_outcomes.jsonl",
+        trading_day="2026-07-22",
     )
 
     assert result["ok"] is False
     assert result["history_complete"] is False
+    assert result["daily_pnl_complete"] is False
     assert "broker_order_history_unmatched_sells:AAPL260814C00105000" == result["error"]
+
+
+def test_sync_warns_but_does_not_block_on_historical_unmatched_sell(tmp_path) -> None:
+    class BrokerWithHistoricalGap:
+        def list_orders(self, *, status="all", limit=200, direction="desc"):
+            return [
+                _broker_order(
+                    "OLD260515C00105000",
+                    "sell",
+                    "old-unmatched-exit",
+                    "2.00",
+                    "2026-05-15T15:00:00Z",
+                ),
+                _broker_order(
+                    "AAPL260814C00105000",
+                    "buy",
+                    "today-entry",
+                    "2.00",
+                    "2026-07-22T14:00:00Z",
+                ),
+                _broker_order(
+                    "AAPL260814C00105000",
+                    "sell",
+                    "today-exit",
+                    "2.50",
+                    "2026-07-22T15:00:00Z",
+                ),
+            ]
+
+    result = sync_trade_outcomes_from_broker(
+        BrokerWithHistoricalGap(),
+        journal_path=tmp_path / "trade_outcomes.jsonl",
+        trading_day="2026-07-22",
+    )
+
+    assert result["ok"] is True
+    assert result["history_complete"] is False
+    assert result["daily_pnl_complete"] is True
+    assert result["daily_realized_pnl"] == 50.0
+    assert result["historical_unmatched_sell_symbols"] == ["OLD260515C00105000"]
+    assert result["history_warning"] == (
+        "broker_order_history_historical_unmatched_sells:OLD260515C00105000"
+    )
+
+
+def test_exit_runtime_policy_never_relabels_a_legacy_entry() -> None:
+    symbol = "AAPL260814C00105000"
+    exit_row = _execution_order_row(
+        symbol,
+        "exit",
+        exit_reason="dte_floor",
+        policy_version="hosted-vix-profit-v1",
+    )
+
+    outcome = build_trade_outcomes_from_orders(
+        [
+            _broker_order(symbol, "buy", "legacy-entry", "2.00", "2026-07-15T14:00:00Z"),
+            _broker_order(symbol, "sell", "exit", "1.50", "2026-07-22T15:00:00Z"),
+        ],
+        execution_journal_rows=[exit_row],
+    )[0]
+
+    assert outcome["match_source"] == "exit_journal_recovery"
+    assert outcome["policy_version"] is None
+    assert outcome["policy_attribution_source"] is None
+    assert outcome["build_sha"] is None
+
+
+def test_persisted_entry_policy_and_build_can_recover_attribution() -> None:
+    symbol = "VIXW260814C00024000"
+    exit_row = _execution_order_row(
+        symbol,
+        "exit",
+        exit_reason="take_profit",
+        policy_version=None,
+        entry_policy_version="hosted-vix-profit-v1",
+        entry_build_sha="entry-sha",
+    )
+
+    outcome = build_trade_outcomes_from_orders(
+        [
+            _broker_order(symbol, "buy", "entry-outside-journal-tail", "2.00", "2026-07-15T14:00:00Z"),
+            _broker_order(symbol, "sell", "exit", "3.00", "2026-07-22T15:00:00Z"),
+        ],
+        execution_journal_rows=[exit_row],
+    )[0]
+
+    assert outcome["policy_version"] == "hosted-vix-profit-v1"
+    assert outcome["policy_attribution_source"] == "persisted_entry_policy"
+    assert outcome["build_sha"] == "entry-sha"
+
+
+def test_hosted_summary_excludes_pre_fix_exit_attribution(tmp_path, monkeypatch) -> None:
+    monkeypatch.setenv("RENDER", "true")
+    monkeypatch.setenv("ALPACA_ENV", "paper")
+    rows = [
+        {
+            "outcome_id": "misattributed-legacy-exit",
+            "underlying": "AAPL",
+            "pnl": -400.0,
+            "policy_version": "hosted-vix-profit-v1",
+            "match_source": "execution_journal",
+        },
+        {
+            "outcome_id": "verified-current-entry",
+            "underlying": "VIX",
+            "pnl": 50.0,
+            "policy_version": "hosted-vix-profit-v1",
+            "policy_attribution_source": "entry_execution_metadata",
+            "match_source": "execution_journal",
+        },
+    ]
+    journal_path = tmp_path / "trade_outcomes.jsonl"
+    journal_path.write_text("".join(f"{json.dumps(row)}\n" for row in rows), encoding="utf-8")
+
+    result = record_trade_outcomes_from_orders([], journal_path=journal_path)
+
+    assert result["summary"]["closed_trades"] == 1
+    assert result["summary"]["net_pnl"] == 50.0
 
 
 def _broker_order(
@@ -610,6 +734,9 @@ def _execution_order_row(
     *,
     leg_role: str | None = None,
     exit_reason: str | None = None,
+    policy_version: str | None = "policy-v1",
+    entry_policy_version: str | None = None,
+    entry_build_sha: str | None = None,
 ) -> dict:
     metadata = {
         "trade_group_id": "core-runner:decision-123" if leg_role else None,
@@ -617,7 +744,9 @@ def _execution_order_row(
         "trade_setup": "bullish_continuation",
         "execution_layer": "tactical",
         "confidence_score": 0.81,
-        "policy_version": "policy-v1",
+        "policy_version": policy_version,
+        "entry_policy_version": entry_policy_version,
+        "entry_build_sha": entry_build_sha,
         "build_sha": "abc123",
         "exit_reason": exit_reason,
     }
@@ -661,4 +790,5 @@ def _group_leg(
         "qty": 1.0,
         "pnl": pnl,
         "policy_version": policy_version,
+        "policy_attribution_source": "entry_execution_metadata" if policy_version else None,
     }
