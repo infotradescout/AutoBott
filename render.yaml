@@ -39,9 +39,9 @@ services:
       - key: AUTOBOTT_PAPER_DIRECTIONAL_DISCOVERY
         value: "true"
       - key: AUTOBOTT_PAPER_MAX_NEW_ENTRY_ATTEMPTS_PER_LOOP
-        value: "2"
+        value: "10"
       - key: AUTOBOTT_PAPER_MAX_OPEN_ENTRY_BUY_ORDERS
-        value: "6"
+        value: "20"
       - key: AUTOBOTT_ENTRY_LIMIT_EXTRA
         value: "0.02"
       - key: AUTOBOTT_PENDING_ENTRY_MAX_AGE_SECONDS
@@ -147,7 +147,7 @@ services:
       - key: AUTOBOTT_SESSION_INTERVAL_SECONDS
         value: "90"
       - key: AUTOBOTT_SESSION_SYMBOL_BATCH_SIZE
-        value: "10"
+        value: "25"
       - key: AUTOBOTT_SESSION_MAX_CYCLES
         sync: false
       - key: AUTOBOTT_SESSION_QUANTITY
