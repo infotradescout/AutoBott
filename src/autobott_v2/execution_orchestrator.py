@@ -228,8 +228,8 @@ def _core_runner_atomic_mleg_required() -> bool:
     value = os.getenv("AUTOBOTT_CORE_RUNNER_ATOMIC_MLEG_REQUIRED")
     if value is not None:
         return value.strip().lower() in {"1", "true", "yes", "on"}
-    hosted_autostart = (os.getenv("AUTOBOTT_SESSION_AUTOSTART") or "").strip().lower()
-    return hosted_autostart not in {"1", "true", "yes", "on"}
+    data_root = (os.getenv("AUTOBOTT_DATA_ROOT") or "").rstrip("/")
+    return not data_root.startswith("/var/data/autobott")
 
 
 def _option_type_value(value: object) -> str:
