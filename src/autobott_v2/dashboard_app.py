@@ -2873,7 +2873,8 @@ def _core_runner_atomic_mleg_required() -> bool:
     value = os.getenv("AUTOBOTT_CORE_RUNNER_ATOMIC_MLEG_REQUIRED")
     if value is not None:
         return value.strip().lower() in {"1", "true", "yes", "on"}
-    return not _env_bool("AUTOBOTT_SESSION_AUTOSTART", default=False)
+    data_root = (os.getenv("AUTOBOTT_DATA_ROOT") or "").rstrip("/")
+    return not data_root.startswith("/var/data/autobott")
 
 
 def _thesis_failure_sort_key(row: JsonDict) -> tuple[float, float, float, str]:
