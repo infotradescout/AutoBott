@@ -792,7 +792,7 @@ def _paper_opportunistic_decision(
         DecisionStatus.BLOCKED_BY_VOLATILITY,
         DecisionStatus.BLOCKED_BY_SPREAD,
         DecisionStatus.NO_TRADE,
-    } and not volatility_hedge_regime_override:
+    } and not volatility_hedge_regime_override and not directional_discovery_override:
         return None
     if (
         strict_decision.decision is DecisionStatus.NO_TRADE
