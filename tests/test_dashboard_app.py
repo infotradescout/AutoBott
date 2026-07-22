@@ -1181,12 +1181,186 @@ def test_frontend_identifies_live_market_paper_trading_and_real_money_off() -> N
     assert "Paper Readiness" in body
     assert "Volatility Scout" in body
     assert "OPTIONS FEED" in body
+    assert "OPEN VIX TRADER" in body
     assert "Decision Feed" in body
     assert "MANUAL MIRROR" in body
     assert 'id="manual-mirror-badge"' in body
     assert "payload.max_contract_cost" in body
     assert "Order Timeline" in body
     assert "REGIME TRACE" in body
+
+
+def test_vix_trader_workspace_is_additive_and_platform_home_still_renders() -> None:
+    home_status, home = _invoke_app("GET", "/")
+    vix_status, vix = _invoke_app("GET", "/vix-trader")
+
+    assert home_status.startswith("200")
+    assert "AutoBott Phase 1 Operator Console" in home
+    assert vix_status.startswith("200")
+    assert "VIX Paper → Robinhood Mirror" in vix
+    assert "Platform dashboard" in vix
+    assert "Robinhood action queue" in vix
+    assert "Paper performance report" in vix
+    assert "Save paper cycle" in vix
+
+
+def test_preexisting_dashboard_route_inventory_is_preserved() -> None:
+    source = Path(dashboard_app.__file__).read_text(encoding="utf-8")
+    preexisting_routes = {
+        "/", "/api/health", "/api/safety", "/api/alpaca/status", "/api/paper/readiness",
+        "/api/positions/open", "/api/account/positions", "/api/account/orders", "/api/options/scout",
+        "/api/options/timeline", "/api/corpus/latest", "/api/campaign/latest", "/api/decisions/latest",
+        "/api/decisions/feed", "/api/execution/state", "/api/session/status", "/api/runtime/arm-paper",
+        "/api/runtime/disable-execution", "/api/runtime/kill-switch", "/api/execution/reconcile",
+        "/api/session/start", "/api/reports/bucket-edge/latest", "/api/reports/thesis-failures/latest",
+        "/api/reports/gate-candidate/latest", "/api/reports/decision-lab/latest",
+        "/api/reports/decision-lab/backfill-run", "/api/capture/start", "/api/campaign/run",
+        "/api/trading-cycle/run", "/api/trading-session/run", "/api/execution/exit",
+        "/api/execution/cancel", "/api/execution/replace",
+    }
+    assert not {route for route in preexisting_routes if f'"{route}"' not in source}
+
+
+def test_strategy_registry_and_vix_status_routes(monkeypatch, tmp_path) -> None:
+    _auth_env(monkeypatch, tmp_path)
+    registry_status, registry_body = _invoke_app("GET", "/api/strategies", token="dashboard-token")
+    vix_status, vix_body = _invoke_app("GET", "/api/vix-trader/status", token="dashboard-token")
+    registry_payload = json.loads(registry_body)
+    vix_payload = json.loads(vix_body)
+
+    assert registry_status.startswith("200")
+    assert any(row["strategy_id"] == "vix_paired_options" for row in registry_payload["strategies"])
+    assert vix_status.startswith("200")
+    assert vix_payload["broker_execution_supported"] is False
+    assert vix_payload["mode"] == "paper_trading_with_robinhood_reporting"
+    assert "robinhood_mirror" in vix_payload
+    assert vix_payload["alpaca_paper_isolated"] is True
+    assert vix_payload["vix_broker"]["broker_id"] == "disabled"
+    mirror_status, mirror_body = _invoke_app("GET", "/api/vix-trader/robinhood-mirror", token="dashboard-token")
+    mirror = json.loads(mirror_body)
+    assert mirror_status.startswith("200")
+    assert mirror["real_money_venue"] == "robinhood_manual"
+    assert mirror["autobott_submits_live_orders"] is False
+
+
+def test_vix_sim_route_is_disabled_by_default(monkeypatch, tmp_path) -> None:
+    _auth_env(monkeypatch, tmp_path)
+    status, body = _invoke_app("POST", "/api/vix-trader/sim/run", token="dashboard-token", payload={"cycles_per_candidate": 1})
+    payload = json.loads(body)
+    assert status.startswith("403")
+    assert payload["error"] == "vix_sim_disabled"
+    assert payload["alpaca_paper_isolated"] is True
+
+
+def test_vix_broker_status_route_defaults_disabled(monkeypatch, tmp_path) -> None:
+    _auth_env(monkeypatch, tmp_path)
+    status, body = _invoke_app("GET", "/api/vix-trader/broker", token="dashboard-token")
+    payload = json.loads(body)
+    assert status.startswith("200")
+    assert payload["selection"]["broker_id"] == "disabled"
+    assert payload["selection"]["affects_alpaca_paper"] is False
+
+
+def test_vix_preflight_route_blocks_mismatched_products(monkeypatch, tmp_path) -> None:
+    _auth_env(monkeypatch, tmp_path)
+    status, body = _invoke_app(
+        "POST",
+        "/api/vix-trader/preflight",
+        token="dashboard-token",
+        payload={
+            "spot_vix": 17.5,
+            "product": "VIXW",
+            "call_product": "VIX",
+            "put_product": "VIXW",
+            "call_expiration": "2026-07-29",
+            "put_expiration": "2026-07-29",
+            "settlement_type": "AM",
+            "intended_session": "REGULAR",
+            "actual_timestamp": "2026-07-20T15:00:00Z",
+            "call_strike": 18,
+            "put_strike": 17,
+            "call_quantity": 1,
+            "put_quantity": 1,
+            "call_debit": 2,
+            "put_debit": 2,
+        },
+    )
+    payload = json.loads(body)
+
+    assert status.startswith("200")
+    assert payload["preflight"]["passed"] is False
+    assert "vix_vixw_mismatch" in {row["code"] for row in payload["preflight"]["issues"]}
+
+
+def test_vix_cycle_store_enforces_server_side_duplicate_detection(monkeypatch, tmp_path) -> None:
+    _auth_env(monkeypatch, tmp_path)
+    request = {
+        "spot_vix": 17.5,
+        "product": "VIXW",
+        "call_expiration": "2026-07-29",
+        "put_expiration": "2026-07-29",
+        "settlement_type": "AM",
+        "intended_session": "REGULAR",
+        "actual_timestamp": "2026-07-20T15:00:00Z",
+        "call_strike": 18,
+        "put_strike": 17,
+        "call_quantity": 1,
+        "put_quantity": 1,
+        "call_debit": 2,
+        "put_debit": 2,
+        "client_request_id": "duplicate-proof",
+    }
+    first_status, _first_body = _invoke_app("POST", "/api/vix-trader/cycles", token="dashboard-token", payload=request)
+    second_status, second_body = _invoke_app("POST", "/api/vix-trader/preflight", token="dashboard-token", payload=request)
+    second = json.loads(second_body)["preflight"]
+
+    assert first_status.startswith("200")
+    assert second_status.startswith("200")
+    issue_codes = {row["code"] for row in second["issues"]}
+    assert "duplicate_order" in issue_codes
+    assert "duplicate_cycle" not in issue_codes
+    assert "overlapping_exposure" not in issue_codes
+    duplicate_status, duplicate_body = _invoke_app("POST", "/api/vix-trader/cycles", token="dashboard-token", payload=request)
+    assert duplicate_status.startswith("409")
+    assert json.loads(duplicate_body)["error"] == "duplicate_client_request_id"
+
+
+def test_vix_configuration_api_persists_operator_ceilings(monkeypatch, tmp_path) -> None:
+    _auth_env(monkeypatch, tmp_path)
+    config = {
+        "minimum_full_trading_sessions_remaining": 3,
+        "maximum_days_to_expiration": 10,
+        "maximum_combined_debit": 8.5,
+        "maximum_cycle_allocation": 1500,
+        "first_leg_exit_target_pct": 0.3,
+        "second_leg_management_rule": "hold_remaining_leg_until_reversal_or_deadline",
+        "maximum_additions": 1,
+        "maximum_additional_capital": 300,
+        "addition_sizing": 1,
+        "addition_trigger": "confirmed_opposite_move",
+    }
+    put_status, put_body = _invoke_app("PUT", "/api/vix-trader/config", token="dashboard-token", payload=config)
+    get_status, get_body = _invoke_app("GET", "/api/vix-trader/config", token="dashboard-token")
+    assert put_status.startswith("200")
+    put_payload = json.loads(put_body)
+    assert put_payload["operator_ceilings"]["maximum_cycle_allocation"] == 1500.0
+    assert put_payload["evidence"]["profitability_status"] == "insufficient_evidence"
+    assert get_status.startswith("200")
+    assert json.loads(get_body)["operator_ceilings"]["maximum_cycle_allocation"] == 1500.0
+
+
+def test_vix_configuration_api_rejects_invalid_values(monkeypatch, tmp_path) -> None:
+    _auth_env(monkeypatch, tmp_path)
+    status, body = _invoke_app(
+        "PUT",
+        "/api/vix-trader/config",
+        token="dashboard-token",
+        payload={"maximum_combined_debit": -1, "preferred_entry_min": 20, "preferred_entry_max": 19},
+    )
+    response = json.loads(body)
+    assert status.startswith("400")
+    assert response["error"] == "invalid_vix_strategy_config"
+    assert "maximum_combined_debit_must_be_positive_finite" in response["details"]
 
 
 def test_frontend_contains_no_buy_sell_submit_order_controls() -> None:

@@ -170,3 +170,29 @@ services:
         value: /var/data/autobott/artifacts
       - key: AUTOBOTT_GATE_PATH
         value: /var/data/autobott/data/PHASE1_CYCLE_GATE.json
+      - key: AUTOBOTT_VIX_MIN_FULL_SESSIONS
+        sync: false
+      - key: AUTOBOTT_VIX_MAX_DTE
+        sync: false
+      - key: AUTOBOTT_VIX_MAX_COMBINED_DEBIT
+        sync: false
+      - key: AUTOBOTT_VIX_MAX_CYCLE_ALLOCATION
+        sync: false
+      - key: AUTOBOTT_VIX_FIRST_LEG_TARGET_PCT
+        sync: false
+      - key: AUTOBOTT_VIX_SECOND_LEG_RULE
+        sync: false
+      - key: AUTOBOTT_VIX_MAX_ADDITIONS
+        sync: false
+      - key: AUTOBOTT_VIX_MAX_ADDITIONAL_CAPITAL
+        sync: false
+      - key: AUTOBOTT_VIX_ADDITION_SIZING
+        sync: false
+      - key: AUTOBOTT_VIX_ADDITION_TRIGGER
+        sync: false
+      - key: AUTOBOTT_VIX_SIM_ENABLED
+        value: "false"
+      - key: AUTOBOTT_VIX_BROKER
+        value: disabled
+      - key: AUTOBOTT_VIX_EXECUTION_ENABLED
+        value: "false"
