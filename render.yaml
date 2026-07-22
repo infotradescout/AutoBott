@@ -60,6 +60,8 @@ services:
         value: "true"
       - key: AUTOBOTT_CORE_RUNNER_ENABLED
         value: "true"
+      - key: AUTOBOTT_CORE_RUNNER_ATOMIC_MLEG_REQUIRED
+        value: "false"
       - key: AUTOBOTT_RUNNER_MAX_COST_RATIO
         value: "0.40"
       - key: AUTOBOTT_CORE_MAX_SPREAD_PCT

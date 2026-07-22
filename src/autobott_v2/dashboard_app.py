@@ -200,7 +200,10 @@ def _safety_payload() -> JsonDict:
         "active_gate_path": str(gate_path),
         "order_methods_present": _order_methods_present(),
         "core_runner_enabled": (os.getenv("AUTOBOTT_CORE_RUNNER_ENABLED", "true").strip().lower() in {"1", "true", "yes", "on"}),
-        "core_runner_atomic_mleg_required": True,
+        "core_runner_atomic_mleg_required": _env_bool(
+            "AUTOBOTT_CORE_RUNNER_ATOMIC_MLEG_REQUIRED",
+            default=True,
+        ),
         "core_runner_pair_price_restricted": False,
         "paper_position_cost_limit_enabled": execution_config.effective_max_position_cost() is not None,
         "kill_switch_enabled": runtime_state.kill_switch_enabled,
@@ -2189,7 +2192,8 @@ def _dashboard_html() -> str:
           ['Order placement', payload.order_placement_enabled ? statusBadge('ARMED', 'danger') : statusBadge(payload.order_placement_configured ? 'PAUSED' : 'CONFIG DISABLED', payload.order_placement_configured ? 'warn' : 'safe')],
           ['Account status', escapeHtml(payload.account_status || 'not available')],
           ['Options level', escapeHtml(payload.options_trading_level ?? 'unknown')],
-          ['Atomic MLeg', statusBadge(payload.core_runner_mleg_ready ? 'READY' : 'LEVEL 3 REQUIRED', payload.core_runner_mleg_ready ? 'safe' : 'warn')],
+          ['Pair submission', escapeHtml(payload.core_runner_submission_mode || 'atomic_mleg')],
+          ['Atomic MLeg', statusBadge(payload.core_runner_atomic_mleg_required ? (payload.core_runner_mleg_ready ? 'READY' : 'LEVEL 3 REQUIRED') : 'NOT REQUIRED', payload.core_runner_mleg_ready ? 'safe' : 'warn')],
           ['Quote checks', `<span class="mono">${escapeHtml(JSON.stringify(payload.quote_checks || {}, null, 0))}</span>`]
         ])}
         ${detailsBlock(payload)}`;
@@ -2859,6 +2863,13 @@ def _file_hash(path: Path) -> str | None:
 def _order_methods_present() -> bool:
     forbidden = ("submit_order", "replace_order", "cancel_order", "buy", "sell", "close", "liquidate")
     return any(hasattr(AlpacaPaperClient, method_name) for method_name in forbidden)
+
+
+def _env_bool(name: str, *, default: bool = False) -> bool:
+    value = os.getenv(name)
+    if value is None:
+        return default
+    return value.strip().lower() in {"1", "true", "yes", "on"}
 
 
 def _thesis_failure_sort_key(row: JsonDict) -> tuple[float, float, float, str]:

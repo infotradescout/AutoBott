@@ -149,24 +149,57 @@ def submit_core_runner_to_broker(
     if rejected:
         raise ExecutionRejectedError(rejected[0], detail=", ".join(rejected), reasons=rejected)
 
-    if not hasattr(resolved_broker, "submit_mleg_order"):
+    atomic_mleg_required = _core_runner_atomic_mleg_required()
+    if atomic_mleg_required and not hasattr(resolved_broker, "submit_mleg_order"):
         raise ExecutionRejectedError("core_runner_atomic_submission_unavailable")
+    if not atomic_mleg_required and not hasattr(resolved_broker, "submit_order"):
+        raise ExecutionRejectedError("core_runner_paired_submission_unavailable")
     if on_submission_attempt is not None:
         on_submission_attempt(primary_intent)
-    try:
-        submitted_orders = resolved_broker.submit_mleg_order(
-            (primary_intent, runner_intent),
-            current_daily_realized_pnl=current_daily_realized_pnl,
-            open_positions=open_positions,
-        )
-    except Exception as exc:
-        raise ExecutionRejectedError(
-            "core_runner_atomic_submission_failed",
-            detail=str(exc),
-            reasons=("core_runner_atomic_submission_failed",),
-        ) from exc
-    if len(submitted_orders) != 2:
-        raise ExecutionRejectedError("core_runner_atomic_response_invalid")
+
+    if atomic_mleg_required:
+        try:
+            submitted_orders = resolved_broker.submit_mleg_order(
+                (primary_intent, runner_intent),
+                current_daily_realized_pnl=current_daily_realized_pnl,
+                open_positions=open_positions,
+            )
+        except Exception as exc:
+            raise ExecutionRejectedError(
+                "core_runner_atomic_submission_failed",
+                detail=str(exc),
+                reasons=("core_runner_atomic_submission_failed",),
+            ) from exc
+        if len(submitted_orders) != 2:
+            raise ExecutionRejectedError("core_runner_atomic_response_invalid")
+    else:
+        # Paper collection must not depend on Alpaca Level-3 MLEG approval.
+        # Keep both contracts linked by trade_group_id while submitting them
+        # as ordinary buy-to-open orders supported by the paper account.
+        simple_orders: list[ExecutionOrder] = []
+        try:
+            for index, intent in enumerate((primary_intent, runner_intent)):
+                simple_orders.append(
+                    resolved_broker.submit_order(
+                        intent,
+                        current_daily_realized_pnl=current_daily_realized_pnl,
+                        open_positions=open_positions + index,
+                    )
+                )
+        except Exception as exc:
+            # Persist any accepted first leg so the position monitor can manage
+            # it instead of leaving broker exposure invisible after a partial.
+            for order in simple_orders:
+                append_order_submission(order, journal_path=journal_path)
+                upsert_open_position_from_order(order)
+            reason = (
+                "core_runner_paired_submission_partial_failure"
+                if simple_orders
+                else "core_runner_paired_submission_failed"
+            )
+            raise ExecutionRejectedError(reason, detail=str(exc), reasons=(reason,)) from exc
+        submitted_orders = tuple(simple_orders)
+
     primary_order, runner_order = submitted_orders
     for order in submitted_orders:
         append_order_submission(order, journal_path=journal_path)
@@ -189,6 +222,13 @@ def _validate_pair(pair: CoreRunnerPair) -> None:
         raise ExecutionRejectedError("call_runner_must_use_higher_strike")
     if _option_type_value(primary.option_type) == "put" and runner.strike >= primary.strike:
         raise ExecutionRejectedError("put_runner_must_use_lower_strike")
+
+
+def _core_runner_atomic_mleg_required() -> bool:
+    value = os.getenv("AUTOBOTT_CORE_RUNNER_ATOMIC_MLEG_REQUIRED")
+    if value is None:
+        return True
+    return value.strip().lower() in {"1", "true", "yes", "on"}
 
 
 def _option_type_value(value: object) -> str:
