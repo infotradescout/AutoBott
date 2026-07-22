@@ -513,7 +513,9 @@ def test_position_monitor_cancels_stale_atomic_entry_parent_only(monkeypatch, tm
             },
             {
                 "id": "single-leg-old",
+                "client_order_id": "autobott-linked-entry-old",
                 "order_class": "simple",
+                "side": "buy",
                 "status": "accepted",
                 "submitted_at": "2026-07-16T15:20:00Z",
                 "symbol": "SPY260717C00600000",
@@ -535,9 +537,16 @@ def test_position_monitor_cancels_stale_atomic_entry_parent_only(monkeypatch, tm
             "symbols": ["VXX260717C00022000", "VXX260717C00025000"],
             "age_seconds": 300.0,
             "max_age_seconds": 180,
-        }
+        },
+        {
+            "reason": "stale_linked_entry_canceled",
+            "broker_order_id": "single-leg-old",
+            "symbols": ["SPY260717C00600000"],
+            "age_seconds": 900.0,
+            "max_age_seconds": 180,
+        },
     ]
-    assert broker.canceled == ["mleg-parent-stale"]
+    assert broker.canceled == ["mleg-parent-stale", "single-leg-old"]
 
 
 def test_position_monitor_trims_excess_contracts_before_profit_loss(tmp_path) -> None:

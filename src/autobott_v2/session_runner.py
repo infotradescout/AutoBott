@@ -45,6 +45,7 @@ def run_trading_session(
     sleep_fn: Callable[[float], None] = time.sleep,
     cycle_runner: Callable[..., TradingCycleResult] = run_trading_cycle,
     cycle_kwargs: dict[str, Any] | None = None,
+    on_cycle_complete: Callable[[dict[str, Any]], None] | None = None,
 ) -> SessionRunResult:
     started_at = _now(now_fn)
     results: list[dict[str, Any]] = []
@@ -77,14 +78,20 @@ def run_trading_session(
         except Exception as exc:
             # A single bad cycle (e.g. a data-feed hiccup) must not end the
             # whole session -- keep the loop alive and retry next interval.
-            results.append({"error": f"{type(exc).__name__}: {exc}", "symbols": cycle_symbols})
+            cycle_payload = {"error": f"{type(exc).__name__}: {exc}", "symbols": cycle_symbols}
+            results.append(cycle_payload)
             cycles_completed += 1
+            if on_cycle_complete is not None:
+                on_cycle_complete(cycle_payload)
             if max_cycles is not None and cycles_completed >= max_cycles:
                 break
             sleep_fn(interval_seconds)
             continue
-        results.append(result.to_json_dict())
+        cycle_payload = result.to_json_dict()
+        results.append(cycle_payload)
         cycles_completed += 1
+        if on_cycle_complete is not None:
+            on_cycle_complete(cycle_payload)
 
         if max_cycles is not None and cycles_completed >= max_cycles:
             break

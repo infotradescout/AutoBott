@@ -69,9 +69,9 @@ services:
       - key: AUTOBOTT_RUNNER_MAX_SPREAD_PCT
         value: "0.25"
       - key: AUTOBOTT_CORE_MIN_OPEN_INTEREST
-        value: "100"
+        value: "0"
       - key: AUTOBOTT_RUNNER_MIN_OPEN_INTEREST
-        value: "50"
+        value: "0"
       - key: AUTOBOTT_CORE_MIN_VOLUME
         value: "10"
       - key: AUTOBOTT_RUNNER_MIN_VOLUME

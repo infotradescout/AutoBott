@@ -13,6 +13,7 @@ from .execution_models import (
     BrokerEnvironment,
     ExecutionOrder,
     OrderSide,
+    OrderType,
     TradeIntent,
     validate_trade_intent,
 )
@@ -45,6 +46,7 @@ def build_trade_intent_from_decision(
     leg_role: str = "primary",
     trade_group_id: str | None = None,
     paired_option_symbol: str | None = None,
+    order_type: OrderType | None = None,
 ) -> TradeIntent:
     if decision.decision is not DecisionStatus.TRADE_CANDIDATE:
         raise ValueError("decision_not_trade_candidate")
@@ -70,6 +72,7 @@ def build_trade_intent_from_decision(
         ),
         generated_at=decision.timestamp,
         environment=environment,
+        order_type=order_type or _entry_order_type(environment),
         take_profit_price=selected_contract.target_exit_mid,
         stop_loss_price=selected_contract.stop_exit_mid,
         decision_id=decision.decision_id,
@@ -109,6 +112,8 @@ def submit_core_runner_to_broker(
         raise ExecutionRejectedError("core_runner_live_not_validated")
     _validate_pair(pair)
 
+    atomic_mleg_required = _core_runner_atomic_mleg_required()
+    pair_order_type = OrderType.LIMIT if atomic_mleg_required else _entry_order_type(resolved_broker.config.environment)
     trade_group_id = f"core-runner:{decision.decision_id}"
     primary_intent = build_trade_intent_from_decision(
         decision,
@@ -119,6 +124,7 @@ def submit_core_runner_to_broker(
         leg_role="primary",
         trade_group_id=trade_group_id,
         paired_option_symbol=pair.runner.option_symbol,
+        order_type=pair_order_type,
     )
     runner_intent = build_trade_intent_from_decision(
         decision,
@@ -129,6 +135,7 @@ def submit_core_runner_to_broker(
         leg_role="runner",
         trade_group_id=trade_group_id,
         paired_option_symbol=pair.primary.option_symbol,
+        order_type=pair_order_type,
     )
     controls = resolved_broker.config.risk_controls()
     primary_risk = validate_trade_intent(
@@ -149,7 +156,6 @@ def submit_core_runner_to_broker(
     if rejected:
         raise ExecutionRejectedError(rejected[0], detail=", ".join(rejected), reasons=rejected)
 
-    atomic_mleg_required = _core_runner_atomic_mleg_required()
     if atomic_mleg_required and not hasattr(resolved_broker, "submit_mleg_order"):
         raise ExecutionRejectedError("core_runner_atomic_submission_unavailable")
     if not atomic_mleg_required and not hasattr(resolved_broker, "submit_order"):
@@ -306,6 +312,22 @@ def _entry_limit_price(
     # Execution risk controls either approve the real notional or reject it;
     # paper mode can explicitly disable that risk limit altogether.
     return max(0.01, round(limit_price, 2))
+
+
+def _entry_order_type(environment: BrokerEnvironment) -> OrderType:
+    """Use fill-producing market orders for the fake-money collection lane.
+
+    Alpaca's Basic options feed is indicative rather than the executable OPRA
+    quote. A limit derived from that feed can sit unfilled even when the paper
+    account and session are healthy. Market orders are supported for options
+    during regular market hours and give the learning loop an actual fill.
+    Live-money entries remain limit-only.
+    """
+
+    if environment is not BrokerEnvironment.PAPER:
+        return OrderType.LIMIT
+    configured = (os.getenv("AUTOBOTT_PAPER_ENTRY_ORDER_TYPE") or "market").strip().lower()
+    return OrderType.LIMIT if configured == "limit" else OrderType.MARKET
 
 
 def _entry_limit_extra() -> float:

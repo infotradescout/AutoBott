@@ -46,11 +46,14 @@ class SessionSupervisorState:
     last_error: str | None = None
     last_monitor_result: dict[str, Any] | None = None
     last_monitor_error: str | None = None
+    cycles_completed: int = 0
+    last_cycle_at: datetime | None = None
 
     def to_json_dict(self) -> dict[str, Any]:
         payload = asdict(self)
         payload["started_at"] = self.started_at.astimezone(UTC).isoformat() if self.started_at else None
         payload["finished_at"] = self.finished_at.astimezone(UTC).isoformat() if self.finished_at else None
+        payload["last_cycle_at"] = self.last_cycle_at.astimezone(UTC).isoformat() if self.last_cycle_at else None
         return payload
 
 
@@ -115,6 +118,8 @@ def _start_session_thread(config: SessionSupervisorConfig, *, consume_autostart:
         _SESSION_STATE.last_result = None
         _SESSION_STATE.last_monitor_error = None
         _SESSION_STATE.last_monitor_result = None
+        _SESSION_STATE.cycles_completed = 0
+        _SESSION_STATE.last_cycle_at = None
         _SESSION_STOP_EVENT = threading.Event()
         _SESSION_THREAD = threading.Thread(target=_run_session, args=(config, _SESSION_STOP_EVENT), daemon=True, name="autobott-session")
         _SESSION_THREAD.start()
@@ -151,6 +156,7 @@ def _run_session(config: SessionSupervisorConfig, stop_event: threading.Event) -
                 "position_count": config.position_count,
                 "current_daily_realized_pnl": config.daily_pnl,
             },
+            on_cycle_complete=_record_cycle_result,
         )
         with _SESSION_LOCK:
             _SESSION_STATE.last_result = result.to_json_dict()
@@ -163,6 +169,19 @@ def _run_session(config: SessionSupervisorConfig, stop_event: threading.Event) -
         with _SESSION_LOCK:
             _SESSION_STATE.running = False
             _SESSION_STATE.finished_at = datetime.now(tz=UTC)
+
+
+def _record_cycle_result(cycle_result: dict[str, Any]) -> None:
+    """Publish every cycle while the continuous session is still running."""
+
+    with _SESSION_LOCK:
+        _SESSION_STATE.cycles_completed += 1
+        _SESSION_STATE.last_cycle_at = datetime.now(tz=UTC)
+        _SESSION_STATE.last_result = {
+            "cycles_completed": _SESSION_STATE.cycles_completed,
+            "cycle_results": [cycle_result],
+        }
+        _SESSION_STATE.last_error = cycle_result.get("error")
 
 
 def _ensure_position_monitor_thread_locked(config: SessionSupervisorConfig) -> None:

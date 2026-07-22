@@ -229,6 +229,15 @@ def test_dashboard_health_returns_ok() -> None:
     assert payload["ok"] is True
 
 
+def test_dashboard_session_panel_exposes_live_cycle_execution_counts() -> None:
+    html = dashboard_app._dashboard_html()
+
+    assert "Candidates" in html
+    assert "Trade attempts" in html
+    assert "Orders submitted" in html
+    assert "execution_rejected_count_by_reason" in html
+
+
 def test_dashboard_health_fails_when_session_loop_has_died(monkeypatch) -> None:
     monkeypatch.setattr(
         dashboard_app,

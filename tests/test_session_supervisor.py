@@ -16,6 +16,8 @@ def _reset_supervisor_state() -> None:
     supervisor._SESSION_STATE.last_error = None
     supervisor._SESSION_STATE.last_monitor_result = None
     supervisor._SESSION_STATE.last_monitor_error = None
+    supervisor._SESSION_STATE.cycles_completed = 0
+    supervisor._SESSION_STATE.last_cycle_at = None
 
 
 def test_load_session_supervisor_config_from_env(monkeypatch) -> None:
@@ -90,8 +92,28 @@ def test_maybe_start_session_supervisor_starts_once(monkeypatch) -> None:
     assert started is True
     assert calls
     assert calls[0]["continuous_window"] is True
+    assert calls[0]["on_cycle_complete"] is supervisor._record_cycle_result
     second = supervisor.maybe_start_session_supervisor()
     assert second is False
+
+
+def test_supervisor_publishes_each_cycle_before_session_finishes() -> None:
+    _reset_supervisor_state()
+
+    supervisor._record_cycle_result(
+        {
+            "scanner_candidates_count": 3,
+            "trade_attempted_count": 2,
+            "orders_submitted": [{"broker_order_id": "paper-1"}],
+            "skipped": [{"symbol": "QQQ", "reason": "core_runner_pair_not_found"}],
+        }
+    )
+
+    status = supervisor.session_supervisor_status()["state"]
+    assert status["cycles_completed"] == 1
+    assert status["last_cycle_at"] is not None
+    assert status["last_result"]["cycles_completed"] == 1
+    assert status["last_result"]["cycle_results"][0]["trade_attempted_count"] == 2
 
 
 def test_maybe_start_session_supervisor_can_arm_paper_execution(monkeypatch) -> None:
