@@ -255,7 +255,8 @@ def test_submit_core_runner_uses_two_distinct_contracts_atomically(tmp_path, mon
 def test_submit_core_runner_can_use_linked_simple_orders_for_paper_collection(tmp_path, monkeypatch) -> None:
     import autobott_v2.execution_orchestrator as orchestrator
 
-    monkeypatch.setenv("AUTOBOTT_CORE_RUNNER_ATOMIC_MLEG_REQUIRED", "false")
+    monkeypatch.delenv("AUTOBOTT_CORE_RUNNER_ATOMIC_MLEG_REQUIRED", raising=False)
+    monkeypatch.setenv("AUTOBOTT_SESSION_AUTOSTART", "true")
     monkeypatch.setattr(orchestrator, "upsert_open_position_from_order", lambda *args, **kwargs: None)
     broker = FakeBroker()
     selected = _decision_card().selected_contract
