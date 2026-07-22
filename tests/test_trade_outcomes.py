@@ -11,6 +11,7 @@ from autobott_v2.trade_outcomes import (
     record_trade_outcomes_from_orders,
     recent_loss_guard,
     recent_winner_bias,
+    summarize_completed_trade_groups,
     summarize_trade_outcomes,
     sync_trade_outcomes_from_broker,
 )
@@ -265,6 +266,24 @@ def test_incomplete_group_is_excluded_from_expectancy() -> None:
     assert summary["incomplete_group_legs"] == 1
     assert summary["net_pnl"] == 100.0
     assert summary["independent_net_pnl"] == 0.0
+
+
+def test_no_loss_profit_factors_are_strict_json_with_explicit_status() -> None:
+    rows = [
+        _group_leg("group-1", "primary", 60.0, "primary-1", "2026-07-09T14:30:00Z"),
+        _group_leg("group-1", "runner", 20.0, "runner-1", "2026-07-09T14:31:00Z"),
+    ]
+
+    leg_summary = summarize_trade_outcomes(rows)
+    group_summary = summarize_completed_trade_groups(rows)
+
+    assert leg_summary["profit_factor"] is None
+    assert leg_summary["profit_factor_status"] == "no_losses"
+    assert group_summary["profit_factor"] is None
+    assert group_summary["profit_factor_status"] == "no_losses"
+    # Browser JSON.parse rejects Python's legacy `Infinity` output.  These
+    # summaries must remain RFC-JSON serializable even for an all-winner set.
+    json.dumps({"summary": leg_summary, "group_summary": group_summary}, allow_nan=False)
 
 
 def test_hosted_loss_guard_ignores_legacy_cohort_and_cannot_be_disabled(monkeypatch) -> None:

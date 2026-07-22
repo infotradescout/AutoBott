@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import json
+import math
 import os
+import threading
 from datetime import UTC, date, datetime
 from hashlib import sha256
 from pathlib import Path
@@ -35,6 +37,8 @@ _TERMINAL_FILL_STATUSES = {
     "rejected",
     "done_for_day",
 }
+
+_TRADE_OUTCOME_LOCK = threading.RLock()
 
 
 def _order_has_realized_fill(order: dict[str, Any]) -> bool:
@@ -120,6 +124,28 @@ def sync_trade_outcomes_from_broker(
 
 
 def record_trade_outcomes_from_orders(
+    orders: list[dict[str, Any]],
+    *,
+    journal_path: str | Path | None = None,
+    execution_journal_path: str | Path | None = None,
+    execution_journal_rows: list[dict[str, Any]] | None = None,
+    trading_day: date | datetime | str | None = None,
+) -> dict[str, Any]:
+    # The dashboard and the trading loop can sync the same broker history at
+    # the same time.  Keep load/deduplicate/append/compact as one transaction
+    # within the hosted process so a read-only dashboard refresh cannot race a
+    # cycle into duplicate or truncated JSONL records.
+    with _TRADE_OUTCOME_LOCK:
+        return _record_trade_outcomes_from_orders_locked(
+            orders,
+            journal_path=journal_path,
+            execution_journal_path=execution_journal_path,
+            execution_journal_rows=execution_journal_rows,
+            trading_day=trading_day,
+        )
+
+
+def _record_trade_outcomes_from_orders_locked(
     orders: list[dict[str, Any]],
     *,
     journal_path: str | Path | None = None,
@@ -251,6 +277,15 @@ def _unmatched_realized_sell_events(orders: list[dict[str, Any]]) -> list[dict[s
 
 
 def load_trade_outcomes(*, journal_path: str | Path | None = None, limit: int | None = None) -> list[dict[str, Any]]:
+    with _TRADE_OUTCOME_LOCK:
+        return _load_trade_outcomes_locked(journal_path=journal_path, limit=limit)
+
+
+def _load_trade_outcomes_locked(
+    *,
+    journal_path: str | Path | None = None,
+    limit: int | None = None,
+) -> list[dict[str, Any]]:
     path = Path(journal_path) if journal_path is not None else trade_outcome_journal_path()
     if not path.exists():
         return []
@@ -300,6 +335,7 @@ def summarize_trade_outcomes(rows: list[dict[str, Any]]) -> dict[str, Any]:
     independent_net = round(sum(independent_pnls), 2)
     grouped_leg_count = sum(1 for row in rows if row.get("trade_group_id"))
     completed_group_leg_count = sum(int(group.get("closed_legs") or 0) for group in completed_groups)
+    profit_factor, profit_factor_status = _json_profit_factor(wins, losses)
     return {
         # Preserve the original leg-level headline for dashboard/API callers.
         # The independent_* fields and group_summary carry pair-level metrics.
@@ -316,7 +352,8 @@ def summarize_trade_outcomes(rows: list[dict[str, Any]]) -> dict[str, Any]:
         "win_rate": round(len(wins) / len(rows), 4) if rows else 0.0,
         "net_pnl": net,
         "expectancy": round(net / len(rows), 2) if rows else 0.0,
-        "profit_factor": round(sum(wins) / abs(sum(losses)), 4) if losses else (float("inf") if wins else 0.0),
+        "profit_factor": profit_factor,
+        "profit_factor_status": profit_factor_status,
     }
 
 
@@ -391,6 +428,7 @@ def summarize_completed_trade_groups(rows: list[dict[str, Any]]) -> dict[str, An
     wins = [pnl for pnl in pnls if pnl > 0]
     losses = [pnl for pnl in pnls if pnl < 0]
     net = round(sum(pnls), 2)
+    profit_factor, profit_factor_status = _json_profit_factor(wins, losses)
     return {
         "completed_groups": len(groups),
         "wins": len(wins),
@@ -398,7 +436,8 @@ def summarize_completed_trade_groups(rows: list[dict[str, Any]]) -> dict[str, An
         "win_rate": round(len(wins) / len(groups), 4) if groups else 0.0,
         "net_pnl": net,
         "expectancy": round(net / len(groups), 2) if groups else 0.0,
-        "profit_factor": round(sum(wins) / abs(sum(losses)), 4) if losses else (float("inf") if wins else 0.0),
+        "profit_factor": profit_factor,
+        "profit_factor_status": profit_factor_status,
         "average_return_pct": round(
             sum(float(group.get("return_pct") or 0.0) for group in groups) / len(groups),
             4,
@@ -408,6 +447,22 @@ def summarize_completed_trade_groups(rows: list[dict[str, Any]]) -> dict[str, An
         "runner_contribution": round(sum(float(group.get("runner_pnl") or 0.0) for group in groups), 2),
         "runner_funded_groups": sum(1 for group in groups if group.get("runner_funded")),
     }
+
+
+def _json_profit_factor(wins: list[float], losses: list[float]) -> tuple[float | None, str]:
+    """Return a strict-JSON profit factor without erasing no-loss semantics."""
+
+    if losses:
+        value = sum(wins) / abs(sum(losses))
+        if not math.isfinite(value):
+            raise ValueError("nonfinite_profit_factor_from_trade_outcomes")
+        return round(value, 4), "finite"
+    if wins:
+        # Mathematically unbounded, but Infinity is not valid JSON.  Preserve
+        # the reason explicitly instead of replacing it with a misleading
+        # finite number.
+        return None, "no_losses"
+    return 0.0, "no_wins_or_losses"
 
 
 def daily_realized_pnl(
