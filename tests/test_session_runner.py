@@ -251,3 +251,36 @@ def test_run_trading_session_continuous_window_waits_after_end_time() -> None:
 
     assert result.cycles_completed == 1
     assert [call.isoformat() for call in calls] == ["2026-07-02T13:30:00+00:00"]
+
+
+def test_run_trading_session_reports_cycle_results_immediately() -> None:
+    clock = FakeClock()
+    published = []
+
+    def fake_cycle_runner(*, symbols, **kwargs):
+        return TradingCycleResult(
+            started_at=clock.now(),
+            finished_at=clock.now(),
+            symbols=list(symbols),
+            snapshot_paths=[],
+            decisions=[],
+            orders_submitted=[{"broker_order_id": "paper-order-1"}],
+            skipped=[],
+            runtime_state={},
+            scanner_candidates_count=1,
+            trade_attempted_count=1,
+        )
+
+    run_trading_session(
+        symbols=["SPY"],
+        interval_seconds=90,
+        max_cycles=1,
+        now_fn=clock.now,
+        sleep_fn=clock.sleep,
+        cycle_runner=fake_cycle_runner,
+        on_cycle_complete=published.append,
+    )
+
+    assert published[0]["scanner_candidates_count"] == 1
+    assert published[0]["trade_attempted_count"] == 1
+    assert published[0]["orders_submitted"][0]["broker_order_id"] == "paper-order-1"

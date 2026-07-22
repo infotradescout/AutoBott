@@ -132,7 +132,7 @@ def run_position_monitor(
     open_symbols: set[str] = set()
     actions: list[dict[str, Any]] = []
     actions.extend(
-        _cancel_stale_pending_mleg_entries(
+        _cancel_stale_pending_entries(
             resolved_broker,
             max_age_seconds=resolved_rules.pending_entry_max_age_seconds,
         )
@@ -441,7 +441,7 @@ def _cancel_over_cap_pending_entries(
     return actions
 
 
-def _cancel_stale_pending_mleg_entries(
+def _cancel_stale_pending_entries(
     broker: AlpacaExecutionBroker,
     *,
     max_age_seconds: int,
@@ -458,9 +458,11 @@ def _cancel_stale_pending_mleg_entries(
     now = _monitor_now()
     actions: list[dict[str, Any]] = []
     for order in orders:
-        if str(order.get("order_class") or "").lower() != "mleg":
-            continue
         if not str(order.get("client_order_id") or "").startswith("autobott-"):
+            continue
+        order_class = str(order.get("order_class") or "").lower()
+        side = str(order.get("side") or "").lower()
+        if order_class != "mleg" and side != "buy":
             continue
         status = str(order.get("status") or "").lower()
         if status not in {"new", "accepted", "partially_filled", "pending_new", "pending_replace"}:
@@ -476,11 +478,13 @@ def _cancel_stale_pending_mleg_entries(
             continue
         legs = [leg for leg in order.get("legs") or [] if isinstance(leg, dict)]
         symbols = [str(leg.get("symbol") or "").upper() for leg in legs if leg.get("symbol")]
+        if not symbols and order.get("symbol"):
+            symbols = [str(order["symbol"]).upper()]
         try:
             broker.cancel_order(order_id)
             actions.append(
                 {
-                    "reason": "stale_atomic_entry_canceled",
+                    "reason": "stale_atomic_entry_canceled" if order_class == "mleg" else "stale_linked_entry_canceled",
                     "broker_order_id": order_id,
                     "symbols": symbols,
                     "age_seconds": round(age_seconds, 1),
@@ -490,7 +494,7 @@ def _cancel_stale_pending_mleg_entries(
         except Exception as exc:
             actions.append(
                 {
-                    "reason": "stale_atomic_entry_cancel_failed",
+                    "reason": "stale_atomic_entry_cancel_failed" if order_class == "mleg" else "stale_linked_entry_cancel_failed",
                     "broker_order_id": order_id,
                     "symbols": symbols,
                     "age_seconds": round(age_seconds, 1),

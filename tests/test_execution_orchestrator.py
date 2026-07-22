@@ -7,7 +7,7 @@ import pytest
 
 from autobott_v2.core_runner import CoreRunnerPair
 from autobott_v2.execution_config import AlpacaExecutionConfig
-from autobott_v2.execution_models import BrokerEnvironment, ExecutionOrder, ExecutionState
+from autobott_v2.execution_models import BrokerEnvironment, ExecutionOrder, ExecutionState, OrderType
 from autobott_v2.execution_orchestrator import (
     ExecutionRejectedError,
     build_trade_intent_from_decision,
@@ -130,6 +130,7 @@ def test_build_trade_intent_from_decision_uses_marketable_paper_limit() -> None:
     assert intent.symbol == "AAPL"
     assert intent.option_symbol == "AAPL260117C00190000"
     assert intent.limit_price == 2.6
+    assert intent.order_type is OrderType.MARKET
     assert intent.take_profit_price == 3.75
 
 
@@ -293,6 +294,7 @@ def test_submit_core_runner_can_use_linked_simple_orders_for_paper_collection(tm
     )
 
     assert broker.mleg_calls == []
+    assert [intent.order_type for intent in broker.intents] == [OrderType.MARKET, OrderType.MARKET]
     assert [intent.option_symbol for intent in broker.intents] == [
         primary.option_symbol,
         runner.option_symbol,

@@ -168,7 +168,7 @@ def _session_watchdog_status() -> tuple[bool, JsonDict | None]:
     config = status.get("config") or {}
     if not config.get("enabled"):
         return True, None
-    if state.get("started_at") and not status.get("thread_alive"):
+    if state.get("started_at") and not state.get("finished_at") and not status.get("thread_alive"):
         return False, {"stalled": True, "last_error": state.get("last_error")}
     return True, None
 
@@ -2392,6 +2392,9 @@ def _dashboard_html() -> str:
       dashboardState.session = payload;
       const state = payload.state || {};
       const config = payload.config || {};
+      const cycleResults = state.last_result?.cycle_results || [];
+      const lastCycle = cycleResults.length ? cycleResults[cycleResults.length - 1] : {};
+      const rejected = Object.values(lastCycle.execution_rejected_count_by_reason || {}).reduce((sum, value) => sum + Number(value || 0), 0);
       const tone = state.last_error ? 'danger' : (state.running ? 'safe' : 'warn');
       return `
         ${metricList([
@@ -2401,7 +2404,13 @@ def _dashboard_html() -> str:
           ['Interval', escapeHtml(String(config.interval_seconds ?? 'n/a'))],
           ['Max cycles', escapeHtml(String(config.max_cycles ?? 'continuous'))],
           ['Last error', state.last_error ? `<span class="mono">${escapeHtml(state.last_error)}</span>` : statusBadge('NONE', 'safe')],
-          ['Last result', state.last_result ? statusBadge(`CYCLES ${state.last_result.cycles_completed ?? 0}`, 'safe') : statusBadge('NONE', 'warn')]
+          ['Cycles completed', escapeHtml(String(state.cycles_completed ?? state.last_result?.cycles_completed ?? 0))],
+          ['Last cycle', escapeHtml(state.last_cycle_at || 'waiting')],
+          ['Candidates', escapeHtml(String(lastCycle.scanner_candidates_count ?? 0))],
+          ['Trade attempts', escapeHtml(String(lastCycle.trade_attempted_count ?? 0))],
+          ['Orders submitted', escapeHtml(String((lastCycle.orders_submitted || []).length))],
+          ['Rejected', escapeHtml(String(rejected))],
+          ['Skipped', escapeHtml(String((lastCycle.skipped || []).length))]
         ])}
         ${detailsBlock(payload)}`;
     }
