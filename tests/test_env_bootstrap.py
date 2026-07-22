@@ -60,7 +60,6 @@ def test_configure_local_paper_runtime_defaults_sets_expected_values(monkeypatch
     assert os.environ["AUTOBOTT_SESSION_AUTOSTART"] == "true"
     assert os.environ["AUTOBOTT_SESSION_ARM_PAPER_EXECUTION"] == "true"
     assert os.environ["AUTOBOTT_ALLOW_ORDER_PLACEMENT"] == "true"
-    assert os.environ["AUTOBOTT_DASHBOARD_AUTH_TOKEN"] == "autobott-local"
     assert os.environ["HOST"] == "127.0.0.1"
     assert os.environ["PORT"] == "8000"
     assert "ALPACA_LIVE_API_KEY" not in os.environ

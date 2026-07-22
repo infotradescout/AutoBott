@@ -34,7 +34,6 @@ def _invoke_app(method: str, path: str, *, token: str | None = None, payload: di
 
 
 def _auth_env(monkeypatch, tmp_path: Path) -> None:
-    monkeypatch.setenv("AUTOBOTT_DASHBOARD_AUTH_TOKEN", "dashboard-token")
     monkeypatch.setenv("AUTOBOTT_DATA_ROOT", str(tmp_path / "data"))
     monkeypatch.setenv("AUTOBOTT_ARTIFACTS_ROOT", str(tmp_path / "artifacts"))
     monkeypatch.setenv("AUTOBOTT_GATE_PATH", str(tmp_path / "data" / "PHASE1_CYCLE_GATE.json"))
@@ -565,36 +564,39 @@ def test_dashboard_runtime_disable_and_kill_switch_endpoints(monkeypatch, tmp_pa
     assert kill_payload["runtime_state"]["kill_switch_enabled"] is True
 
 
-def test_dashboard_rejects_missing_auth_for_capture(monkeypatch, tmp_path) -> None:
+def test_dashboard_capture_route_is_not_auth_gated(monkeypatch, tmp_path) -> None:
     _auth_env(monkeypatch, tmp_path)
+    monkeypatch.setattr(dashboard_app, "_capture_start_payload", lambda _payload: {"ok": True})
     status, body = _invoke_app("POST", "/api/capture/start", payload={})
     payload = json.loads(body)
-    assert status.startswith("401")
-    assert payload["error"] == "unauthorized"
+    assert status.startswith("200")
+    assert payload["ok"] is True
 
 
-def test_dashboard_rejects_missing_auth_for_campaign(monkeypatch, tmp_path) -> None:
+def test_dashboard_campaign_route_is_not_auth_gated(monkeypatch, tmp_path) -> None:
     _auth_env(monkeypatch, tmp_path)
+    monkeypatch.setattr(dashboard_app, "_campaign_run_payload", lambda _payload: {"ok": True})
     status, body = _invoke_app("POST", "/api/campaign/run", payload={})
     payload = json.loads(body)
-    assert status.startswith("401")
-    assert payload["error"] == "unauthorized"
+    assert status.startswith("200")
+    assert payload["ok"] is True
 
 
-def test_dashboard_rejects_missing_auth_for_trading_cycle(monkeypatch, tmp_path) -> None:
+def test_dashboard_trading_cycle_route_is_not_auth_gated(monkeypatch, tmp_path) -> None:
     _auth_env(monkeypatch, tmp_path)
+    monkeypatch.setattr(dashboard_app, "_trading_cycle_run_payload", lambda _payload: {"ok": True})
     status, body = _invoke_app("POST", "/api/trading-cycle/run", payload={})
     payload = json.loads(body)
-    assert status.startswith("401")
-    assert payload["error"] == "unauthorized"
+    assert status.startswith("200")
+    assert payload["ok"] is True
 
 
-def test_dashboard_rejects_missing_auth_for_runtime_controls(monkeypatch, tmp_path) -> None:
+def test_dashboard_runtime_controls_are_not_auth_gated(monkeypatch, tmp_path) -> None:
     _auth_env(monkeypatch, tmp_path)
     status, body = _invoke_app("POST", "/api/runtime/arm-paper", payload={})
     payload = json.loads(body)
-    assert status.startswith("401")
-    assert payload["error"] == "unauthorized"
+    assert status.startswith("200")
+    assert payload["runtime_state"]["execution_enabled"] is True
 
 
 def test_dashboard_does_not_expose_alpaca_secrets(monkeypatch, tmp_path) -> None:
@@ -952,12 +954,14 @@ def test_dashboard_options_timeline_pairs_round_trips_and_clusters(monkeypatch, 
     assert any(warning["type"] == "reversal_with_pending_entries" for warning in payload["warnings"])
 
 
-def test_dashboard_account_endpoints_require_auth(monkeypatch, tmp_path) -> None:
+def test_dashboard_account_endpoints_are_not_auth_gated(monkeypatch, tmp_path) -> None:
     _auth_env(monkeypatch, tmp_path)
+    monkeypatch.setattr(dashboard_app, "_account_positions_payload", lambda: {"ok": True, "positions": []})
+    monkeypatch.setattr(dashboard_app, "_account_orders_payload", lambda: {"ok": True, "orders": []})
     status, _ = _invoke_app("GET", "/api/account/positions")
-    assert status.startswith("401")
+    assert status.startswith("200")
     status, _ = _invoke_app("GET", "/api/account/orders")
-    assert status.startswith("401")
+    assert status.startswith("200")
 
 
 def test_dashboard_execution_exit_endpoint_returns_order(monkeypatch, tmp_path) -> None:
@@ -1176,7 +1180,7 @@ def test_frontend_identifies_live_market_paper_trading_and_real_money_off() -> N
     assert status.startswith("200")
     assert "ALPACA PAPER | LIVE MARKET TRADING | REAL MONEY OFF | EXECUTION CHECKING" in body
     assert "AutoBott Phase 1 Operator Console" in body
-    assert "LOCKED" in body
+    assert "DASHBOARD READY" in body
     assert "Session Supervisor" in body
     assert "Arm paper execution" in body
     assert "Paper Readiness" in body
@@ -1196,15 +1200,18 @@ def test_frontend_contains_no_buy_sell_submit_order_controls() -> None:
     assert "buy button" not in lowered
     assert "sell button" not in lowered
     assert "submit order" not in lowered
-    assert "run protected trading cycle" in lowered
+    assert "run paper trading cycle" in lowered
     assert "start paper session" in lowered
 
 
-def test_frontend_contains_clean_locked_state_copy() -> None:
+def test_frontend_contains_no_dashboard_auth_or_token_setup() -> None:
     status, body = _invoke_app("GET", "/")
     assert status.startswith("200")
-    assert "Dashboard token required" in body
-    assert "Set token to view this panel." in body
+    assert "dashboard token" not in body.lower()
+    assert "dashboardToken" not in body
+    assert "Authorization" not in body
+    assert "TOKEN REQUIRED" not in body
+    assert "DASHBOARD READY" in body
     assert "Theory pass" in body
     assert "2DTE pass" in body
     assert "Worst Thesis Failures" in body

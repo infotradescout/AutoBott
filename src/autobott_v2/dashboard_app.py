@@ -52,15 +52,10 @@ DECISION_LAB_MIN_SYNC_INTERVAL_MINUTES = 30
 def app(environ: dict[str, Any], start_response: Callable[..., Any]) -> list[bytes]:
     method = environ.get("REQUEST_METHOD", "GET").upper()
     path = environ.get("PATH_INFO", "/")
-    headers = _extract_headers(environ)
     body = _read_body(environ)
 
     try:
-        status_code, content_type, payload = handle_request(method, path, headers, body)
-    except PermissionError as exc:
-        status_code = 401
-        content_type = "application/json; charset=utf-8"
-        payload = {"ok": False, "error": "unauthorized", "detail": str(exc)}
+        status_code, content_type, payload = handle_request(method, path, {}, body)
     except Exception as exc:  # pragma: no cover
         status_code = 500
         content_type = "application/json; charset=utf-8"
@@ -79,7 +74,6 @@ def handle_request(method: str, path: str, headers: dict[str, str], body: bytes)
         payload = _health_payload()
         return (200 if payload["ok"] else 503), "application/json; charset=utf-8", payload
     if path.startswith("/api/"):
-        _require_auth(headers)
         if path == "/api/safety" and method == "GET":
             return 200, "application/json; charset=utf-8", _safety_payload()
         if path == "/api/alpaca/status" and method == "GET":
@@ -1826,7 +1820,7 @@ def _dashboard_html() -> str:
         <div class="muted mono" id="mode-banner-text">ALPACA PAPER | LIVE MARKET TRADING | REAL MONEY OFF | EXECUTION CHECKING</div>
         <div class="chip-row">
           <span class="chip info">Current Service <span id="service-name">autobott-phase1-dashboard</span></span>
-          <span class="chip warn" id="auth-badge">LOCKED</span>
+          <span class="chip safe">DASHBOARD READY</span>
           <span class="chip safe" id="service-badge">BOOT CHECK RUNNING</span>
         </div>
       </section>
@@ -1842,8 +1836,8 @@ def _dashboard_html() -> str:
             <div class="mono" id="env-value">PAPER ONLY</div>
           </div>
           <div class="mini">
-            <div class="mini-label">Auth State</div>
-            <div class="mono" id="auth-state-text">LOCKED</div>
+            <div class="mini-label">Dashboard Access</div>
+            <div class="mono">DIRECT</div>
           </div>
           <div class="mini">
             <div class="mini-label">Health</div>
@@ -1944,48 +1938,42 @@ def _dashboard_html() -> str:
           <div class="group-head">
             <div>
               <h2>Operator Actions</h2>
-              <div class="section-note">Controlled flows only. Token-gated actions stay disabled until authentication succeeds.</div>
+              <div class="section-note">Paper-trading controls are available directly from this operator console.</div>
             </div>
-            <span class="badge warn" id="action-state">TOKEN REQUIRED</span>
+            <span class="badge safe">READY</span>
           </div>
           <div class="group-grid">
             <div class="group">
-              <div class="group-title">Auth</div>
-              <button class="primary" onclick="setToken()">Set Dashboard Token</button>
-              <button class="ghost" onclick="clearToken()">Clear Token</button>
-              <div class="button-note">Locked panels will show “Dashboard token required” until a valid token is accepted.</div>
-            </div>
-            <div class="group">
               <div class="group-title">Runtime</div>
-              <button class="primary protected-action" onclick="armPaperMode()">Arm paper execution</button>
-              <button class="secondary protected-action" onclick="disableExecution()">Disable execution</button>
-              <button class="ghost protected-action" onclick="engageKillSwitch()">Engage kill switch</button>
+              <button class="primary" onclick="armPaperMode()">Arm paper execution</button>
+              <button class="secondary" onclick="disableExecution()">Disable execution</button>
+              <button class="ghost" onclick="engageKillSwitch()">Engage kill switch</button>
               <div class="button-note">These controls affect paper execution only. Live mode remains locked.</div>
             </div>
             <div class="group">
               <div class="group-title">Capture</div>
-              <button class="primary protected-action" onclick="startCapture(5)">Run 5-minute capture</button>
-              <button class="secondary protected-action" onclick="startCapture(30)">Run 30-minute capture</button>
+              <button class="primary" onclick="startCapture(5)">Run 5-minute capture</button>
+              <button class="secondary" onclick="startCapture(30)">Run 30-minute capture</button>
               <div class="button-note">Paper-only snapshot capture for evidence and diagnostics.</div>
             </div>
             <div class="group">
               <div class="group-title">Campaign</div>
-              <button class="primary protected-action" onclick="runCampaign()">Run campaign from latest corpus</button>
-              <button class="secondary protected-action" onclick="runDecisionLabBackfill()">Run historical decision lab</button>
+              <button class="primary" onclick="runCampaign()">Run campaign from latest corpus</button>
+              <button class="secondary" onclick="runDecisionLabBackfill()">Run historical decision lab</button>
               <div class="button-note">Advisory replay only. Live trading remains disabled.</div>
             </div>
             <div class="group">
               <div class="group-title">Trading Cycle</div>
-              <button class="primary protected-action" onclick="runTradingCycle()">Run protected trading cycle</button>
-              <button class="secondary protected-action" onclick="startPaperSession()">Start paper session</button>
-              <button class="ghost protected-action" onclick="reconcileExecution()">Reconcile open orders</button>
+              <button class="primary" onclick="runTradingCycle()">Run paper trading cycle</button>
+              <button class="secondary" onclick="startPaperSession()">Start paper session</button>
+              <button class="ghost" onclick="reconcileExecution()">Reconcile open orders</button>
               <div class="button-note">Capture, decision, and broker submit when runtime controls permit.</div>
             </div>
             <div class="group">
               <div class="group-title">Refresh</div>
               <button class="secondary" onclick="refreshAll()">Refresh all panels</button>
-              <button class="ghost protected-action" onclick="refreshProtected()">Refresh protected only</button>
-              <div class="button-note">Health is public-by-design. Protected panels still fail closed.</div>
+              <button class="ghost" onclick="refreshDashboardData()">Refresh dashboard data</button>
+              <div class="button-note">Refresh account, execution, strategy, and persistence data.</div>
             </div>
           </div>
         </section>
@@ -2002,7 +1990,7 @@ def _dashboard_html() -> str:
             <div class="log" id="action-log">
               <div class="log-entry">
                 <div class="log-label">Status</div>
-                <div>Console ready. Protected panels are locked until authentication succeeds.</div>
+                <div>Console ready. Loading paper account and AutoBott runtime data.</div>
               </div>
             </div>
           </div>
@@ -2012,7 +2000,6 @@ def _dashboard_html() -> str:
   </div>
   <script>
     const dashboardState = {
-      authState: 'LOCKED',
       version: 'loading',
       safety: null,
       corpus: null,
@@ -2020,10 +2007,7 @@ def _dashboard_html() -> str:
       session: null
     };
 
-    const apiHeaders = () => {
-      const token = sessionStorage.getItem('dashboardToken') || '';
-      return token ? { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' } : { 'Content-Type': 'application/json' };
-    };
+    const apiHeaders = () => ({ 'Content-Type': 'application/json' });
 
     async function callApi(path, options = {}) {
       const response = await fetch(path, { ...options, headers: { ...apiHeaders(), ...(options.headers || {}) } });
@@ -2034,40 +2018,6 @@ def _dashboard_html() -> str:
         payload = {};
       }
       return { ok: response.ok, status: response.status, payload };
-    }
-
-    function setToken() {
-      const value = window.prompt('Enter dashboard auth token');
-      if (value) {
-        sessionStorage.setItem('dashboardToken', value);
-        logEntry('Token updated', 'Dashboard token stored in browser session. Refreshing protected panels.', 'warn');
-        refreshAll();
-      }
-    }
-
-    function clearToken() {
-      sessionStorage.removeItem('dashboardToken');
-      setAuthState('LOCKED');
-      syncActionState();
-      logEntry('Token cleared', 'Protected panels are locked again until a valid token is set.', 'warn');
-      refreshAll();
-    }
-
-    function setAuthState(state) {
-      dashboardState.authState = state;
-      document.getElementById('auth-badge').textContent = state;
-      document.getElementById('auth-badge').className = `chip ${state === 'AUTHENTICATED' ? 'safe' : 'warn'}`;
-      document.getElementById('auth-state-text').textContent = state;
-      document.getElementById('action-state').textContent = state === 'AUTHENTICATED' ? 'CONTROLLED ACCESS' : 'TOKEN REQUIRED';
-      document.getElementById('action-state').className = `badge ${state === 'AUTHENTICATED' ? 'safe' : 'warn'}`;
-    }
-
-    function syncActionState() {
-      const tokenPresent = !!sessionStorage.getItem('dashboardToken');
-      const enabled = tokenPresent && dashboardState.authState === 'AUTHENTICATED';
-      document.querySelectorAll('.protected-action').forEach((button) => {
-        button.disabled = !enabled;
-      });
     }
 
     function updateRefreshStamp() {
@@ -2096,15 +2046,6 @@ def _dashboard_html() -> str:
           <div class="metric-value compact">${value}</div>
         </div>`).join('')}
       </div>`;
-    }
-
-    function lockedState() {
-      return `
-        <div class="locked">
-          <strong>Locked</strong>
-          <div>Dashboard token required</div>
-          <div class="muted">Set token to view this panel.</div>
-        </div>`;
     }
 
     function emptyState(title, detail) {
@@ -2140,17 +2081,12 @@ def _dashboard_html() -> str:
       document.getElementById('service-badge').className = `chip ${payload.ok ? 'safe' : 'danger'}`;
     }
 
-    function renderProtectedPanel(targetId, result, formatter) {
+    function renderDashboardPanel(targetId, result, formatter) {
       const target = document.getElementById(targetId);
-      if (result.status === 401) {
-        target.innerHTML = lockedState();
-        return false;
-      }
       if (!result.ok) {
         target.innerHTML = errorState('Request failed', result.payload.detail || result.payload.error || 'Unknown error', result.payload);
         return false;
       }
-      setAuthState('AUTHENTICATED');
       target.innerHTML = formatter(result.payload);
       return true;
     }
@@ -2566,7 +2502,7 @@ def _dashboard_html() -> str:
       const corpus = dashboardState.corpus;
       const campaign = dashboardState.campaign;
       if (!safety) {
-        document.getElementById('persistence-status').innerHTML = emptyState('Persistence unknown', 'Authenticate to inspect active runtime paths.');
+        document.getElementById('persistence-status').innerHTML = emptyState('Persistence unknown', 'Runtime paths have not loaded yet.');
         return;
       }
       const roots = [safety.active_gate_path, corpus?.manifest_path, campaign?.artifact_dir].filter(Boolean);
@@ -2588,9 +2524,8 @@ def _dashboard_html() -> str:
       return result;
     }
 
-    async function refreshProtected() {
-      setAuthState(sessionStorage.getItem('dashboardToken') ? 'LOCKED' : 'LOCKED');
-      const protectedResults = await Promise.all([
+    async function refreshDashboardData() {
+      const dashboardResults = await Promise.all([
         callApi('/api/safety'),
         callApi('/api/alpaca/status'),
         callApi('/api/paper/readiness'),
@@ -2607,29 +2542,28 @@ def _dashboard_html() -> str:
         callApi('/api/decisions/feed'),
         callApi('/api/options/timeline')
       ]);
-      renderProtectedPanel('safety-status', protectedResults[0], renderSafety);
-      renderProtectedPanel('alpaca-status', protectedResults[1], renderAlpaca);
-      renderProtectedPanel('paper-readiness', protectedResults[2], renderPaperReadiness);
-      renderProtectedPanel('corpus-status', protectedResults[3], renderCorpus);
-      renderProtectedPanel('campaign-status', protectedResults[4], renderCampaign);
-      renderProtectedPanel('session-status', protectedResults[5], renderSession);
-      renderProtectedPanel('bucket-report', protectedResults[6], renderBucketReport);
-      renderProtectedPanel('thesis-failures', protectedResults[7], renderThesisFailures);
-      renderProtectedPanel('gate-report', protectedResults[8], renderGateReport);
-      renderProtectedPanel('decision-lab', protectedResults[9], renderDecisionLab);
-      renderProtectedPanel('account-summary', protectedResults[10], renderAccountSummary);
-      renderProtectedPanel('account-positions', protectedResults[10], renderAccountPositions);
-      renderProtectedPanel('account-orders', protectedResults[11], renderAccountOrders);
-      renderProtectedPanel('options-scout', protectedResults[12], renderOptionsScout);
-      renderProtectedPanel('decision-feed', protectedResults[13], renderDecisionFeed);
-      renderProtectedPanel('options-timeline', protectedResults[14], renderOptionsTimeline);
+      renderDashboardPanel('safety-status', dashboardResults[0], renderSafety);
+      renderDashboardPanel('alpaca-status', dashboardResults[1], renderAlpaca);
+      renderDashboardPanel('paper-readiness', dashboardResults[2], renderPaperReadiness);
+      renderDashboardPanel('corpus-status', dashboardResults[3], renderCorpus);
+      renderDashboardPanel('campaign-status', dashboardResults[4], renderCampaign);
+      renderDashboardPanel('session-status', dashboardResults[5], renderSession);
+      renderDashboardPanel('bucket-report', dashboardResults[6], renderBucketReport);
+      renderDashboardPanel('thesis-failures', dashboardResults[7], renderThesisFailures);
+      renderDashboardPanel('gate-report', dashboardResults[8], renderGateReport);
+      renderDashboardPanel('decision-lab', dashboardResults[9], renderDecisionLab);
+      renderDashboardPanel('account-summary', dashboardResults[10], renderAccountSummary);
+      renderDashboardPanel('account-positions', dashboardResults[10], renderAccountPositions);
+      renderDashboardPanel('account-orders', dashboardResults[11], renderAccountOrders);
+      renderDashboardPanel('options-scout', dashboardResults[12], renderOptionsScout);
+      renderDashboardPanel('decision-feed', dashboardResults[13], renderDecisionFeed);
+      renderDashboardPanel('options-timeline', dashboardResults[14], renderOptionsTimeline);
       renderPersistenceStatus();
-      syncActionState();
     }
 
     async function refreshAll() {
       await refreshHealth();
-      await refreshProtected();
+      await refreshDashboardData();
       updateRefreshStamp();
     }
 
@@ -2637,8 +2571,6 @@ def _dashboard_html() -> str:
       const result = await callApi('/api/capture/start', { method:'POST', body: JSON.stringify({ symbols:['SPY','QQQ'], minutes, interval_seconds:60 }) });
       if (result.ok) {
         logEntry('Capture completed', `${minutes}-minute paper capture finished without enabling trading or mutating the active gate.`);
-      } else if (result.status === 401) {
-        logEntry('Capture blocked', 'Dashboard token required before protected actions can run.', 'warn');
       } else {
         logEntry('Capture failed', result.payload.detail || result.payload.error || 'Unknown capture failure.', 'danger');
       }
@@ -2649,8 +2581,6 @@ def _dashboard_html() -> str:
       const result = await callApi('/api/campaign/run', { method:'POST', body: JSON.stringify({}) });
       if (result.ok) {
         logEntry('Campaign completed', 'Advisory replay campaign finished. Review report panels for candidate and bucket summaries.');
-      } else if (result.status === 401) {
-        logEntry('Campaign blocked', 'Dashboard token required before protected actions can run.', 'warn');
       } else {
         logEntry('Campaign failed', result.payload.detail || result.payload.error || 'Unknown campaign failure.', 'danger');
       }
@@ -2670,8 +2600,6 @@ def _dashboard_html() -> str:
       if (result.ok) {
         const lab = result.payload.decision_lab || {};
         logEntry('Decision Lab completed', `Closed ${lab.summary?.closed_trades ?? 0} replay trades. Actual vs no-trade: ${lab.baselines?.actual_vs_no_trade ?? 'n/a'}.`);
-      } else if (result.status === 401) {
-        logEntry('Decision Lab blocked', 'Dashboard token required before protected actions can run.', 'warn');
       } else {
         logEntry('Decision Lab failed', result.payload.detail || result.payload.error || 'Unknown decision lab failure.', 'danger');
       }
@@ -2685,8 +2613,6 @@ def _dashboard_html() -> str:
         const attempts = result.payload.trade_attempted_count ?? result.payload.orders_submitted?.length ?? 0;
         const rejected = Object.values(result.payload.execution_rejected_count_by_reason || {}).reduce((sum, value) => sum + Number(value || 0), 0);
         logEntry('Trading cycle completed', `Candidates: ${candidates}. Trade attempts: ${attempts}. Execution rejections: ${rejected}.`);
-      } else if (result.status === 401) {
-        logEntry('Trading cycle blocked', 'Dashboard token required before protected actions can run.', 'warn');
       } else {
         logEntry('Trading cycle failed', result.payload.detail || result.payload.error || 'Unknown trading cycle failure.', 'danger');
       }
@@ -2697,8 +2623,6 @@ def _dashboard_html() -> str:
       const result = await callApi('/api/runtime/arm-paper', { method:'POST', body: JSON.stringify({ reason:'dashboard_arm_paper' }) });
       if (result.ok) {
         logEntry('Paper execution armed', 'Paper execution is enabled and live mode stays locked.', 'safe');
-      } else if (result.status === 401) {
-        logEntry('Arm blocked', 'Dashboard token required before protected actions can run.', 'warn');
       } else {
         logEntry('Arm failed', result.payload.detail || result.payload.error || 'Unknown runtime control failure.', 'danger');
       }
@@ -2709,8 +2633,6 @@ def _dashboard_html() -> str:
       const result = await callApi('/api/runtime/disable-execution', { method:'POST', body: JSON.stringify({ reason:'dashboard_disable_execution' }) });
       if (result.ok) {
         logEntry('Execution disabled', 'New paper entries are disabled until paper mode is armed again.', 'warn');
-      } else if (result.status === 401) {
-        logEntry('Disable blocked', 'Dashboard token required before protected actions can run.', 'warn');
       } else {
         logEntry('Disable failed', result.payload.detail || result.payload.error || 'Unknown runtime control failure.', 'danger');
       }
@@ -2721,8 +2643,6 @@ def _dashboard_html() -> str:
       const result = await callApi('/api/runtime/kill-switch', { method:'POST', body: JSON.stringify({ enabled:true, reason:'dashboard_kill_switch' }) });
       if (result.ok) {
         logEntry('Kill switch engaged', 'Execution and live mode were forced off immediately.', 'danger');
-      } else if (result.status === 401) {
-        logEntry('Kill switch blocked', 'Dashboard token required before protected actions can run.', 'warn');
       } else {
         logEntry('Kill switch failed', result.payload.detail || result.payload.error || 'Unknown runtime control failure.', 'danger');
       }
@@ -2733,8 +2653,6 @@ def _dashboard_html() -> str:
       const result = await callApi('/api/execution/reconcile', { method:'POST', body: JSON.stringify({}) });
       if (result.ok) {
         logEntry('Reconcile completed', `Checked ${result.payload.checked} orders and updated ${result.payload.updated}.`, 'safe');
-      } else if (result.status === 401) {
-        logEntry('Reconcile blocked', 'Dashboard token required before protected actions can run.', 'warn');
       } else {
         logEntry('Reconcile failed', result.payload.detail || result.payload.error || 'Unknown reconcile failure.', 'danger');
       }
@@ -2745,8 +2663,6 @@ def _dashboard_html() -> str:
       const result = await callApi('/api/session/start', { method:'POST', body: JSON.stringify({ symbols:['SPY'], interval_seconds:300, quantity:1 }) });
       if (result.ok && result.payload.started) {
         logEntry('Session started', 'Protected paper session launched successfully.', 'safe');
-      } else if (result.status === 401) {
-        logEntry('Session blocked', 'Dashboard token required before protected actions can run.', 'warn');
       } else if (result.ok) {
         logEntry('Session already running', 'Supervisor ignored the request because a session is already active.', 'warn');
       } else {
@@ -2755,21 +2671,11 @@ def _dashboard_html() -> str:
       await refreshAll();
     }
 
-    syncActionState();
     refreshAll();
   </script>
 </body>
 </html>
 """
-
-
-def _require_auth(headers: dict[str, str]) -> None:
-    expected = os.getenv("AUTOBOTT_DASHBOARD_AUTH_TOKEN", "")
-    if not expected:
-        raise PermissionError("dashboard_auth_token_not_configured")
-    provided = headers.get("authorization", "")
-    if provided != f"Bearer {expected}":
-        raise PermissionError("dashboard_auth_required")
 
 
 def _extract_headers(environ: dict[str, Any]) -> dict[str, str]:
@@ -2816,7 +2722,7 @@ def _parse_datetime(value: Any) -> datetime | None:
 
 
 def _reason(status_code: int) -> str:
-    return {200: "OK", 401: "Unauthorized", 404: "Not Found", 500: "Internal Server Error"}.get(status_code, "OK")
+    return {200: "OK", 404: "Not Found", 500: "Internal Server Error"}.get(status_code, "OK")
 
 
 def _corpus_root() -> Path:

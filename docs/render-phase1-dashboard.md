@@ -23,7 +23,6 @@ Deploy remains blocked until the persistent disk and hosted secrets below are co
 
 - `ALPACA_API_KEY_ID=<paper key>`
 - `ALPACA_API_SECRET_KEY=<paper secret>`
-- `AUTOBOTT_DASHBOARD_AUTH_TOKEN=<long random token>`
 
 Do not expose Alpaca credentials in frontend code.
 
