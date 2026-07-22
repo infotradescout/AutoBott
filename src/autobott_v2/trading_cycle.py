@@ -785,8 +785,7 @@ def _paper_opportunistic_decision(
         and strict_decision.ticker.upper() in _paper_volatility_hedge_symbols()
     )
     directional_discovery_override = (
-        strict_decision.decision is DecisionStatus.NO_TRADE
-        and strict_decision.blocked_reason == "direction_not_strong_enough"
+        strict_decision.decision is not DecisionStatus.TRADE_CANDIDATE
         and _paper_directional_discovery_enabled()
     )
     if strict_decision.decision not in {
