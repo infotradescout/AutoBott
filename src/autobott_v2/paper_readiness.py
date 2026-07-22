@@ -126,8 +126,13 @@ def run_paper_readiness_probe(
     response["account_status"] = str(account.get("status", "unknown"))
     response["options_trading_level"] = _account_level(account.get("options_trading_level"))
     response["options_approved_level"] = _account_level(account.get("options_approved_level"))
+    response["core_runner_atomic_mleg_required"] = _core_runner_atomic_mleg_required()
     response["core_runner_mleg_ready"] = bool(
-        response["options_trading_level"] is not None and response["options_trading_level"] >= 3
+        not response["core_runner_atomic_mleg_required"]
+        or (response["options_trading_level"] is not None and response["options_trading_level"] >= 3)
+    )
+    response["core_runner_submission_mode"] = (
+        "atomic_mleg" if response["core_runner_atomic_mleg_required"] else "linked_simple_orders"
     )
     response["quote_symbols"] = sorted(quotes.keys())
     response["option_snapshot_count"] = len(option_snapshots)
@@ -185,13 +190,20 @@ def _execution_blockers(execution_config: Any, runtime_state: Any, *, account: d
         "yes",
         "on",
     }
-    if core_runner_enabled:
+    if core_runner_enabled and _core_runner_atomic_mleg_required():
         options_trading_level = _account_level(account.get("options_trading_level"))
         if options_trading_level is None:
             blockers.append("core_runner_mleg_level_unknown")
         elif options_trading_level < 3:
             blockers.append("core_runner_mleg_level_insufficient")
     return blockers
+
+
+def _core_runner_atomic_mleg_required() -> bool:
+    value = os.getenv("AUTOBOTT_CORE_RUNNER_ATOMIC_MLEG_REQUIRED")
+    if value is None:
+        return True
+    return value.strip().lower() in {"1", "true", "yes", "on"}
 
 
 def _account_level(value: Any) -> int | None:
