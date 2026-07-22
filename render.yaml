@@ -34,14 +34,10 @@ services:
         value: "5000"
       - key: AUTOBOTT_PAPER_TRADE_ALL_PASSED_SIGNALS
         value: "true"
-      - key: AUTOBOTT_PAPER_OPPORTUNISTIC_ENTRIES
-        value: "true"
-      - key: AUTOBOTT_PAPER_DIRECTIONAL_DISCOVERY
-        value: "true"
       - key: AUTOBOTT_PAPER_MAX_NEW_ENTRY_ATTEMPTS_PER_LOOP
-        value: "10"
+        value: "3"
       - key: AUTOBOTT_PAPER_MAX_OPEN_ENTRY_BUY_ORDERS
-        value: "20"
+        value: "6"
       - key: AUTOBOTT_ENTRY_LIMIT_EXTRA
         value: "0.02"
       - key: AUTOBOTT_PENDING_ENTRY_MAX_AGE_SECONDS
@@ -76,6 +72,14 @@ services:
         value: "10"
       - key: AUTOBOTT_RUNNER_MIN_VOLUME
         value: "1"
+      - key: AUTOBOTT_ENTRY_MIN_DTE
+        value: "5"
+      - key: AUTOBOTT_ENTRY_TACTICAL_MAX_DTE
+        value: "10"
+      - key: AUTOBOTT_ENTRY_RIDER_MIN_DTE
+        value: "14"
+      - key: AUTOBOTT_ENTRY_RIDER_MAX_DTE
+        value: "45"
       - key: AUTOBOTT_SPREAD_MAX_RISK
         value: "100"
       - key: AUTOBOTT_SPREAD_PROFIT_TARGET_PCT

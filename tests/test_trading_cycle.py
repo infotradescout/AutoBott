@@ -300,7 +300,7 @@ def test_run_trading_cycle_captures_decides_and_submits(tmp_path) -> None:
     assert "pass_trade_attempted" in dispositions
 
 
-def test_run_trading_cycle_submits_primary_and_runner_without_100_total_cap(tmp_path, monkeypatch) -> None:
+def test_unqualified_pair_chain_does_not_force_primary_and_runner(tmp_path, monkeypatch) -> None:
     monkeypatch.setenv("AUTOBOTT_CORE_RUNNER_ENABLED", "true")
     save_runtime_state(default_runtime_state(), state_path=tmp_path / "runtime_state.json")
     original = trading_cycle.load_runtime_state
@@ -323,17 +323,12 @@ def test_run_trading_cycle_submits_primary_and_runner_without_100_total_cap(tmp_
         trading_cycle.load_runtime_state = original
         trading_cycle.load_open_positions = original_positions
 
-    assert result.trade_attempted_count == 1
-    assert len(result.orders_submitted) == 2
-    assert [row["leg_role"] for row in result.orders_submitted] == ["primary", "runner"]
-    assert result.orders_submitted[0]["option_symbol"] != result.orders_submitted[1]["option_symbol"]
-    assert broker.submitted[0].quantity == broker.submitted[1].quantity == 1
-    assert len(broker.mleg_calls) == 1
-    assert sum(intent.estimated_notional for intent in broker.submitted) > 100.0
-    assert broker.submitted[0].metadata["trade_group_id"] == broker.submitted[1].metadata["trade_group_id"]
+    assert result.trade_attempted_count == 0
+    assert result.orders_submitted == []
+    assert broker.mleg_calls == []
 
 
-def test_risk_off_allows_bullish_volatility_hedge_in_paper_only(tmp_path, monkeypatch) -> None:
+def test_risk_off_does_not_manufacture_bullish_volatility_hedge(tmp_path, monkeypatch) -> None:
     monkeypatch.setenv("AUTOBOTT_CORE_RUNNER_ENABLED", "true")
     monkeypatch.setenv("AUTOBOTT_VOLATILITY_HEDGE_SYMBOLS", "VXX,UVXY")
     save_runtime_state(default_runtime_state(), state_path=tmp_path / "runtime_state.json")
@@ -358,10 +353,10 @@ def test_risk_off_allows_bullish_volatility_hedge_in_paper_only(tmp_path, monkey
         trading_cycle.load_open_positions = original_positions
 
     assert result.decisions[0]["decision"] == "BLOCKED_BY_REGIME"
-    assert result.decisions[1]["decision"] == "TRADE_CANDIDATE"
-    assert "paper_volatility_hedge_risk_off_override" in result.decisions[1]["reason_codes"]
-    assert len(result.orders_submitted) == 2
-    assert len(broker.mleg_calls) == 1
+    assert len(result.decisions) == 1
+    assert result.trade_attempted_count == 0
+    assert result.orders_submitted == []
+    assert broker.mleg_calls == []
 
 
 def test_risk_off_still_blocks_ordinary_bullish_equity_in_paper(tmp_path, monkeypatch) -> None:
@@ -1070,7 +1065,7 @@ def test_run_trading_cycle_paper_opportunistic_mode_can_be_disabled(tmp_path, mo
     assert result.trade_attempted_count == 0
     assert result.orders_submitted == []
 
-def test_paper_directional_discovery_turns_neutral_cycle_into_atomic_pair(tmp_path, monkeypatch) -> None:
+def test_paper_environment_cannot_turn_neutral_cycle_into_order(tmp_path, monkeypatch) -> None:
     monkeypatch.setenv("AUTOBOTT_CORE_RUNNER_ENABLED", "true")
     monkeypatch.setenv("AUTOBOTT_PAPER_OPPORTUNISTIC_ENTRIES", "true")
     monkeypatch.setenv("AUTOBOTT_PAPER_DIRECTIONAL_DISCOVERY", "true")
@@ -1118,13 +1113,12 @@ def test_paper_directional_discovery_turns_neutral_cycle_into_atomic_pair(tmp_pa
         trading_cycle.load_open_positions = original_positions
 
     assert result.decisions[0]["decision"] == "NO_TRADE"
-    assert result.decisions[1]["decision"] == "TRADE_CANDIDATE"
-    assert "paper_directional_discovery_override" in result.decisions[1]["reason_codes"]
-    assert result.trade_attempted_count == 1
-    assert len(result.orders_submitted) == 2
-    assert len(broker.mleg_calls) == 1
+    assert len(result.decisions) == 1
+    assert result.trade_attempted_count == 0
+    assert result.orders_submitted == []
+    assert broker.mleg_calls == []
 
-def test_paper_directional_discovery_turns_regime_block_into_atomic_pair(tmp_path, monkeypatch) -> None:
+def test_paper_environment_records_regime_block_without_order(tmp_path, monkeypatch) -> None:
     monkeypatch.setenv("AUTOBOTT_CORE_RUNNER_ENABLED", "true")
     monkeypatch.setenv("AUTOBOTT_PAPER_OPPORTUNISTIC_ENTRIES", "true")
     monkeypatch.setenv("AUTOBOTT_PAPER_DIRECTIONAL_DISCOVERY", "true")
@@ -1167,12 +1161,10 @@ def test_paper_directional_discovery_turns_regime_block_into_atomic_pair(tmp_pat
         trading_cycle.load_open_positions = original_positions
 
     assert result.decisions[0]["decision"] == "BLOCKED_BY_REGIME"
-    assert result.decisions[1]["decision"] == "TRADE_CANDIDATE"
-    assert "paper_directional_discovery_override" in result.decisions[1]["reason_codes"]
+    assert len(result.decisions) == 1
     assert len(result.snapshot_paths) == 1
     assert any(row["disposition"] == "trade_outcome_learning_summary" for row in result.execution_outcomes)
-    assert any(row["disposition"] == "pass_trade_attempted" for row in result.execution_outcomes)
-    assert result.trade_attempted_count == 1
-    assert len(result.orders_submitted) == 2
-    assert len(broker.mleg_calls) == 1
-
+    assert not any(row["disposition"] == "pass_trade_attempted" for row in result.execution_outcomes)
+    assert result.trade_attempted_count == 0
+    assert result.orders_submitted == []
+    assert broker.mleg_calls == []
