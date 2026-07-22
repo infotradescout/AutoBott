@@ -256,7 +256,7 @@ def test_submit_core_runner_can_use_linked_simple_orders_for_paper_collection(tm
     import autobott_v2.execution_orchestrator as orchestrator
 
     monkeypatch.delenv("AUTOBOTT_CORE_RUNNER_ATOMIC_MLEG_REQUIRED", raising=False)
-    monkeypatch.setenv("AUTOBOTT_SESSION_AUTOSTART", "true")
+    monkeypatch.setenv("AUTOBOTT_DATA_ROOT", "/var/data/autobott/data")
     monkeypatch.setattr(orchestrator, "upsert_open_position_from_order", lambda *args, **kwargs: None)
     broker = FakeBroker()
     selected = _decision_card().selected_contract
