@@ -105,7 +105,7 @@ services:
       - key: AUTOBOTT_TAKE_PROFIT_HARVEST_LIMIT_PRICE_FACTOR
         value: "0.95"
       - key: AUTOBOTT_POSITION_MONITOR_HEARTBEAT_ENABLED
-        value: "true"
+        value: "false"
       - key: AUTOBOTT_POSITION_MONITOR_HEARTBEAT_SECONDS
         value: "15"
       - key: AUTOBOTT_RECENT_LOSS_GUARD_ENABLED
@@ -170,3 +170,9 @@ services:
         value: /var/data/autobott/artifacts
       - key: AUTOBOTT_GATE_PATH
         value: /var/data/autobott/data/PHASE1_CYCLE_GATE.json
+      - key: AUTOBOTT_SNAPSHOT_MAX_BYTES
+        value: "134217728"
+      - key: AUTOBOTT_MIN_FREE_BYTES
+        value: "134217728"
+      - key: AUTOBOTT_CAPTURE_OPTION_QUOTE_FILES
+        value: "false"

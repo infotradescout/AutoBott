@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -213,6 +214,21 @@ class AlpacaExecutionBroker:
         return payload if isinstance(payload, list) else []
 
     def _request_json(self, method: str, path: str, *, payload: dict | None = None) -> dict | list:
+        if method == "GET":
+            return self._request_json_with_get_retry(method, path, payload=payload)
+        return self._request_json_once(method, path, payload=payload)
+
+    def _request_json_with_get_retry(self, method: str, path: str, *, payload: dict | None = None) -> dict | list:
+        for attempt in range(3):
+            try:
+                return self._request_json_once(method, path, payload=payload)
+            except ValueError as exc:
+                if "alpaca_http_429:" not in str(exc) or attempt == 2:
+                    raise
+                time.sleep(0.5 * (2**attempt))
+        raise RuntimeError("alpaca_get_retry_exhausted")
+
+    def _request_json_once(self, method: str, path: str, *, payload: dict | None = None) -> dict | list:
         headers = {
             "APCA-API-KEY-ID": str(self.config.api_key),
             "APCA-API-SECRET-KEY": str(self.config.secret_key),
