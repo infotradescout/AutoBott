@@ -150,6 +150,113 @@ def test_get_option_chain_joins_contract_open_interest(monkeypatch) -> None:
     assert any("/v1beta1/options/snapshots/VXX" in url for url in urls)
 
 
+def test_vix_chain_requires_paper_capability_and_european_contracts(monkeypatch) -> None:
+    client = AlpacaPaperClient(_config())
+    urls = []
+    option_symbol = "VIXW260814C00024000"
+
+    def fake_urlopen(request, timeout=30):
+        urls.append(request.full_url)
+        if request.full_url.endswith("/v2/account"):
+            return _FakeResponse({"options_trading_level": 3, "trading_blocked": False})
+        if "/v2/options/contracts" in request.full_url:
+            return _FakeResponse(
+                {
+                    "option_contracts": [
+                        {
+                            "symbol": option_symbol,
+                            "underlying_symbol": "VIX",
+                            "root_symbol": "VIXW",
+                            "style": "european",
+                            "expiration_date": "2026-08-14",
+                            "strike_price": "24",
+                            "type": "call",
+                            "tradable": True,
+                        }
+                    ]
+                }
+            )
+        return _FakeResponse(
+            {
+                "snapshots": {
+                    option_symbol: {
+                        "latestQuote": {"bp": 1.9, "ap": 2.0},
+                        "greeks": {"delta": 0.52, "theta": -0.03, "vega": 0.08, "iv": 0.7},
+                    }
+                }
+            }
+        )
+
+    monkeypatch.setattr("autobott_v2.phase1_alpaca_client.urllib.request.urlopen", fake_urlopen)
+
+    chain = client.get_option_chain_snapshots("VIX")
+
+    assert set(chain) == {option_symbol}
+    contract_url = next(url for url in urls if "/v2/options/contracts" in url)
+    assert "underlying_symbols=VIX" in contract_url
+    assert "style=european" in contract_url
+    assert any("/v1beta1/options/snapshots/VIX" in url for url in urls)
+
+
+def test_vixw_chain_uses_vix_underlying_and_vixw_root(monkeypatch) -> None:
+    client = AlpacaPaperClient(_config())
+    urls = []
+    option_symbol = "VIXW260814C00024000"
+
+    def fake_urlopen(request, timeout=30):
+        urls.append(request.full_url)
+        if request.full_url.endswith("/v2/account"):
+            return _FakeResponse({"options_trading_level": 3, "trading_blocked": False})
+        if "/v2/options/contracts" in request.full_url:
+            return _FakeResponse(
+                {
+                    "option_contracts": [
+                        {
+                            "symbol": option_symbol,
+                            "underlying_symbol": "VIX",
+                            "root_symbol": "VIXW",
+                            "style": "european",
+                            "expiration_date": "2026-08-14",
+                            "strike_price": "24",
+                            "type": "call",
+                            "tradable": True,
+                        }
+                    ]
+                }
+            )
+        return _FakeResponse(
+            {
+                "snapshots": {
+                    option_symbol: {
+                        "latestQuote": {"bp": 1.9, "ap": 2.0},
+                        "greeks": {"delta": 0.52, "theta": -0.03, "vega": 0.08, "iv": 0.7},
+                    }
+                }
+            }
+        )
+
+    monkeypatch.setattr("autobott_v2.phase1_alpaca_client.urllib.request.urlopen", fake_urlopen)
+
+    chain = client.get_option_chain_snapshots("VIXW")
+
+    assert set(chain) == {option_symbol}
+    contract_url = next(url for url in urls if "/v2/options/contracts" in url)
+    snapshot_url = next(url for url in urls if "/v1beta1/options/snapshots/" in url)
+    assert "underlying_symbols=VIX" in contract_url
+    assert "root_symbol=VIXW" in contract_url
+    assert "/v1beta1/options/snapshots/VIX?" in snapshot_url
+    assert "root_symbol=VIXW" in snapshot_url
+    assert "/snapshots/VIXW" not in snapshot_url
+
+
+def test_vix_chain_fails_capability_probe_below_level_two(monkeypatch) -> None:
+    client = AlpacaPaperClient(_config())
+    monkeypatch.setattr(client, "get_account", lambda: {"options_trading_level": 1})
+
+    with pytest.raises(ValueError, match="vix_index_options_level_insufficient"):
+        client.get_option_chain_snapshots("VIX")
+
+
 def test_get_option_chain_drops_active_but_nontradable_contracts(monkeypatch) -> None:
     client = AlpacaPaperClient(_config())
     tradable = "VXX260717C00050000"

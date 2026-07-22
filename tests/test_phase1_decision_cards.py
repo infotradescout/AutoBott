@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from dataclasses import replace
 from datetime import date, datetime, timedelta, timezone
 
 from autobott_v2.phase1_config import load_alpaca_read_only_config
@@ -16,6 +17,7 @@ from autobott_v2.phase1_models import (
     MarketContext,
     OptionContractSnapshot,
     OptionType,
+    Phase1Rules,
     TradeSetup,
 )
 
@@ -147,6 +149,28 @@ def test_phase1_builds_trade_candidate_without_order() -> None:
     payload = json.dumps(card.to_json_dict()).lower()
     assert "paper_order" not in payload
     assert "order_id" not in payload
+
+
+def test_risk_off_exemption_allows_qualified_volatility_signal_only() -> None:
+    base = _input()
+    risk_off_context = MarketContext(
+        spy_bars=_bars(500.0, -0.35),
+        qqq_bars=_bars(430.0, -0.30),
+        vix_bars=_bars(16.0, 0.08),
+    )
+    rules = Phase1Rules(risk_off_bullish_exempt_symbols=("VXX", "UVXY", "VIX"))
+
+    volatility_card = build_decision_card(
+        replace(base, ticker="VXX", context=risk_off_context),
+        rules,
+    )
+    equity_card = build_decision_card(
+        replace(base, ticker="AAPL", context=risk_off_context),
+        rules,
+    )
+
+    assert volatility_card.decision is not DecisionStatus.BLOCKED_BY_REGIME
+    assert equity_card.decision is DecisionStatus.BLOCKED_BY_REGIME
 
 
 def test_phase1_blocks_event_iv_crush_risk() -> None:

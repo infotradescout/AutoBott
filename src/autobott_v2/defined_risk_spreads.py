@@ -7,6 +7,8 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+from .jsonl_retention import compact_jsonl_tail
+from .hosted_policy import is_hosted_paper_runtime
 from .phase1_models import DecisionInput, DirectionBias, OptionContractSnapshot, OptionType
 from .runtime_paths import data_root
 
@@ -67,6 +69,10 @@ def defined_risk_spread_journal_path() -> Path:
 
 
 def load_defined_risk_spread_rules() -> DefinedRiskSpreadRules:
+    if is_hosted_paper_runtime():
+        # This 0-3 DTE research lane is outside the hosted 5-45 DTE policy and
+        # must never parse retained env values on the real entry path.
+        return DefinedRiskSpreadRules(enabled=False)
     return DefinedRiskSpreadRules(
         enabled=_env_bool("AUTOBOTT_DEFINED_RISK_SPREADS_ENABLED", default=True),
         min_dte=int(os.getenv("AUTOBOTT_SPREAD_MIN_DTE", "0")),
@@ -128,6 +134,7 @@ def append_defined_risk_spread_candidate(
     with path.open("a", encoding="utf-8") as handle:
         handle.write(json.dumps(record, sort_keys=True))
         handle.write("\n")
+    compact_jsonl_tail(path)
     return path
 
 

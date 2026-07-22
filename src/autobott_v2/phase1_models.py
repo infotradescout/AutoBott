@@ -176,6 +176,10 @@ class Phase1Rules:
     reversal_min_move_pct: float = 0.012
     reversal_upper_range_position: float = 0.70
     reversal_lower_range_position: float = 0.30
+    # Volatility instruments rise during risk-off by design. This exemption
+    # only removes the contradictory regime veto; every direction, volatility,
+    # liquidity, confidence, DTE, and contract-quality gate still applies.
+    risk_off_bullish_exempt_symbols: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)

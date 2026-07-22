@@ -4,7 +4,13 @@ import json
 from datetime import UTC, date, datetime, timedelta, timezone
 from pathlib import Path
 
+import pytest
+
+from autobott_v2.core_runner import CoreRunnerRules, select_core_runner_pair
+from autobott_v2.phase1_engine import build_decision_card
+from autobott_v2.phase1_models import DecisionStatus, Phase1Rules
 from autobott_v2.phase1_snapshot_capture import (
+    AlpacaMarketDataClient,
     CaptureRules,
     _select_manual_mirror_candidates,
     _select_chain_subset,
@@ -12,6 +18,8 @@ from autobott_v2.phase1_snapshot_capture import (
     capture_symbol_snapshot,
     write_snapshot_day_manifest,
 )
+from autobott_v2.phase1_config import AlpacaReadOnlyConfig
+from autobott_v2.phase1_validate import _decision_input_from_snapshot
 
 
 class FakeCaptureClient:
@@ -62,6 +70,54 @@ class ShortFirstContextClient(FakeCaptureClient):
         if symbol == "UVXY" and self.calls_by_symbol[symbol] == 1:
             payload[symbol] = payload[symbol][:2]
         return payload
+
+
+class VixCaptureClient:
+    def __init__(self, *, include_greeks: bool = True) -> None:
+        self.include_greeks = include_greeks
+        self.bar_symbols: list[str] = []
+        self.option_symbols: list[str] = []
+
+    def get_stock_bars(self, symbols, *, start, end, timeframe="1Min", limit=35):
+        symbol = symbols[0].upper()
+        self.bar_symbols.append(symbol)
+        base = {"VIXY": 16.0, "SPY": 600.0, "QQQ": 520.0}.get(symbol, 18.0)
+        return {
+            symbol: [
+                {
+                    "t": (end - timedelta(minutes=34 - index)).isoformat(),
+                    "o": base + index * 0.03,
+                    "h": base + index * 0.03 + 0.05,
+                    "l": base + index * 0.03 - 0.05,
+                    "c": base + index * 0.03,
+                    "v": 2000 + index,
+                }
+                for index in range(35)
+            ]
+        }
+
+    def get_latest_stock_quotes(self, symbols):
+        return {
+            symbol.upper(): {
+                "t": "2026-06-30T14:35:00Z",
+                "bp": _base_price(symbol) - 0.05,
+                "ap": _base_price(symbol) + 0.05,
+            }
+            for symbol in symbols
+        }
+
+    def get_option_chain_snapshots(self, symbol):
+        self.option_symbols.append(symbol.upper())
+        primary = _option_snapshot("2026-07-07", "call", 24.0, 0.52, 1.90, 2.00)
+        runner = _option_snapshot("2026-07-07", "call", 28.0, 0.18, 0.30, 0.36)
+        for row in (primary, runner):
+            row["underlying_price"] = 24.0
+            if not self.include_greeks:
+                row["greeks"] = {}
+        return {
+            "VIXW260707C00024000": primary,
+            "VIXW260707C00028000": runner,
+        }
 
 
 def _base_price(symbol: str) -> float:
@@ -226,6 +282,136 @@ def test_snapshot_capture_retries_short_context_bar_response(tmp_path) -> None:
 
     assert client.calls_by_symbol["UVXY"] == 2
     assert len(snapshot["context"]["vix_bars"]) == 35
+
+
+def test_vix_capture_uses_vixy_signal_and_real_vix_contracts(tmp_path) -> None:
+    client = VixCaptureClient()
+    snapshot_path = capture_symbol_snapshot(
+        symbol="VIX",
+        corpus_root=tmp_path,
+        scheduled_market_time=datetime(2026, 6, 30, 10, 35, tzinfo=timezone(timedelta(hours=-4))),
+        captured_at_utc=datetime(2026, 6, 30, 14, 35, tzinfo=UTC),
+        corpus_type="paper_capture",
+        market_timezone="America/New_York",
+        volatility_proxy_symbol="VIXY",
+        data_client=client,
+        rules=CaptureRules(),
+    )
+
+    snapshot = json.loads(Path(snapshot_path).read_text(encoding="utf-8"))
+
+    assert "VIXY" in client.bar_symbols
+    assert "VIX" not in client.bar_symbols
+    assert client.option_symbols == ["VIX"]
+    assert snapshot["ticker"] == "VIX"
+    assert snapshot["underlying_quote"]["symbol"] == "VIX"
+    assert snapshot["underlying_quote"]["last"] == 24.0
+    assert {row["option_symbol"] for row in snapshot["option_chain"]} == {
+        "VIXW260707C00024000",
+        "VIXW260707C00028000",
+    }
+    assert {row["underlying"] for row in snapshot["option_chain"]} == {"VIX"}
+
+
+def test_api_shaped_vix_chain_preserves_returned_symbols_through_decision_and_pair(tmp_path) -> None:
+    snapshot_path = capture_symbol_snapshot(
+        symbol="VIX",
+        corpus_root=tmp_path,
+        scheduled_market_time=datetime(2026, 6, 30, 10, 35, tzinfo=timezone(timedelta(hours=-4))),
+        captured_at_utc=datetime(2026, 6, 30, 14, 35, tzinfo=UTC),
+        corpus_type="paper_capture",
+        market_timezone="America/New_York",
+        volatility_proxy_symbol="VIXY",
+        data_client=VixCaptureClient(),
+        rules=CaptureRules(),
+    )
+    snapshot = json.loads(Path(snapshot_path).read_text(encoding="utf-8"))
+    decision_input = _decision_input_from_snapshot(snapshot)
+
+    decision = build_decision_card(
+        decision_input,
+        Phase1Rules(risk_off_bullish_exempt_symbols=("VIX",)),
+    )
+    assert decision.decision is DecisionStatus.TRADE_CANDIDATE
+    assert decision.selected_contract is not None
+
+    pair = select_core_runner_pair(
+        decision.selected_contract,
+        decision_input.option_chain,
+        rules=CoreRunnerRules(),
+    )
+
+    assert decision.selected_contract.option_symbol == "VIXW260707C00024000"
+    assert pair is not None
+    assert pair.primary.option_symbol == "VIXW260707C00024000"
+    assert pair.runner.option_symbol == "VIXW260707C00028000"
+
+
+def test_vixw_market_data_request_uses_vix_underlying_and_vixw_root(monkeypatch) -> None:
+    client = AlpacaMarketDataClient(
+        AlpacaReadOnlyConfig(
+            api_key="paper-key",
+            secret_key="paper-secret",
+            base_url="https://paper-api.alpaca.markets",
+            data_url="https://data.alpaca.markets",
+            paper=True,
+        )
+    )
+    calls: list[tuple[str, dict[str, str], str | None]] = []
+    option_symbol = "VIXW260814C00024000"
+
+    def fake_get_json_with_retry(path, params, *, base_url=None):
+        calls.append((path, dict(params), base_url))
+        if path == "/v2/options/contracts":
+            return {
+                "option_contracts": [
+                    {
+                        "symbol": option_symbol,
+                        "underlying_symbol": "VIX",
+                        "root_symbol": "VIXW",
+                        "style": "european",
+                        "expiration_date": "2026-08-14",
+                        "strike_price": "24",
+                        "type": "call",
+                        "tradable": True,
+                    }
+                ]
+            }
+        return {
+            "snapshots": {
+                option_symbol: {
+                    "latestQuote": {"bp": 1.9, "ap": 2.0},
+                    "greeks": {"delta": 0.52, "theta": -0.03, "vega": 0.08, "iv": 0.7},
+                }
+            }
+        }
+
+    monkeypatch.setattr(client, "_get_json_with_retry", fake_get_json_with_retry)
+
+    chain = client.get_option_chain_snapshots("VIXW")
+
+    assert set(chain) == {option_symbol}
+    contract_call = next(call for call in calls if call[0] == "/v2/options/contracts")
+    snapshot_call = next(call for call in calls if call[0].startswith("/v1beta1/options/snapshots/"))
+    assert contract_call[1]["underlying_symbols"] == "VIX"
+    assert contract_call[1]["root_symbol"] == "VIXW"
+    assert snapshot_call[0] == "/v1beta1/options/snapshots/VIX"
+    assert snapshot_call[1]["root_symbol"] == "VIXW"
+
+
+def test_vix_capture_requires_provider_greeks(tmp_path) -> None:
+    with pytest.raises(ValueError, match="empty_option_chain"):
+        capture_symbol_snapshot(
+            symbol="VIX",
+            corpus_root=tmp_path,
+            scheduled_market_time=datetime(2026, 6, 30, 10, 35, tzinfo=timezone(timedelta(hours=-4))),
+            captured_at_utc=datetime(2026, 6, 30, 14, 35, tzinfo=UTC),
+            corpus_type="paper_capture",
+            market_timezone="America/New_York",
+            volatility_proxy_symbol="VIXY",
+            data_client=VixCaptureClient(include_greeks=False),
+            rules=CaptureRules(),
+        )
 
 
 def test_chain_subset_preserves_farther_otm_runner_from_dense_chain() -> None:

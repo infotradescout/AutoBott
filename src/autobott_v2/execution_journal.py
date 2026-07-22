@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Any
 
 from .execution_models import ExecutionOrder, RiskCheckResult, TradeIntent
+from .jsonl_retention import compact_jsonl_tail, read_jsonl_tail
 from .runtime_paths import data_root
 
 
@@ -79,23 +80,39 @@ def append_execution_outcome(
     return _append_record(record, journal_path=journal_path)
 
 
-def load_execution_journal(*, journal_path: str | Path | None = None) -> list[dict[str, Any]]:
+def load_execution_journal(
+    *,
+    journal_path: str | Path | None = None,
+    max_tail_bytes: int | None = None,
+) -> list[dict[str, Any]]:
     path = Path(journal_path) if journal_path is not None else execution_journal_path()
     if not path.exists():
         return []
     rows: list[dict[str, Any]] = []
-    for line in path.read_text(encoding="utf-8").splitlines():
-        if line.strip():
-            rows.append(json.loads(line))
+    for raw_line in read_jsonl_tail(path, max_tail_bytes=max_tail_bytes):
+        if not raw_line.strip():
+            continue
+        try:
+            rows.append(json.loads(raw_line))
+        except (json.JSONDecodeError, UnicodeDecodeError, TypeError):
+            continue
     return rows
 
 
 def _append_record(record: ExecutionJournalRecord, *, journal_path: str | Path | None = None) -> Path:
     path = Path(journal_path) if journal_path is not None else execution_journal_path()
     path.parent.mkdir(parents=True, exist_ok=True)
+    needs_separator = False
+    if path.exists() and path.stat().st_size:
+        with path.open("rb") as existing:
+            existing.seek(-1, 2)
+            needs_separator = existing.read(1) != b"\n"
     with path.open("a", encoding="utf-8") as handle:
+        if needs_separator:
+            handle.write("\n")
         handle.write(json.dumps(record.to_json_dict(), sort_keys=True))
         handle.write("\n")
+    compact_jsonl_tail(path)
     return path
 
 

@@ -3,15 +3,20 @@ from __future__ import annotations
 import json
 import os
 from dataclasses import dataclass, replace
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 from pathlib import Path
 from typing import Any
 
 from .execution_broker import AlpacaExecutionBroker
 from .execution_journal import append_execution_outcome, append_order_submission
 from .execution_models import BrokerEnvironment, ExecutionOrder, OrderSide, OrderType, TradeIntent
-from .position_store import load_open_positions
-from .runtime_control import load_runtime_state
+from .hosted_policy import (
+    HOSTED_EXIT_MIN_DTE,
+    HOSTED_POLICY_VERSION,
+    active_build_sha,
+    is_hosted_paper_runtime,
+)
+from .position_store import load_open_positions, save_open_positions
 from .runtime_paths import data_root
 
 
@@ -45,9 +50,14 @@ class PositionMonitorRules:
     runner_trailing_drawdown_pct: float = 0.25
     runner_stop_loss_pct: float = 0.70
     pending_entry_max_age_seconds: int = 180
+    # Disabled for library/replay callers. Hosted paper loads a code-owned
+    # two-DTE floor through load_position_monitor_rules().
+    exit_min_dte: int = -1
 
 
 def load_position_monitor_rules() -> PositionMonitorRules:
+    if is_hosted_paper_runtime():
+        return PositionMonitorRules(exit_min_dte=HOSTED_EXIT_MIN_DTE)
     return PositionMonitorRules(
         enabled=_normalize_bool(os.getenv("AUTOBOTT_POSITION_MONITOR_ENABLED"), default=True),
         take_profit_pct=float(os.getenv("AUTOBOTT_EXIT_TAKE_PROFIT_PCT", "0.30")),
@@ -71,6 +81,7 @@ def load_position_monitor_rules() -> PositionMonitorRules:
         runner_trailing_drawdown_pct=float(os.getenv("AUTOBOTT_RUNNER_EXIT_TRAILING_DRAWDOWN_PCT", "0.25")),
         runner_stop_loss_pct=float(os.getenv("AUTOBOTT_RUNNER_EXIT_STOP_LOSS_PCT", "0.70")),
         pending_entry_max_age_seconds=max(30, int(os.getenv("AUTOBOTT_PENDING_ENTRY_MAX_AGE_SECONDS", "180"))),
+        exit_min_dte=max(-1, int(os.getenv("AUTOBOTT_EXIT_MIN_DTE", "-1"))),
     )
 
 
@@ -106,17 +117,6 @@ def run_position_monitor(
     resolved_rules = rules or load_position_monitor_rules()
     if not resolved_rules.enabled:
         return {"ok": True, "enabled": False, "checked": 0, "actions": []}
-    runtime_state = load_runtime_state()
-    if runtime_state.kill_switch_enabled or not runtime_state.execution_enabled:
-        return {
-            "ok": True,
-            "enabled": True,
-            "blocked": True,
-            "reason": "kill_switch_enabled" if runtime_state.kill_switch_enabled else "execution_disabled",
-            "checked": 0,
-            "actions": [],
-        }
-
     resolved_broker = broker or AlpacaExecutionBroker()
     if not hasattr(resolved_broker, "list_open_positions"):
         return {"ok": True, "enabled": True, "checked": 0, "actions": []}
@@ -131,22 +131,29 @@ def run_position_monitor(
     peaks = _load_trailing_peaks(state_path=trailing_state_path)
     open_symbols: set[str] = set()
     actions: list[dict[str, Any]] = []
-    actions.extend(
-        _cancel_stale_pending_entries(
-            resolved_broker,
-            max_age_seconds=resolved_rules.pending_entry_max_age_seconds,
-        )
+    stale_entry_actions = _cancel_stale_pending_entries(
+        resolved_broker,
+        max_age_seconds=resolved_rules.pending_entry_max_age_seconds,
     )
-    actions.extend(_cancel_over_cap_pending_entries(pending_orders, broker=resolved_broker))
+    actions.extend(stale_entry_actions)
+    pending_orders = _without_canceled_orders(pending_orders, stale_entry_actions)
+    over_cap_actions = _cancel_over_cap_pending_entries(pending_orders, broker=resolved_broker)
+    actions.extend(over_cap_actions)
+    pending_orders = _without_canceled_orders(pending_orders, over_cap_actions)
     for position in positions:
         symbol = str(position.get("symbol") or "").upper()
         if symbol:
             open_symbols.add(symbol)
         stored_position = stored_by_symbol.get(symbol)
         leg_role = stored_position.leg_role if stored_position is not None else None
-        action = _monitor_action(position, _rules_for_leg(resolved_rules, leg_role), peaks, leg_role=leg_role)
+        rules_action = _monitor_action(position, _rules_for_leg(resolved_rules, leg_role), peaks, leg_role=leg_role)
+        action = _position_cost_cap_action(position, broker=resolved_broker, leg_role=leg_role) or rules_action
         if action is None:
             continue
+        if stored_position is not None:
+            action["trade_group_id"] = stored_position.trade_group_id
+            action["entry_decision_id"] = stored_position.decision_id
+            action["paired_option_symbol"] = stored_position.paired_option_symbol
         pending_exit = pending_exits.get(action["symbol"])
         if action["reason"] == "take_profit" and pending_exit is not None:
             actions.append(
@@ -160,7 +167,7 @@ def run_position_monitor(
             )
             continue
         try:
-            if action["reason"] in {"stop_loss", "trailing_stop"} and hasattr(resolved_broker, "cancel_order"):
+            if action["reason"] in {"stop_loss", "trailing_stop", "dte_floor", "position_cost_cap_breached"} and hasattr(resolved_broker, "cancel_order"):
                 canceled_ids = _cancel_pending_orders_for_symbol(
                     action["symbol"],
                     pending_orders,
@@ -187,11 +194,22 @@ def run_position_monitor(
         {symbol: value for symbol, value in peaks.items() if symbol in open_symbols},
         state_path=trailing_state_path,
     )
+    retained_store_symbols = open_symbols | {
+        symbol
+        for symbol, orders in pending_orders.items()
+        if any(str(order.get("side") or "").lower() == "buy" for order in orders)
+    }
+    retained_positions = [
+        position for position in stored_positions if position.option_symbol.upper() in retained_store_symbols
+    ]
+    if len(retained_positions) != len(stored_positions):
+        save_open_positions(retained_positions, store_path=position_store_path)
     return {
         "ok": True,
         "enabled": True,
         "checked": len(positions),
         "actions": actions,
+        "position_store_pruned": len(stored_positions) - len(retained_positions),
     }
 
 
@@ -218,6 +236,20 @@ def _monitor_action(
 
     peak_plpc = max(peaks.get(symbol, unrealized_plpc), unrealized_plpc)
     peaks[symbol] = peak_plpc
+
+    expiration = _option_expiration(symbol)
+    dte = (expiration - _monitor_now().date()).days if expiration is not None else None
+    if rules.exit_min_dte >= 0 and dte is not None and dte <= rules.exit_min_dte:
+        return {
+            "reason": "dte_floor",
+            "symbol": symbol,
+            "quantity": qty,
+            "unrealized_plpc": unrealized_plpc,
+            "current_price": current_price,
+            "dte": dte,
+            "expiration": expiration.isoformat(),
+            "leg_role": leg_role,
+        }
 
     if qty > rules.max_contracts_per_option:
         return {
@@ -262,6 +294,49 @@ def _monitor_action(
     return None
 
 
+def _position_cost_cap_action(
+    position: dict[str, Any],
+    *,
+    broker: AlpacaExecutionBroker,
+    leg_role: str | None,
+) -> dict[str, Any] | None:
+    """Flatten a market fill that exceeded the selected-contract cost cap."""
+
+    config = getattr(broker, "config", None)
+    effective_limit = (
+        config.effective_max_position_cost()
+        if config is not None and hasattr(config, "effective_max_position_cost")
+        else getattr(config, "max_position_cost", None)
+    )
+    max_position_cost = _float_or_none(effective_limit)
+    if max_position_cost is None or max_position_cost <= 0:
+        return None
+    symbol = str(position.get("symbol") or "").upper()
+    side = str(position.get("side") or "long").lower()
+    quantity = int(float(position.get("qty") or 0))
+    average_entry = _float_or_none(position.get("avg_entry_price"))
+    current_price = _float_or_none(position.get("current_price")) or average_entry
+    if not symbol or side != "long" or quantity <= 0 or average_entry is None or average_entry <= 0:
+        return None
+    per_contract_notional = round(average_entry * 100, 2)
+    filled_notional = round(per_contract_notional * quantity, 2)
+    # Quantity excess is handled by trim_excess_contracts. This guard exists
+    # for slippage that makes even one selected contract breach the debit cap.
+    if per_contract_notional <= max_position_cost:
+        return None
+    return {
+        "reason": "position_cost_cap_breached",
+        "symbol": symbol,
+        "quantity": quantity,
+        "unrealized_plpc": float(position.get("unrealized_plpc") or 0.0),
+        "current_price": current_price,
+        "average_entry_price": average_entry,
+        "filled_notional": filled_notional,
+        "max_position_cost": max_position_cost,
+        "leg_role": leg_role,
+    }
+
+
 def _submit_monitor_exit(
     position: dict[str, Any],
     *,
@@ -298,27 +373,37 @@ def _submit_monitor_exit(
             "take_profit_tier": action.get("take_profit_tier"),
             "unrealized_plpc": action["unrealized_plpc"],
             "leg_role": action.get("leg_role"),
+            "trade_group_id": action.get("trade_group_id"),
+            "entry_decision_id": action.get("entry_decision_id"),
+            "paired_option_symbol": action.get("paired_option_symbol"),
+            "policy_version": HOSTED_POLICY_VERSION if is_hosted_paper_runtime() else "local-default",
+            "build_sha": active_build_sha(),
         },
     )
     order = broker.submit_order(intent, open_positions=0)
-    append_order_submission(order, journal_path=journal_path)
-    append_execution_outcome(
-        decision_id=intent.decision_id,
-        thesis_id=intent.thesis_id,
-        symbol=symbol,
-        disposition="position_monitor_exit_submitted",
-        detail=action["reason"],
-        payload={
-            "quantity": intent.quantity,
-            "limit_price": intent.limit_price,
-            "order_type": intent.order_type.value,
-            "take_profit_tier": action.get("take_profit_tier"),
-            "unrealized_plpc": action["unrealized_plpc"],
-            "state": order.state.value,
-            "broker_order_id": order.broker_order_id,
-        },
-        journal_path=journal_path,
-    )
+    try:
+        append_order_submission(order, journal_path=journal_path)
+        append_execution_outcome(
+            decision_id=intent.decision_id,
+            thesis_id=intent.thesis_id,
+            symbol=symbol,
+            disposition="position_monitor_exit_submitted",
+            detail=action["reason"],
+            payload={
+                "quantity": intent.quantity,
+                "limit_price": intent.limit_price,
+                "order_type": intent.order_type.value,
+                "take_profit_tier": action.get("take_profit_tier"),
+                "unrealized_plpc": action["unrealized_plpc"],
+                "state": order.state.value,
+                "broker_order_id": order.broker_order_id,
+            },
+            journal_path=journal_path,
+        )
+    except Exception:
+        # The broker order is authoritative. A telemetry write failure must
+        # not turn an accepted risk-reducing exit into a reported failure.
+        pass
     return order
 
 
@@ -383,9 +468,35 @@ def _cancel_pending_orders_for_symbol(
         order_id = str(order.get("id") or order.get("broker_order_id") or "")
         if not order_id:
             continue
-        broker.cancel_order(order_id)
+        try:
+            broker.cancel_order(order_id)
+        except Exception as exc:
+            normalized = str(exc).strip().lower()
+            if not any(token in normalized for token in ("already canceled", "already cancelled", "not found", "404")):
+                raise
         canceled.append(order_id)
     return canceled
+
+
+def _without_canceled_orders(
+    pending_orders: dict[str, list[dict[str, Any]]],
+    actions: list[dict[str, Any]],
+) -> dict[str, list[dict[str, Any]]]:
+    canceled_ids = {
+        str(action.get("broker_order_id") or "")
+        for action in actions
+        if str(action.get("reason") or "").endswith("_canceled")
+    }
+    if not canceled_ids:
+        return pending_orders
+    return {
+        symbol: [
+            order
+            for order in orders
+            if str(order.get("id") or order.get("broker_order_id") or "") not in canceled_ids
+        ]
+        for symbol, orders in pending_orders.items()
+    }
 
 
 def _cancel_over_cap_pending_entries(
@@ -684,4 +795,20 @@ def _underlying_from_option_symbol(symbol: str) -> str | None:
             suffix = stripped[index + 1 :]
             if expiry.isdigit() and suffix.isdigit():
                 return stripped[: index - 6]
+    return None
+
+
+def _option_expiration(symbol: str) -> date | None:
+    stripped = symbol.strip().upper()
+    for index, char in enumerate(stripped):
+        if char not in {"C", "P"} or index < 6:
+            continue
+        expiry = stripped[index - 6 : index]
+        suffix = stripped[index + 1 :]
+        if not expiry.isdigit() or not suffix.isdigit():
+            continue
+        try:
+            return date(2000 + int(expiry[:2]), int(expiry[2:4]), int(expiry[4:6]))
+        except ValueError:
+            return None
     return None

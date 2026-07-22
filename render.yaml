@@ -31,7 +31,7 @@ services:
       - key: AUTOBOTT_PAPER_IGNORE_POSITION_COST_LIMIT
         value: "false"
       - key: AUTOBOTT_MAX_DAILY_LOSS
-        value: "5000"
+        value: "750"
       - key: AUTOBOTT_PAPER_TRADE_ALL_PASSED_SIGNALS
         value: "true"
       - key: AUTOBOTT_PAPER_MAX_NEW_ENTRY_ATTEMPTS_PER_LOOP
@@ -43,9 +43,9 @@ services:
       - key: AUTOBOTT_PENDING_ENTRY_MAX_AGE_SECONDS
         value: "180"
       - key: AUTOBOTT_OPEN_DRAWDOWN_GUARD_ENABLED
-        value: "false"
+        value: "true"
       - key: AUTOBOTT_OPEN_DRAWDOWN_GUARD_MAX_UNREALIZED_LOSS
-        value: "20"
+        value: "750"
       - key: AUTOBOTT_OPEN_DRAWDOWN_GUARD_MIN_LOSERS
         value: "3"
       - key: AUTOBOTT_OPEN_DRAWDOWN_GUARD_LOSS_RATE
@@ -111,27 +111,27 @@ services:
       - key: AUTOBOTT_POSITION_MONITOR_HEARTBEAT_ENABLED
         value: "false"
       - key: AUTOBOTT_POSITION_MONITOR_HEARTBEAT_SECONDS
-        value: "15"
+        value: "90"
       - key: AUTOBOTT_RECENT_LOSS_GUARD_ENABLED
-        value: "false"
+        value: "true"
       - key: AUTOBOTT_RECENT_LOSS_GUARD_LOOKBACK
-        value: "20"
+        value: "30"
       - key: AUTOBOTT_RECENT_LOSS_GUARD_CONSECUTIVE_LOSSES
-        value: "2"
-      - key: AUTOBOTT_RECENT_LOSS_GUARD_MIN_SAMPLE
         value: "3"
+      - key: AUTOBOTT_RECENT_LOSS_GUARD_MIN_SAMPLE
+        value: "5"
       - key: AUTOBOTT_RECENT_LOSS_GUARD_LOSS_RATE
-        value: "0.67"
+        value: "0.70"
       - key: AUTOBOTT_RECENT_WINNER_BIAS_ENABLED
         value: "true"
       - key: AUTOBOTT_RECENT_WINNER_BIAS_LOOKBACK
-        value: "20"
+        value: "30"
       - key: AUTOBOTT_RECENT_WINNER_BIAS_MIN_SAMPLE
-        value: "2"
+        value: "5"
       - key: AUTOBOTT_RECENT_WINNER_BIAS_WIN_RATE
-        value: "0.67"
+        value: "0.60"
       - key: AUTOBOTT_RECENT_WINNER_BIAS_CONSECUTIVE_WINS
-        value: "2"
+        value: "3"
       - key: AUTOBOTT_PAPER_ONLY
         value: "true"
       - key: AUTOBOTT_MANUAL_MIRROR_MAX_CONTRACT_COST
@@ -143,11 +143,11 @@ services:
       - key: AUTOBOTT_SESSION_RUN_FOREVER
         value: "true"
       - key: AUTOBOTT_SESSION_SYMBOLS
-        value: TOP_OPTIONS_100,VXX,UVXY
+        value: VIX,VXX,UVXY,TOP_OPTIONS_100
       - key: AUTOBOTT_SESSION_PRIORITY_SYMBOLS
-        value: VXX,UVXY,SPY,QQQ
+        value: VIX,VXX,UVXY,SPY,QQQ
       - key: AUTOBOTT_VOLATILITY_HEDGE_SYMBOLS
-        value: VXX,UVXY
+        value: VIX,VXX,UVXY
       - key: AUTOBOTT_SESSION_INTERVAL_SECONDS
         value: "90"
       - key: AUTOBOTT_SESSION_SYMBOL_BATCH_SIZE

@@ -9,6 +9,14 @@ from typing import Any, Callable
 from wsgiref.simple_server import make_server
 
 from .execution_config import load_alpaca_execution_config
+from .hosted_policy import (
+    HOSTED_POLICY_VERSION,
+    HOSTED_RIDER_MAX_DTE,
+    HOSTED_RIDER_MIN_DTE,
+    HOSTED_SESSION_SYMBOL_TOKENS,
+    HOSTED_TACTICAL_MAX_DTE,
+    HOSTED_TACTICAL_MIN_DTE,
+)
 from .env_bootstrap import bootstrap_env_file
 from .decision_lab import build_decision_lab_report
 from .phase1_alpaca_capture_now import capture_now
@@ -146,6 +154,14 @@ def _health_payload() -> JsonDict:
         "app": "autobott-phase1-dashboard",
         "timestamp": datetime.now(UTC).isoformat(),
         "version": os.getenv("RENDER_GIT_COMMIT") or "dev",
+        "policy_version": HOSTED_POLICY_VERSION,
+        "volatility_lane": [symbol for symbol in HOSTED_SESSION_SYMBOL_TOKENS if symbol != "TOP_OPTIONS_100"],
+        "vix_execution_contracts": ["VIX", "VIXW"],
+        "vix_signal_proxy": "VIXY",
+        "entry_dte_windows": {
+            "tactical": [HOSTED_TACTICAL_MIN_DTE, HOSTED_TACTICAL_MAX_DTE],
+            "rider": [HOSTED_RIDER_MIN_DTE, HOSTED_RIDER_MAX_DTE],
+        },
     }
     if detail:
         payload["session_supervisor"] = detail
@@ -168,7 +184,11 @@ def _session_watchdog_status() -> tuple[bool, JsonDict | None]:
     config = status.get("config") or {}
     if not config.get("enabled"):
         return True, None
-    if state.get("started_at") and not state.get("finished_at") and not status.get("thread_alive"):
+    if (
+        state.get("started_at")
+        and not status.get("thread_alive")
+        and (config.get("run_forever") or not state.get("finished_at"))
+    ):
         return False, {"stalled": True, "last_error": state.get("last_error")}
     return True, None
 

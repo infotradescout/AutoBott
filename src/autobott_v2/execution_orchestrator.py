@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import Callable
 
 from .core_runner import CoreRunnerPair
@@ -12,11 +12,13 @@ from .execution_journal import append_order_submission, append_risk_check
 from .execution_models import (
     BrokerEnvironment,
     ExecutionOrder,
+    ExecutionState,
     OrderSide,
     OrderType,
     TradeIntent,
     validate_trade_intent,
 )
+from .hosted_policy import HOSTED_POLICY_VERSION, active_build_sha, is_hosted_paper_runtime, is_volatility_symbol
 from .position_store import upsert_open_position_from_order
 from .phase1_models import DecisionCard, DecisionStatus, ExecutionLayer, SelectedContract
 from .runtime_control import load_runtime_state
@@ -85,6 +87,10 @@ def build_trade_intent_from_decision(
             "trade_group_id": trade_group_id,
             "leg_role": leg_role,
             "paired_option_symbol": paired_option_symbol,
+            "strategy_version": "phase1-human-loop-v1",
+            "policy_version": HOSTED_POLICY_VERSION if is_hosted_paper_runtime() else "local-default",
+            "build_sha": active_build_sha(),
+            "setup_event_id": _setup_event_id(decision),
         },
     )
 
@@ -150,8 +156,8 @@ def submit_core_runner_to_broker(
         current_daily_realized_pnl=current_daily_realized_pnl,
         open_positions=open_positions + 1,
     )
-    append_risk_check(primary_intent, primary_risk, journal_path=journal_path)
-    append_risk_check(runner_intent, runner_risk, journal_path=journal_path)
+    _append_risk_check_safely(primary_intent, primary_risk, journal_path=journal_path)
+    _append_risk_check_safely(runner_intent, runner_risk, journal_path=journal_path)
     rejected = tuple(primary_risk.reasons + runner_risk.reasons)
     if rejected:
         raise ExecutionRejectedError(rejected[0], detail=", ".join(rejected), reasons=rejected)
@@ -193,23 +199,38 @@ def submit_core_runner_to_broker(
                     )
                 )
         except Exception as exc:
-            # Persist any accepted first leg so the position monitor can manage
-            # it instead of leaving broker exposure invisible after a partial.
+            compensation: dict[str, str | None] | None = None
+            # A pair is the unit of risk. If the runner POST fails after the
+            # primary was accepted, cancel the primary or immediately flatten
+            # any filled quantity instead of leaving an accidental single leg.
             for order in simple_orders:
-                append_order_submission(order, journal_path=journal_path)
-                upsert_open_position_from_order(order)
+                _persist_submitted_order_safely(order, journal_path=journal_path)
+                try:
+                    compensation = _neutralize_partial_pair_order(
+                        order,
+                        broker=resolved_broker,
+                        journal_path=journal_path,
+                    )
+                except Exception as compensation_exc:
+                    compensation = {
+                        "action": "compensation_failed",
+                        "broker_order_id": order.broker_order_id,
+                        "error": str(compensation_exc),
+                    }
             reason = (
                 "core_runner_paired_submission_partial_failure"
                 if simple_orders
                 else "core_runner_paired_submission_failed"
             )
-            raise ExecutionRejectedError(reason, detail=str(exc), reasons=(reason,)) from exc
+            detail = str(exc)
+            if compensation is not None:
+                detail = f"{detail}; compensation={compensation}"
+            raise ExecutionRejectedError(reason, detail=detail, reasons=(reason,)) from exc
         submitted_orders = tuple(simple_orders)
 
     primary_order, runner_order = submitted_orders
     for order in submitted_orders:
-        append_order_submission(order, journal_path=journal_path)
-        upsert_open_position_from_order(order)
+        _persist_submitted_order_safely(order, journal_path=journal_path)
     return primary_order, runner_order
 
 
@@ -231,6 +252,8 @@ def _validate_pair(pair: CoreRunnerPair) -> None:
 
 
 def _core_runner_atomic_mleg_required() -> bool:
+    if is_hosted_paper_runtime():
+        return False
     value = os.getenv("AUTOBOTT_CORE_RUNNER_ATOMIC_MLEG_REQUIRED")
     if value is not None:
         return value.strip().lower() in {"1", "true", "yes", "on"}
@@ -241,6 +264,19 @@ def _core_runner_atomic_mleg_required() -> bool:
 def _option_type_value(value: object) -> str:
     enum_value = getattr(value, "value", value)
     return str(enum_value).lower()
+
+
+def _setup_event_id(decision: DecisionCard) -> str:
+    completed_bar_bucket = decision.timestamp.astimezone(UTC).replace(minute=0, second=0, microsecond=0)
+    learning_symbol = "VOLATILITY" if is_volatility_symbol(decision.ticker) else decision.ticker.upper()
+    return ":".join(
+        (
+            learning_symbol,
+            completed_bar_bucket.isoformat(),
+            decision.trade_setup.value,
+            decision.direction.bias.value,
+        )
+    )
 
 
 def submit_decision_to_broker(
@@ -274,7 +310,7 @@ def submit_decision_to_broker(
         current_daily_realized_pnl=current_daily_realized_pnl,
         open_positions=open_positions,
     )
-    append_risk_check(intent, risk_check, journal_path=journal_path)
+    _append_risk_check_safely(intent, risk_check, journal_path=journal_path)
     if not risk_check.approved:
         raise ExecutionRejectedError(
             risk_check.reasons[0] if risk_check.reasons else "risk_check_not_approved",
@@ -288,8 +324,7 @@ def submit_decision_to_broker(
         current_daily_realized_pnl=current_daily_realized_pnl,
         open_positions=open_positions,
     )
-    append_order_submission(order, journal_path=journal_path)
-    upsert_open_position_from_order(order)
+    _persist_submitted_order_safely(order, journal_path=journal_path)
     return order
 
 
@@ -300,9 +335,14 @@ def _entry_limit_price(
     environment: BrokerEnvironment,
     max_position_cost: float | None,
 ) -> float:
-    style = (os.getenv("AUTOBOTT_ENTRY_LIMIT_STYLE") or "marketable").strip().lower()
     mid = float(getattr(contract, "mid"))
     ask = float(getattr(contract, "ask", mid) or mid)
+    if environment is BrokerEnvironment.PAPER and is_hosted_paper_runtime():
+        # Market orders still need a valuation for pre-trade debit controls.
+        # Use the observed ask; retained limit-style/extra env values must not
+        # manufacture a cost-cap rejection for the hosted paper service.
+        return max(0.01, round(ask, 2))
+    style = (os.getenv("AUTOBOTT_ENTRY_LIMIT_STYLE") or "marketable").strip().lower()
     if environment is not BrokerEnvironment.PAPER or style in {"mid", "passive"}:
         return round(mid, 2)
     limit_price = ask if style in {"marketable", "ask", "aggressive"} else mid
@@ -326,8 +366,106 @@ def _entry_order_type(environment: BrokerEnvironment) -> OrderType:
 
     if environment is not BrokerEnvironment.PAPER:
         return OrderType.LIMIT
+    if is_hosted_paper_runtime():
+        return OrderType.MARKET
     configured = (os.getenv("AUTOBOTT_PAPER_ENTRY_ORDER_TYPE") or "market").strip().lower()
     return OrderType.LIMIT if configured == "limit" else OrderType.MARKET
+
+
+def _neutralize_partial_pair_order(
+    order: ExecutionOrder,
+    *,
+    broker: AlpacaExecutionBroker,
+    journal_path: str | None,
+) -> dict[str, str | None]:
+    """Cancel an accepted orphan or market-close its filled quantity."""
+
+    broker_order_id = order.broker_order_id
+    cancel_error: str | None = None
+    cancel_status = ""
+    if broker_order_id and hasattr(broker, "cancel_order"):
+        try:
+            canceled = broker.cancel_order(broker_order_id)
+            cancel_status = str((canceled or {}).get("status") or "").lower()
+        except Exception as exc:
+            cancel_error = str(exc)
+
+    filled_quantity = order.intent.quantity if order.state is ExecutionState.FILLED else 0
+    status = cancel_status
+    if broker_order_id and hasattr(broker, "get_order"):
+        try:
+            payload = broker.get_order(broker_order_id)
+            status = str(payload.get("status") or "").lower()
+            filled_quantity = max(filled_quantity, int(float(payload.get("filled_qty") or 0)))
+        except Exception:
+            pass
+    if filled_quantity <= 0:
+        # Market paper orders normally fill before a second POST can fail. If
+        # the broker cannot report status, inspect the live position before a
+        # sell-to-close so we never create an invalid naked exit.
+        if hasattr(broker, "list_open_positions"):
+            try:
+                for position in broker.list_open_positions():
+                    if str(position.get("symbol") or "").upper() == order.intent.option_symbol.upper():
+                        filled_quantity = int(float(position.get("qty") or 0))
+                        break
+            except Exception:
+                pass
+    if filled_quantity <= 0 and status in {"canceled", "cancelled", "rejected", "expired"}:
+        return {"action": "canceled_primary", "broker_order_id": broker_order_id}
+    if filled_quantity <= 0:
+        return {
+            "action": "cancel_requested",
+            "broker_order_id": broker_order_id,
+            "error": cancel_error,
+        }
+
+    exit_intent = TradeIntent(
+        symbol=order.intent.symbol,
+        option_symbol=order.intent.option_symbol,
+        side=OrderSide.SELL_TO_CLOSE,
+        quantity=filled_quantity,
+        limit_price=max(0.01, order.intent.limit_price),
+        generated_at=datetime.now(tz=order.intent.generated_at.tzinfo),
+        environment=order.intent.environment,
+        order_type=OrderType.MARKET,
+        decision_id=order.intent.decision_id,
+        thesis_id=order.intent.thesis_id,
+        metadata={
+            **order.intent.metadata,
+            "compensating_exit": True,
+            "exit_reason": "runner_submission_failed",
+            "source_broker_order_id": broker_order_id,
+        },
+    )
+    exit_order = broker.submit_order(exit_intent, current_daily_realized_pnl=0.0, open_positions=0)
+    try:
+        append_order_submission(exit_order, journal_path=journal_path)
+    except Exception:
+        pass
+    return {
+        "action": "market_close_primary",
+        "broker_order_id": broker_order_id,
+        "exit_broker_order_id": exit_order.broker_order_id,
+    }
+
+
+def _append_risk_check_safely(intent: TradeIntent, risk_check: object, *, journal_path: str | None) -> None:
+    try:
+        append_risk_check(intent, risk_check, journal_path=journal_path)
+    except Exception:
+        pass
+
+
+def _persist_submitted_order_safely(order: ExecutionOrder, *, journal_path: str | None) -> None:
+    try:
+        append_order_submission(order, journal_path=journal_path)
+    except Exception:
+        pass
+    try:
+        upsert_open_position_from_order(order)
+    except Exception:
+        pass
 
 
 def _entry_limit_extra() -> float:

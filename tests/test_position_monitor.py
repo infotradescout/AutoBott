@@ -4,10 +4,10 @@ from datetime import UTC, datetime
 
 import autobott_v2.position_monitor as position_monitor
 from autobott_v2.execution_config import AlpacaExecutionConfig
-from autobott_v2.execution_models import BrokerEnvironment, ExecutionOrder, ExecutionState
+from autobott_v2.execution_models import BrokerEnvironment, ExecutionOrder, ExecutionState, OrderSide, OrderType
 from autobott_v2.position_monitor import PositionMonitorRules, run_position_monitor
 from autobott_v2.position_store import OpenPosition, save_open_positions
-from autobott_v2.runtime_control import default_runtime_state, save_runtime_state
+from autobott_v2.runtime_control import default_runtime_state, save_runtime_state, set_kill_switch
 
 
 def _config(*, max_position_cost: float = 1000.0) -> AlpacaExecutionConfig:
@@ -85,6 +85,45 @@ def test_position_monitor_holds_a_winner_that_has_not_reversed(tmp_path) -> None
 
     assert result["actions"] == []
     assert broker.submitted == []
+
+
+def test_position_monitor_still_reduces_risk_while_kill_switch_blocks_entries(tmp_path) -> None:
+    set_kill_switch(True, reason="block_new_entries")
+    broker = FakeBroker([_position(unrealized_plpc="-0.30")])
+
+    result = run_position_monitor(
+        broker=broker,
+        rules=PositionMonitorRules(stop_loss_pct=0.22),
+        journal_path=str(tmp_path / "journal.jsonl"),
+        trailing_state_path=str(tmp_path / "trailing_peaks.json"),
+    )
+    save_runtime_state(default_runtime_state())
+
+    assert result["actions"][0]["reason"] == "stop_loss"
+    assert result["actions"][0]["submitted"] is True
+    assert broker.submitted[0].side is OrderSide.SELL_TO_CLOSE
+
+
+def test_position_monitor_flattens_market_fill_above_cost_cap(tmp_path) -> None:
+    save_runtime_state(default_runtime_state())
+    broker = FakeBroker(
+        [_position(avg_entry_price="12.00", current_price="11.90", unrealized_plpc="-0.01")],
+        max_position_cost=1000.0,
+    )
+
+    result = run_position_monitor(
+        broker=broker,
+        rules=PositionMonitorRules(),
+        journal_path=str(tmp_path / "journal.jsonl"),
+        trailing_state_path=str(tmp_path / "trailing_peaks.json"),
+    )
+
+    action = result["actions"][0]
+    assert action["reason"] == "position_cost_cap_breached"
+    assert action["filled_notional"] == 1200.0
+    assert action["max_position_cost"] == 1000.0
+    assert broker.submitted[0].side is OrderSide.SELL_TO_CLOSE
+    assert broker.submitted[0].order_type is OrderType.MARKET
 
 
 def test_position_monitor_sells_once_a_winner_reverses_from_its_peak(tmp_path) -> None:
@@ -549,6 +588,46 @@ def test_position_monitor_cancels_stale_atomic_entry_parent_only(monkeypatch, tm
     assert broker.canceled == ["mleg-parent-stale", "single-leg-old"]
 
 
+def test_stale_partial_entry_cancel_does_not_block_urgent_position_exit(monkeypatch, tmp_path) -> None:
+    save_runtime_state(default_runtime_state())
+    monkeypatch.setattr(position_monitor, "_monitor_now", lambda: datetime(2026, 7, 16, 15, 35, tzinfo=UTC))
+
+    class RejectDuplicateCancelBroker(FakeBroker):
+        def cancel_order(self, broker_order_id):
+            if broker_order_id in self.canceled:
+                raise RuntimeError("already canceled")
+            return super().cancel_order(broker_order_id)
+
+    symbol = "QQQ260717P00726000"
+    broker = RejectDuplicateCancelBroker(
+        [_position(symbol=symbol, unrealized_plpc="-0.30")],
+        orders=[
+            {
+                "id": "stale-partial-buy",
+                "client_order_id": "autobott-stale-partial",
+                "order_class": "simple",
+                "symbol": symbol,
+                "side": "buy",
+                "status": "partially_filled",
+                "submitted_at": "2026-07-16T15:20:00Z",
+                "qty": "2",
+                "filled_qty": "1",
+            }
+        ],
+    )
+
+    result = run_position_monitor(
+        broker=broker,
+        rules=PositionMonitorRules(stop_loss_pct=0.22, pending_entry_max_age_seconds=180),
+        journal_path=str(tmp_path / "journal.jsonl"),
+        trailing_state_path=str(tmp_path / "trailing_peaks.json"),
+    )
+
+    assert broker.canceled == ["stale-partial-buy"]
+    assert broker.submitted[0].side is OrderSide.SELL_TO_CLOSE
+    assert any(action.get("reason") == "stop_loss" and action.get("submitted") is True for action in result["actions"])
+
+
 def test_position_monitor_trims_excess_contracts_before_profit_loss(tmp_path) -> None:
     save_runtime_state(default_runtime_state())
     broker = FakeBroker([_position(qty="4", unrealized_plpc="-0.05")])
@@ -578,4 +657,26 @@ def test_position_monitor_closes_stop_loss(tmp_path) -> None:
 
     assert result["actions"][0]["reason"] == "stop_loss"
     assert broker.submitted[0].quantity == 1
+    assert broker.submitted[0].order_type.value == "market"
+
+
+def test_position_monitor_exits_at_hosted_dte_floor(monkeypatch, tmp_path) -> None:
+    save_runtime_state(default_runtime_state())
+    monkeypatch.setattr(
+        position_monitor,
+        "_monitor_now",
+        lambda: datetime(2026, 7, 22, 16, 0, tzinfo=UTC),
+    )
+    broker = FakeBroker([_position(symbol="QQQ260724P00726000", unrealized_plpc="0.05")])
+
+    result = run_position_monitor(
+        broker=broker,
+        rules=PositionMonitorRules(exit_min_dte=2),
+        journal_path=str(tmp_path / "journal.jsonl"),
+        trailing_state_path=str(tmp_path / "trailing_peaks.json"),
+        position_store_path=tmp_path / "open_positions.json",
+    )
+
+    assert result["actions"][0]["reason"] == "dte_floor"
+    assert result["actions"][0]["dte"] == 2
     assert broker.submitted[0].order_type.value == "market"

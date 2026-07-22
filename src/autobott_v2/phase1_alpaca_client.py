@@ -9,19 +9,28 @@ import urllib.request
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
+from .hosted_policy import HOSTED_TACTICAL_MIN_DTE, is_hosted_paper_runtime
 from .phase1_alpaca_config import AlpacaPaperConfig, require_alpaca_paper_config
 
 
-_OPTION_CONTRACT_METADATA_CACHE: dict[tuple[str, str, str, str], dict[str, dict[str, Any]]] = {}
+_OPTION_CONTRACT_METADATA_CACHE: dict[tuple[str, str, str, str, str], dict[str, dict[str, Any]]] = {}
 _OPTION_CONTRACT_METADATA_CACHE_LOCK = threading.Lock()
 
 
 class AlpacaPaperClient:
     def __init__(self, config: AlpacaPaperConfig | None = None) -> None:
         self.config = (config or require_alpaca_paper_config()).validate()
+        # One client instance is reused for a complete trading cycle. Cache the
+        # repeated SPY/QQQ/VIXY context reads so a 25-symbol scan does not spend
+        # most of Alpaca's request budget downloading identical bars.
+        self._stock_bars_cache: dict[tuple[Any, ...], dict[str, list[dict[str, Any]]]] = {}
+        self._latest_stock_quote_cache: dict[str, dict[str, Any]] = {}
+        self._account_cache: dict[str, Any] | None = None
 
     def get_account(self) -> dict[str, Any]:
-        return self._get_json(self.config.trading_base_url, "/v2/account")
+        if self._account_cache is None:
+            self._account_cache = self._get_json_with_retry(self.config.trading_base_url, "/v2/account")
+        return dict(self._account_cache)
 
     def get_stock_bars(
         self,
@@ -33,6 +42,17 @@ class AlpacaPaperClient:
         limit: int = 35,
         feed: str = "iex",
     ) -> dict[str, list[dict[str, Any]]]:
+        cache_key = (
+            tuple(sorted(symbol.upper() for symbol in symbols)),
+            _isoformat_z(start),
+            _isoformat_z(end),
+            timeframe,
+            limit,
+            feed,
+        )
+        cached = self._stock_bars_cache.get(cache_key)
+        if cached is not None:
+            return {symbol: list(rows) for symbol, rows in cached.items()}
         bars: dict[str, list[dict[str, Any]]] = {}
         base_params = {
             "symbols": ",".join(symbols),
@@ -48,40 +68,58 @@ class AlpacaPaperClient:
             params = dict(base_params)
             if page_token:
                 params["page_token"] = page_token
-            payload = self._get_json(self.config.data_base_url, "/v2/stocks/bars", params)
+            payload = self._get_json_with_retry(self.config.data_base_url, "/v2/stocks/bars", params)
             for symbol, rows in payload.get("bars", {}).items():
                 bars.setdefault(symbol.upper(), []).extend(list(rows))
             page_token = payload.get("next_page_token")
             if not page_token:
                 break
+        self._stock_bars_cache[cache_key] = {symbol: list(rows) for symbol, rows in bars.items()}
         return bars
 
     def get_latest_stock_quotes(self, symbols: list[str]) -> dict[str, dict[str, Any]]:
-        payload = self._get_json(
+        normalized = [symbol.upper() for symbol in symbols]
+        missing = [symbol for symbol in normalized if symbol not in self._latest_stock_quote_cache]
+        if not missing:
+            return {symbol: dict(self._latest_stock_quote_cache[symbol]) for symbol in normalized}
+        payload = self._get_json_with_retry(
             self.config.data_base_url,
             "/v2/stocks/quotes/latest",
-            {"symbols": ",".join(symbols)},
+            {"symbols": ",".join(missing)},
         )
         quotes = payload.get("quotes", {})
-        return {symbol.upper(): dict(row) for symbol, row in quotes.items()}
+        self._latest_stock_quote_cache.update({symbol.upper(): dict(row) for symbol, row in quotes.items()})
+        return {
+            symbol: dict(self._latest_stock_quote_cache[symbol])
+            for symbol in normalized
+            if symbol in self._latest_stock_quote_cache
+        }
 
     def get_option_chain_snapshots(self, symbol: str) -> dict[str, dict[str, Any]]:
         # Without an expiration window, Alpaca's snapshot endpoint defaults to
         # only the nearest (often same-day) expiration, which the decision
         # engine's minimum-DTE rule always excludes. Request the window the
         # engine actually trades so a full chain comes back.
+        normalized_symbol = symbol.upper()
+        if normalized_symbol in {"VIX", "VIXW"}:
+            self._require_paper_index_option_capability()
+        underlying_symbol, root_symbol = _option_chain_request_symbols(normalized_symbol)
         today = datetime.now(UTC).date()
+        min_dte = HOSTED_TACTICAL_MIN_DTE if is_hosted_paper_runtime() else 1
         base_params = {
             "feed": "indicative",
             "limit": "1000",
-            "expiration_date_gte": (today + timedelta(days=1)).isoformat(),
-            "expiration_date_lte": (today + timedelta(days=30)).isoformat(),
+            "expiration_date_gte": (today + timedelta(days=min_dte)).isoformat(),
+            "expiration_date_lte": (today + timedelta(days=45)).isoformat(),
         }
         contract_metadata = self._get_option_contract_metadata(
-            symbol,
+            underlying_symbol,
             expiration_date_gte=base_params["expiration_date_gte"],
             expiration_date_lte=base_params["expiration_date_lte"],
+            root_symbol=root_symbol,
         )
+        if root_symbol is not None:
+            base_params["root_symbol"] = root_symbol
         snapshots: dict[str, dict[str, Any]] = {}
         page_token: str | None = None
         seen_page_tokens: set[str] = set()
@@ -91,7 +129,7 @@ class AlpacaPaperClient:
                 params["page_token"] = page_token
             payload = self._get_json_with_retry(
                 self.config.data_base_url,
-                f"/v1beta1/options/snapshots/{symbol.upper()}",
+                f"/v1beta1/options/snapshots/{underlying_symbol}",
                 params,
             )
             page_snapshots = payload.get("snapshots") or payload.get("option_snapshots") or {}
@@ -108,6 +146,16 @@ class AlpacaPaperClient:
             for option_symbol, snapshot in snapshots.items()
             if option_symbol in contract_metadata
         }
+
+    def _require_paper_index_option_capability(self) -> None:
+        account = self.get_account()
+        if bool(account.get("trading_blocked")) or bool(account.get("account_blocked")):
+            raise ValueError("vix_index_options_account_blocked")
+        raw_level = account.get("options_trading_level")
+        if raw_level is None:
+            raw_level = account.get("options_approved_level")
+        if raw_level is not None and int(raw_level) < 2:
+            raise ValueError("vix_index_options_level_insufficient")
 
     def get_latest_option_quotes(self, option_symbols: list[str]) -> dict[str, dict[str, Any]]:
         symbols = [symbol.strip().upper() for symbol in option_symbols if symbol.strip()]
@@ -131,6 +179,7 @@ class AlpacaPaperClient:
         *,
         expiration_date_gte: str,
         expiration_date_lte: str,
+        root_symbol: str | None = None,
     ) -> dict[str, dict[str, Any]]:
         """Fetch contract fields that are absent from the market-data snapshot.
 
@@ -147,11 +196,16 @@ class AlpacaPaperClient:
             "expiration_date_lte": expiration_date_lte,
             "limit": "10000",
         }
+        if symbol.upper() in {"VIX", "VIXW"}:
+            base_params["style"] = "european"
+        if root_symbol is not None:
+            base_params["root_symbol"] = root_symbol
         cache_key = (
             self.config.trading_base_url,
             symbol.upper(),
             expiration_date_gte,
             expiration_date_lte,
+            root_symbol or "",
         )
         with _OPTION_CONTRACT_METADATA_CACHE_LOCK:
             cached = _OPTION_CONTRACT_METADATA_CACHE.get(cache_key)
@@ -172,6 +226,14 @@ class AlpacaPaperClient:
             for contract in payload.get("option_contracts") or []:
                 if contract.get("tradable") is not True:
                     continue
+                if symbol.upper() in {"VIX", "VIXW"}:
+                    if str(contract.get("style") or "").lower() != "european":
+                        continue
+                    contract_root = str(contract.get("root_symbol") or "").upper()
+                    if root_symbol is not None and contract_root != root_symbol:
+                        continue
+                    if root_symbol is None and contract_root and contract_root not in {"VIX", "VIXW"}:
+                        continue
                 option_symbol = str(contract.get("symbol") or "").upper()
                 if option_symbol:
                     metadata[option_symbol] = dict(contract)
@@ -189,7 +251,7 @@ class AlpacaPaperClient:
         return metadata
 
     def get_positions(self) -> list[dict[str, Any]]:
-        payload = self._get_json(self.config.trading_base_url, "/v2/positions")
+        payload = self._get_json_with_retry(self.config.trading_base_url, "/v2/positions")
         return list(payload) if isinstance(payload, list) else []
 
     def get_orders(
@@ -199,7 +261,7 @@ class AlpacaPaperClient:
         limit: int = 50,
         direction: str = "desc",
     ) -> list[dict[str, Any]]:
-        payload = self._get_json(
+        payload = self._get_json_with_retry(
             self.config.trading_base_url,
             "/v2/orders",
             {"status": status, "limit": str(limit), "direction": direction, "nested": "false"},
@@ -250,6 +312,20 @@ class AlpacaPaperClient:
 def _clear_option_contract_metadata_cache() -> None:
     with _OPTION_CONTRACT_METADATA_CACHE_LOCK:
         _OPTION_CONTRACT_METADATA_CACHE.clear()
+
+
+def _option_chain_request_symbols(symbol: str) -> tuple[str, str | None]:
+    """Return Alpaca's underlying path symbol and optional contract root.
+
+    VIX weekly contracts use the ``VIXW`` root but remain options on the VIX
+    index. Alpaca's chain endpoint is keyed by underlying, so a VIXW-only
+    request must use the VIX path and narrow the response by root symbol.
+    """
+
+    normalized = symbol.strip().upper()
+    if normalized == "VIXW":
+        return "VIX", "VIXW"
+    return normalized, None
 
 
 def _isoformat_z(value: datetime) -> str:

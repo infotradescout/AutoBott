@@ -7,7 +7,7 @@ import pytest
 
 from autobott_v2.core_runner import CoreRunnerPair
 from autobott_v2.execution_config import AlpacaExecutionConfig
-from autobott_v2.execution_models import BrokerEnvironment, ExecutionOrder, ExecutionState, OrderType
+from autobott_v2.execution_models import BrokerEnvironment, ExecutionOrder, ExecutionState, OrderSide, OrderType
 from autobott_v2.execution_orchestrator import (
     ExecutionRejectedError,
     build_trade_intent_from_decision,
@@ -132,6 +132,15 @@ def test_build_trade_intent_from_decision_uses_marketable_paper_limit() -> None:
     assert intent.limit_price == 2.6
     assert intent.order_type is OrderType.MARKET
     assert intent.take_profit_price == 3.75
+
+
+def test_volatility_proxies_share_one_hourly_setup_event_id() -> None:
+    vix = build_trade_intent_from_decision(_decision_card(ticker="VIX"))
+    vxx = build_trade_intent_from_decision(_decision_card(ticker="VXX"))
+    uvxy = build_trade_intent_from_decision(_decision_card(ticker="UVXY"))
+
+    assert vix.metadata["setup_event_id"] == vxx.metadata["setup_event_id"] == uvxy.metadata["setup_event_id"]
+    assert vix.metadata["setup_event_id"].startswith("VOLATILITY:")
 
 
 def test_build_trade_intent_does_not_distort_quote_to_fit_position_cost() -> None:
@@ -302,6 +311,177 @@ def test_submit_core_runner_can_use_linked_simple_orders_for_paper_collection(tm
     assert primary_order.intent.metadata["trade_group_id"] == runner_order.intent.metadata["trade_group_id"]
     assert primary_order.intent.metadata["leg_role"] == "primary"
     assert runner_order.intent.metadata["leg_role"] == "runner"
+
+
+def test_hosted_pair_ignores_stale_mleg_and_limit_order_environment(tmp_path, monkeypatch) -> None:
+    import autobott_v2.execution_orchestrator as orchestrator
+
+    monkeypatch.setenv("RENDER", "true")
+    monkeypatch.setenv("ALPACA_ENV", "paper")
+    monkeypatch.setenv("AUTOBOTT_CORE_RUNNER_ATOMIC_MLEG_REQUIRED", "true")
+    monkeypatch.setenv("AUTOBOTT_PAPER_ENTRY_ORDER_TYPE", "limit")
+    monkeypatch.setenv("AUTOBOTT_ENTRY_LIMIT_STYLE", "passive")
+    monkeypatch.setenv("AUTOBOTT_ENTRY_LIMIT_EXTRA", "999")
+    monkeypatch.setattr(orchestrator, "upsert_open_position_from_order", lambda *args, **kwargs: None)
+    broker = FakeBroker()
+    selected = _decision_card().selected_contract
+    assert selected is not None
+    primary = replace(
+        selected,
+        option_symbol="AAPL260117C00195000",
+        strike=195.0,
+        bid=0.60,
+        ask=0.70,
+        mid=0.65,
+        delta=0.40,
+        target_exit_mid=0.85,
+        stop_exit_mid=0.51,
+    )
+    runner = replace(
+        selected,
+        option_symbol="AAPL260117C00200000",
+        strike=200.0,
+        bid=0.20,
+        ask=0.25,
+        mid=0.225,
+        delta=0.15,
+        target_exit_mid=0.45,
+        stop_exit_mid=0.07,
+    )
+
+    submit_core_runner_to_broker(
+        _decision_card(),
+        CoreRunnerPair(primary, runner, estimated_group_cost=95.0),
+        broker=broker,
+        journal_path=str(tmp_path / "execution_orders.jsonl"),
+    )
+
+    assert broker.mleg_calls == []
+    assert [intent.order_type for intent in broker.intents] == [OrderType.MARKET, OrderType.MARKET]
+    assert [intent.limit_price for intent in broker.intents] == [0.70, 0.25]
+
+
+def test_hosted_direct_vix_pair_posts_exact_returned_vixw_symbols(tmp_path, monkeypatch) -> None:
+    import autobott_v2.execution_orchestrator as orchestrator
+
+    monkeypatch.setenv("RENDER", "true")
+    monkeypatch.setattr(orchestrator, "upsert_open_position_from_order", lambda *args, **kwargs: None)
+    broker = FakeBroker()
+    decision = _decision_card(ticker="VIX")
+    selected = decision.selected_contract
+    assert selected is not None
+    primary = replace(
+        selected,
+        option_symbol="VIXW260707C00024000",
+        strike=24.0,
+        bid=0.60,
+        ask=0.70,
+        mid=0.65,
+        delta=0.50,
+        target_exit_mid=0.85,
+        stop_exit_mid=0.51,
+    )
+    runner = replace(
+        selected,
+        option_symbol="VIXW260707C00028000",
+        strike=28.0,
+        bid=0.20,
+        ask=0.25,
+        mid=0.225,
+        delta=0.15,
+        target_exit_mid=0.45,
+        stop_exit_mid=0.07,
+    )
+
+    submit_core_runner_to_broker(
+        decision,
+        CoreRunnerPair(primary, runner, estimated_group_cost=95.0),
+        broker=broker,
+        journal_path=str(tmp_path / "execution_orders.jsonl"),
+    )
+
+    assert [intent.option_symbol for intent in broker.intents] == [
+        "VIXW260707C00024000",
+        "VIXW260707C00028000",
+    ]
+    assert [intent.order_type for intent in broker.intents] == [OrderType.MARKET, OrderType.MARKET]
+
+
+def test_linked_pair_runner_failure_market_closes_filled_primary(tmp_path, monkeypatch) -> None:
+    import autobott_v2.execution_orchestrator as orchestrator
+
+    monkeypatch.setenv("RENDER", "true")
+    monkeypatch.setenv("ALPACA_ENV", "paper")
+    monkeypatch.setattr(orchestrator, "upsert_open_position_from_order", lambda *args, **kwargs: None)
+
+    class PartialPairBroker(FakeBroker):
+        def __init__(self) -> None:
+            super().__init__()
+            self.canceled = []
+
+        def submit_order(self, intent, *, current_daily_realized_pnl=0.0, open_positions=0):
+            self.intents.append(intent)
+            if len(self.intents) == 2:
+                raise RuntimeError("runner_post_failed")
+            return ExecutionOrder(
+                order_id=f"order-{len(self.intents)}",
+                client_order_id=f"autobott-order-{len(self.intents)}",
+                intent=intent,
+                state=ExecutionState.FILLED,
+                submitted_at=datetime(2026, 7, 1, 15, 31, tzinfo=UTC),
+                broker_order_id=f"alpaca-order-{len(self.intents)}",
+            )
+
+        def cancel_order(self, broker_order_id):
+            self.canceled.append(broker_order_id)
+            raise RuntimeError("order_already_filled")
+
+        def get_order(self, broker_order_id):
+            return {"id": broker_order_id, "status": "filled", "filled_qty": "1"}
+
+    broker = PartialPairBroker()
+    selected = _decision_card().selected_contract
+    assert selected is not None
+    primary = replace(
+        selected,
+        option_symbol="AAPL260117C00195000",
+        strike=195.0,
+        bid=0.60,
+        ask=0.70,
+        mid=0.65,
+        delta=0.40,
+        target_exit_mid=0.85,
+        stop_exit_mid=0.51,
+    )
+    runner = replace(
+        selected,
+        option_symbol="AAPL260117C00200000",
+        strike=200.0,
+        bid=0.20,
+        ask=0.25,
+        mid=0.225,
+        delta=0.15,
+        target_exit_mid=0.45,
+        stop_exit_mid=0.07,
+    )
+
+    with pytest.raises(ExecutionRejectedError) as excinfo:
+        submit_core_runner_to_broker(
+            _decision_card(),
+            CoreRunnerPair(primary, runner, estimated_group_cost=95.0),
+            broker=broker,
+            journal_path=str(tmp_path / "execution_orders.jsonl"),
+        )
+
+    assert excinfo.value.reason == "core_runner_paired_submission_partial_failure"
+    assert broker.canceled == ["alpaca-order-1"]
+    assert [intent.side for intent in broker.intents] == [
+        OrderSide.BUY_TO_OPEN,
+        OrderSide.BUY_TO_OPEN,
+        OrderSide.SELL_TO_CLOSE,
+    ]
+    assert broker.intents[-1].order_type is OrderType.MARKET
+    assert broker.intents[-1].metadata["compensating_exit"] is True
 
 
 def test_submit_core_runner_allows_pair_above_manual_mirror_budget(tmp_path, monkeypatch) -> None:

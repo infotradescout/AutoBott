@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import json
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
+from zoneinfo import ZoneInfo
 
 import pytest
 
@@ -120,6 +122,29 @@ class CoreRunnerDataClient(FakeDataClient):
         return payload
 
 
+class HostedCoreRunnerDataClient(CoreRunnerDataClient):
+    def get_option_chain_snapshots(self, symbol):
+        payload = super().get_option_chain_snapshots(symbol)
+        hosted = {}
+        for option_symbol, row in payload.items():
+            hosted_symbol = option_symbol.replace("260703", "260708")
+            hosted[hosted_symbol] = {
+                **row,
+                "details": {**row["details"], "expiration_date": "2026-07-08"},
+            }
+        return hosted
+
+
+class UnqualifiedPairDataClient(CoreRunnerDataClient):
+    def get_option_chain_snapshots(self, symbol):
+        payload = super().get_option_chain_snapshots(symbol)
+        for option_symbol, row in payload.items():
+            if option_symbol.endswith("C00110000") or option_symbol.endswith("C00115000"):
+                row["latestQuote"]["bp"] = 1.20
+                row["latestQuote"]["ap"] = 1.30
+        return payload
+
+
 class RiskOffVolatilityDataClient(FakeDataClient):
     def get_stock_bars(self, symbols, *, start, end, timeframe="1Min", limit=35):
         bars = {}
@@ -149,7 +174,7 @@ class RiskOffVolatilityDataClient(FakeDataClient):
         return bars
 
     def get_latest_stock_quotes(self, symbols):
-        prices = {"VXX": 21.8, "UVXY": 27.0, "SPY": 589.8, "QQQ": 493.2, "AAPL": 103.4}
+        prices = {"VXX": 21.8, "UVXY": 27.0, "VIXY": 16.0, "SPY": 589.8, "QQQ": 493.2, "AAPL": 103.4}
         return {
             symbol.upper(): {
                 "bp": prices[symbol.upper()] - 0.02,
@@ -266,6 +291,11 @@ class FakeBrokerWithAllOrders(FakeBroker):
         return self.orders
 
 
+class FailingOutcomeBroker(FakeBrokerWithLivePositions):
+    def list_orders(self, *, status="open", limit=100, direction="desc"):
+        raise RuntimeError("broker_history_unavailable")
+
+
 def test_run_trading_cycle_captures_decides_and_submits(tmp_path) -> None:
     save_runtime_state(default_runtime_state(), state_path=tmp_path / "runtime_state.json")
     original = trading_cycle.load_runtime_state
@@ -300,6 +330,103 @@ def test_run_trading_cycle_captures_decides_and_submits(tmp_path) -> None:
     assert "pass_trade_attempted" in dispositions
 
 
+def test_same_hour_setup_cannot_reenter_after_first_submission(tmp_path) -> None:
+    save_runtime_state(default_runtime_state(), state_path=tmp_path / "runtime_state.json")
+    original = trading_cycle.load_runtime_state
+    original_positions = trading_cycle.load_open_positions
+    trading_cycle.load_runtime_state = lambda: original(state_path=tmp_path / "runtime_state.json")
+    trading_cycle.load_open_positions = lambda: []
+    broker = FakeBroker()
+    kwargs = {
+        "symbols": ["AAPL"],
+        "broker": broker,
+        "data_client": FakeDataClient(),
+        "scheduled_market_time": datetime(2026, 7, 1, 15, 35, tzinfo=UTC),
+        "captured_at_utc": datetime(2026, 7, 1, 15, 35, tzinfo=UTC),
+        "corpus_root": tmp_path / "corpus",
+        "decision_log_path": tmp_path / "decision_cards.jsonl",
+        "execution_log_path": str(tmp_path / "execution_orders.jsonl"),
+    }
+    try:
+        first = trading_cycle.run_trading_cycle(**kwargs)
+        second = trading_cycle.run_trading_cycle(**kwargs)
+    finally:
+        trading_cycle.load_runtime_state = original
+        trading_cycle.load_open_positions = original_positions
+
+    assert first.trade_attempted_count == 1
+    assert second.trade_attempted_count == 0
+    assert second.orders_submitted == []
+    assert any(row["reason"] == "setup_event_already_traded" for row in second.skipped)
+
+
+def test_setup_cooldown_bootstrap_reads_beyond_old_two_megabyte_tail(tmp_path) -> None:
+    journal_path = tmp_path / "execution_orders.jsonl"
+    setup_event_id = "AAPL:2026-07-01T15:00:00+00:00:BULLISH_CONTINUATION:BULLISH"
+    entry = {
+        "event_type": "order_submission",
+        "payload": {
+            "intent": {
+                "side": "buy_to_open",
+                "metadata": {"setup_event_id": setup_event_id},
+            }
+        },
+    }
+    telemetry = {"event_type": "execution_outcome", "payload": {"detail": "x" * 1000}}
+    journal_path.write_text(
+        f"{json.dumps(entry)}\n" + "".join(f"{json.dumps(telemetry)}\n" for _ in range(2600)),
+        encoding="utf-8",
+    )
+
+    events = trading_cycle._recent_entry_setup_event_ids(journal_path)
+
+    assert setup_event_id in events
+    assert setup_event_id in json.loads((tmp_path / "setup_events.json").read_text(encoding="utf-8"))
+
+
+def test_setup_cooldown_fails_closed_when_journal_cannot_be_read(tmp_path, monkeypatch) -> None:
+    journal_path = tmp_path / "execution_orders.jsonl"
+    journal_path.write_text("{}\n", encoding="utf-8")
+    monkeypatch.setattr(trading_cycle, "read_jsonl_tail", lambda *args, **kwargs: (_ for _ in ()).throw(OSError("disk")))
+
+    events = trading_cycle._recent_entry_setup_event_ids(journal_path)
+
+    assert trading_cycle._SETUP_REGISTRY_UNAVAILABLE in events
+
+
+def test_setup_cooldown_write_failure_blocks_broker_post(tmp_path, monkeypatch) -> None:
+    save_runtime_state(default_runtime_state(), state_path=tmp_path / "runtime_state.json")
+    original = trading_cycle.load_runtime_state
+    original_positions = trading_cycle.load_open_positions
+    trading_cycle.load_runtime_state = lambda: original(state_path=tmp_path / "runtime_state.json")
+    trading_cycle.load_open_positions = lambda: []
+    monkeypatch.setattr(
+        trading_cycle,
+        "_write_setup_event_registry",
+        lambda *args, **kwargs: (_ for _ in ()).throw(OSError("disk full")),
+    )
+    broker = FakeBroker()
+    try:
+        result = trading_cycle.run_trading_cycle(
+            symbols=["AAPL"],
+            broker=broker,
+            data_client=FakeDataClient(),
+            scheduled_market_time=datetime(2026, 7, 1, 15, 35, tzinfo=UTC),
+            captured_at_utc=datetime(2026, 7, 1, 15, 35, tzinfo=UTC),
+            corpus_root=tmp_path / "corpus",
+            decision_log_path=tmp_path / "decision_cards.jsonl",
+            execution_log_path=str(tmp_path / "execution_orders.jsonl"),
+        )
+    finally:
+        trading_cycle.load_runtime_state = original
+        trading_cycle.load_open_positions = original_positions
+
+    assert broker.submitted == []
+    assert result.trade_attempted_count == 0
+    assert result.execution_rejected_count_by_reason == {"setup_event_registry_unavailable": 1}
+    assert any(row["reason"] == "setup_event_registry_unavailable" for row in result.skipped)
+
+
 def test_unqualified_pair_chain_does_not_force_primary_and_runner(tmp_path, monkeypatch) -> None:
     monkeypatch.setenv("AUTOBOTT_CORE_RUNNER_ENABLED", "true")
     save_runtime_state(default_runtime_state(), state_path=tmp_path / "runtime_state.json")
@@ -312,7 +439,7 @@ def test_unqualified_pair_chain_does_not_force_primary_and_runner(tmp_path, monk
         result = trading_cycle.run_trading_cycle(
             symbols=["AAPL"],
             broker=broker,
-            data_client=CoreRunnerDataClient(),
+            data_client=UnqualifiedPairDataClient(),
             scheduled_market_time=datetime(2026, 7, 1, 15, 35, tzinfo=UTC),
             captured_at_utc=datetime(2026, 7, 1, 15, 35, tzinfo=UTC),
             corpus_root=tmp_path / "corpus",
@@ -778,6 +905,114 @@ def test_run_trading_cycle_uses_recent_loss_guard(tmp_path) -> None:
     assert result.orders_submitted == []
     assert result.skipped[0]["reason"] == "recent_loss_guard"
     assert result.execution_rejected_count_by_reason == {"recent_loss_guard": 1}
+
+
+def test_account_wide_same_day_realized_loss_blocks_new_entry(tmp_path) -> None:
+    save_runtime_state(default_runtime_state(), state_path=tmp_path / "runtime_state.json")
+    original = trading_cycle.load_runtime_state
+    original_positions = trading_cycle.load_open_positions
+    trading_cycle.load_runtime_state = lambda: original(state_path=tmp_path / "runtime_state.json")
+    trading_cycle.load_open_positions = lambda: []
+    today_ny = datetime.now(ZoneInfo("America/New_York")).replace(hour=10, minute=0, second=0, microsecond=0)
+    entry_time = today_ny.astimezone(UTC)
+    exit_time = (today_ny + timedelta(hours=1)).astimezone(UTC)
+    broker = FakeBrokerWithAllOrders(
+        [
+            {
+                "id": "msft-entry",
+                "symbol": "MSFT260724C00400000",
+                "side": "buy",
+                "qty": "1",
+                "filled_qty": "1",
+                "filled_avg_price": "8.00",
+                "status": "filled",
+                "submitted_at": entry_time.isoformat(),
+                "filled_at": entry_time.isoformat(),
+            },
+            {
+                "id": "msft-exit",
+                "symbol": "MSFT260724C00400000",
+                "side": "sell",
+                "qty": "1",
+                "filled_qty": "1",
+                "filled_avg_price": "2.00",
+                "status": "filled",
+                "submitted_at": exit_time.isoformat(),
+                "filled_at": exit_time.isoformat(),
+            },
+        ],
+        max_daily_loss=500.0,
+    )
+    try:
+        result = trading_cycle.run_trading_cycle(
+            symbols=["AAPL"],
+            broker=broker,
+            data_client=FakeDataClient(),
+            scheduled_market_time=datetime(2026, 7, 1, 15, 35, tzinfo=UTC),
+            captured_at_utc=datetime(2026, 7, 1, 15, 35, tzinfo=UTC),
+            corpus_root=tmp_path / "corpus",
+            decision_log_path=tmp_path / "decision_cards.jsonl",
+            execution_log_path=str(tmp_path / "execution_orders.jsonl"),
+        )
+    finally:
+        trading_cycle.load_runtime_state = original
+        trading_cycle.load_open_positions = original_positions
+
+    assert broker.submitted == []
+    assert result.trade_attempted_count == 0
+    assert result.execution_rejected_count_by_reason == {"daily_loss_limit_reached": 1}
+    daily = next(row for row in result.execution_outcomes if row["disposition"] == "daily_realized_pnl_summary")
+    assert daily["daily_realized_pnl"] == -600.0
+    assert daily["source"] == "broker_fill_outcomes"
+
+
+def test_hosted_outcome_sync_failure_blocks_entries_but_not_risk_reducing_exits(tmp_path, monkeypatch) -> None:
+    monkeypatch.setenv("RENDER", "true")
+    monkeypatch.setenv("ALPACA_ENV", "paper")
+    save_runtime_state(default_runtime_state(), state_path=tmp_path / "runtime_state.json")
+    original = trading_cycle.load_runtime_state
+    original_positions = trading_cycle.load_open_positions
+    trading_cycle.load_runtime_state = lambda: original(state_path=tmp_path / "runtime_state.json")
+    trading_cycle.load_open_positions = lambda: []
+    broker = FailingOutcomeBroker(
+        [
+            {
+                "symbol": "MSFT260708P00380000",
+                "underlying": "MSFT",
+                "side": "long",
+                "qty": "1",
+                "avg_entry_price": "5.00",
+                "current_price": "3.50",
+                "unrealized_plpc": "-0.30",
+            }
+        ]
+    )
+    try:
+        result = trading_cycle.run_trading_cycle(
+            symbols=["AAPL"],
+            broker=broker,
+            data_client=HostedCoreRunnerDataClient(),
+            scheduled_market_time=datetime(2026, 7, 1, 15, 35, tzinfo=UTC),
+            captured_at_utc=datetime(2026, 7, 1, 15, 35, tzinfo=UTC),
+            corpus_root=tmp_path / "corpus",
+            decision_log_path=tmp_path / "decision_cards.jsonl",
+            execution_log_path=str(tmp_path / "execution_orders.jsonl"),
+        )
+    finally:
+        trading_cycle.load_runtime_state = original
+        trading_cycle.load_open_positions = original_positions
+
+    assert [intent.side.value for intent in broker.submitted] == ["sell_to_close"]
+    assert result.orders_submitted == []
+    assert result.trade_attempted_count == 0
+    assert result.execution_rejected_count_by_reason == {"daily_pnl_unavailable": 1}
+    assert any(row["reason"] == "daily_pnl_unavailable" for row in result.skipped)
+    daily = next(row for row in result.execution_outcomes if row["disposition"] == "daily_realized_pnl_summary")
+    assert daily == {
+        "disposition": "daily_realized_pnl_summary",
+        "daily_realized_pnl": None,
+        "source": "unavailable",
+    }
 
 
 def test_run_trading_cycle_paper_ignores_real_money_cost_limit(tmp_path) -> None:

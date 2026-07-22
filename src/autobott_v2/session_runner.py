@@ -8,6 +8,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, time as daytime
 from typing import Any, Callable
 
+from .hosted_policy import HOSTED_PRIORITY_SYMBOLS, is_hosted_paper_runtime
 from .phase1_snapshot_capture import _market_timezone_info
 from .paper_readiness import _is_regular_trading_day
 from .trading_cycle import TradingCycleResult, run_trading_cycle
@@ -111,11 +112,15 @@ def _cycle_symbols(symbols: list[str], *, cycle_index: int, batch_size: int | No
     normalized = [symbol.upper() for symbol in symbols]
     if batch_size is None or batch_size <= 0 or batch_size >= len(normalized):
         return normalized
-    configured_priority = [
-        symbol.strip().upper()
-        for symbol in (os.getenv("AUTOBOTT_SESSION_PRIORITY_SYMBOLS") or "").split(",")
-        if symbol.strip()
-    ]
+    configured_priority = (
+        list(HOSTED_PRIORITY_SYMBOLS)
+        if is_hosted_paper_runtime()
+        else [
+            symbol.strip().upper()
+            for symbol in (os.getenv("AUTOBOTT_SESSION_PRIORITY_SYMBOLS") or "").split(",")
+            if symbol.strip()
+        ]
+    )
     priority = [symbol for symbol in configured_priority if symbol in normalized][:batch_size]
     rotating = [symbol for symbol in normalized if symbol not in set(priority)]
     rotating_batch_size = batch_size - len(priority)

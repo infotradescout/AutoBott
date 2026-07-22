@@ -4,6 +4,7 @@ import json
 from pathlib import Path
 from typing import Any
 
+from .jsonl_retention import compact_jsonl_tail
 
 
 class LearningLedger:
@@ -18,3 +19,4 @@ class LearningLedger:
             else:
                 payload = record
             handle.write(json.dumps(payload, sort_keys=True) + "\n")
+        compact_jsonl_tail(self.path)

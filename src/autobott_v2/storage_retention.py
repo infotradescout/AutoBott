@@ -5,6 +5,8 @@ import shutil
 from pathlib import Path
 from typing import Any
 
+from .hosted_policy import HOSTED_MIN_FREE_BYTES, HOSTED_SNAPSHOT_MAX_BYTES, is_hosted_paper_runtime
+
 
 MIB = 1024 * 1024
 
@@ -18,10 +20,26 @@ def prune_snapshot_storage(
     """Bound raw snapshot storage without touching execution/outcome journals."""
 
     snapshot_root = Path(root)
-    resolved_max = max(1, max_bytes if max_bytes is not None else _env_bytes("AUTOBOTT_SNAPSHOT_MAX_BYTES", 128 * MIB))
+    hosted_paper = is_hosted_paper_runtime()
+    resolved_max = max(
+        1,
+        max_bytes
+        if max_bytes is not None
+        else (
+            HOSTED_SNAPSHOT_MAX_BYTES
+            if hosted_paper
+            else _env_bytes("AUTOBOTT_SNAPSHOT_MAX_BYTES", 128 * MIB)
+        ),
+    )
     resolved_min_free = max(
         0,
-        min_free_bytes if min_free_bytes is not None else _env_bytes("AUTOBOTT_MIN_FREE_BYTES", 128 * MIB),
+        min_free_bytes
+        if min_free_bytes is not None
+        else (
+            HOSTED_MIN_FREE_BYTES
+            if hosted_paper
+            else _env_bytes("AUTOBOTT_MIN_FREE_BYTES", 128 * MIB)
+        ),
     )
     if not snapshot_root.exists():
         return {

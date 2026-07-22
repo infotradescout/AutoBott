@@ -6,6 +6,17 @@ from dataclasses import asdict, dataclass
 from datetime import UTC, datetime, time as daytime
 from typing import Any
 
+from .hosted_policy import (
+    HOSTED_POSITION_MONITOR_HEARTBEAT_ENABLED,
+    HOSTED_POSITION_MONITOR_HEARTBEAT_SECONDS,
+    HOSTED_SESSION_END_TIME,
+    HOSTED_SESSION_INTERVAL_SECONDS,
+    HOSTED_SESSION_MARKET_TIMEZONE,
+    HOSTED_SESSION_START_TIME,
+    HOSTED_SESSION_SYMBOL_BATCH_SIZE,
+    HOSTED_SESSION_SYMBOL_TOKENS,
+    is_hosted_paper_runtime,
+)
 from .options_universe import resolve_symbol_universe
 from .position_monitor import run_position_monitor
 from .runtime_control import arm_paper_execution
@@ -67,25 +78,66 @@ _SESSION_AUTOSTART_CONSUMED = False
 
 
 def load_session_supervisor_config() -> SessionSupervisorConfig:
-    symbols = resolve_symbol_universe([item.strip() for item in (os.getenv("AUTOBOTT_SESSION_SYMBOLS") or "SPY").split(",") if item.strip()])
+    hosted_paper = is_hosted_paper_runtime()
+    symbol_source = (
+        HOSTED_SESSION_SYMBOL_TOKENS
+        if hosted_paper
+        else tuple(item.strip() for item in (os.getenv("AUTOBOTT_SESSION_SYMBOLS") or "SPY").split(",") if item.strip())
+    )
+    symbols = resolve_symbol_universe(list(symbol_source))
     raw_max_cycles = os.getenv("AUTOBOTT_SESSION_MAX_CYCLES")
     raw_batch_size = os.getenv("AUTOBOTT_SESSION_SYMBOL_BATCH_SIZE")
-    run_forever = _normalize_bool(os.getenv("AUTOBOTT_SESSION_RUN_FOREVER"), default=False)
+    run_forever = True if hosted_paper else _normalize_bool(os.getenv("AUTOBOTT_SESSION_RUN_FOREVER"), default=False)
     return SessionSupervisorConfig(
-        enabled=_normalize_bool(os.getenv("AUTOBOTT_SESSION_AUTOSTART"), default=True),
+        enabled=True if hosted_paper else _normalize_bool(os.getenv("AUTOBOTT_SESSION_AUTOSTART"), default=True),
         symbols=symbols,
-        interval_seconds=int(os.getenv("AUTOBOTT_SESSION_INTERVAL_SECONDS", "300")),
+        interval_seconds=(
+            HOSTED_SESSION_INTERVAL_SECONDS
+            if hosted_paper
+            else int(os.getenv("AUTOBOTT_SESSION_INTERVAL_SECONDS", "300"))
+        ),
         max_cycles=None if run_forever else (int(raw_max_cycles) if raw_max_cycles else None),
-        symbol_batch_size=int(raw_batch_size) if raw_batch_size else None,
-        quantity=int(os.getenv("AUTOBOTT_SESSION_QUANTITY", "1")),
-        position_count=int(os.getenv("AUTOBOTT_SESSION_POSITION_COUNT", "0")),
-        daily_pnl=float(os.getenv("AUTOBOTT_SESSION_DAILY_PNL", "0.0")),
-        start_time=_normalize_time_text(os.getenv("AUTOBOTT_SESSION_START_TIME") or "09:35"),
-        end_time=_normalize_time_text(os.getenv("AUTOBOTT_SESSION_END_TIME") or "15:55"),
-        market_timezone=(os.getenv("AUTOBOTT_SESSION_MARKET_TIMEZONE") or "America/New_York").strip() or "America/New_York",
-        arm_paper_execution_on_start=_normalize_bool(os.getenv("AUTOBOTT_SESSION_ARM_PAPER_EXECUTION"), default=True),
-        position_monitor_heartbeat_enabled=_normalize_bool(os.getenv("AUTOBOTT_POSITION_MONITOR_HEARTBEAT_ENABLED"), default=False),
-        position_monitor_heartbeat_seconds=max(5, int(os.getenv("AUTOBOTT_POSITION_MONITOR_HEARTBEAT_SECONDS", "15"))),
+        symbol_batch_size=(
+            HOSTED_SESSION_SYMBOL_BATCH_SIZE
+            if hosted_paper
+            else (int(raw_batch_size) if raw_batch_size else None)
+        ),
+        quantity=1 if hosted_paper else int(os.getenv("AUTOBOTT_SESSION_QUANTITY", "1")),
+        position_count=0 if hosted_paper else int(os.getenv("AUTOBOTT_SESSION_POSITION_COUNT", "0")),
+        # Hosted cycles derive realized P/L from broker fills. A retained env
+        # value must never impersonate the live daily result.
+        daily_pnl=0.0 if hosted_paper else float(os.getenv("AUTOBOTT_SESSION_DAILY_PNL", "0.0")),
+        start_time=_normalize_time_text(
+            HOSTED_SESSION_START_TIME
+            if hosted_paper
+            else (os.getenv("AUTOBOTT_SESSION_START_TIME") or "09:35")
+        ),
+        end_time=_normalize_time_text(
+            HOSTED_SESSION_END_TIME
+            if hosted_paper
+            else (os.getenv("AUTOBOTT_SESSION_END_TIME") or "15:55")
+        ),
+        market_timezone=(
+            HOSTED_SESSION_MARKET_TIMEZONE
+            if hosted_paper
+            else (os.getenv("AUTOBOTT_SESSION_MARKET_TIMEZONE") or "America/New_York").strip()
+            or "America/New_York"
+        ),
+        arm_paper_execution_on_start=(
+            True
+            if hosted_paper
+            else _normalize_bool(os.getenv("AUTOBOTT_SESSION_ARM_PAPER_EXECUTION"), default=True)
+        ),
+        position_monitor_heartbeat_enabled=(
+            HOSTED_POSITION_MONITOR_HEARTBEAT_ENABLED
+            if hosted_paper
+            else _normalize_bool(os.getenv("AUTOBOTT_POSITION_MONITOR_HEARTBEAT_ENABLED"), default=False)
+        ),
+        position_monitor_heartbeat_seconds=(
+            HOSTED_POSITION_MONITOR_HEARTBEAT_SECONDS
+            if hosted_paper
+            else max(5, int(os.getenv("AUTOBOTT_POSITION_MONITOR_HEARTBEAT_SECONDS", "15")))
+        ),
         run_forever=run_forever,
     )
 
