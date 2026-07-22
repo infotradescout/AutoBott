@@ -33,7 +33,6 @@ def configure_local_paper_runtime_defaults(*, repo_root: Path | None = None) -> 
     os.environ.setdefault("AUTOBOTT_SESSION_END_TIME", "15:55")
     os.environ.setdefault("AUTOBOTT_SESSION_MARKET_TIMEZONE", "America/New_York")
     os.environ.setdefault("AUTOBOTT_SESSION_ARM_PAPER_EXECUTION", "true")
-    os.environ.setdefault("AUTOBOTT_DASHBOARD_AUTH_TOKEN", "autobott-local")
     # Hosted env files (downloaded from the Render dashboard) carry Render's
     # disk-mounted /var/data paths. Local runs must always use the repo-relative
     # roots regardless of what the loaded env file says, so these are forced
