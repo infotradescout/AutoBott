@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 
 import pytest
@@ -1068,3 +1069,58 @@ def test_run_trading_cycle_paper_opportunistic_mode_can_be_disabled(tmp_path, mo
     assert result.decisions[0]["decision"] == "BLOCKED_BY_SPREAD"
     assert result.trade_attempted_count == 0
     assert result.orders_submitted == []
+
+def test_paper_directional_discovery_turns_neutral_cycle_into_atomic_pair(tmp_path, monkeypatch) -> None:
+    monkeypatch.setenv("AUTOBOTT_CORE_RUNNER_ENABLED", "true")
+    monkeypatch.setenv("AUTOBOTT_PAPER_OPPORTUNISTIC_ENTRIES", "true")
+    monkeypatch.setenv("AUTOBOTT_PAPER_DIRECTIONAL_DISCOVERY", "true")
+    save_runtime_state(default_runtime_state(), state_path=tmp_path / "runtime_state.json")
+    original_runtime = trading_cycle.load_runtime_state
+    original_positions = trading_cycle.load_open_positions
+    original_build = trading_cycle.build_decision_card
+    trading_cycle.load_runtime_state = lambda: original_runtime(state_path=tmp_path / "runtime_state.json")
+    trading_cycle.load_open_positions = lambda: []
+
+    def neutral_build(decision_input, rules=None):
+        card = original_build(decision_input, rules)
+        return replace(
+            card,
+            direction=replace(
+                card.direction,
+                bias=trading_cycle.DirectionBias.NEUTRAL,
+                score=0.0,
+            ),
+            selected_contract=None,
+            tactical_contract=None,
+            rider_contract=None,
+            trade_setup=trading_cycle.TradeSetup.NO_TRADE,
+            execution_layer=trading_cycle.ExecutionLayer.NONE,
+            decision=trading_cycle.DecisionStatus.NO_TRADE,
+            blocked_reason="direction_not_strong_enough",
+        )
+
+    trading_cycle.build_decision_card = neutral_build
+    broker = FakeBroker()
+    try:
+        result = trading_cycle.run_trading_cycle(
+            symbols=["AAPL"],
+            broker=broker,
+            data_client=CoreRunnerDataClient(),
+            scheduled_market_time=datetime(2026, 7, 1, 15, 35, tzinfo=UTC),
+            captured_at_utc=datetime(2026, 7, 1, 15, 35, tzinfo=UTC),
+            corpus_root=tmp_path / "corpus",
+            decision_log_path=tmp_path / "decision_cards.jsonl",
+            execution_log_path=str(tmp_path / "execution_orders.jsonl"),
+        )
+    finally:
+        trading_cycle.build_decision_card = original_build
+        trading_cycle.load_runtime_state = original_runtime
+        trading_cycle.load_open_positions = original_positions
+
+    assert result.decisions[0]["decision"] == "NO_TRADE"
+    assert result.decisions[1]["decision"] == "TRADE_CANDIDATE"
+    assert "paper_directional_discovery_override" in result.decisions[1]["reason_codes"]
+    assert result.trade_attempted_count == 1
+    assert len(result.orders_submitted) == 2
+    assert len(broker.mleg_calls) == 1
+
