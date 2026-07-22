@@ -200,10 +200,7 @@ def _safety_payload() -> JsonDict:
         "active_gate_path": str(gate_path),
         "order_methods_present": _order_methods_present(),
         "core_runner_enabled": (os.getenv("AUTOBOTT_CORE_RUNNER_ENABLED", "true").strip().lower() in {"1", "true", "yes", "on"}),
-        "core_runner_atomic_mleg_required": _env_bool(
-            "AUTOBOTT_CORE_RUNNER_ATOMIC_MLEG_REQUIRED",
-            default=True,
-        ),
+        "core_runner_atomic_mleg_required": _core_runner_atomic_mleg_required(),
         "core_runner_pair_price_restricted": False,
         "paper_position_cost_limit_enabled": execution_config.effective_max_position_cost() is not None,
         "kill_switch_enabled": runtime_state.kill_switch_enabled,
@@ -2870,6 +2867,14 @@ def _env_bool(name: str, *, default: bool = False) -> bool:
     if value is None:
         return default
     return value.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _core_runner_atomic_mleg_required() -> bool:
+    value = os.getenv("AUTOBOTT_CORE_RUNNER_ATOMIC_MLEG_REQUIRED")
+    if value is not None:
+        return value.strip().lower() in {"1", "true", "yes", "on"}
+    data_root = (os.getenv("AUTOBOTT_DATA_ROOT") or "").rstrip("/")
+    return not data_root.startswith("/var/data/autobott")
 
 
 def _thesis_failure_sort_key(row: JsonDict) -> tuple[float, float, float, str]:
