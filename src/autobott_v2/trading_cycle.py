@@ -23,11 +23,13 @@ from .phase1_models import (
     DecisionCard,
     DecisionStatus,
     DirectionBias,
+    DirectionResult,
     ExecutionLayer,
     OptionContractSnapshot,
     OptionType,
     Phase1Rules,
     SelectedContract,
+    TradeSetup,
 )
 from .phase1_snapshot_capture import CaptureRules, capture_symbol_snapshot
 from .phase1_validate import _decision_input_from_snapshot, _load_snapshot
@@ -782,19 +784,43 @@ def _paper_opportunistic_decision(
         and strict_decision.direction.bias is DirectionBias.BULLISH
         and strict_decision.ticker.upper() in _paper_volatility_hedge_symbols()
     )
+    directional_discovery_override = (
+        strict_decision.decision is DecisionStatus.NO_TRADE
+        and strict_decision.blocked_reason == "direction_not_strong_enough"
+        and _paper_directional_discovery_enabled()
+    )
     if strict_decision.decision not in {
         DecisionStatus.BLOCKED_BY_VOLATILITY,
         DecisionStatus.BLOCKED_BY_SPREAD,
         DecisionStatus.NO_TRADE,
     } and not volatility_hedge_regime_override:
         return None
-    if strict_decision.decision is DecisionStatus.NO_TRADE and strict_decision.blocked_reason != "confidence_below_threshold":
+    if (
+        strict_decision.decision is DecisionStatus.NO_TRADE
+        and strict_decision.blocked_reason != "confidence_below_threshold"
+        and not directional_discovery_override
+    ):
         return None
+
+    discovery_decision = strict_decision
+    if directional_discovery_override:
+        discovery_direction = _paper_discovery_direction(strict_decision, decision_input=decision_input)
+        if discovery_direction is None:
+            return None
+        discovery_decision = replace(
+            strict_decision,
+            direction=discovery_direction,
+            trade_setup=(
+                TradeSetup.BULLISH_CONTINUATION
+                if discovery_direction.bias is DirectionBias.BULLISH
+                else TradeSetup.BEARISH_CONTINUATION
+            ),
+        )
 
     rules = _paper_opportunistic_rules()
     relaxed = build_decision_card(decision_input, rules)
     if relaxed.decision is not DecisionStatus.TRADE_CANDIDATE or relaxed.selected_contract is None:
-        fallback = _paper_discovery_contract(strict_decision, decision_input=decision_input, rules=rules)
+        fallback = _paper_discovery_contract(discovery_decision, decision_input=decision_input, rules=rules)
         if fallback is None:
             return None
         relaxed = fallback
@@ -807,6 +833,8 @@ def _paper_opportunistic_decision(
     )
     if volatility_hedge_regime_override:
         reason_codes.append("paper_volatility_hedge_risk_off_override")
+    if directional_discovery_override:
+        reason_codes.append("paper_directional_discovery_override")
     if strict_decision.blocked_reason:
         reason_codes.append(f"strict_blocked_{strict_decision.blocked_reason}")
     return replace(
@@ -815,6 +843,55 @@ def _paper_opportunistic_decision(
         explanation=(
             f"{relaxed.explanation}; paper_opportunistic_discovery override from "
             f"{strict_decision.decision.value}:{strict_decision.blocked_reason or 'none'}"
+        ),
+    )
+
+
+def _paper_directional_discovery_enabled() -> bool:
+    value = os.getenv("AUTOBOTT_PAPER_DIRECTIONAL_DISCOVERY")
+    if value is None:
+        return False
+    return value.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _paper_discovery_direction(
+    strict_decision: DecisionCard,
+    *,
+    decision_input: Any,
+) -> DirectionResult | None:
+    """Select the strongest observable direction for paper-only data collection."""
+
+    bars = list(decision_input.market_bars)
+    if len(bars) < 2:
+        return None
+    first_close = float(bars[0].close)
+    short_start_close = float(bars[max(0, len(bars) - 6)].close)
+    last_close = float(bars[-1].close)
+    if first_close <= 0 or short_start_close <= 0 or last_close <= 0:
+        return None
+    full_move = (last_close - first_close) / first_close
+    short_move = (last_close - short_start_close) / short_start_close
+    signal = short_move * 0.70 + full_move * 0.30
+    if abs(signal) < 0.000001:
+        last_open = float(bars[-1].open)
+        if last_open > 0:
+            signal = (last_close - last_open) / last_open
+    if abs(signal) < 0.000001:
+        return None
+
+    bias = DirectionBias.BULLISH if signal > 0 else DirectionBias.BEARISH
+    magnitude = min(0.49, max(0.20, abs(signal) * 50))
+    score = magnitude if bias is DirectionBias.BULLISH else -magnitude
+    return DirectionResult(
+        bias=bias,
+        score=score,
+        momentum=full_move,
+        relative_strength=signal,
+        volume_confirmation=strict_decision.direction.volume_confirmation,
+        failed_breakout=strict_decision.direction.failed_breakout,
+        explanation=(
+            f"{bias.value} paper directional discovery from "
+            f"short_move={short_move:.4f}, full_move={full_move:.4f}."
         ),
     )
 
