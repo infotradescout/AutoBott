@@ -384,23 +384,31 @@ def capture_symbol_snapshot(
     snapshot_path = snapshot_dir / filename
     option_quote_path = option_quote_dir / filename
     snapshot_path.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
-    option_quote_path.write_text(
-        json.dumps(
-            {
-                "schema_version": "phase1_option_quote_capture.v1",
-                "captured_at": captured_at_utc.astimezone(UTC).isoformat(),
-                "timestamp_utc": _isoformat_z(as_of_utc),
-                "timestamp_market": scheduled_market_time.astimezone(tz).isoformat(),
-                "ticker": symbol,
-                "contract_count": len(option_chain),
-                "contracts": option_chain,
-            },
-            indent=2,
-            sort_keys=True,
-        ),
-        encoding="utf-8",
-    )
+    if _capture_option_quote_files_enabled():
+        option_quote_path.write_text(
+            json.dumps(
+                {
+                    "schema_version": "phase1_option_quote_capture.v1",
+                    "captured_at": captured_at_utc.astimezone(UTC).isoformat(),
+                    "timestamp_utc": _isoformat_z(as_of_utc),
+                    "timestamp_market": scheduled_market_time.astimezone(tz).isoformat(),
+                    "ticker": symbol,
+                    "contract_count": len(option_chain),
+                    "contracts": option_chain,
+                },
+                indent=2,
+                sort_keys=True,
+            ),
+            encoding="utf-8",
+        )
     return str(snapshot_path)
+
+
+def _capture_option_quote_files_enabled() -> bool:
+    value = os.getenv("AUTOBOTT_CAPTURE_OPTION_QUOTE_FILES")
+    if value is None:
+        return True
+    return value.strip().lower() in {"1", "true", "yes", "on"}
 
 
 def _fetch_stock_bars_with_retries(
