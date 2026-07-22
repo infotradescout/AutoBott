@@ -2865,6 +2865,13 @@ def _order_methods_present() -> bool:
     return any(hasattr(AlpacaPaperClient, method_name) for method_name in forbidden)
 
 
+def _env_bool(name: str, *, default: bool = False) -> bool:
+    value = os.getenv(name)
+    if value is None:
+        return default
+    return value.strip().lower() in {"1", "true", "yes", "on"}
+
+
 def _thesis_failure_sort_key(row: JsonDict) -> tuple[float, float, float, str]:
     dte_penalty = 0 if (row.get("contract_dte_days") or 99) <= 2 else 1
     followthrough = float(row.get("followthrough_rate") or 0.0)
