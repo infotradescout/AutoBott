@@ -122,3 +122,17 @@ def test_historical_live_simulation_runs_and_closes_trade(tmp_path) -> None:
     assert result["closed_trades"] >= 1
     assert "tactical_2dte_pass_rate" in result["thesis_validation"]
     assert (tmp_path / "artifacts" / "sim1" / "simulation_summary.json").exists()
+    execution_rows = [
+        json.loads(line)
+        for line in (tmp_path / "artifacts" / "sim1" / "execution_orders.jsonl")
+        .read_text(encoding="utf-8")
+        .splitlines()
+    ]
+    exit_rows = [
+        row
+        for row in execution_rows
+        if row.get("event_type") == "order_submission"
+        and (row.get("payload", {}).get("intent", {}).get("side") == "sell_to_close")
+    ]
+    assert exit_rows
+    assert exit_rows[0]["payload"]["intent"]["metadata"]["exit_reason"] == "dte_floor"

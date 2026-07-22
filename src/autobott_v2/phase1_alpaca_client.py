@@ -17,6 +17,15 @@ _OPTION_CONTRACT_METADATA_CACHE: dict[tuple[str, str, str, str, str], dict[str, 
 _OPTION_CONTRACT_METADATA_CACHE_LOCK = threading.Lock()
 
 
+class _AlpacaResponseDecodeError(ValueError):
+    """A successful Alpaca response whose body cannot be decoded as JSON."""
+
+    def __init__(self, path: str, reason: str) -> None:
+        super().__init__(f"alpaca_response_invalid_json:{path}:{reason}")
+        self.path = path
+        self.reason = reason
+
+
 class AlpacaPaperClient:
     def __init__(self, config: AlpacaPaperConfig | None = None) -> None:
         self.config = (config or require_alpaca_paper_config()).validate()
@@ -286,7 +295,18 @@ class AlpacaPaperClient:
             method="GET",
         )
         with urllib.request.urlopen(request, timeout=30) as response:
-            return json.loads(response.read().decode("utf-8"))
+            body = response.read()
+            if not body or not body.strip():
+                raise _AlpacaResponseDecodeError(path, "empty_body")
+            try:
+                decoded = body.decode("utf-8")
+            except UnicodeDecodeError as exc:
+                raise _AlpacaResponseDecodeError(path, "invalid_utf8") from exc
+            try:
+                return json.loads(decoded)
+            except json.JSONDecodeError as exc:
+                reason = f"malformed_json_line_{exc.lineno}_column_{exc.colno}"
+                raise _AlpacaResponseDecodeError(path, reason) from exc
 
     def _get_json_with_retry(
         self,
@@ -305,6 +325,11 @@ class AlpacaPaperClient:
             except (urllib.error.URLError, TimeoutError):
                 if attempt == 2:
                     raise
+            except _AlpacaResponseDecodeError as exc:
+                if attempt == 2:
+                    raise RuntimeError(
+                        f"alpaca_response_invalid_json:{path}:{exc.reason}:attempts=3"
+                    ) from exc
             time.sleep(0.25 * (2**attempt))
         raise RuntimeError("alpaca_request_retry_exhausted")
 

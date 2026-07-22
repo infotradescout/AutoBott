@@ -163,7 +163,12 @@ def run_historical_live_simulation(
             exit_decision = evaluate_exit(open_event, snapshot, quote_age_seconds=quote_age_seconds, rules=ExitRules())
             if exit_decision.exit_action == "close":
                 exit_position = _position_from_event(open_event)
-                exit_intent = build_exit_intent_from_position(exit_position, limit_price=exit_decision.exit_fill_price or exit_position.entry_limit_price, environment=resolved_config.environment)
+                exit_intent = build_exit_intent_from_position(
+                    exit_position,
+                    limit_price=exit_decision.exit_fill_price or exit_position.entry_limit_price,
+                    exit_reason=exit_decision.exit_reason or "automated_exit",
+                    environment=resolved_config.environment,
+                )
                 exit_risk = RiskCheckResult(
                     approved=True,
                     reasons=(),

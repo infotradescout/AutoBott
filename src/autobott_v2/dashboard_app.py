@@ -587,6 +587,7 @@ def _options_timeline_payload() -> JsonDict:
     normalized = sorted((_normalize_order_for_timeline(order) for order in orders), key=lambda row: row["event_time"] or datetime.min.replace(tzinfo=UTC))
     round_trips, pending = _timeline_round_trips(normalized)
     outcome_learning = record_trade_outcomes_from_orders(orders)
+    current_policy_groups = outcome_learning.get("group_summary") or {}
     clusters = _timeline_clusters(normalized, round_trips)
     warnings = _timeline_warnings(clusters, round_trips, pending)
     return {
@@ -603,9 +604,17 @@ def _options_timeline_payload() -> JsonDict:
             "orders_seen": len(normalized),
             "round_trips": len(round_trips),
             "pending_orders": len(pending),
+            # This is a bounded broker-order window and remains useful for
+            # account reconciliation, but it is not the strategy cohort.
             "realized_pnl": round(sum(float(row.get("pnl") or 0.0) for row in round_trips), 2),
             "winners": sum(1 for row in round_trips if float(row.get("pnl") or 0.0) > 0),
             "losers": sum(1 for row in round_trips if float(row.get("pnl") or 0.0) < 0),
+            # Profitability decisions use only fully closed primary+runner
+            # groups attributed to the current entry policy.
+            "current_policy_version": outcome_learning.get("summary_policy_version"),
+            "current_policy_completed_pairs": int(current_policy_groups.get("completed_groups") or 0),
+            "current_policy_pair_pnl": float(current_policy_groups.get("net_pnl") or 0.0),
+            "current_policy_pair_expectancy": float(current_policy_groups.get("expectancy") or 0.0),
         },
     }
 
@@ -1061,6 +1070,7 @@ def _manual_decision_row(record: JsonDict) -> JsonDict:
         "stop_exit_mid": contract.get("stop_exit_mid"),
         "exit_rule": contract.get("exit_rule"),
         "reason_codes": decision.get("reason_codes", []),
+        "contract_diagnostics": decision.get("contract_diagnostics", []),
         "score_reasons": contract.get("score_reasons", []),
         "explanation": decision.get("explanation"),
         "score": _decision_feed_score(status=status, confidence=confidence, spread_pct=spread_pct, blocked_reason=blocked_reason),
@@ -1521,6 +1531,7 @@ def _execution_exit_payload(payload: JsonDict) -> JsonDict:
         position,
         broker=AlpacaExecutionBroker(),
         limit_price=limit_price,
+        exit_reason="manual_exit",
     )
     return {
         "ok": True,
@@ -2337,8 +2348,12 @@ def _dashboard_html() -> str:
         ${metricList([
           ['Mode', escapeHtml(payload.mode || 'timeline')],
           ['Orders seen', escapeHtml(summary.orders_seen ?? 0)],
-          ['Round trips', escapeHtml(summary.round_trips ?? 0)],
-          ['Realized P/L', formatMoney(summary.realized_pnl)],
+          ['Account-window leg exits', escapeHtml(summary.round_trips ?? 0)],
+          ['Account-window leg P/L', formatMoney(summary.realized_pnl)],
+          ['Current policy', escapeHtml(summary.current_policy_version || 'unattributed')],
+          ['Current-policy completed pairs', escapeHtml(summary.current_policy_completed_pairs ?? 0)],
+          ['Current-policy pair P/L', formatMoney(summary.current_policy_pair_pnl)],
+          ['Current-policy pair expectancy', formatMoney(summary.current_policy_pair_expectancy)],
           ['Pending', escapeHtml(summary.pending_orders ?? 0)]
         ])}
         ${warningRows || '<div class="foot-note">No timeline warnings.</div>'}

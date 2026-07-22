@@ -37,6 +37,9 @@ def _position() -> OpenPosition:
         take_profit_price=3.75,
         stop_loss_price=1.75,
         status="filled",
+        trade_group_id="core-runner:decision-123",
+        leg_role="primary",
+        paired_option_symbol="AAPL260117C00195000",
         entry_policy_version="entry-policy-v1",
         entry_build_sha="entry-sha",
     )
@@ -64,9 +67,18 @@ class FakeBroker:
 
 
 def test_build_exit_intent_from_position_creates_sell_to_close() -> None:
-    intent = build_exit_intent_from_position(_position(), limit_price=3.1)
+    intent = build_exit_intent_from_position(
+        _position(),
+        limit_price=3.1,
+        exit_reason="manual_exit",
+    )
     assert intent.side is OrderSide.SELL_TO_CLOSE
     assert intent.limit_price == 3.1
+    assert intent.metadata["exit_reason"] == "manual_exit"
+    assert intent.metadata["trade_group_id"] == "core-runner:decision-123"
+    assert intent.metadata["leg_role"] == "primary"
+    assert intent.metadata["paired_option_symbol"] == "AAPL260117C00195000"
+    assert intent.metadata["entry_decision_id"] == "decision-123"
     assert intent.metadata["entry_policy_version"] == "entry-policy-v1"
     assert intent.metadata["entry_build_sha"] == "entry-sha"
 
@@ -80,6 +92,7 @@ def test_submit_exit_for_position_marks_position_closing(tmp_path) -> None:
         _position(),
         broker=FakeBroker(),
         limit_price=3.1,
+        exit_reason="manual_exit",
         journal_path=str(journal_path),
         store_path=str(store_path),
     )

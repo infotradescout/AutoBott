@@ -1,4 +1,5 @@
 import json
+import urllib.error
 from io import BytesIO
 from datetime import datetime, timezone
 
@@ -38,6 +39,91 @@ class _FakeResponse:
 
     def __exit__(self, *exc_info) -> None:
         return None
+
+
+class _RawFakeResponse(_FakeResponse):
+    def __init__(self, body: bytes) -> None:
+        self._body = body
+
+
+def test_successful_empty_or_malformed_response_retries_until_valid(monkeypatch) -> None:
+    client = AlpacaPaperClient(_config())
+    bodies = [b"", b"not-json", b'{"quotes": {"SPY": {"ap": 650.25}}}']
+    sleeps = []
+
+    def fake_urlopen(request, timeout=30):
+        return _RawFakeResponse(bodies.pop(0))
+
+    monkeypatch.setattr("autobott_v2.phase1_alpaca_client.urllib.request.urlopen", fake_urlopen)
+    monkeypatch.setattr("autobott_v2.phase1_alpaca_client.time.sleep", sleeps.append)
+
+    quotes = client.get_latest_stock_quotes(["SPY"])
+
+    assert quotes == {"SPY": {"ap": 650.25}}
+    assert bodies == []
+    assert sleeps == [0.25, 0.5]
+
+
+@pytest.mark.parametrize(
+    ("body", "reason"),
+    [
+        (b"", "empty_body"),
+        (b"\xff", "invalid_utf8"),
+        (b"<html>upstream reset</html>", "malformed_json_line_1_column_1"),
+    ],
+)
+def test_successful_invalid_response_reports_endpoint_after_retry_exhaustion(
+    monkeypatch,
+    body: bytes,
+    reason: str,
+) -> None:
+    client = AlpacaPaperClient(_config())
+    calls = 0
+
+    def fake_urlopen(request, timeout=30):
+        nonlocal calls
+        calls += 1
+        return _RawFakeResponse(body)
+
+    monkeypatch.setattr("autobott_v2.phase1_alpaca_client.urllib.request.urlopen", fake_urlopen)
+    monkeypatch.setattr("autobott_v2.phase1_alpaca_client.time.sleep", lambda _seconds: None)
+
+    with pytest.raises(
+        RuntimeError,
+        match=rf"alpaca_response_invalid_json:/v2/stocks/quotes/latest:{reason}:attempts=3",
+    ):
+        client.get_latest_stock_quotes(["SPY"])
+
+    assert calls == 3
+
+
+def test_nonretryable_http_error_is_not_converted_or_retried(monkeypatch) -> None:
+    client = AlpacaPaperClient(_config())
+    calls = 0
+    expected = urllib.error.HTTPError(
+        "https://data.alpaca.markets/v2/stocks/quotes/latest",
+        401,
+        "Unauthorized",
+        {},
+        BytesIO(b'{"message":"unauthorized"}'),
+    )
+
+    def fake_urlopen(request, timeout=30):
+        nonlocal calls
+        calls += 1
+        raise expected
+
+    monkeypatch.setattr("autobott_v2.phase1_alpaca_client.urllib.request.urlopen", fake_urlopen)
+    monkeypatch.setattr(
+        "autobott_v2.phase1_alpaca_client.time.sleep",
+        lambda _seconds: pytest.fail("nonretryable HTTP errors must not sleep"),
+    )
+
+    with pytest.raises(urllib.error.HTTPError) as raised:
+        client.get_latest_stock_quotes(["SPY"])
+
+    assert raised.value is expected
+    assert calls == 1
 
 
 def test_get_positions_returns_list(monkeypatch) -> None:

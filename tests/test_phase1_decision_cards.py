@@ -267,11 +267,69 @@ def test_phase1_prioritizes_edge_liquidity_and_risk_reward_over_farther_dte() ->
 
 
 def test_phase1_blocks_when_reward_risk_ratio_is_too_weak() -> None:
-    card = build_decision_card(_input(chain=[_contract(option_type=OptionType.PUT, bid=4.56, ask=5.44)]))
+    card = build_decision_card(_input(chain=[_contract(bid=4.56, ask=5.44)]))
 
     assert card.decision == DecisionStatus.BLOCKED_BY_SPREAD
     assert card.blocked_reason == "no_contract_passed_edge_liquidity_risk_reward_filters"
     assert card.selected_contract is None
+    assert len(card.contract_diagnostics) == 1
+    diagnostic = card.contract_diagnostics[0]
+    assert diagnostic["option_symbol"] == "AAPL260619C00215000"
+    rider = next(layer for layer in diagnostic["layers"] if layer["layer"] == "rider")
+    assert rider["rejection_reasons"] == ["reward_risk_below_min"]
+    assert "contract_filter:reward_risk_below_min" in card.reason_codes
+    assert "tactical_contract_rejections[" in card.explanation
+
+
+def test_vix_uses_normalized_vega_floor_without_weakening_other_contract_gates() -> None:
+    bars = _bars(18.0, 0.10)
+    expiration = date(2026, 6, 8)
+    vix_contract = replace(
+        _contract(
+            option_symbol="VIXW260608C00021000",
+            expiration=expiration,
+            strike=21.0,
+            bid=0.95,
+            ask=1.05,
+            delta=0.52,
+            theta=-0.03,
+            vega=0.006,
+        ),
+        underlying="VIX",
+    )
+    rules = Phase1Rules(
+        intraday_min_dte=5,
+        intraday_max_dte=10,
+        rider_min_dte=14,
+        rider_max_dte=45,
+        risk_off_bullish_exempt_symbols=("VIX",),
+    )
+    vix_input = replace(
+        _input(bars=bars, chain=[vix_contract]),
+        ticker="VIX",
+        iv_history=[],
+    )
+
+    vix_card = build_decision_card(vix_input, rules)
+    equity_card = build_decision_card(
+        replace(
+            vix_input,
+            ticker="AAPL",
+            option_chain=[replace(vix_contract, option_symbol="AAPL260608C00021000", underlying="AAPL")],
+        ),
+        rules,
+    )
+
+    assert vix_card.decision == DecisionStatus.TRADE_CANDIDATE
+    assert vix_card.selected_contract is not None
+    assert equity_card.decision == DecisionStatus.BLOCKED_BY_SPREAD
+    tactical = next(
+        layer
+        for layer in equity_card.contract_diagnostics[0]["layers"]
+        if layer["layer"] == "tactical"
+    )
+    assert "normalized_vega_below_min" in tactical["rejection_reasons"]
+    assert tactical["limits"]["effective_min_vega"] == 0.01
 
 
 def test_phase1_persists_accepted_and_rejected_cards(tmp_path) -> None:

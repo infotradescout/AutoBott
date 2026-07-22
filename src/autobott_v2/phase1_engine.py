@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import math
 from datetime import date
+from typing import Any
 
 from .phase1_models import (
     ContractScore,
@@ -64,7 +65,29 @@ def build_decision_card(decision_input: DecisionInput, rules: Phase1Rules | None
     contract = _selected_contract_score(selected_layer, tactical_contract, rider_contract)
     if contract is None:
         confidence = _confidence(regime.score, direction.score, volatility.score, None)
-        return _card(decision_input, regime, direction, cycle, volatility, None, None, None, setup, ExecutionLayer.NONE, DecisionStatus.BLOCKED_BY_SPREAD, "no_contract_passed_edge_liquidity_risk_reward_filters", confidence)
+        contract_diagnostics = _contract_filter_diagnostics(
+            decision_input,
+            direction,
+            rules,
+            setup,
+            cycle,
+        )
+        return _card(
+            decision_input,
+            regime,
+            direction,
+            cycle,
+            volatility,
+            None,
+            None,
+            None,
+            setup,
+            ExecutionLayer.NONE,
+            DecisionStatus.BLOCKED_BY_SPREAD,
+            "no_contract_passed_edge_liquidity_risk_reward_filters",
+            confidence,
+            contract_diagnostics=contract_diagnostics,
+        )
 
     confidence = _confidence(regime.score, direction.score, volatility.score, contract.score)
     status = DecisionStatus.TRADE_CANDIDATE if confidence >= rules.min_confidence else DecisionStatus.NO_TRADE
@@ -301,34 +324,22 @@ def _score_contract(
     layer: ExecutionLayer,
     cycle_profile: CycleProfile,
 ) -> ContractScore | None:
+    rejection_reasons = _contract_rejection_reasons(
+        contract,
+        underlying,
+        as_of,
+        rules,
+        layer,
+        cycle_profile,
+    )
+    if rejection_reasons:
+        return None
+
     dte = (contract.expiration - as_of).days
-    strike_distance = abs(contract.strike - underlying) / underlying
     abs_delta = abs(contract.delta)
     reasons: list[str] = []
 
-    if contract.bid <= 0 or contract.ask <= 0 or contract.ask < contract.bid:
-        return None
-    if contract.spread_pct > rules.max_spread_pct:
-        return None
-    if contract.open_interest < rules.min_open_interest:
-        return None
-    if contract.volume_available and contract.volume < rules.min_contract_volume:
-        return None
-    if contract.underlying.upper() not in {"VIX", "VIXW"} and strike_distance > rules.max_strike_distance_pct:
-        return None
-    min_abs_delta = rules.intraday_min_abs_delta if layer == ExecutionLayer.TACTICAL else rules.min_abs_delta
-    max_abs_delta = rules.intraday_max_abs_delta if layer == ExecutionLayer.TACTICAL else rules.max_abs_delta
-    if not (min_abs_delta <= abs_delta <= max_abs_delta):
-        return None
-    if abs(contract.theta) > rules.max_theta_abs or contract.vega < rules.min_vega:
-        return None
-    min_dte, max_dte = _target_dte_window(layer, rules, cycle_profile)
-    if not (min_dte <= dte <= max_dte):
-        return None
-
     reward_risk_ratio = _planned_reward_risk_ratio(contract, rules)
-    if reward_risk_ratio < rules.min_reward_risk_ratio:
-        return None
 
     reasons.append("liquidity_passed")
     if not contract.volume_available:
@@ -348,10 +359,168 @@ def _score_contract(
     bid_ask_quality = max(0.0, 1 - contract.spread_pct / rules.max_spread_pct)
     edge_fit = _contract_edge_fit(abs_delta, direction, volatility, layer)
     risk_reward = min(1.0, reward_risk_ratio / 1.25)
-    exit_quality = _exit_quality(contract, rules)
+    exit_quality = _exit_quality(
+        contract,
+        rules,
+        min_vega=_effective_min_vega(contract, underlying, rules),
+    )
     layer_fit = 1.0 if layer == ExecutionLayer.TACTICAL else _rider_dte_fit(dte, cycle_profile)
     score = liquidity * 0.25 + edge_fit * 0.25 + risk_reward * 0.20 + bid_ask_quality * 0.15 + exit_quality * 0.05 + layer_fit * 0.10
     return ContractScore(contract=contract, score=round(score, 4), reward_risk_ratio=round(reward_risk_ratio, 4), reasons=reasons)
+
+
+def _contract_rejection_reasons(
+    contract: OptionContractSnapshot,
+    underlying: float,
+    as_of: date,
+    rules: Phase1Rules,
+    layer: ExecutionLayer,
+    cycle_profile: CycleProfile,
+) -> list[str]:
+    """Return every hard contract gate that failed, using stable codes.
+
+    Selection and diagnostics share this function so telemetry cannot claim a
+    different rejection from the one that actually stopped the order path.
+    """
+
+    if contract.bid <= 0 or contract.ask <= 0 or contract.ask < contract.bid:
+        return ["invalid_two_sided_quote"]
+
+    rejections: list[str] = []
+    if contract.spread_pct > rules.max_spread_pct:
+        rejections.append("spread_pct_above_max")
+    if contract.open_interest < rules.min_open_interest:
+        rejections.append("open_interest_below_min")
+    if contract.volume_available and contract.volume < rules.min_contract_volume:
+        rejections.append("contract_volume_below_min")
+
+    strike_distance = abs(contract.strike - underlying) / underlying
+    if contract.underlying.upper() not in {"VIX", "VIXW"} and strike_distance > rules.max_strike_distance_pct:
+        rejections.append("strike_distance_pct_above_max")
+
+    abs_delta = abs(contract.delta)
+    min_abs_delta = rules.intraday_min_abs_delta if layer == ExecutionLayer.TACTICAL else rules.min_abs_delta
+    max_abs_delta = rules.intraday_max_abs_delta if layer == ExecutionLayer.TACTICAL else rules.max_abs_delta
+    if abs_delta < min_abs_delta:
+        rejections.append("abs_delta_below_min")
+    if abs_delta > max_abs_delta:
+        rejections.append("abs_delta_above_max")
+    if abs(contract.theta) > rules.max_theta_abs:
+        rejections.append("theta_decay_above_max")
+    if contract.vega < _effective_min_vega(contract, underlying, rules):
+        rejections.append("normalized_vega_below_min")
+
+    dte = (contract.expiration - as_of).days
+    min_dte, max_dte = _target_dte_window(layer, rules, cycle_profile)
+    if dte < min_dte:
+        rejections.append("dte_below_layer_min")
+    if dte > max_dte:
+        rejections.append("dte_above_layer_max")
+
+    if _planned_reward_risk_ratio(contract, rules) < rules.min_reward_risk_ratio:
+        rejections.append("reward_risk_below_min")
+    return rejections
+
+
+def _effective_min_vega(
+    contract: OptionContractSnapshot,
+    underlying: float,
+    rules: Phase1Rules,
+) -> float:
+    """Make the VIX vega floor dimensionally comparable to equity options.
+
+    Dollar vega scales with the underlying price.  Applying the equity-sized
+    absolute ``0.01`` floor to a 15--25 point VIX forward rejects even liquid
+    at-the-money weeklies solely because VIX has a smaller quote scale.  For
+    VIX/VIXW, preserve the same normalized floor (vega / underlying) implied
+    by the rule at a 100-dollar reference.  Delta, spread, volume, theta, DTE,
+    and risk/reward gates remain unchanged.
+    """
+
+    if contract.underlying.upper() in {"VIX", "VIXW"}:
+        return rules.min_vega * min(1.0, underlying / 100.0)
+    return rules.min_vega
+
+
+def _contract_filter_diagnostics(
+    decision_input: DecisionInput,
+    direction: DirectionResult,
+    rules: Phase1Rules,
+    setup: TradeSetup,
+    cycle: CycleAssessment,
+) -> list[dict[str, Any]]:
+    """Describe every target-side contract and the exact layer gates it hit."""
+
+    option_type = OptionType.CALL if direction.bias == DirectionBias.BULLISH else OptionType.PUT
+    underlying = decision_input.market_bars[-1].close
+    diagnostics: list[dict[str, Any]] = []
+    for contract in decision_input.option_chain:
+        if contract.option_type != option_type:
+            continue
+        dte = (contract.expiration - decision_input.timestamp.date()).days
+        effective_min_vega = _effective_min_vega(contract, underlying, rules)
+        layers: list[dict[str, Any]] = []
+        for layer in (ExecutionLayer.TACTICAL, ExecutionLayer.RIDER):
+            min_dte, max_dte = _target_dte_window(layer, rules, decision_input.cycle_profile)
+            min_abs_delta = rules.intraday_min_abs_delta if layer == ExecutionLayer.TACTICAL else rules.min_abs_delta
+            max_abs_delta = rules.intraday_max_abs_delta if layer == ExecutionLayer.TACTICAL else rules.max_abs_delta
+            if not _layer_allowed(layer, setup, cycle):
+                rejection_reasons = ["layer_not_allowed_for_setup_cycle"]
+            else:
+                rejection_reasons = _contract_rejection_reasons(
+                    contract,
+                    underlying,
+                    decision_input.timestamp.date(),
+                    rules,
+                    layer,
+                    decision_input.cycle_profile,
+                )
+            layers.append(
+                {
+                    "layer": layer.value,
+                    "eligible": not rejection_reasons,
+                    "rejection_reasons": rejection_reasons,
+                    "limits": {
+                        "min_dte": min_dte,
+                        "max_dte": max_dte,
+                        "max_spread_pct": rules.max_spread_pct,
+                        "min_open_interest": rules.min_open_interest,
+                        "min_contract_volume": rules.min_contract_volume,
+                        "min_abs_delta": min_abs_delta,
+                        "max_abs_delta": max_abs_delta,
+                        "max_theta_abs": rules.max_theta_abs,
+                        "effective_min_vega": round(effective_min_vega, 6),
+                        "min_reward_risk_ratio": rules.min_reward_risk_ratio,
+                    },
+                }
+            )
+        diagnostics.append(
+            {
+                "option_symbol": contract.option_symbol,
+                "option_type": contract.option_type.value,
+                "expiration": contract.expiration.isoformat(),
+                "dte": dte,
+                "strike": contract.strike,
+                "underlying_reference": round(underlying, 6),
+                "bid": contract.bid,
+                "ask": contract.ask,
+                "mid": round(contract.mid, 6),
+                "spread_pct": round(contract.spread_pct, 6),
+                "open_interest": contract.open_interest,
+                "volume": contract.volume,
+                "volume_available": contract.volume_available,
+                "abs_delta": round(abs(contract.delta), 6),
+                "theta_abs": round(abs(contract.theta), 6),
+                "vega": round(contract.vega, 6),
+                "normalized_vega": round(contract.vega / underlying, 8),
+                "reward_risk_ratio": round(_planned_reward_risk_ratio(contract, rules), 6),
+                "layers": layers,
+            }
+        )
+    return sorted(
+        diagnostics,
+        key=lambda row: (str(row["expiration"]), float(row["strike"]), str(row["option_symbol"])),
+    )
 
 
 def _planned_reward_risk_ratio(contract: OptionContractSnapshot, rules: Phase1Rules) -> float:
@@ -371,9 +540,15 @@ def _contract_edge_fit(abs_delta: float, direction: DirectionResult, volatility:
     return min(1.0, delta_fit * 0.75 + direction_strength * 0.15 + volatility_fit * 0.10)
 
 
-def _exit_quality(contract: OptionContractSnapshot, rules: Phase1Rules) -> float:
+def _exit_quality(
+    contract: OptionContractSnapshot,
+    rules: Phase1Rules,
+    *,
+    min_vega: float | None = None,
+) -> float:
     theta_quality = max(0.0, 1 - abs(contract.theta) / rules.max_theta_abs)
-    vega_quality = min(1.0, contract.vega / max(rules.min_vega * 5, rules.min_vega))
+    resolved_min_vega = rules.min_vega if min_vega is None else min_vega
+    vega_quality = min(1.0, contract.vega / max(resolved_min_vega * 5, resolved_min_vega, 1e-9))
     return theta_quality * 0.70 + vega_quality * 0.30
 
 
@@ -391,9 +566,33 @@ def _card(
     decision: DecisionStatus,
     blocked_reason: str | None,
     confidence_score: float,
+    contract_diagnostics: list[dict[str, Any]] | None = None,
 ) -> DecisionCard:
-    reason_codes = _reason_codes(direction, cycle, selected_contract, tactical_contract, rider_contract, trade_setup, execution_layer, blocked_reason)
-    explanation = "; ".join(part for part in [regime.explanation, cycle.explanation, direction.explanation, volatility.explanation, blocked_reason] if part)
+    resolved_contract_diagnostics = contract_diagnostics or []
+    reason_codes = _reason_codes(
+        direction,
+        cycle,
+        selected_contract,
+        tactical_contract,
+        rider_contract,
+        trade_setup,
+        execution_layer,
+        blocked_reason,
+        resolved_contract_diagnostics,
+    )
+    diagnostic_summary = _contract_diagnostic_summary(resolved_contract_diagnostics)
+    explanation = "; ".join(
+        part
+        for part in [
+            regime.explanation,
+            cycle.explanation,
+            direction.explanation,
+            volatility.explanation,
+            blocked_reason,
+            diagnostic_summary,
+        ]
+        if part
+    )
     return DecisionCard(
         schema_version=PHASE1_DECISION_CARD_SCHEMA_VERSION,
         decision_id=_decision_id(decision_input, trade_setup),
@@ -413,6 +612,7 @@ def _card(
         reason_codes=reason_codes,
         confidence_score=round(max(0.0, min(1.0, confidence_score)), 4),
         explanation=explanation,
+        contract_diagnostics=resolved_contract_diagnostics,
     )
 
 
@@ -619,6 +819,7 @@ def _reason_codes(
     trade_setup: TradeSetup,
     execution_layer: ExecutionLayer,
     blocked_reason: str | None,
+    contract_diagnostics: list[dict[str, Any]],
 ) -> list[str]:
     codes: list[str] = []
     if cycle.trend_score >= 1:
@@ -654,7 +855,29 @@ def _reason_codes(
         codes.append("selected_tactical_priority")
     if blocked_reason is not None:
         codes.append(blocked_reason)
+    contract_filter_codes = {
+        str(reason)
+        for row in contract_diagnostics
+        for layer in row.get("layers", [])
+        for reason in layer.get("rejection_reasons", [])
+        if reason != "layer_not_allowed_for_setup_cycle"
+    }
+    codes.extend(f"contract_filter:{reason}" for reason in sorted(contract_filter_codes))
     return codes
+
+
+def _contract_diagnostic_summary(contract_diagnostics: list[dict[str, Any]]) -> str | None:
+    counts: dict[str, int] = {}
+    for row in contract_diagnostics:
+        for layer in row.get("layers", []):
+            if layer.get("layer") != ExecutionLayer.TACTICAL.value:
+                continue
+            for reason in layer.get("rejection_reasons", []):
+                counts[str(reason)] = counts.get(str(reason), 0) + 1
+    if not counts:
+        return None
+    summary = ",".join(f"{reason}={count}" for reason, count in sorted(counts.items()))
+    return f"tactical_contract_rejections[{summary}]"
 
 
 def _percentile_rank(history: list[float], current: float) -> float:
