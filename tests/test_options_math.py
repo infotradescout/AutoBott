@@ -1,4 +1,10 @@
-from autobott_v2.options_math import black_scholes_price, implied_volatility, solve_iv_and_greeks
+from autobott_v2.options_math import (
+    black_76_price,
+    black_scholes_price,
+    implied_volatility,
+    solve_forward_iv_and_greeks,
+    solve_iv_and_greeks,
+)
 
 
 def test_implied_volatility_round_trips_a_known_price() -> None:
@@ -38,3 +44,39 @@ def test_deep_itm_call_delta_approaches_one() -> None:
 
 def test_unsolvable_price_returns_none() -> None:
     assert solve_iv_and_greeks(price=0.0, s=100.0, k=100.0, dte_days=30, option_type="call") is None
+
+
+def test_black_76_solver_expands_bracket_and_reprices_high_vix_premium() -> None:
+    result = solve_forward_iv_and_greeks(
+        price=8.0,
+        forward=24.0,
+        k=24.0,
+        dte_days=5,
+        option_type="call",
+    )
+
+    assert result is not None
+    iv, _, _, _ = result
+    assert iv > 5.0
+    repriced = black_76_price(
+        forward=24.0,
+        k=24.0,
+        t=5 / 365,
+        r=0.04,
+        sigma=iv,
+        option_type="call",
+    )
+    assert abs(repriced - 8.0) < 1e-3
+
+
+def test_black_76_solver_rejects_premium_above_no_arbitrage_bound() -> None:
+    assert (
+        solve_forward_iv_and_greeks(
+            price=25.0,
+            forward=24.0,
+            k=24.0,
+            dte_days=5,
+            option_type="call",
+        )
+        is None
+    )

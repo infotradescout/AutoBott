@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 
+from autobott_v2.execution_journal import load_execution_journal
 from autobott_v2.execution_models import BrokerEnvironment, ExecutionOrder, ExecutionState, OrderSide, TradeIntent
 from autobott_v2.execution_reconciler import reconcile_open_positions
 from autobott_v2.position_store import load_open_positions, upsert_open_position_from_order
@@ -41,6 +42,8 @@ def test_reconcile_open_positions_updates_status_and_journals(tmp_path) -> None:
                 "trade_group_id": "core-runner:decision-123",
                 "leg_role": "runner",
                 "paired_option_symbol": "AAPL260117C00185000",
+                "policy_version": "hosted-vix-profit-v1",
+                "build_sha": "entry-build-sha",
             },
         ),
         state=ExecutionState.SUBMITTED,
@@ -56,4 +59,10 @@ def test_reconcile_open_positions_updates_status_and_journals(tmp_path) -> None:
     assert rows[0].trade_group_id == "core-runner:decision-123"
     assert rows[0].leg_role == "runner"
     assert rows[0].paired_option_symbol == "AAPL260117C00185000"
+    assert rows[0].entry_policy_version == "hosted-vix-profit-v1"
+    assert rows[0].entry_build_sha == "entry-build-sha"
     assert journal_path.exists() is True
+    journal_rows = load_execution_journal(journal_path=journal_path)
+    metadata = journal_rows[0]["payload"]["intent"]["metadata"]
+    assert metadata["policy_version"] == "hosted-vix-profit-v1"
+    assert metadata["build_sha"] == "entry-build-sha"

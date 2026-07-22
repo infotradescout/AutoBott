@@ -57,6 +57,19 @@ class _FakeResponse:
         return None
 
 
+class _FakeClock:
+    def __init__(self) -> None:
+        self.now = 0.0
+        self.sleeps: list[float] = []
+
+    def monotonic(self) -> float:
+        return self.now
+
+    def sleep(self, seconds: float) -> None:
+        self.sleeps.append(seconds)
+        self.now += seconds
+
+
 def test_submit_order_returns_submitted_execution_order(monkeypatch) -> None:
     broker = AlpacaExecutionBroker(_config())
     captured = {}
@@ -111,6 +124,75 @@ def test_submit_order_reconciles_ambiguous_post_timeout(monkeypatch) -> None:
     assert order.state is ExecutionState.FILLED
     assert order.broker_order_id == "alpaca-reconciled"
     assert order.client_order_id.startswith("autobott-")
+
+
+def test_hosted_paper_paces_burst_order_mutations(monkeypatch) -> None:
+    monkeypatch.setenv("RENDER", "true")
+    clock = _FakeClock()
+    monkeypatch.setattr("autobott_v2.execution_broker.time.monotonic", clock.monotonic)
+    monkeypatch.setattr("autobott_v2.execution_broker.time.sleep", clock.sleep)
+    broker = AlpacaExecutionBroker(_config())
+    post_times: list[float] = []
+
+    def _fake_urlopen(request, timeout=30):
+        post_times.append(clock.now)
+        body = json.loads(request.data.decode("utf-8"))
+        return _FakeResponse(
+            {
+                "id": f"alpaca-order-{len(post_times)}",
+                "client_order_id": body["client_order_id"],
+                "status": "accepted",
+                "submitted_at": "2026-07-01T15:31:00Z",
+            }
+        )
+
+    monkeypatch.setattr("urllib.request.urlopen", _fake_urlopen)
+
+    broker.submit_order(_intent())
+    broker.submit_order(_intent(option_symbol="MSFT260117C00400000"))
+
+    assert post_times == [0.0, 0.75]
+    assert clock.sleeps == [0.75]
+
+
+def test_hosted_paper_retries_429_with_same_client_id_after_reconciliation(monkeypatch) -> None:
+    monkeypatch.setenv("RENDER", "true")
+    clock = _FakeClock()
+    monkeypatch.setattr("autobott_v2.execution_broker.time.monotonic", clock.monotonic)
+    monkeypatch.setattr("autobott_v2.execution_broker.time.sleep", clock.sleep)
+    broker = AlpacaExecutionBroker(_config())
+    submitted_client_ids: list[str] = []
+    reconciliation_attempts = 0
+
+    def _fake_request_once(method, path, *, payload=None):
+        assert method == "POST"
+        submitted_client_ids.append(payload["client_order_id"])
+        if len(submitted_client_ids) == 1:
+            raise ValueError("alpaca_http_429: rate limit exceeded")
+        raise ValueError("alpaca_http_422: client_order_id must be unique")
+
+    def _fake_reconcile(client_order_id):
+        nonlocal reconciliation_attempts
+        reconciliation_attempts += 1
+        if reconciliation_attempts == 1:
+            raise RuntimeError("order_not_found")
+        return {
+            "id": "alpaca-late-order",
+            "client_order_id": client_order_id,
+            "status": "accepted",
+            "submitted_at": "2026-07-01T15:31:00Z",
+        }
+
+    monkeypatch.setattr(broker, "_request_json_once", _fake_request_once)
+    monkeypatch.setattr(broker, "_get_order_by_client_order_id", _fake_reconcile)
+
+    order = broker.submit_order(_intent())
+
+    assert submitted_client_ids[0] == submitted_client_ids[1]
+    assert reconciliation_attempts == 2
+    assert order.broker_order_id == "alpaca-late-order"
+    assert order.state is ExecutionState.SUBMITTED
+    assert clock.sleeps == [1.0]
 
 
 def test_list_order_history_pages_until_complete(monkeypatch) -> None:

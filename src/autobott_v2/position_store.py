@@ -29,6 +29,10 @@ class OpenPosition:
     trade_group_id: str | None = None
     leg_role: str | None = None
     paired_option_symbol: str | None = None
+    # Persist the policy that opened the position. Exit-time runtime policy is
+    # intentionally separate so legacy positions are never relabeled.
+    entry_policy_version: str | None = None
+    entry_build_sha: str | None = None
 
     def to_json_dict(self) -> dict[str, Any]:
         payload = asdict(self)
@@ -59,6 +63,8 @@ def load_open_positions(*, store_path: str | Path | None = None) -> list[OpenPos
                 trade_group_id=row.get("trade_group_id"),
                 leg_role=row.get("leg_role"),
                 paired_option_symbol=row.get("paired_option_symbol"),
+                entry_policy_version=row.get("entry_policy_version"),
+                entry_build_sha=row.get("entry_build_sha"),
             )
         )
     return positions
@@ -98,6 +104,8 @@ def upsert_open_position_from_order(order: ExecutionOrder, *, store_path: str | 
             trade_group_id=order.intent.metadata.get("trade_group_id"),
             leg_role=order.intent.metadata.get("leg_role"),
             paired_option_symbol=order.intent.metadata.get("paired_option_symbol"),
+            entry_policy_version=order.intent.metadata.get("policy_version"),
+            entry_build_sha=order.intent.metadata.get("build_sha"),
         )
     )
     return save_open_positions(updated, store_path=store_path)

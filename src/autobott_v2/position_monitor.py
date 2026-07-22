@@ -154,6 +154,8 @@ def run_position_monitor(
             action["trade_group_id"] = stored_position.trade_group_id
             action["entry_decision_id"] = stored_position.decision_id
             action["paired_option_symbol"] = stored_position.paired_option_symbol
+            action["entry_policy_version"] = stored_position.entry_policy_version
+            action["entry_build_sha"] = stored_position.entry_build_sha
         pending_exit = pending_exits.get(action["symbol"])
         if action["reason"] == "take_profit" and pending_exit is not None:
             actions.append(
@@ -376,7 +378,9 @@ def _submit_monitor_exit(
             "trade_group_id": action.get("trade_group_id"),
             "entry_decision_id": action.get("entry_decision_id"),
             "paired_option_symbol": action.get("paired_option_symbol"),
-            "policy_version": HOSTED_POLICY_VERSION if is_hosted_paper_runtime() else "local-default",
+            "entry_policy_version": action.get("entry_policy_version"),
+            "entry_build_sha": action.get("entry_build_sha"),
+            "exit_policy_version": HOSTED_POLICY_VERSION if is_hosted_paper_runtime() else "local-default",
             "build_sha": active_build_sha(),
         },
     )

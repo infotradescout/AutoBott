@@ -120,6 +120,25 @@ class VixCaptureClient:
         }
 
 
+class ParityOnlyVixCaptureClient(VixCaptureClient):
+    """Alpaca-shaped VIXW snapshots without spot, IV, or provider Greeks."""
+
+    def get_option_chain_snapshots(self, symbol):
+        self.option_symbols.append(symbol.upper())
+        return {
+            "VIXW260707C00020000": _parity_option_snapshot("call", 20.0, 4.00, 4.20),
+            "VIXW260707P00020000": _parity_option_snapshot("put", 20.0, 0.09, 0.11),
+            "VIXW260707C00024000": _parity_option_snapshot("call", 24.0, 0.97, 1.03),
+            "VIXW260707P00024000": _parity_option_snapshot("put", 24.0, 0.97, 1.03),
+            "VIXW260707C00028000": _parity_option_snapshot("call", 28.0, 0.14, 0.16),
+            "VIXW260707P00028000": _parity_option_snapshot("put", 28.0, 4.05, 4.25),
+            # A stale/mismatched pair must not move the robust expiry forward
+            # away from the three coherent estimates around 24.
+            "VIXW260707C00040000": _parity_option_snapshot("call", 40.0, 0.09, 0.11),
+            "VIXW260707P00040000": _parity_option_snapshot("put", 40.0, 4.90, 5.10),
+        }
+
+
 def _base_price(symbol: str) -> float:
     return {"SPY": 600.0, "QQQ": 520.0, "VIXY": 16.0, "UVXY": 18.0}.get(symbol.upper(), 600.0)
 
@@ -149,6 +168,23 @@ def _option_snapshot(expiration: str, option_type: str, strike: float, delta: fl
         "dailyBar": {
             "v": 250,
         },
+        "open_interest": 900,
+    }
+
+
+def _parity_option_snapshot(option_type: str, strike: float, bid: float, ask: float):
+    return {
+        "latestQuote": {
+            "t": "2026-06-30T14:35:00Z",
+            "bp": bid,
+            "ap": ask,
+        },
+        "details": {
+            "expiration_date": "2026-07-07",
+            "type": option_type,
+            "strike_price": str(strike),
+        },
+        "dailyBar": {"v": 250},
         "open_interest": 900,
     }
 
@@ -342,6 +378,54 @@ def test_api_shaped_vix_chain_preserves_returned_symbols_through_decision_and_pa
     )
 
     assert decision.selected_contract.option_symbol == "VIXW260707C00024000"
+    assert pair is not None
+    assert pair.primary.option_symbol == "VIXW260707C00024000"
+    assert pair.runner.option_symbol == "VIXW260707C00028000"
+
+
+def test_api_shaped_vix_chain_derives_forward_and_greeks_from_put_call_parity(tmp_path) -> None:
+    client = ParityOnlyVixCaptureClient()
+    snapshot_path = capture_symbol_snapshot(
+        symbol="VIX",
+        corpus_root=tmp_path,
+        scheduled_market_time=datetime(2026, 6, 30, 10, 35, tzinfo=timezone(timedelta(hours=-4))),
+        captured_at_utc=datetime(2026, 6, 30, 14, 35, tzinfo=UTC),
+        corpus_type="paper_capture",
+        market_timezone="America/New_York",
+        volatility_proxy_symbol="VIXY",
+        data_client=client,
+        rules=CaptureRules(),
+    )
+    snapshot = json.loads(Path(snapshot_path).read_text(encoding="utf-8"))
+
+    assert client.option_symbols == ["VIX"]
+    assert snapshot["underlying_quote"]["last"] == pytest.approx(24.0, abs=0.01)
+    assert snapshot["underlying_quote"]["last"] != _base_price("VIXY")
+    chain = {row["option_symbol"]: row for row in snapshot["option_chain"]}
+    assert {
+        "VIXW260707C00024000",
+        "VIXW260707C00028000",
+        "VIXW260707P00020000",
+        "VIXW260707P00024000",
+    }.issubset(chain)
+    assert chain["VIXW260707C00024000"]["delta"] == pytest.approx(0.52, abs=0.03)
+    assert chain["VIXW260707P00024000"]["delta"] == pytest.approx(-0.48, abs=0.03)
+    assert abs(chain["VIXW260707C00028000"]["delta"]) < abs(chain["VIXW260707C00024000"]["delta"])
+    assert abs(chain["VIXW260707P00020000"]["delta"]) < abs(chain["VIXW260707P00024000"]["delta"])
+    assert all(row["implied_volatility"] > 0 for row in chain.values())
+
+    decision_input = _decision_input_from_snapshot(snapshot)
+    decision = build_decision_card(
+        decision_input,
+        Phase1Rules(risk_off_bullish_exempt_symbols=("VIX",)),
+    )
+    assert decision.decision is DecisionStatus.TRADE_CANDIDATE
+    assert decision.selected_contract is not None
+    pair = select_core_runner_pair(
+        decision.selected_contract,
+        decision_input.option_chain,
+        rules=CoreRunnerRules(),
+    )
     assert pair is not None
     assert pair.primary.option_symbol == "VIXW260707C00024000"
     assert pair.runner.option_symbol == "VIXW260707C00028000"

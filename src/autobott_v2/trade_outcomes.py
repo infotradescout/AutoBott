@@ -60,6 +60,7 @@ def sync_trade_outcomes_from_broker(
     execution_journal_path: str | Path | None = None,
     execution_journal_rows: list[dict[str, Any]] | None = None,
     limit: int = 200,
+    trading_day: date | datetime | str | None = None,
 ) -> dict[str, Any]:
     if not hasattr(broker, "list_orders"):
         return {"ok": True, "recorded": 0, "outcomes": [], "blocked_underlyings": []}
@@ -77,18 +78,44 @@ def sync_trade_outcomes_from_broker(
         journal_path=journal_path,
         execution_journal_path=execution_journal_path,
         execution_journal_rows=execution_journal_rows,
+        trading_day=trading_day,
     )
-    unmatched_sells = _unmatched_terminal_sell_symbols(orders)
-    if not history_complete or unmatched_sells:
+    resolved_trading_day = _resolve_trading_day(trading_day)
+    unmatched_sell_events = _unmatched_realized_sell_events(orders)
+    current_day_unmatched = [
+        event
+        for event in unmatched_sell_events
+        if event["event_time"] is None
+        or event["event_time"].astimezone(ZoneInfo("America/New_York")).date() == resolved_trading_day
+    ]
+    historical_unmatched = [event for event in unmatched_sell_events if event not in current_day_unmatched]
+    current_day_symbols = sorted({str(event["symbol"]) for event in current_day_unmatched})
+    historical_symbols = sorted({str(event["symbol"]) for event in historical_unmatched})
+
+    # A truncated broker result can hide any fill, including a loss today, so
+    # it remains fatal. Historical unmatched exits make long-range statistics
+    # incomplete but cannot make today's realized P/L incomplete. Only an
+    # unmatched sell from the current New York trading day blocks new entries.
+    if not history_complete:
         summary["ok"] = False
-        summary["error"] = (
-            "broker_order_history_truncated"
-            if not history_complete
-            else f"broker_order_history_unmatched_sells:{','.join(unmatched_sells)}"
-        )
+        summary["error"] = "broker_order_history_truncated"
         summary["history_complete"] = False
+        summary["daily_pnl_complete"] = False
+    elif current_day_symbols:
+        summary["ok"] = False
+        summary["error"] = f"broker_order_history_unmatched_sells:{','.join(current_day_symbols)}"
+        summary["history_complete"] = False
+        summary["daily_pnl_complete"] = False
     else:
-        summary["history_complete"] = True
+        summary["history_complete"] = not historical_symbols
+        summary["daily_pnl_complete"] = True
+    if historical_symbols:
+        summary["history_warning"] = (
+            f"broker_order_history_historical_unmatched_sells:{','.join(historical_symbols)}"
+        )
+        summary["historical_unmatched_sell_symbols"] = historical_symbols
+    if current_day_symbols:
+        summary["current_day_unmatched_sell_symbols"] = current_day_symbols
     return summary
 
 
@@ -98,6 +125,7 @@ def record_trade_outcomes_from_orders(
     journal_path: str | Path | None = None,
     execution_journal_path: str | Path | None = None,
     execution_journal_rows: list[dict[str, Any]] | None = None,
+    trading_day: date | datetime | str | None = None,
 ) -> dict[str, Any]:
     existing = {str(row.get("outcome_id")) for row in load_trade_outcomes(journal_path=journal_path)}
     resolved_execution_rows = _resolve_execution_journal_rows(
@@ -135,7 +163,10 @@ def record_trade_outcomes_from_orders(
         # cumulative partial fill cannot be appended and counted twice when it
         # later completes.  Intraday protection still includes the currently
         # realized, nonterminal quantity from the fresh broker snapshot.
-        "daily_realized_pnl": daily_realized_pnl([*all_rows, *provisional_outcomes]),
+        "daily_realized_pnl": daily_realized_pnl(
+            [*all_rows, *provisional_outcomes],
+            trading_day=trading_day,
+        ),
         "blocked_underlyings": recent_loss_guard(
             all_rows,
             policy_version=summary_policy_version,
@@ -187,9 +218,9 @@ def build_trade_outcomes_from_orders(
     return outcomes
 
 
-def _unmatched_terminal_sell_symbols(orders: list[dict[str, Any]]) -> list[str]:
+def _unmatched_realized_sell_events(orders: list[dict[str, Any]]) -> list[dict[str, Any]]:
     inventory: dict[str, float] = {}
-    unmatched: set[str] = set()
+    unmatched: list[dict[str, Any]] = []
     normalized = sorted(
         (_normalize_order(order) for order in orders),
         key=lambda row: row["event_time"] or datetime.min.replace(tzinfo=UTC),
@@ -206,11 +237,17 @@ def _unmatched_terminal_sell_symbols(orders: list[dict[str, Any]]) -> list[str]:
         elif order["side"] == "sell":
             available = inventory.get(symbol, 0.0)
             if quantity > available + 1e-9:
-                unmatched.add(symbol)
+                unmatched.append(
+                    {
+                        "symbol": symbol,
+                        "event_time": order["event_time"],
+                        "unmatched_qty": round(quantity - available, 10),
+                    }
+                )
                 inventory[symbol] = 0.0
             else:
                 inventory[symbol] = available - quantity
-    return sorted(unmatched)
+    return unmatched
 
 
 def load_trade_outcomes(*, journal_path: str | Path | None = None, limit: int | None = None) -> list[dict[str, Any]]:
@@ -412,9 +449,9 @@ def recent_loss_guard(
     if not _loss_guard_enabled():
         return {"enabled": False, "blocked_underlyings": [], "reasons": {}}
     source = rows if rows is not None else load_trade_outcomes(journal_path=journal_path)
-    independent = _independent_trade_outcomes(source)
     if policy_version is not None:
-        independent = [row for row in independent if row.get("policy_version") == policy_version]
+        source = _filter_rows_for_policy(source, policy_version)
+    independent = _independent_trade_outcomes(source)
     recent = independent[-_loss_guard_lookback() :]
     by_underlying: dict[str, list[dict[str, Any]]] = {}
     for row in recent:
@@ -461,9 +498,9 @@ def recent_winner_bias(
     if not _winner_bias_enabled():
         return {"enabled": False, "preferred_underlyings": [], "reasons": {}}
     source = rows if rows is not None else load_trade_outcomes(journal_path=journal_path)
-    independent = _independent_trade_outcomes(source)
     if policy_version is not None:
-        independent = [row for row in independent if row.get("policy_version") == policy_version]
+        source = _filter_rows_for_policy(source, policy_version)
+    independent = _independent_trade_outcomes(source)
     recent = independent[-_winner_bias_lookback() :]
     by_underlying: dict[str, list[dict[str, Any]]] = {}
     for row in recent:
@@ -506,6 +543,14 @@ def _outcome_from_pair(entry: dict[str, Any], exit_order: dict[str, Any], *, qty
     parts = _option_symbol_parts(symbol)
     entry_metadata = entry.get("execution_metadata") or {}
     exit_metadata = exit_order.get("execution_metadata") or {}
+    entry_policy_version = _string_or_none(entry_metadata.get("policy_version"))
+    persisted_entry_policy_version = _string_or_none(exit_metadata.get("entry_policy_version"))
+    policy_version = entry_policy_version or persisted_entry_policy_version
+    policy_attribution_source = (
+        "entry_execution_metadata"
+        if entry_policy_version
+        else ("persisted_entry_policy" if persisted_entry_policy_version else None)
+    )
     leg_role = _canonical_leg_role(entry_metadata.get("leg_role") or exit_metadata.get("leg_role"))
     classification, reason = _classify_outcome(return_pct, pnl, leg_role=leg_role)
     payload = {
@@ -537,8 +582,11 @@ def _outcome_from_pair(entry: dict[str, Any], exit_order: dict[str, Any], *, qty
         "execution_layer": entry_metadata.get("execution_layer") or exit_metadata.get("execution_layer"),
         "confidence_score": entry_metadata.get("confidence_score") or exit_metadata.get("confidence_score"),
         "strategy_version": entry_metadata.get("strategy_version") or exit_metadata.get("strategy_version"),
-        "policy_version": entry_metadata.get("policy_version") or exit_metadata.get("policy_version"),
-        "build_sha": entry_metadata.get("build_sha") or exit_metadata.get("build_sha"),
+        # Exit policy describes the rules that closed a position, not the
+        # strategy that opened it. Attribute performance only to entry policy.
+        "policy_version": policy_version,
+        "policy_attribution_source": policy_attribution_source,
+        "build_sha": entry_metadata.get("build_sha") or exit_metadata.get("entry_build_sha"),
         "exit_reason": exit_metadata.get("exit_reason"),
         "match_source": (
             "execution_journal"
@@ -659,6 +707,9 @@ def _execution_journal_index(rows: list[dict[str, Any]]) -> dict[str, dict[tuple
             "confidence_score": metadata.get("confidence_score"),
             "strategy_version": metadata.get("strategy_version"),
             "policy_version": metadata.get("policy_version"),
+            "entry_policy_version": metadata.get("entry_policy_version"),
+            "exit_policy_version": metadata.get("exit_policy_version"),
+            "entry_build_sha": metadata.get("entry_build_sha"),
             "build_sha": metadata.get("build_sha"),
             "exit_reason": metadata.get("exit_reason"),
             "entry_decision_id": metadata.get("entry_decision_id"),
@@ -705,7 +756,30 @@ def _filter_rows_for_policy(
 ) -> list[dict[str, Any]]:
     if policy_version is None:
         return rows
-    return [row for row in rows if row.get("policy_version") == policy_version]
+    return [
+        row
+        for row in rows
+        if row.get("policy_version") == policy_version
+        and _has_trustworthy_policy_attribution(row, policy_version=policy_version)
+    ]
+
+
+def _has_trustworthy_policy_attribution(
+    row: dict[str, Any],
+    *,
+    policy_version: str,
+) -> bool:
+    # PR32's first rollout recovered legacy entries from their exit journal
+    # rows and copied the then-current exit policy onto them. Those persisted
+    # outcomes have no entry-policy provenance and must stay out of the new
+    # policy's expectancy, guard, and winner cohorts. Rows made after this fix
+    # explicitly identify persisted entry-policy provenance.
+    attribution_source = row.get("policy_attribution_source")
+    if policy_version == HOSTED_POLICY_VERSION:
+        return attribution_source in {"entry_execution_metadata", "persisted_entry_policy"}
+    if row.get("match_source") == "exit_journal_recovery":
+        return attribution_source == "persisted_entry_policy"
+    return True
 
 
 def _learning_bucket(row: dict[str, Any]) -> str:
@@ -810,6 +884,21 @@ def _parse_datetime(value: Any) -> datetime | None:
         return datetime.fromisoformat(str(value).replace("Z", "+00:00")).astimezone(UTC)
     except ValueError:
         return None
+
+
+def _resolve_trading_day(
+    trading_day: date | datetime | str | None,
+    *,
+    timezone_name: str = "America/New_York",
+) -> date:
+    timezone = ZoneInfo(timezone_name)
+    if isinstance(trading_day, str):
+        return date.fromisoformat(trading_day)
+    if isinstance(trading_day, datetime):
+        return trading_day.astimezone(timezone).date() if trading_day.tzinfo else trading_day.date()
+    if isinstance(trading_day, date):
+        return trading_day
+    return datetime.now(tz=timezone).date()
 
 
 def _float_or_zero(value: Any) -> float:

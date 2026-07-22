@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import threading
 import time
 import urllib.error
 import urllib.parse
@@ -10,6 +11,7 @@ from typing import Protocol
 
 from .execution_config import AlpacaExecutionConfig, require_alpaca_execution_config
 from .execution_models import (
+    BrokerEnvironment,
     ExecutionOrder,
     ExecutionState,
     OrderSide,
@@ -18,6 +20,15 @@ from .execution_models import (
     build_execution_order,
     validate_trade_intent,
 )
+from .hosted_policy import is_hosted_paper_runtime
+
+
+# Leave enough of Alpaca's trading-API budget for reconciliation and position
+# reads while a newly deployed paper worker is flattening stale positions. The
+# normal hosted cycle submits at most six entry legs, but recovery can require
+# dozens of urgent exits in one pass.
+_HOSTED_MUTATION_MIN_INTERVAL_SECONDS = 0.75
+_HOSTED_SUBMISSION_RETRY_DELAYS_SECONDS = (1.0, 2.0)
 
 
 class BrokerAdapter(Protocol):
@@ -56,6 +67,12 @@ class BrokerAdapter(Protocol):
 class AlpacaExecutionBroker:
     def __init__(self, config: AlpacaExecutionConfig | None = None) -> None:
         self.config = (config or require_alpaca_execution_config()).validate()
+        self._hosted_paper = (
+            is_hosted_paper_runtime()
+            and self.config.environment is BrokerEnvironment.PAPER
+        )
+        self._mutation_lock = threading.Lock()
+        self._last_mutation_at: float | None = None
 
     def submit_order(
         self,
@@ -72,15 +89,10 @@ class AlpacaExecutionBroker:
         )
         order = build_execution_order(intent, risk_check)
 
-        try:
-            payload = self._submit_alpaca_order(order.intent, client_order_id=order.client_order_id)
-        except Exception as exc:
-            if not _submission_result_is_ambiguous(exc):
-                raise
-            try:
-                payload = self._get_order_by_client_order_id(order.client_order_id)
-            except Exception:
-                raise exc
+        payload = self._submit_with_reconciliation(
+            order.intent,
+            client_order_id=order.client_order_id,
+        )
         return ExecutionOrder(
             order_id=order.order_id,
             client_order_id=str(payload.get("client_order_id") or order.client_order_id),
@@ -89,6 +101,34 @@ class AlpacaExecutionBroker:
             submitted_at=_parse_dt(payload.get("submitted_at")),
             broker_order_id=payload.get("id"),
         )
+
+    def _submit_with_reconciliation(self, intent: TradeIntent, *, client_order_id: str) -> dict:
+        """Submit one order without duplicating an ambiguous broker request.
+
+        A timeout, 5xx, or 429 does not prove that Alpaca rejected the POST. We
+        first look up the stable client order id. Hosted paper execution retries
+        only after that lookup fails, and reuses the same id so a late first
+        request cannot create a second order.
+        """
+
+        max_attempts = 1 + (
+            len(_HOSTED_SUBMISSION_RETRY_DELAYS_SECONDS)
+            if self._hosted_paper
+            else 0
+        )
+        for attempt in range(max_attempts):
+            try:
+                return self._submit_alpaca_order(intent, client_order_id=client_order_id)
+            except Exception as exc:
+                if not _submission_result_requires_reconciliation(exc):
+                    raise
+                try:
+                    return self._get_order_by_client_order_id(client_order_id)
+                except Exception:
+                    if attempt + 1 >= max_attempts:
+                        raise exc
+                    time.sleep(_HOSTED_SUBMISSION_RETRY_DELAYS_SECONDS[attempt])
+        raise RuntimeError("alpaca_submission_retry_exhausted")
 
     def submit_mleg_order(
         self,
@@ -293,7 +333,22 @@ class AlpacaExecutionBroker:
     def _request_json(self, method: str, path: str, *, payload: dict | None = None) -> dict | list:
         if method == "GET":
             return self._request_json_with_get_retry(method, path, payload=payload)
+        self._pace_mutation()
         return self._request_json_once(method, path, payload=payload)
+
+    def _pace_mutation(self) -> None:
+        if not self._hosted_paper:
+            return
+        with self._mutation_lock:
+            now = time.monotonic()
+            if self._last_mutation_at is not None:
+                delay = _HOSTED_MUTATION_MIN_INTERVAL_SECONDS - (
+                    now - self._last_mutation_at
+                )
+                if delay > 0:
+                    time.sleep(delay)
+                    now = time.monotonic()
+            self._last_mutation_at = now
 
     def _request_json_with_get_retry(self, method: str, path: str, *, payload: dict | None = None) -> dict | list:
         for attempt in range(3):
@@ -362,6 +417,17 @@ def _submission_result_is_ambiguous(exc: Exception) -> bool:
         return True
     detail = str(exc).lower()
     return "alpaca_http_5" in detail or "alpaca_http_429" in detail
+
+
+def _submission_result_requires_reconciliation(exc: Exception) -> bool:
+    if _submission_result_is_ambiguous(exc):
+        return True
+    detail = str(exc).lower()
+    return (
+        "alpaca_http_422" in detail
+        and "client_order_id" in detail
+        and ("unique" in detail or "duplicate" in detail or "already" in detail)
+    )
 
 
 def _parse_dt(value: str | None) -> datetime | None:

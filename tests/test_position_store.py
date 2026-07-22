@@ -27,6 +27,8 @@ def test_upsert_open_position_from_order_round_trips(tmp_path) -> None:
                 "trade_group_id": "core-runner:decision-123",
                 "leg_role": "runner",
                 "paired_option_symbol": "AAPL260117C00185000",
+                "policy_version": "policy-entry-v1",
+                "build_sha": "entry-sha",
             },
         ),
         state=ExecutionState.SUBMITTED,
@@ -42,6 +44,8 @@ def test_upsert_open_position_from_order_round_trips(tmp_path) -> None:
     assert rows[0].trade_group_id == "core-runner:decision-123"
     assert rows[0].leg_role == "runner"
     assert rows[0].paired_option_symbol == "AAPL260117C00185000"
+    assert rows[0].entry_policy_version == "policy-entry-v1"
+    assert rows[0].entry_build_sha == "entry-sha"
 
 
 def test_upsert_keeps_both_atomic_mleg_positions_with_shared_parent_id(tmp_path) -> None:

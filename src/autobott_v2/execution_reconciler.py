@@ -56,6 +56,8 @@ def reconcile_open_positions(
             trade_group_id=position.trade_group_id,
             leg_role=position.leg_role,
             paired_option_symbol=position.paired_option_symbol,
+            entry_policy_version=position.entry_policy_version,
+            entry_build_sha=position.entry_build_sha,
         )
         if next_position.status != position.status:
             updated += 1
@@ -79,6 +81,8 @@ def reconcile_open_positions(
                             "trade_group_id": position.trade_group_id,
                             "leg_role": position.leg_role,
                             "paired_option_symbol": position.paired_option_symbol,
+                            "policy_version": position.entry_policy_version,
+                            "build_sha": position.entry_build_sha,
                         },
                     ),
                     state=next_state,
