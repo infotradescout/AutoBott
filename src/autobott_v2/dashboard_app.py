@@ -62,6 +62,7 @@ def app(environ: dict[str, Any], start_response: Callable[..., Any]) -> list[byt
     path = environ.get("PATH_INFO", "/")
     body = _read_body(environ)
 
+    strict_json = path in {"/api/options/timeline", "/api/trading/timeline"}
     try:
         status_code, content_type, payload = handle_request(method, path, {}, body)
     except Exception as exc:  # pragma: no cover
@@ -69,10 +70,29 @@ def app(environ: dict[str, Any], start_response: Callable[..., Any]) -> list[byt
         content_type = "application/json; charset=utf-8"
         payload = {"ok": False, "error": type(exc).__name__, "detail": str(exc)}
 
-    start_response(f"{status_code} {_reason(status_code)}", [("Content-Type", content_type)])
     if isinstance(payload, str):
+        start_response(f"{status_code} {_reason(status_code)}", [("Content-Type", content_type)])
         return [payload.encode("utf-8")]
-    return [json.dumps(payload, indent=2, sort_keys=True).encode("utf-8")]
+    try:
+        # RFC 8259 JSON has no NaN or Infinity values.  Enforce that contract
+        # on the live timeline and turn any future non-JSON learning payload
+        # into a visible, bounded API error instead of a browser parse failure.
+        encoded = json.dumps(payload, indent=2, sort_keys=True, allow_nan=not strict_json).encode("utf-8")
+    except (TypeError, ValueError) as exc:
+        status_code = 500
+        content_type = "application/json; charset=utf-8"
+        encoded = json.dumps(
+            {
+                "ok": False,
+                "error": "response_serialization_failed",
+                "detail": f"{type(exc).__name__}: {exc}",
+            },
+            indent=2,
+            sort_keys=True,
+            allow_nan=False,
+        ).encode("utf-8")
+    start_response(f"{status_code} {_reason(status_code)}", [("Content-Type", content_type)])
+    return [encoded]
 
 
 def handle_request(method: str, path: str, headers: dict[str, str], body: bytes) -> tuple[int, str, JsonDict | str]:
@@ -94,9 +114,9 @@ def handle_request(method: str, path: str, headers: dict[str, str], body: bytes)
             return 200, "application/json; charset=utf-8", _account_positions_payload()
         if path == "/api/account/orders" and method == "GET":
             return 200, "application/json; charset=utf-8", _account_orders_payload()
-        if path == "/api/options/scout" and method == "GET":
+        if path in {"/api/options/scout", "/api/volatility/scout"} and method == "GET":
             return 200, "application/json; charset=utf-8", _options_scout_payload()
-        if path == "/api/options/timeline" and method == "GET":
+        if path in {"/api/options/timeline", "/api/trading/timeline"} and method == "GET":
             return 200, "application/json; charset=utf-8", _options_timeline_payload()
         if path == "/api/corpus/latest" and method == "GET":
             return 200, "application/json; charset=utf-8", _latest_corpus_payload()
@@ -2041,14 +2061,33 @@ def _dashboard_html() -> str:
     const apiHeaders = () => ({ 'Content-Type': 'application/json' });
 
     async function callApi(path, options = {}) {
-      const response = await fetch(path, { ...options, headers: { ...apiHeaders(), ...(options.headers || {}) } });
-      let payload = {};
       try {
-        payload = await response.json();
-      } catch {
-        payload = {};
+        const response = await fetch(path, { ...options, headers: { ...apiHeaders(), ...(options.headers || {}) } });
+        const body = await response.text();
+        let payload = {};
+        if (body) {
+          try {
+            payload = JSON.parse(body);
+          } catch (error) {
+            payload = {
+              ok: false,
+              error: 'invalid_json_response',
+              detail: `${path} returned HTTP ${response.status} with invalid JSON: ${error?.message || error}`
+            };
+          }
+        }
+        return { ok: response.ok, status: response.status, payload };
+      } catch (error) {
+        return {
+          ok: false,
+          status: 0,
+          payload: {
+            ok: false,
+            error: 'network_request_failed',
+            detail: `${path}: ${error?.message || error}`
+          }
+        };
       }
-      return { ok: response.ok, status: response.status, payload };
     }
 
     function updateRefreshStamp() {
@@ -2582,9 +2621,9 @@ def _dashboard_html() -> str:
         callApi('/api/reports/decision-lab/latest'),
         callApi('/api/account/positions'),
         callApi('/api/account/orders'),
-        callApi('/api/options/scout'),
+        callApi('/api/volatility/scout'),
         callApi('/api/decisions/feed'),
-        callApi('/api/options/timeline')
+        callApi('/api/trading/timeline')
       ]);
       renderDashboardPanel('safety-status', dashboardResults[0], renderSafety);
       renderDashboardPanel('alpaca-status', dashboardResults[1], renderAlpaca);

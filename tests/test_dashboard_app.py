@@ -858,6 +858,10 @@ def test_dashboard_options_scout_ranks_profit_harvest_rows(monkeypatch, tmp_path
     assert payload["scout_rows"][0]["profit_tier"] == "initial"
     assert payload["scout_rows"][0]["target_exit_price"] == 3.43
 
+    alias_status, alias_body = _invoke_app("GET", "/api/volatility/scout")
+    assert alias_status.startswith("200")
+    assert json.loads(alias_body)["status"] == "options_scout_ready"
+
 
 def test_dashboard_account_orders_endpoint_returns_history(monkeypatch, tmp_path) -> None:
     _auth_env(monkeypatch, tmp_path)
@@ -1007,6 +1011,38 @@ def test_dashboard_options_timeline_pairs_round_trips_and_clusters(monkeypatch, 
     assert payload["round_trips"][0]["pnl"] == -99.0
     assert payload["round_trips"][0]["classification"] == "loss_cut"
     assert any(warning["type"] == "reversal_with_pending_entries" for warning in payload["warnings"])
+
+    alias_status, alias_body = _invoke_app("GET", "/api/trading/timeline")
+    assert alias_status.startswith("200")
+    assert json.loads(alias_body)["status"] == "options_timeline_ready"
+
+
+def test_dashboard_uses_content_blocker_safe_routes_and_surfaces_fetch_errors() -> None:
+    html = dashboard_app._dashboard_html()
+
+    assert "callApi('/api/volatility/scout')" in html
+    assert "callApi('/api/trading/timeline')" in html
+    assert "callApi('/api/options/scout')" not in html
+    assert "callApi('/api/options/timeline')" not in html
+    assert "network_request_failed" in html
+    assert "invalid_json_response" in html
+
+
+def test_dashboard_returns_visible_json_error_for_nonfinite_payload(monkeypatch, tmp_path) -> None:
+    _auth_env(monkeypatch, tmp_path)
+    monkeypatch.setattr(
+        dashboard_app,
+        "_options_timeline_payload",
+        lambda: {"ok": True, "bad_metric": float("inf")},
+    )
+
+    status, body = _invoke_app("GET", "/api/trading/timeline")
+    payload = json.loads(body)
+
+    assert status.startswith("500")
+    assert payload["ok"] is False
+    assert payload["error"] == "response_serialization_failed"
+    assert "Out of range float" in payload["detail"]
 
 
 def test_dashboard_account_endpoints_are_not_auth_gated(monkeypatch, tmp_path) -> None:
