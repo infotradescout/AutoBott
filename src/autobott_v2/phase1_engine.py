@@ -397,6 +397,10 @@ def _contract_rejection_reasons(
     strike_distance = abs(contract.strike - underlying) / underlying
     if contract.underlying.upper() not in {"VIX", "VIXW"} and strike_distance > rules.max_strike_distance_pct:
         rejections.append("strike_distance_pct_above_max")
+    intrinsic_value = _intrinsic_value(contract, underlying)
+    intrinsic_value_ratio = intrinsic_value / contract.mid if contract.mid > 0 else 1.0
+    if intrinsic_value_ratio > rules.max_intrinsic_value_ratio:
+        rejections.append("intrinsic_value_ratio_above_max")
 
     abs_delta = abs(contract.delta)
     min_abs_delta = rules.intraday_min_abs_delta if layer == ExecutionLayer.TACTICAL else rules.min_abs_delta
@@ -484,6 +488,7 @@ def _contract_filter_diagnostics(
                         "min_dte": min_dte,
                         "max_dte": max_dte,
                         "max_spread_pct": rules.max_spread_pct,
+                        "max_intrinsic_value_ratio": rules.max_intrinsic_value_ratio,
                         "min_open_interest": rules.min_open_interest,
                         "min_contract_volume": rules.min_contract_volume,
                         "min_abs_delta": min_abs_delta,
@@ -506,6 +511,13 @@ def _contract_filter_diagnostics(
                 "ask": contract.ask,
                 "mid": round(contract.mid, 6),
                 "spread_pct": round(contract.spread_pct, 6),
+                "intrinsic_value": round(_intrinsic_value(contract, underlying), 6),
+                "intrinsic_value_ratio": round(
+                    _intrinsic_value(contract, underlying) / contract.mid
+                    if contract.mid > 0
+                    else 1.0,
+                    6,
+                ),
                 "open_interest": contract.open_interest,
                 "volume": contract.volume,
                 "volume_available": contract.volume_available,
@@ -530,6 +542,12 @@ def _planned_reward_risk_ratio(contract: OptionContractSnapshot, rules: Phase1Ru
     if planned_reward <= 0 or planned_risk <= 0:
         return 0.0
     return planned_reward / planned_risk
+
+
+def _intrinsic_value(contract: OptionContractSnapshot, underlying: float) -> float:
+    if contract.option_type == OptionType.CALL:
+        return max(0.0, underlying - contract.strike)
+    return max(0.0, contract.strike - underlying)
 
 
 def _contract_edge_fit(abs_delta: float, direction: DirectionResult, volatility: VolatilityResult, layer: ExecutionLayer) -> float:

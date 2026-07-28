@@ -161,6 +161,7 @@ class Phase1Rules:
     rider_max_dte: int = 30
     max_strike_distance_pct: float = 0.08
     max_contract_mid: float = 1.00
+    max_intrinsic_value_ratio: float = 0.80
     max_spread_pct: float = 0.18
     min_open_interest: int = 100
     min_contract_volume: int = 10

@@ -65,10 +65,10 @@ def _snapshot(
         "market_bars": _bars(timestamp, 600.0, 0.25),
         "option_chain": [
             {
-                "option_symbol": f"{ticker}260701C00600000",
+                "option_symbol": f"{ticker}260701C00605000",
                 "underlying": ticker,
                 "expiration": "2026-07-01",
-                "strike": 600.0,
+                "strike": 605.0,
                 "option_type": "call",
                 "bid": tactical_bid,
                 "ask": tactical_ask,
@@ -86,10 +86,10 @@ def _snapshot(
                 "realized_volatility": 0.01,
             },
             {
-                "option_symbol": f"{ticker}260718C00600000",
+                "option_symbol": f"{ticker}260718C00605000",
                 "underlying": ticker,
                 "expiration": "2026-07-18",
-                "strike": 600.0,
+                "strike": 605.0,
                 "option_type": "call",
                 "bid": rider_bid,
                 "ask": rider_ask,

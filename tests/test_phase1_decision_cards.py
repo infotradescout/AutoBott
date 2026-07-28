@@ -281,6 +281,44 @@ def test_phase1_blocks_when_reward_risk_ratio_is_too_weak() -> None:
     assert "tactical_contract_rejections[" in card.explanation
 
 
+def test_phase1_rejects_deep_itm_vxx_put_that_is_mostly_intrinsic_value() -> None:
+    bars = _bars(23.0, -0.03)
+    contract = replace(
+        _contract(
+            option_symbol="VXX260807P00025000",
+            option_type=OptionType.PUT,
+            expiration=date(2026, 8, 7),
+            strike=25.0,
+            bid=3.05,
+            ask=3.43,
+            delta=-0.60,
+            theta=-0.02,
+            vega=0.08,
+        ),
+        underlying="VXX",
+    )
+    decision_input = replace(
+        _input(chain=[contract], bars=bars),
+        ticker="VXX",
+    )
+    rules = Phase1Rules(
+        rider_min_dte=7,
+        rider_max_dte=90,
+        max_strike_distance_pct=0.20,
+    )
+
+    card = build_decision_card(decision_input, rules)
+
+    assert card.decision == DecisionStatus.BLOCKED_BY_SPREAD
+    assert card.selected_contract is None
+    diagnostic = card.contract_diagnostics[0]
+    assert diagnostic["intrinsic_value"] == 3.02
+    assert diagnostic["intrinsic_value_ratio"] > 0.90
+    rider = next(layer for layer in diagnostic["layers"] if layer["layer"] == "rider")
+    assert "intrinsic_value_ratio_above_max" in rider["rejection_reasons"]
+    assert "contract_filter:intrinsic_value_ratio_above_max" in card.reason_codes
+
+
 def test_vix_uses_normalized_vega_floor_without_weakening_other_contract_gates() -> None:
     bars = _bars(18.0, 0.10)
     expiration = date(2026, 6, 8)
