@@ -134,6 +134,8 @@ services:
         value: "3"
       - key: AUTOBOTT_PAPER_ONLY
         value: "true"
+      - key: AUTOBOTT_DASHBOARD_AUTH_TOKEN
+        sync: false
       - key: AUTOBOTT_MANUAL_MIRROR_MAX_CONTRACT_COST
         value: "100"
       - key: AUTOBOTT_MANUAL_MIRROR_MAX_SIGNAL_AGE_MINUTES

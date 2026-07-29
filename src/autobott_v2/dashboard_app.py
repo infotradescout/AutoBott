@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import copy
+import hmac
 import json
 import os
 import threading
@@ -83,11 +84,16 @@ class _DashboardBrokerReadError(RuntimeError):
 def app(environ: dict[str, Any], start_response: Callable[..., Any]) -> list[bytes]:
     method = environ.get("REQUEST_METHOD", "GET").upper()
     path = environ.get("PATH_INFO", "/")
+    headers = _extract_headers(environ)
     body = _read_body(environ)
 
     strict_json = path in {"/api/options/timeline", "/api/trading/timeline"}
     try:
-        status_code, content_type, payload = handle_request(method, path, {}, body)
+        status_code, content_type, payload = handle_request(method, path, headers, body)
+    except PermissionError:
+        status_code = 401
+        content_type = "application/json; charset=utf-8"
+        payload = {"ok": False, "error": "unauthorized"}
     except Exception as exc:  # pragma: no cover
         status_code = 500
         content_type = "application/json; charset=utf-8"
@@ -125,6 +131,7 @@ def handle_request(method: str, path: str, headers: dict[str, str], body: bytes)
         payload = _health_payload()
         return (200 if payload["ok"] else 503), "application/json; charset=utf-8", payload
     if path.startswith("/api/"):
+        _require_auth(headers)
         if path == "/api/safety" and method == "GET":
             return 200, "application/json; charset=utf-8", _safety_payload()
         if path == "/api/alpaca/status" and method == "GET":
@@ -2048,7 +2055,7 @@ def _dashboard_html() -> str:
           </div>
           <div class="mini">
             <div class="mini-label">Dashboard Access</div>
-            <div class="mono">DIRECT</div>
+            <div class="mono" id="auth-state-text">LOCKED</div>
           </div>
           <div class="mini">
             <div class="mini-label">Health</div>
@@ -2149,11 +2156,17 @@ def _dashboard_html() -> str:
           <div class="group-head">
             <div>
               <h2>Operator Actions</h2>
-              <div class="section-note">Paper-trading controls are available directly from this operator console.</div>
+              <div class="section-note">Token-gated controls. Set the dashboard token before protected actions will succeed.</div>
             </div>
-            <span class="badge safe">READY</span>
+            <span class="badge warn" id="action-state">TOKEN REQUIRED</span>
           </div>
           <div class="group-grid">
+            <div class="group">
+              <div class="group-title">Auth</div>
+              <button class="primary" onclick="setToken()">Set Dashboard Token</button>
+              <button class="ghost" onclick="clearToken()">Clear Token</button>
+              <div class="button-note">Protected panels stay locked until a valid dashboard token is accepted.</div>
+            </div>
             <div class="group">
               <div class="group-title">Runtime</div>
               <button class="primary" onclick="armPaperMode()">Arm paper execution</button>
@@ -2212,13 +2225,46 @@ def _dashboard_html() -> str:
   <script>
     const dashboardState = {
       version: 'loading',
+      authState: 'LOCKED',
       safety: null,
       corpus: null,
       campaign: null,
       session: null
     };
 
-    const apiHeaders = () => ({ 'Content-Type': 'application/json' });
+    const apiHeaders = () => {
+      const token = sessionStorage.getItem('dashboardToken') || '';
+      return token
+        ? { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' }
+        : { 'Content-Type': 'application/json' };
+    };
+
+    function setToken() {
+      const value = window.prompt('Enter dashboard auth token');
+      if (value) {
+        sessionStorage.setItem('dashboardToken', value);
+        setAuthState('LOCKED');
+        logEntry('Token updated', 'Dashboard token stored in browser session. Refreshing protected panels.', 'warn');
+        refreshAll();
+      }
+    }
+
+    function clearToken() {
+      sessionStorage.removeItem('dashboardToken');
+      setAuthState('LOCKED');
+      logEntry('Token cleared', 'Protected panels are locked again until a valid token is set.', 'warn');
+      refreshAll();
+    }
+
+    function setAuthState(state) {
+      dashboardState.authState = state;
+      document.getElementById('auth-state-text').textContent = state;
+      const action = document.getElementById('action-state');
+      if (action) {
+        action.textContent = state === 'AUTHENTICATED' ? 'CONTROLLED ACCESS' : 'TOKEN REQUIRED';
+        action.className = `badge ${state === 'AUTHENTICATED' ? 'safe' : 'warn'}`;
+      }
+    }
 
     async function callApi(path, options = {}) {
       try {
@@ -2235,6 +2281,11 @@ def _dashboard_html() -> str:
               detail: `${path} returned HTTP ${response.status} with invalid JSON: ${error?.message || error}`
             };
           }
+        }
+        if (response.status === 401) {
+          setAuthState('LOCKED');
+        } else if (response.ok && path !== '/api/health' && sessionStorage.getItem('dashboardToken')) {
+          setAuthState('AUTHENTICATED');
         }
         return { ok: response.ok, status: response.status, payload };
       } catch (error) {
@@ -2314,6 +2365,10 @@ def _dashboard_html() -> str:
     function renderDashboardPanel(targetId, result, formatter) {
       const target = document.getElementById(targetId);
       if (!result.ok) {
+        if (result.status === 401) {
+          target.innerHTML = emptyState('Locked', 'Dashboard token required. Use Set Dashboard Token before viewing this panel.');
+          return false;
+        }
         target.innerHTML = errorState('Request failed', result.payload.detail || result.payload.error || 'Unknown error', result.payload);
         return false;
       }
@@ -2921,6 +2976,16 @@ def _dashboard_html() -> str:
 """
 
 
+def _require_auth(headers: dict[str, str]) -> None:
+    expected = os.getenv("AUTOBOTT_DASHBOARD_AUTH_TOKEN", "")
+    if not expected:
+        raise PermissionError("dashboard_auth_token_not_configured")
+    provided = headers.get("authorization", "")
+    scheme, separator, token = provided.partition(" ")
+    if separator != " " or scheme.lower() != "bearer" or not hmac.compare_digest(token, expected):
+        raise PermissionError("dashboard_auth_required")
+
+
 def _extract_headers(environ: dict[str, Any]) -> dict[str, str]:
     headers: dict[str, str] = {}
     for key, value in environ.items():
@@ -2965,7 +3030,12 @@ def _parse_datetime(value: Any) -> datetime | None:
 
 
 def _reason(status_code: int) -> str:
-    return {200: "OK", 404: "Not Found", 500: "Internal Server Error"}.get(status_code, "OK")
+    return {
+        200: "OK",
+        401: "Unauthorized",
+        404: "Not Found",
+        500: "Internal Server Error",
+    }.get(status_code, "OK")
 
 
 def _corpus_root() -> Path:

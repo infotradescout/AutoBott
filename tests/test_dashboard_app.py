@@ -37,6 +37,7 @@ def _invoke_app(method: str, path: str, *, token: str | None = None, payload: di
 
 def _auth_env(monkeypatch, tmp_path: Path) -> None:
     dashboard_app._clear_dashboard_broker_cache()
+    monkeypatch.setenv("AUTOBOTT_DASHBOARD_AUTH_TOKEN", "dashboard-token")
     monkeypatch.setenv("AUTOBOTT_DATA_ROOT", str(tmp_path / "data"))
     monkeypatch.setenv("AUTOBOTT_ARTIFACTS_ROOT", str(tmp_path / "artifacts"))
     monkeypatch.setenv("AUTOBOTT_GATE_PATH", str(tmp_path / "data" / "PHASE1_CYCLE_GATE.json"))
@@ -382,6 +383,41 @@ def test_dashboard_health_returns_ok() -> None:
     assert payload["vix_execution_contracts"] == ["VIX", "VIXW"]
     assert payload["vix_signal_proxy"] == "VIXY"
     assert payload["entry_dte_windows"] == {"tactical": [5, 10], "rider": [14, 45]}
+
+
+def test_dashboard_root_and_health_remain_public_when_auth_is_not_configured(monkeypatch) -> None:
+    monkeypatch.delenv("AUTOBOTT_DASHBOARD_AUTH_TOKEN", raising=False)
+
+    root_status, root_body = _invoke_app("GET", "/")
+    health_status, health_body = _invoke_app("GET", "/api/health")
+
+    assert root_status.startswith("200")
+    assert "AutoBott Phase 1 Operator Console" in root_body
+    assert health_status.startswith("200")
+    assert json.loads(health_body)["ok"] is True
+
+
+def test_dashboard_protected_api_fails_closed_without_configured_token(monkeypatch) -> None:
+    monkeypatch.delenv("AUTOBOTT_DASHBOARD_AUTH_TOKEN", raising=False)
+
+    status, body = _invoke_app("GET", "/api/safety")
+
+    assert status.startswith("401")
+    assert json.loads(body) == {"ok": False, "error": "unauthorized"}
+    assert "not_configured" not in body
+
+
+def test_dashboard_protected_api_rejects_missing_and_wrong_bearer(monkeypatch) -> None:
+    monkeypatch.setenv("AUTOBOTT_DASHBOARD_AUTH_TOKEN", "dashboard-token")
+
+    missing_status, missing_body = _invoke_app("GET", "/api/safety")
+    wrong_status, wrong_body = _invoke_app("GET", "/api/safety", token="wrong-token")
+
+    assert missing_status.startswith("401")
+    assert wrong_status.startswith("401")
+    assert json.loads(missing_body) == {"ok": False, "error": "unauthorized"}
+    assert json.loads(wrong_body) == {"ok": False, "error": "unauthorized"}
+    assert "dashboard-token" not in missing_body + wrong_body
 
 
 def test_dashboard_session_panel_exposes_live_cycle_execution_counts() -> None:
@@ -752,39 +788,39 @@ def test_dashboard_runtime_disable_and_kill_switch_endpoints(monkeypatch, tmp_pa
     assert kill_payload["runtime_state"]["kill_switch_enabled"] is True
 
 
-def test_dashboard_capture_route_is_not_auth_gated(monkeypatch, tmp_path) -> None:
+def test_dashboard_capture_route_requires_auth(monkeypatch, tmp_path) -> None:
     _auth_env(monkeypatch, tmp_path)
     monkeypatch.setattr(dashboard_app, "_capture_start_payload", lambda _payload: {"ok": True})
     status, body = _invoke_app("POST", "/api/capture/start", payload={})
     payload = json.loads(body)
-    assert status.startswith("200")
-    assert payload["ok"] is True
+    assert status.startswith("401")
+    assert payload == {"ok": False, "error": "unauthorized"}
 
 
-def test_dashboard_campaign_route_is_not_auth_gated(monkeypatch, tmp_path) -> None:
+def test_dashboard_campaign_route_requires_auth(monkeypatch, tmp_path) -> None:
     _auth_env(monkeypatch, tmp_path)
     monkeypatch.setattr(dashboard_app, "_campaign_run_payload", lambda _payload: {"ok": True})
     status, body = _invoke_app("POST", "/api/campaign/run", payload={})
     payload = json.loads(body)
-    assert status.startswith("200")
-    assert payload["ok"] is True
+    assert status.startswith("401")
+    assert payload == {"ok": False, "error": "unauthorized"}
 
 
-def test_dashboard_trading_cycle_route_is_not_auth_gated(monkeypatch, tmp_path) -> None:
+def test_dashboard_trading_cycle_route_requires_auth(monkeypatch, tmp_path) -> None:
     _auth_env(monkeypatch, tmp_path)
     monkeypatch.setattr(dashboard_app, "_trading_cycle_run_payload", lambda _payload: {"ok": True})
     status, body = _invoke_app("POST", "/api/trading-cycle/run", payload={})
     payload = json.loads(body)
-    assert status.startswith("200")
-    assert payload["ok"] is True
+    assert status.startswith("401")
+    assert payload == {"ok": False, "error": "unauthorized"}
 
 
-def test_dashboard_runtime_controls_are_not_auth_gated(monkeypatch, tmp_path) -> None:
+def test_dashboard_runtime_controls_require_auth(monkeypatch, tmp_path) -> None:
     _auth_env(monkeypatch, tmp_path)
     status, body = _invoke_app("POST", "/api/runtime/arm-paper", payload={})
     payload = json.loads(body)
-    assert status.startswith("200")
-    assert payload["runtime_state"]["execution_enabled"] is True
+    assert status.startswith("401")
+    assert payload == {"ok": False, "error": "unauthorized"}
 
 
 def test_dashboard_does_not_expose_alpaca_secrets(monkeypatch, tmp_path) -> None:
@@ -1015,7 +1051,7 @@ def test_dashboard_options_scout_ranks_profit_harvest_rows(monkeypatch, tmp_path
     assert payload["scout_rows"][0]["profit_tier"] == "initial"
     assert payload["scout_rows"][0]["target_exit_price"] == 3.43
 
-    alias_status, alias_body = _invoke_app("GET", "/api/volatility/scout")
+    alias_status, alias_body = _invoke_app("GET", "/api/volatility/scout", token="dashboard-token")
     assert alias_status.startswith("200")
     assert json.loads(alias_body)["status"] == "options_scout_ready"
 
@@ -1169,7 +1205,7 @@ def test_dashboard_options_timeline_pairs_round_trips_and_clusters(monkeypatch, 
     assert payload["round_trips"][0]["classification"] == "loss_cut"
     assert any(warning["type"] == "reversal_with_pending_entries" for warning in payload["warnings"])
 
-    alias_status, alias_body = _invoke_app("GET", "/api/trading/timeline")
+    alias_status, alias_body = _invoke_app("GET", "/api/trading/timeline", token="dashboard-token")
     assert alias_status.startswith("200")
     assert json.loads(alias_body)["status"] == "options_timeline_ready"
 
@@ -1193,7 +1229,7 @@ def test_dashboard_returns_visible_json_error_for_nonfinite_payload(monkeypatch,
         lambda: {"ok": True, "bad_metric": float("inf")},
     )
 
-    status, body = _invoke_app("GET", "/api/trading/timeline")
+    status, body = _invoke_app("GET", "/api/trading/timeline", token="dashboard-token")
     payload = json.loads(body)
 
     assert status.startswith("500")
@@ -1202,14 +1238,14 @@ def test_dashboard_returns_visible_json_error_for_nonfinite_payload(monkeypatch,
     assert "Out of range float" in payload["detail"]
 
 
-def test_dashboard_account_endpoints_are_not_auth_gated(monkeypatch, tmp_path) -> None:
+def test_dashboard_account_endpoints_require_auth(monkeypatch, tmp_path) -> None:
     _auth_env(monkeypatch, tmp_path)
     monkeypatch.setattr(dashboard_app, "_account_positions_payload", lambda: {"ok": True, "positions": []})
     monkeypatch.setattr(dashboard_app, "_account_orders_payload", lambda: {"ok": True, "orders": []})
     status, _ = _invoke_app("GET", "/api/account/positions")
-    assert status.startswith("200")
+    assert status.startswith("401")
     status, _ = _invoke_app("GET", "/api/account/orders")
-    assert status.startswith("200")
+    assert status.startswith("401")
 
 
 def test_dashboard_execution_exit_endpoint_returns_order(monkeypatch, tmp_path) -> None:
@@ -1418,6 +1454,9 @@ def test_render_config_has_health_check() -> None:
     assert 'key: AUTOBOTT_MAX_POSITION_COST\n        value: "1000"' in render_config
     assert 'key: AUTOBOTT_MAX_DAILY_LOSS\n        value: "750"' in render_config
     assert 'key: AUTOBOTT_PAPER_IGNORE_POSITION_COST_LIMIT\n        value: "false"' in render_config
+    assert "key: AUTOBOTT_DASHBOARD_AUTH_TOKEN\n        sync: false" in render_config
+    assert "key: AUTOBOTT_DASHBOARD_AUTH_TOKEN\n        value:" not in render_config
+    assert "key: AUTOBOTT_DASHBOARD_AUTH_TOKEN\n        generateValue:" not in render_config
     assert 'key: AUTOBOTT_CORE_RUNNER_ATOMIC_MLEG_REQUIRED\n        value: "false"' in render_config
     assert 'key: AUTOBOTT_MANUAL_MIRROR_MAX_CONTRACT_COST\n        value: "100"' in render_config
     assert 'key: AUTOBOTT_MANUAL_MIRROR_MAX_SIGNAL_AGE_MINUTES\n        value: "30"' in render_config
@@ -1459,14 +1498,24 @@ def test_frontend_contains_no_buy_sell_submit_order_controls() -> None:
     assert "start paper session" in lowered
 
 
-def test_frontend_contains_no_dashboard_auth_or_token_setup() -> None:
+def test_frontend_contains_session_scoped_dashboard_auth_without_hardcoded_token() -> None:
     status, body = _invoke_app("GET", "/")
     assert status.startswith("200")
-    assert "dashboard token" not in body.lower()
-    assert "dashboardToken" not in body
-    assert "Authorization" not in body
-    assert "TOKEN REQUIRED" not in body
-    assert "DASHBOARD READY" in body
+    assert "dashboard token" in body.lower()
+    assert "sessionStorage" in body
+    assert "dashboardToken" in body
+    assert "Authorization" in body
+    assert "TOKEN REQUIRED" in body
+    assert "dashboard-token" not in body
+    assert "autobott-local" not in body
     assert "Theory pass" in body
     assert "2DTE pass" in body
     assert "Worst Thesis Failures" in body
+
+
+def test_local_dashboard_launcher_never_prints_or_sets_a_token_value() -> None:
+    launcher = Path("start_paper_dashboard.cmd").read_text(encoding="utf-8")
+
+    assert "AUTOBOTT_DASHBOARD_AUTH_TOKEN" in launcher
+    assert "autobott-local" not in launcher
+    assert 'set "AUTOBOTT_DASHBOARD_AUTH_TOKEN=' not in launcher

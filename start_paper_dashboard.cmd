@@ -17,6 +17,7 @@ set "AUTOBOTT_ENV_FILE=C:\Users\flavo\Downloads\AutoBott.env"
 echo Starting AutoBott paper dashboard...
 echo Env file: %AUTOBOTT_ENV_FILE%
 echo URL: http://127.0.0.1:8000
+echo Protected API access requires AUTOBOTT_DASHBOARD_AUTH_TOKEN in the configured env file.
 echo.
 
 "%ROOT%\.venv\Scripts\python.exe" -m autobott_v2.launch_dashboard
