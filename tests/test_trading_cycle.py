@@ -264,6 +264,22 @@ class FakeBroker:
         )
 
 
+class RestartReconciliationBroker(FakeBroker):
+    def __init__(self, *, reconciled_status: str = "filled", **config_overrides) -> None:
+        super().__init__(**config_overrides)
+        self.reconciled_status = reconciled_status
+        self.reconciled_order_ids: list[str] = []
+
+    def get_order(self, broker_order_id: str):
+        self.reconciled_order_ids.append(broker_order_id)
+        return {
+            "id": broker_order_id,
+            "client_order_id": "client-1",
+            "status": self.reconciled_status,
+            "submitted_at": "2026-07-01T15:36:00Z",
+        }
+
+
 class FakeBrokerWithLivePositions(FakeBroker):
     def __init__(self, positions, **config_overrides) -> None:
         super().__init__(**config_overrides)
@@ -358,6 +374,57 @@ def test_same_hour_setup_cannot_reenter_after_first_submission(tmp_path) -> None
     assert second.trade_attempted_count == 0
     assert second.orders_submitted == []
     assert any(row["reason"] == "setup_event_already_traded" for row in second.skipped)
+
+
+def test_paper_cycle_survives_restart_reconciles_and_prevents_duplicate_order(
+    tmp_path, monkeypatch
+) -> None:
+    monkeypatch.setenv("AUTOBOTT_DATA_ROOT", str(tmp_path / "paper-data"))
+    save_runtime_state(default_runtime_state(), state_path=tmp_path / "runtime_state.json")
+    original_runtime = trading_cycle.load_runtime_state
+    trading_cycle.load_runtime_state = lambda: original_runtime(
+        state_path=tmp_path / "runtime_state.json"
+    )
+    execution_log_path = tmp_path / "execution_orders.jsonl"
+    cycle_args = {
+        "symbols": ["AAPL"],
+        "data_client": FakeDataClient(),
+        "scheduled_market_time": datetime(2026, 7, 1, 15, 35, tzinfo=UTC),
+        "captured_at_utc": datetime(2026, 7, 1, 15, 35, tzinfo=UTC),
+        "corpus_root": tmp_path / "corpus",
+        "decision_log_path": tmp_path / "decision_cards.jsonl",
+        "execution_log_path": str(execution_log_path),
+    }
+
+    first_process = RestartReconciliationBroker()
+    restarted_process = RestartReconciliationBroker()
+    try:
+        first = trading_cycle.run_trading_cycle(broker=first_process, **cycle_args)
+        second = trading_cycle.run_trading_cycle(broker=restarted_process, **cycle_args)
+    finally:
+        trading_cycle.load_runtime_state = original_runtime
+
+    positions = trading_cycle.load_open_positions()
+    setup_registry = json.loads(
+        execution_log_path.with_name("setup_events.json").read_text(encoding="utf-8")
+    )
+    journal_rows = [
+        json.loads(line)
+        for line in execution_log_path.read_text(encoding="utf-8").splitlines()
+    ]
+    submissions = [row for row in journal_rows if row["event_type"] == "order_submission"]
+
+    assert first.symbols == ["AAPL"]
+    assert first.trade_attempted_count == 1
+    assert len(first_process.submitted) == 1
+    assert first_process.submitted[0].option_symbol.startswith("AAPL")
+    assert restarted_process.reconciled_order_ids == ["alpaca-order-1"]
+    assert positions[0].status == "filled"
+    assert second.trade_attempted_count == 0
+    assert restarted_process.submitted == []
+    assert any(row["reason"] == "setup_event_already_traded" for row in second.skipped)
+    assert len(setup_registry) == 1
+    assert submissions[-1]["payload"]["state"] == "filled"
 
 
 def test_setup_cooldown_bootstrap_reads_beyond_old_two_megabyte_tail(tmp_path) -> None:
