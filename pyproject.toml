@@ -7,7 +7,9 @@ name = "autobott-v2"
 version = "0.1.0"
 description = "AutoBott v2 paper-first risk-gated decision engine"
 requires-python = ">=3.11"
-dependencies = []
+dependencies = [
+  "tzdata>=2025.2; platform_system == 'Windows'",
+]
 
 [project.optional-dependencies]
 dev = [
