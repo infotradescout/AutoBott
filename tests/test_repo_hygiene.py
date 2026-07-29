@@ -91,3 +91,19 @@ def test_source_tree_has_no_generated_artifact_dirs() -> None:
         "Generated artifact directories in source paths must be ignored by git. "
         f"Not ignored: {offenders}"
     )
+
+
+def test_tracked_python_sources_are_utf8_text_and_compile() -> None:
+    offenders: list[str] = []
+
+    for relative_path in _tracked_paths():
+        if not relative_path.endswith(".py"):
+            continue
+        path = REPO_ROOT / relative_path
+        try:
+            source = path.read_text(encoding="utf-8")
+            compile(source, relative_path, "exec")
+        except (UnicodeDecodeError, SyntaxError) as exc:
+            offenders.append(f"{relative_path}: {type(exc).__name__}: {exc}")
+
+    assert not offenders, f"Tracked Python sources must be valid UTF-8 code: {offenders}"
