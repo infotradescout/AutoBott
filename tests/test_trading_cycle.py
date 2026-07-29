@@ -730,6 +730,45 @@ def test_run_trading_cycle_uses_live_broker_positions_for_underlying_guard(tmp_p
     assert result.execution_rejected_count_by_reason == {"underlying_exposure_already_open": 1}
 
 
+def test_retained_runner_does_not_freeze_next_entry_for_same_underlying(monkeypatch) -> None:
+    runner_symbol = "VXX260807P00022000"
+    monkeypatch.setattr(
+        trading_cycle,
+        "load_open_positions",
+        lambda: [
+            OpenPosition(
+                broker_order_id="runner-order",
+                decision_id="runner-decision",
+                symbol="VXX",
+                option_symbol=runner_symbol,
+                quantity=1,
+                entry_limit_price=0.94,
+                entry_submitted_at=datetime(2026, 7, 28, 15, 31, tzinfo=UTC),
+                take_profit_price=1.88,
+                stop_loss_price=0.28,
+                status="filled",
+                trade_group_id="volatility-pair-1",
+                leg_role="runner",
+                paired_option_symbol="VXX260807P00023000",
+            )
+        ],
+    )
+    broker = FakeBrokerWithLivePositions(
+        [
+            {
+                "symbol": runner_symbol,
+                "side": "long",
+                "qty": "1",
+                "current_price": "0.47",
+                "avg_entry_price": "0.94",
+                "unrealized_plpc": "-0.50",
+            }
+        ]
+    )
+
+    assert trading_cycle._active_underlying_symbols(broker) == set()
+
+
 def test_run_trading_cycle_uses_pending_buy_orders_for_underlying_guard(tmp_path) -> None:
     save_runtime_state(default_runtime_state(), state_path=tmp_path / "runtime_state.json")
     original_runtime = trading_cycle.load_runtime_state

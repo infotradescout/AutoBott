@@ -876,17 +876,32 @@ def _prioritize_symbols_by_winners(symbols: list[str], winner_bias: dict[str, An
 
 
 def _active_underlying_symbols(broker: Any | None = None) -> set[str]:
+    try:
+        stored_positions = load_open_positions()
+    except Exception:
+        stored_positions = []
+    # A convex runner is intentionally allowed to survive after the primary
+    # is harvested. It still counts toward account and drawdown limits, but it
+    # must not freeze every later setup for the same underlying or volatility
+    # group. Unknown broker positions remain blocking because they have no
+    # verified runner role in the durable position store.
+    runner_option_symbols = {
+        position.option_symbol.upper()
+        for position in stored_positions
+        if position.leg_role == "runner" and _position_is_active(position.status)
+    }
+
     if broker is not None and hasattr(broker, "list_open_positions"):
         positions_read = False
         symbols: set[str] = set()
         try:
-            symbols.update(
-                {
-                _underlying_from_option_symbol(str(position.get("symbol") or "")) or str(position.get("symbol") or "").upper()
-                for position in broker.list_open_positions()
-                if _broker_position_is_active(position)
-                }
-            )
+            for position in broker.list_open_positions():
+                if not _broker_position_is_active(position):
+                    continue
+                option_symbol = str(position.get("symbol") or "").upper()
+                if option_symbol in runner_option_symbols:
+                    continue
+                symbols.add(_underlying_from_option_symbol(option_symbol) or option_symbol)
             positions_read = True
         except Exception:
             pass
@@ -900,8 +915,8 @@ def _active_underlying_symbols(broker: Any | None = None) -> set[str]:
             return {symbol for symbol in symbols if symbol}
     return {
         position.symbol.upper()
-        for position in load_open_positions()
-        if _position_is_active(position.status)
+        for position in stored_positions
+        if _position_is_active(position.status) and position.leg_role != "runner"
     }
 
 

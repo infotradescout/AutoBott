@@ -32,17 +32,21 @@ The `$100` default exists only in the dashboard's **Decision Feed / Manual Mirro
 expiration and minimum liquidity, and refreshes the quote before display. It does not alter scanner output, the
 paper-selected primary, runner selection, or broker submission.
 
-## Atomic submission
+## Pair submission
 
-The primary and runner are sent to Alpaca as one `mleg` limit order with two unique `buy_to_open` legs and one combined
-debit limit. AutoBott no longer submits the primary and runner as separate broker orders. If atomic multi-leg submission
-is unavailable, rejected, or malformed, the entry fails closed and neither leg is intentionally submitted alone.
+The hosted paper account sends the primary and runner as two linked ordinary `buy_to_open` orders because Alpaca MLeg
+approval is not required for that lane. Both orders retain the same `trade_group_id`. If the second submission fails,
+AutoBott cancels or flattens the first accepted leg instead of intentionally keeping an accidental single-leg entry.
+
+When atomic MLeg mode is enabled, the pair is sent as one two-leg limit order and fails closed if atomic submission is
+unavailable, rejected, or malformed.
 
 ## Exit behavior
 
 The primary keeps the normal harvest rules. The runner is independently monitored with wider defaults: a 100% profit
 target, trailing activation at 50%, a 25-point trailing drawdown, and a 70% stop. Closing the primary does not close the
-runner.
+runner. A retained runner continues to count toward account position and drawdown limits, but it does not occupy the
+same-underlying or shared-volatility entry slot by itself; a later qualified setup can open a new primary/runner pair.
 
 The runner is considered funded only when realized primary profit covers the runner's entry debit and fees. An
 unrealized recovery in the runner's own premium does not satisfy that accounting condition.
