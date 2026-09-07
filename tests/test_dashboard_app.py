@@ -8,6 +8,7 @@ from pathlib import Path
 import pytest
 
 from autobott_v2 import dashboard_app
+from autobott_v2.hosted_policy import HOSTED_POLICY_VERSION
 from autobott_v2.runtime_control import default_runtime_state, save_runtime_state
 from autobott_v2.runtime_control import set_kill_switch
 
@@ -377,7 +378,7 @@ def test_dashboard_health_returns_ok() -> None:
     payload = json.loads(body)
     assert status.startswith("200")
     assert payload["ok"] is True
-    assert payload["policy_version"] == "hosted-vix-profit-v1"
+    assert payload["policy_version"] == HOSTED_POLICY_VERSION
     assert payload["volatility_lane"] == ["VIX", "VXX", "UVXY"]
     assert payload["vix_execution_contracts"] == ["VIX", "VIXW"]
     assert payload["vix_signal_proxy"] == "VIXY"
@@ -1427,7 +1428,8 @@ def test_render_config_has_health_check() -> None:
     assert "AUTOBOTT_PAPER_DISCOVERY_MAX_CONTRACT_PRICE" not in render_config
     assert "AUTOBOTT_MAX_TRADE_GROUP_COST" not in render_config
     assert 'key: AUTOBOTT_OPEN_DRAWDOWN_GUARD_ENABLED\n        value: "true"' in render_config
-    assert 'key: AUTOBOTT_RECENT_LOSS_GUARD_ENABLED\n        value: "true"' in render_config
+    assert "startCommand: python -m autobott_v2.dashboard_app_v2" in render_config
+    assert "key: AUTOBOTT_RECENT_LOSS_GUARD_ENABLED" not in render_config
 
 
 def test_frontend_identifies_live_market_paper_trading_and_real_money_off() -> None:
