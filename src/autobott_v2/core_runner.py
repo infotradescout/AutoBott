@@ -4,8 +4,9 @@ import os
 from dataclasses import dataclass
 from typing import Iterable
 
-from .hosted_policy import HOSTED_MIN_OPEN_INTEREST, is_hosted_paper_runtime
+from .hosted_policy import is_hosted_paper_runtime
 from .phase1_models import OptionContractSnapshot, OptionType, SelectedContract
+from .strategy_policy import HOSTED_STRATEGY_POLICY
 
 
 @dataclass(frozen=True)
@@ -45,7 +46,7 @@ class CoreRunnerRules:
             raise ValueError("core_runner_liquidity_minimums_must_be_nonnegative")
         if not 0 < self.core_min_abs_delta < 1:
             raise ValueError("core_min_abs_delta_must_be_between_zero_and_one")
-        if not 0 < self.runner_min_abs_delta <= self.runner_target_abs_delta <= self.runner_max_abs_delta < 1:
+        if not 0 < self.runner_min_abs_delta <= self.runner_target_abs_delta <= self.runner_max_abs_delta < self.core_min_abs_delta:
             raise ValueError("runner_delta_window_invalid")
         return self
 
@@ -64,23 +65,26 @@ class CoreRunnerPair:
 
 def load_core_runner_rules() -> CoreRunnerRules:
     if is_hosted_paper_runtime():
+        policy = HOSTED_STRATEGY_POLICY
         return CoreRunnerRules(
-            runner_max_cost_ratio=0.40,
-            runner_target_cost_ratio=0.25,
-            core_max_spread_pct=0.18,
-            runner_max_spread_pct=0.25,
-            core_min_open_interest=HOSTED_MIN_OPEN_INTEREST,
-            runner_min_open_interest=HOSTED_MIN_OPEN_INTEREST,
-            core_min_volume=10,
-            runner_min_volume=1,
-            core_min_abs_delta=0.25,
-            runner_min_abs_delta=0.10,
-            runner_max_abs_delta=0.35,
-            runner_target_abs_delta=0.20,
-            primary_target_profit_pct=0.30,
-            primary_stop_loss_pct=0.22,
+            runner_max_cost_ratio=policy.runner_max_cost_ratio,
+            runner_target_cost_ratio=policy.runner_target_cost_ratio,
+            core_max_spread_pct=policy.core_max_spread_pct,
+            runner_max_spread_pct=policy.runner_max_spread_pct,
+            core_min_open_interest=policy.core_min_open_interest,
+            runner_min_open_interest=policy.runner_min_open_interest,
+            core_min_volume=policy.core_min_volume,
+            runner_min_volume=policy.runner_min_volume,
+            core_min_abs_delta=policy.core_min_abs_delta,
+            runner_min_abs_delta=policy.runner_min_abs_delta,
+            runner_max_abs_delta=policy.runner_max_abs_delta,
+            runner_target_abs_delta=policy.runner_target_abs_delta,
+            # These legacy fields only populate compatibility metadata. Actual
+            # pair exits are controlled by pair_lifecycle.py.
+            primary_target_profit_pct=0.50,
+            primary_stop_loss_pct=0.45,
             runner_target_profit_pct=1.00,
-            runner_stop_loss_pct=0.70,
+            runner_stop_loss_pct=policy.unfunded_runner_stop_loss_pct,
         ).validate()
     return CoreRunnerRules(
         runner_max_cost_ratio=float(os.getenv("AUTOBOTT_RUNNER_MAX_COST_RATIO", "0.40")),
@@ -229,6 +233,10 @@ def _selected_contract(
     stop_loss_pct: float,
     role: str,
 ) -> SelectedContract:
+    if role == "primary":
+        exit_rule = "primary_harvest_when_profit_funds_runner_then_retain_runner"
+    else:
+        exit_rule = "runner_hold_for_convex_upside_after_funding_with_trailing_and_dte_risk_controls"
     return SelectedContract(
         option_symbol=contract.option_symbol,
         option_type=contract.option_type,
@@ -248,14 +256,12 @@ def _selected_contract(
         reward_risk_ratio=0.0,
         target_exit_mid=round(contract.mid * (1 + target_profit_pct), 4),
         stop_exit_mid=round(contract.mid * (1 - stop_loss_pct), 4),
-        exit_rule=(
-            f"{role}_take_profit_at_{int(target_profit_pct * 100)}pct_gain_"
-            f"or_stop_at_{int(stop_loss_pct * 100)}pct_loss_on_mid"
-        ),
+        exit_rule=exit_rule,
         score_reasons=[
             f"core_runner_{role}",
             "paper_pair_price_unrestricted",
             "convex_runner_delta_window",
+            "pair_lifecycle_exit_policy",
         ],
         volume_available=contract.volume_available,
     )
