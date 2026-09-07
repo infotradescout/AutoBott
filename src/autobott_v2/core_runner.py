@@ -46,7 +46,7 @@ class CoreRunnerRules:
             raise ValueError("core_runner_liquidity_minimums_must_be_nonnegative")
         if not 0 < self.core_min_abs_delta < 1:
             raise ValueError("core_min_abs_delta_must_be_between_zero_and_one")
-        if not 0 < self.runner_min_abs_delta <= self.runner_target_abs_delta <= self.runner_max_abs_delta < self.core_min_abs_delta:
+        if not 0 < self.runner_min_abs_delta <= self.runner_target_abs_delta <= self.runner_max_abs_delta < 1:
             raise ValueError("runner_delta_window_invalid")
         return self
 
