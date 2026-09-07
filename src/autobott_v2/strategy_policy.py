@@ -82,7 +82,7 @@ class StrategyPolicy:
             raise ValueError("invalid_spread_caps")
         if not 0 < self.core_min_abs_delta < 1:
             raise ValueError("invalid_core_delta_floor")
-        if not 0 < self.runner_min_abs_delta <= self.runner_target_abs_delta <= self.runner_max_abs_delta < self.core_min_abs_delta:
+        if not 0 < self.runner_min_abs_delta <= self.runner_target_abs_delta <= self.runner_max_abs_delta < 1:
             raise ValueError("invalid_runner_delta_window")
         if not 0 < self.pair_max_loss_pct < 1:
             raise ValueError("invalid_pair_max_loss")
