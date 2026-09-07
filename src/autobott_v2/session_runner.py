@@ -11,7 +11,7 @@ from typing import Any, Callable
 from .hosted_policy import HOSTED_PRIORITY_SYMBOLS, is_hosted_paper_runtime
 from .phase1_snapshot_capture import _market_timezone_info
 from .paper_readiness import _is_regular_trading_day
-from .trading_cycle import TradingCycleResult, run_trading_cycle
+from .trading_cycle_v2 import TradingCycleResult, run_trading_cycle
 
 
 @dataclass(frozen=True)
