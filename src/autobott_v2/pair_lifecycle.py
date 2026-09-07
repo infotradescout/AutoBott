@@ -19,7 +19,7 @@ class PairLifecycleRules:
     exists to preserve convex upside after the primary has paid for it.
     """
 
-    funding_buffer_dollars: float = 5.0
+    funding_buffer_dollars: float = 0.0
     max_pair_loss_pct: float = 0.35
     unfunded_runner_stop_loss_pct: float = 0.70
     funded_runner_trailing_activation_pct: float = 0.75
@@ -108,9 +108,9 @@ def evaluate_pair_lifecycle(
 
     Before the primary is harvested, the pair is risk-managed on combined
     debit. The primary is harvested only when its profit can recover the
-    runner's original cost plus a small buffer. After that point the runner is
-    treated as funded and is managed for convex upside rather than a fixed
-    take-profit target.
+    runner's original cost. An optional explicit buffer can be added by policy.
+    After that point the runner is treated as funded and is managed for convex
+    upside rather than a fixed take-profit target.
     """
 
     resolved_state = state or PairLifecycleState()
