@@ -2,72 +2,56 @@ from __future__ import annotations
 
 import os
 
+from .strategy_policy import HOSTED_STRATEGY_POLICY
 
-# Strategy-critical production values live in code. Render retains old
-# environment values across deploys, so using env vars for these controls can
-# leave a new build running an obsolete trading policy.
+
+# Compatibility constants remain because older modules import these names.
+# Their values now originate from one validated policy instead of competing
+# module defaults and retained deployment variables.
 HOSTED_SESSION_SYMBOL_TOKENS = ("VIX", "VXX", "UVXY", "TOP_OPTIONS_100")
 HOSTED_PRIORITY_SYMBOLS = ("VIX", "VXX", "UVXY", "SPY", "QQQ")
 HOSTED_VOLATILITY_SYMBOLS = ("VIX", "VIXW", "VXX", "UVXY")
 HOSTED_VOLATILITY_EXPOSURE_GROUP = frozenset(HOSTED_VOLATILITY_SYMBOLS)
 
-HOSTED_SESSION_INTERVAL_SECONDS = 90
-HOSTED_SESSION_SYMBOL_BATCH_SIZE = 25
-HOSTED_SESSION_START_TIME = "09:35"
-HOSTED_SESSION_END_TIME = "15:55"
-HOSTED_SESSION_MARKET_TIMEZONE = "America/New_York"
+HOSTED_SESSION_INTERVAL_SECONDS = HOSTED_STRATEGY_POLICY.session_interval_seconds
+HOSTED_SESSION_SYMBOL_BATCH_SIZE = HOSTED_STRATEGY_POLICY.session_symbol_batch_size
+HOSTED_SESSION_START_TIME = HOSTED_STRATEGY_POLICY.session_start_time
+HOSTED_SESSION_END_TIME = HOSTED_STRATEGY_POLICY.session_end_time
+HOSTED_SESSION_MARKET_TIMEZONE = HOSTED_STRATEGY_POLICY.session_market_timezone
 HOSTED_POSITION_MONITOR_HEARTBEAT_ENABLED = False
 HOSTED_POSITION_MONITOR_HEARTBEAT_SECONDS = HOSTED_SESSION_INTERVAL_SECONDS
-HOSTED_MAX_NEW_PAIRS_PER_CYCLE = 3
-HOSTED_MAX_OPEN_LEGS = 6
-HOSTED_MAX_POSITION_COST = 1000.0
-HOSTED_MAX_DAILY_LOSS = 750.0
-HOSTED_OPEN_DRAWDOWN_MAX_LOSS = 750.0
-HOSTED_OPEN_DRAWDOWN_MIN_LOSERS = 3
-HOSTED_OPEN_DRAWDOWN_LOSS_RATE = 0.60
+HOSTED_MAX_NEW_PAIRS_PER_CYCLE = HOSTED_STRATEGY_POLICY.max_new_pairs_per_cycle
+HOSTED_MAX_OPEN_LEGS = HOSTED_STRATEGY_POLICY.max_open_legs
+HOSTED_MAX_POSITION_COST = HOSTED_STRATEGY_POLICY.max_position_cost
+HOSTED_MAX_DAILY_LOSS = HOSTED_STRATEGY_POLICY.max_daily_loss
+HOSTED_OPEN_DRAWDOWN_MAX_LOSS = HOSTED_STRATEGY_POLICY.open_drawdown_max_loss
+HOSTED_OPEN_DRAWDOWN_MIN_LOSERS = HOSTED_STRATEGY_POLICY.open_drawdown_min_losers
+HOSTED_OPEN_DRAWDOWN_LOSS_RATE = HOSTED_STRATEGY_POLICY.open_drawdown_loss_rate
 
-# The default swing lane is deliberately multi-day. It is not a same-day
-# scalp engine. Rider contracts are longer-horizon alternatives when the
-# option chain and setup support them.
-HOSTED_TACTICAL_MIN_DTE = 5
-HOSTED_TACTICAL_MAX_DTE = 10
-HOSTED_RIDER_MIN_DTE = 14
-HOSTED_RIDER_MAX_DTE = 45
-HOSTED_EXIT_MIN_DTE = 2
+HOSTED_TACTICAL_MIN_DTE = HOSTED_STRATEGY_POLICY.tactical_min_dte
+HOSTED_TACTICAL_MAX_DTE = HOSTED_STRATEGY_POLICY.tactical_max_dte
+HOSTED_RIDER_MIN_DTE = HOSTED_STRATEGY_POLICY.rider_min_dte
+HOSTED_RIDER_MAX_DTE = HOSTED_STRATEGY_POLICY.rider_max_dte
+HOSTED_EXIT_MIN_DTE = HOSTED_STRATEGY_POLICY.exit_min_dte
 
-# The hosted strategy holds options for days, so one-minute noise is the wrong
-# decision horizon. Thirty-five hourly bars cover roughly one trading week and
-# still let the 90-second session react to a newly completed bar.
-HOSTED_BAR_TIMEFRAME = "1Hour"
-HOSTED_LOOKBACK_BARS = 35
-HOSTED_LOOKBACK_CALENDAR_DAYS = 14
+HOSTED_BAR_TIMEFRAME = HOSTED_STRATEGY_POLICY.bar_timeframe
+HOSTED_LOOKBACK_BARS = HOSTED_STRATEGY_POLICY.lookback_bars
+HOSTED_LOOKBACK_CALENDAR_DAYS = HOSTED_STRATEGY_POLICY.lookback_calendar_days
+HOSTED_MIN_OPEN_INTEREST = HOSTED_STRATEGY_POLICY.core_min_open_interest
+HOSTED_POLICY_VERSION = HOSTED_STRATEGY_POLICY.version
 
-# Open interest is absent from portions of Alpaca's indicative paper feed.
-# Hosted selection still requires a live two-sided quote, bounded spread,
-# volume when supplied, delta, vega, theta, DTE, and price. Missing OI must not
-# be converted into a false zero-liquidity rejection.
-HOSTED_MIN_OPEN_INTEREST = 0
-
-# Strategy/outcome learning is partitioned by policy version. Do not let
-# results produced by the old independent-leg exit policy bias the rebuilt
-# pair-lifecycle policy.
-HOSTED_POLICY_VERSION = "hosted-core-runner-v2"
-
-# The raw market corpus is disposable; orders and outcome journals are stored
-# outside this tree. Keep enough headroom for the next cycle even when Render
-# retains obsolete environment values from an earlier deployment.
 HOSTED_SNAPSHOT_MAX_BYTES = 128 * 1024 * 1024
 HOSTED_MIN_FREE_BYTES = 128 * 1024 * 1024
 HOSTED_CAPTURE_OPTION_QUOTE_FILES = False
 
-HOSTED_LOSS_GUARD_LOOKBACK = 30
-HOSTED_LOSS_GUARD_CONSECUTIVE_LOSSES = 3
-HOSTED_LOSS_GUARD_MIN_SAMPLE = 5
-HOSTED_LOSS_GUARD_LOSS_RATE = 0.70
-HOSTED_WINNER_BIAS_LOOKBACK = 30
-HOSTED_WINNER_BIAS_MIN_SAMPLE = 5
-HOSTED_WINNER_BIAS_WIN_RATE = 0.60
-HOSTED_WINNER_BIAS_CONSECUTIVE_WINS = 3
+HOSTED_LOSS_GUARD_LOOKBACK = HOSTED_STRATEGY_POLICY.loss_guard_lookback
+HOSTED_LOSS_GUARD_CONSECUTIVE_LOSSES = HOSTED_STRATEGY_POLICY.loss_guard_consecutive_losses
+HOSTED_LOSS_GUARD_MIN_SAMPLE = HOSTED_STRATEGY_POLICY.loss_guard_min_sample
+HOSTED_LOSS_GUARD_LOSS_RATE = HOSTED_STRATEGY_POLICY.loss_guard_loss_rate
+HOSTED_WINNER_BIAS_LOOKBACK = HOSTED_STRATEGY_POLICY.winner_bias_lookback
+HOSTED_WINNER_BIAS_MIN_SAMPLE = HOSTED_STRATEGY_POLICY.winner_bias_min_sample
+HOSTED_WINNER_BIAS_WIN_RATE = HOSTED_STRATEGY_POLICY.winner_bias_win_rate
+HOSTED_WINNER_BIAS_CONSECUTIVE_WINS = HOSTED_STRATEGY_POLICY.winner_bias_consecutive_wins
 
 
 def active_build_sha() -> str | None:
@@ -88,12 +72,7 @@ def is_hosted_runtime() -> bool:
 
 
 def is_hosted_paper_runtime() -> bool:
-    """Return true for the deployed service, whose broker mode is always paper.
-
-    Render retains old environment values across deploys. In particular, an
-    obsolete ``ALPACA_ENV=live`` must not turn off every hosted policy override
-    or point this application at the live-money API.
-    """
+    """Return true for the deployed service, whose broker mode is always paper."""
 
     return is_hosted_runtime()
 
