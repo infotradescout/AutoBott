@@ -10,6 +10,9 @@ services:
         mountPath: /var/data/autobott
         sizeGB: 1
     envVars:
+      # Connection and hard safety controls belong in deployment config.
+      # Strategy-critical values are code-owned in hosted_policy.py so a stale
+      # Render variable cannot silently keep an obsolete trading policy alive.
       - key: ALPACA_ENV
         value: paper
       - key: ALPACA_API_KEY_ID
@@ -24,14 +27,16 @@ services:
         value: "false"
       - key: AUTOBOTT_ALLOW_ORDER_PLACEMENT
         value: "true"
+      - key: AUTOBOTT_PAPER_ONLY
+        value: "true"
       - key: AUTOBOTT_MAX_POSITION_COST
         value: "1000"
       - key: AUTOBOTT_MAX_OPEN_POSITIONS
         value: "6"
-      - key: AUTOBOTT_PAPER_IGNORE_POSITION_COST_LIMIT
-        value: "false"
       - key: AUTOBOTT_MAX_DAILY_LOSS
         value: "750"
+      - key: AUTOBOTT_PAPER_IGNORE_POSITION_COST_LIMIT
+        value: "false"
       - key: AUTOBOTT_PAPER_TRADE_ALL_PASSED_SIGNALS
         value: "true"
       - key: AUTOBOTT_PAPER_MAX_NEW_ENTRY_ATTEMPTS_PER_LOOP
@@ -58,82 +63,6 @@ services:
         value: "true"
       - key: AUTOBOTT_CORE_RUNNER_ATOMIC_MLEG_REQUIRED
         value: "false"
-      - key: AUTOBOTT_RUNNER_MAX_COST_RATIO
-        value: "0.40"
-      - key: AUTOBOTT_CORE_MAX_SPREAD_PCT
-        value: "0.18"
-      - key: AUTOBOTT_RUNNER_MAX_SPREAD_PCT
-        value: "0.25"
-      - key: AUTOBOTT_CORE_MIN_OPEN_INTEREST
-        value: "0"
-      - key: AUTOBOTT_RUNNER_MIN_OPEN_INTEREST
-        value: "0"
-      - key: AUTOBOTT_CORE_MIN_VOLUME
-        value: "10"
-      - key: AUTOBOTT_RUNNER_MIN_VOLUME
-        value: "1"
-      - key: AUTOBOTT_ENTRY_MIN_DTE
-        value: "5"
-      - key: AUTOBOTT_ENTRY_TACTICAL_MAX_DTE
-        value: "10"
-      - key: AUTOBOTT_ENTRY_RIDER_MIN_DTE
-        value: "14"
-      - key: AUTOBOTT_ENTRY_RIDER_MAX_DTE
-        value: "45"
-      - key: AUTOBOTT_SPREAD_MAX_RISK
-        value: "100"
-      - key: AUTOBOTT_SPREAD_PROFIT_TARGET_PCT
-        value: "0.50"
-      - key: AUTOBOTT_EXIT_TAKE_PROFIT_PCT
-        value: "0.30"
-      - key: AUTOBOTT_EXIT_TAKE_PROFIT_TIGHTEN_PCT
-        value: "0.50"
-      - key: AUTOBOTT_EXIT_TAKE_PROFIT_HARVEST_PCT
-        value: "0.80"
-      - key: AUTOBOTT_EXIT_TAKE_PROFIT_FORCE_EXIT_PCT
-        value: "1.20"
-      - key: AUTOBOTT_RUNNER_EXIT_TAKE_PROFIT_PCT
-        value: "1.00"
-      - key: AUTOBOTT_RUNNER_EXIT_TRAILING_ACTIVATION_PCT
-        value: "0.50"
-      - key: AUTOBOTT_RUNNER_EXIT_TRAILING_DRAWDOWN_PCT
-        value: "0.25"
-      - key: AUTOBOTT_RUNNER_EXIT_STOP_LOSS_PCT
-        value: "0.70"
-      - key: AUTOBOTT_TAKE_PROFIT_LIMIT_PRICE_FACTOR
-        value: "0.98"
-      - key: AUTOBOTT_TAKE_PROFIT_REPRICE_FACTOR
-        value: "0.97"
-      - key: AUTOBOTT_TAKE_PROFIT_TIGHT_LIMIT_PRICE_FACTOR
-        value: "0.97"
-      - key: AUTOBOTT_TAKE_PROFIT_HARVEST_LIMIT_PRICE_FACTOR
-        value: "0.95"
-      - key: AUTOBOTT_POSITION_MONITOR_HEARTBEAT_ENABLED
-        value: "false"
-      - key: AUTOBOTT_POSITION_MONITOR_HEARTBEAT_SECONDS
-        value: "90"
-      - key: AUTOBOTT_RECENT_LOSS_GUARD_ENABLED
-        value: "true"
-      - key: AUTOBOTT_RECENT_LOSS_GUARD_LOOKBACK
-        value: "30"
-      - key: AUTOBOTT_RECENT_LOSS_GUARD_CONSECUTIVE_LOSSES
-        value: "3"
-      - key: AUTOBOTT_RECENT_LOSS_GUARD_MIN_SAMPLE
-        value: "5"
-      - key: AUTOBOTT_RECENT_LOSS_GUARD_LOSS_RATE
-        value: "0.70"
-      - key: AUTOBOTT_RECENT_WINNER_BIAS_ENABLED
-        value: "true"
-      - key: AUTOBOTT_RECENT_WINNER_BIAS_LOOKBACK
-        value: "30"
-      - key: AUTOBOTT_RECENT_WINNER_BIAS_MIN_SAMPLE
-        value: "5"
-      - key: AUTOBOTT_RECENT_WINNER_BIAS_WIN_RATE
-        value: "0.60"
-      - key: AUTOBOTT_RECENT_WINNER_BIAS_CONSECUTIVE_WINS
-        value: "3"
-      - key: AUTOBOTT_PAPER_ONLY
-        value: "true"
       - key: AUTOBOTT_MANUAL_MIRROR_MAX_CONTRACT_COST
         value: "100"
       - key: AUTOBOTT_MANUAL_MIRROR_MAX_SIGNAL_AGE_MINUTES
