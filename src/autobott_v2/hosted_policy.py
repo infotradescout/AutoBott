@@ -16,9 +16,6 @@ HOSTED_SESSION_SYMBOL_BATCH_SIZE = 25
 HOSTED_SESSION_START_TIME = "09:35"
 HOSTED_SESSION_END_TIME = "15:55"
 HOSTED_SESSION_MARKET_TIMEZONE = "America/New_York"
-# Position management already runs at the start of every 90-second trading
-# cycle. A second retained heartbeat only duplicates broker reads and can push
-# the paper account into Alpaca's rate limit.
 HOSTED_POSITION_MONITOR_HEARTBEAT_ENABLED = False
 HOSTED_POSITION_MONITOR_HEARTBEAT_SECONDS = HOSTED_SESSION_INTERVAL_SECONDS
 HOSTED_MAX_NEW_PAIRS_PER_CYCLE = 3
@@ -29,6 +26,9 @@ HOSTED_OPEN_DRAWDOWN_MAX_LOSS = 750.0
 HOSTED_OPEN_DRAWDOWN_MIN_LOSERS = 3
 HOSTED_OPEN_DRAWDOWN_LOSS_RATE = 0.60
 
+# The default swing lane is deliberately multi-day. It is not a same-day
+# scalp engine. Rider contracts are longer-horizon alternatives when the
+# option chain and setup support them.
 HOSTED_TACTICAL_MIN_DTE = 5
 HOSTED_TACTICAL_MAX_DTE = 10
 HOSTED_RIDER_MIN_DTE = 14
@@ -47,7 +47,11 @@ HOSTED_LOOKBACK_CALENDAR_DAYS = 14
 # volume when supplied, delta, vega, theta, DTE, and price. Missing OI must not
 # be converted into a false zero-liquidity rejection.
 HOSTED_MIN_OPEN_INTEREST = 0
-HOSTED_POLICY_VERSION = "hosted-vix-profit-v1"
+
+# Strategy/outcome learning is partitioned by policy version. Do not let
+# results produced by the old independent-leg exit policy bias the rebuilt
+# pair-lifecycle policy.
+HOSTED_POLICY_VERSION = "hosted-core-runner-v2"
 
 # The raw market corpus is disposable; orders and outcome journals are stored
 # outside this tree. Keep enough headroom for the next cycle even when Render
