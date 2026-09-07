@@ -74,6 +74,7 @@ def test_pair_keeps_engine_primary_even_when_pair_cost_exceeds_100() -> None:
     assert pair.runner.option_symbol == "VIX260715C00020000"
     assert pair.estimated_group_cost == 130.0
     assert pair.primary.option_symbol != pair.runner.option_symbol
+    assert pair.runner_cost_ratio == 0.2381
 
 
 def test_pair_prefers_engine_selected_primary_when_full_pair_fits() -> None:
@@ -97,6 +98,28 @@ def test_missing_structurally_valid_runner_fails_closed() -> None:
     ]
 
     assert select_core_runner_pair(_selected_primary(), chain) is None
+
+
+def test_runner_with_near_zero_delta_is_rejected_as_lottery_ticket() -> None:
+    chain = [
+        _snapshot("VIX260715C00017000", 17.0, 0.95, 1.05, 0.55),
+        _snapshot("VIX260715C00024000", 24.0, 0.04, 0.05, 0.03),
+    ]
+
+    assert select_core_runner_pair(_selected_primary(), chain) is None
+
+
+def test_pair_prefers_runner_near_target_cost_and_delta() -> None:
+    chain = [
+        _snapshot("VIX260715C00017000", 17.0, 0.95, 1.05, 0.55),
+        _snapshot("VIX260715C00019000", 19.0, 0.27, 0.32, 0.28),
+        _snapshot("VIX260715C00020000", 20.0, 0.20, 0.25, 0.18),
+    ]
+
+    pair = select_core_runner_pair(_selected_primary(), chain)
+
+    assert pair is not None
+    assert pair.runner.option_symbol == "VIX260715C00020000"
 
 
 def test_pair_uses_open_interest_when_live_snapshot_volume_is_unavailable() -> None:
