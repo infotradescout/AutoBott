@@ -80,6 +80,8 @@ class PairLifecycleState:
     primary_open: bool = True
     runner_open: bool = True
     primary_realized_pnl: float = 0.0
+    runner_entry_cost: float | None = None
+    legacy_runner_protection: bool = False
 
 
 @dataclass(frozen=True)
@@ -134,13 +136,15 @@ def evaluate_pair_lifecycle(
     pair_pnl = pair_mark_value - pair_entry_cost + resolved_state.primary_realized_pnl
     pair_return_pct = pair_pnl / pair_entry_cost if pair_entry_cost > 0 else 0.0
 
-    primary_pnl = primary.pnl if primary is not None and resolved_state.primary_open else resolved_state.primary_realized_pnl
-    runner_pnl = runner.pnl if runner is not None and resolved_state.runner_open else 0.0
-    runner_cost = runner.entry_cost if runner is not None else 0.0
-    funding_surplus = primary_pnl - runner_cost - resolved_rules.funding_buffer_dollars
-    runner_funded = resolved_state.primary_realized_pnl >= runner_cost or (
-        resolved_state.primary_open and funding_surplus >= 0
+    primary_pnl = resolved_state.primary_realized_pnl + (
+        primary.pnl if primary is not None and resolved_state.primary_open else 0.0
     )
+    runner_pnl = runner.pnl if runner is not None and resolved_state.runner_open else 0.0
+    runner_cost = resolved_state.runner_entry_cost
+    if runner_cost is None:
+        runner_cost = runner.entry_cost if runner is not None else 0.0
+    funding_surplus = primary_pnl - runner_cost - resolved_rules.funding_buffer_dollars
+    runner_funded = runner_cost > 0 and resolved_state.primary_realized_pnl >= runner_cost
 
     if resolved_state.primary_open and resolved_state.runner_open and pair_return_pct <= -resolved_rules.max_pair_loss_pct:
         return _decision(
@@ -168,12 +172,12 @@ def evaluate_pair_lifecycle(
             primary_pnl,
             runner_pnl,
             runner_cost,
-            True,
+            runner_funded,
             funding_surplus,
         )
 
     if resolved_state.runner_open and runner is not None:
-        if runner_funded:
+        if runner_funded or resolved_state.legacy_runner_protection:
             if runner.return_pct <= -resolved_rules.catastrophic_runner_stop_loss_pct:
                 return _decision(
                     PairAction.EXIT_RUNNER,
@@ -185,7 +189,7 @@ def evaluate_pair_lifecycle(
                     primary_pnl,
                     runner_pnl,
                     runner_cost,
-                    True,
+                    runner_funded,
                     funding_surplus,
                 )
             peak = runner.peak_return_pct
@@ -204,7 +208,7 @@ def evaluate_pair_lifecycle(
                     primary_pnl,
                     runner_pnl,
                     runner_cost,
-                    True,
+                    runner_funded,
                     funding_surplus,
                 )
         elif runner.return_pct <= -resolved_rules.unfunded_runner_stop_loss_pct:

@@ -28,7 +28,7 @@ def test_harvests_primary_only_after_profit_pays_runner_and_buffer() -> None:
 
     assert decision.action is PairAction.EXIT_PRIMARY
     assert decision.reason == "primary_profit_funds_runner"
-    assert decision.runner_funded
+    assert not decision.runner_funded
     assert decision.primary_pnl == 30.0
     assert decision.runner_cost == 25.0
     assert decision.funding_surplus == 0.0

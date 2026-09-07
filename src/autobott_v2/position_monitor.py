@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+from math import isfinite
 from dataclasses import dataclass, replace
 from datetime import UTC, date, datetime
 from pathlib import Path
@@ -172,6 +173,14 @@ def run_position_monitor(
     }
     peaks = _load_trailing_peaks(state_path=trailing_state_path)
     pair_states = _load_pair_states(state_path=pair_state_path)
+    _reconcile_pair_funding(
+        pair_states,
+        broker=resolved_broker,
+        broker_by_symbol=broker_by_symbol,
+        stored_positions=stored_positions,
+        pending_exits=pending_exits,
+    )
+    pending_exits = pending_exits or {}
     pair_actions, pair_managed_symbols = _build_pair_actions(
         broker_by_symbol=broker_by_symbol,
         stored_positions=stored_positions,
@@ -256,6 +265,13 @@ def run_position_monitor(
             if action["reason"] == "primary_profit_funds_runner" and stored_position is not None and stored_position.trade_group_id:
                 group_state = pair_states.setdefault(stored_position.trade_group_id, {})
                 group_state["funding_exit_submitted"] = True
+                group_state["funding_exit_order_id"] = order.broker_order_id
+                group_state["funding_exit_status"] = order.state.value
+                if order.broker_order_id:
+                    group_state.setdefault("funding_exit_orders", {})[order.broker_order_id] = {
+                        "status": order.state.value,
+                        "reconciled": False,
+                    }
                 group_state["primary_profit_at_exit_submission"] = float(action.get("primary_pnl") or 0.0)
                 group_state["runner_cost"] = float(action.get("runner_cost") or 0.0)
                 group_state["runner_symbol"] = stored_position.paired_option_symbol
@@ -263,7 +279,6 @@ def run_position_monitor(
             action["submitted"] = False
             action["error"] = str(exc)
         actions.append(action)
-    _promote_funded_runners(pair_states, stored_positions=stored_positions, open_symbols=open_symbols)
     _save_pair_states(pair_states, state_path=pair_state_path)
     _save_trailing_peaks(
         {symbol: value for symbol, value in peaks.items() if symbol in open_symbols},
@@ -326,11 +341,11 @@ def _build_pair_actions(
         runner_store = group.get("runner")
         if runner_store is None:
             continue
-        primary_symbol = primary_store.option_symbol.upper() if primary_store else None
+        state_payload = pair_states.get(group_id, {})
+        primary_symbol = primary_store.option_symbol.upper() if primary_store else state_payload.get("primary_symbol")
         runner_symbol = runner_store.option_symbol.upper()
         primary_position = broker_by_symbol.get(primary_symbol or "")
         runner_position = broker_by_symbol.get(runner_symbol)
-        state_payload = pair_states.get(group_id, {})
 
         if runner_position is None:
             continue
@@ -352,11 +367,19 @@ def _build_pair_actions(
             decision = evaluate_pair_lifecycle(
                 primary=primary_mark,
                 runner=runner_mark,
-                state=PairLifecycleState(primary_open=True, runner_open=True),
+                state=PairLifecycleState(
+                    primary_realized_pnl=float(state_payload.get("primary_realized_pnl") or 0.0),
+                    runner_entry_cost=_float_or_none(state_payload.get("runner_cost")),
+                ),
                 rules=resolved_pair_rules,
             )
             managed.update({primary_symbol or "", runner_symbol})
-            if decision.action is PairAction.EXIT_PRIMARY and primary_symbol:
+            if (
+                decision.action is PairAction.EXIT_PRIMARY
+                and primary_symbol
+                and not state_payload.get("funding_exit_submitted")
+                and not state_payload.get("funding_exit_blocked")
+            ):
                 actions[primary_symbol] = _pair_action_payload(
                     symbol=primary_symbol,
                     position=primary_position,
@@ -377,22 +400,24 @@ def _build_pair_actions(
                     stored=runner_store,
                     decision=decision,
                 )
+            elif decision.action is PairAction.EXIT_RUNNER:
+                actions[runner_symbol] = _pair_action_payload(
+                    symbol=runner_symbol,
+                    position=runner_position,
+                    stored=runner_store,
+                    decision=decision,
+                )
             continue
 
-        if not state_payload.get("runner_funded"):
-            continue
-        realized_estimate = float(
-            state_payload.get("primary_realized_pnl_estimate")
-            or state_payload.get("primary_profit_at_exit_submission")
-            or 0.0
-        )
         decision = evaluate_pair_lifecycle(
             primary=None,
             runner=runner_mark,
             state=PairLifecycleState(
                 primary_open=False,
                 runner_open=True,
-                primary_realized_pnl=realized_estimate,
+                primary_realized_pnl=float(state_payload.get("primary_realized_pnl") or 0.0),
+                runner_entry_cost=_float_or_none(state_payload.get("runner_cost")),
+                legacy_runner_protection=bool(state_payload.get("legacy_runner_protection")),
             ),
             rules=resolved_pair_rules,
         )
@@ -453,29 +478,195 @@ def _pair_action_payload(
     }
 
 
-def _promote_funded_runners(
+_TERMINAL_FUNDING_STATUSES = {"filled", "canceled", "cancelled", "rejected", "expired", "replaced"}
+
+
+def _finite_number(value: Any) -> float | None:
+    number = _float_or_none(value)
+    return number if number is not None and isfinite(number) else None
+
+
+def _capture_pair_entry(
+    payload: dict[str, Any], role: str, stored: OpenPosition | None, position: dict[str, Any] | None, broker: Any,
+) -> None:
+    if stored is not None:
+        payload[f"{role}_symbol"] = stored.option_symbol.upper()
+        payload[f"{role}_entry_order_id"] = stored.broker_order_id
+    symbol = payload.get(f"{role}_symbol")
+    entry_order_id = payload.get(f"{role}_entry_order_id")
+    entry_qty = _finite_number(payload.get(f"{role}_entry_filled_qty")) or 0.0
+    position_qty = _finite_number((position or {}).get("qty")) or 0.0
+    exited_qty = float(payload.get("primary_exit_filled_qty") or 0.0) if role == "primary" else 0.0
+    has_basis = bool(payload.get(f"{role}_entry_filled_avg_price") and entry_qty > 0)
+    unresolved_exit = role == "primary" and "funding_order_unresolved:" in str(payload.get("funding_reconciliation_error") or "")
+    if has_basis and entry_qty >= position_qty + exited_qty and not unresolved_exit:
+        return
+    # Entry limits are intentions, not execution costs. Prefer the entry order's
+    # fills, with the broker's actual position basis as a recovery source.
+    entry = None
+    if hasattr(broker, "get_order") and entry_order_id:
+        try:
+            candidate = broker.get_order(entry_order_id)
+            if (
+                str(candidate.get("symbol") or "").upper() == symbol
+                and str(candidate.get("side") or "").lower() == "buy"
+            ):
+                entry = candidate
+        except Exception:
+            pass
+    price = _finite_number((entry or {}).get("filled_avg_price"))
+    quantity = _finite_number((entry or {}).get("filled_qty"))
+    if price is None or price <= 0 or quantity is None or quantity <= 0:
+        if has_basis:
+            return
+        price = _finite_number((position or {}).get("avg_entry_price"))
+        quantity = _finite_number((position or {}).get("qty"))
+    if price is not None and price > 0 and quantity is not None and quantity > 0:
+        payload[f"{role}_entry_filled_avg_price"] = price
+        payload[f"{role}_entry_filled_qty"] = quantity
+        payload[f"{role}_entry_cost"] = round(price * quantity * 100.0, 8)
+        if role == "runner":
+            payload["runner_cost"] = payload["runner_entry_cost"]
+
+
+def _reconcile_pair_funding(
     pair_states: dict[str, dict[str, Any]],
     *,
+    broker: Any,
+    broker_by_symbol: dict[str, dict[str, Any]],
     stored_positions: list[OpenPosition],
-    open_symbols: set[str],
+    pending_exits: dict[str, dict[str, Any]] | None,
 ) -> None:
     groups: dict[str, dict[str, OpenPosition]] = {}
     for stored in stored_positions:
         if stored.trade_group_id and stored.leg_role in {"primary", "runner"}:
             groups.setdefault(stored.trade_group_id, {})[stored.leg_role] = stored
-    for group_id, payload in pair_states.items():
-        if not payload.get("funding_exit_submitted") or payload.get("runner_funded"):
-            continue
-        group = groups.get(group_id, {})
-        primary = group.get("primary")
-        runner = group.get("runner")
-        if runner is None or runner.option_symbol.upper() not in open_symbols:
-            continue
-        if primary is not None and primary.option_symbol.upper() in open_symbols:
-            continue
-        payload["runner_funded"] = True
-        payload["primary_realized_pnl_estimate"] = float(payload.get("primary_profit_at_exit_submission") or 0.0)
-        payload["funded_at"] = _monitor_now().isoformat()
+    for group_id, group in groups.items():
+        payload = pair_states.setdefault(group_id, {})
+        if payload.get("runner_funded") and not payload.get("funding_verified"):
+            payload["legacy_runner_protection"] = True
+        for role, stored in group.items():
+            _capture_pair_entry(payload, role, stored, broker_by_symbol.get(stored.option_symbol.upper()), broker)
+        primary_symbol = str(payload.get("primary_symbol") or "").upper()
+        if "primary" not in group and payload.get("primary_entry_order_id"):
+            _capture_pair_entry(payload, "primary", None, broker_by_symbol.get(primary_symbol), broker)
+        orders = payload.setdefault("funding_exit_orders", {})
+        old_id = payload.get("funding_exit_order_id")
+        if old_id:
+            orders.setdefault(str(old_id), {"reconciled": False})
+        pending = (pending_exits or {}).get(primary_symbol)
+        if pending is not None:
+            pending_id = str(pending.get("id") or pending.get("broker_order_id") or "")
+            if pending_id:
+                orders.setdefault(pending_id, {"reconciled": False})
+                payload["funding_exit_order_id"] = pending_id
+
+        # An old latch without an order identity cannot safely prove cancellation
+        # or funding. Keep it retryable for reconciliation, without another sell.
+        unidentified_submission = bool(payload.get("funding_exit_submitted") and not orders)
+        blocked = pending_exits is None or unidentified_submission
+        errors: list[str] = []
+        if pending_exits is None:
+            errors.append("open_orders_unavailable")
+        if payload.get("funding_exit_submitted") and not orders:
+            errors.append("funding_order_identity_unavailable")
+        entry_price = _finite_number(payload.get("primary_entry_filled_avg_price"))
+        entry_qty = _finite_number(payload.get("primary_entry_filled_qty"))
+        for order_id, record in list(orders.items()):
+            if record.get("reconciled") and record.get("status") in _TERMINAL_FUNDING_STATUSES:
+                continue
+            try:
+                order = broker.get_order(order_id)
+                if (
+                    str(order.get("id") or "") != order_id
+                    or str(order.get("symbol") or "").upper() != primary_symbol
+                    or str(order.get("side") or "").lower() != "sell"
+                ):
+                    raise ValueError("funding_order_identity_mismatch")
+                status = str(order.get("status") or "").lower()
+                quantity = _finite_number(order.get("filled_qty"))
+                price = _finite_number(order.get("filled_avg_price"))
+                if quantity is None or quantity < 0 or (status == "filled" and quantity <= 0):
+                    raise ValueError("funding_fill_quantity_unavailable")
+                if quantity < float(record.get("filled_qty") or 0.0):
+                    raise ValueError("funding_fill_quantity_regressed")
+                if quantity > 0 and (
+                    price is None or price <= 0 or entry_price is None or entry_qty is None or quantity > entry_qty
+                ):
+                    raise ValueError("funding_fill_basis_unavailable")
+                if status == "replaced" and not order.get("replaced_by"):
+                    raise ValueError("funding_replacement_identity_unavailable")
+                record.update(
+                    status=status,
+                    filled_qty=quantity,
+                    filled_avg_price=price,
+                    realized_pnl=(price - entry_price) * quantity * 100.0 if quantity > 0 else 0.0,
+                    reconciled=True,
+                )
+                if status == "replaced" and order.get("replaced_by"):
+                    replacement = str(order["replaced_by"])
+                    record["replaced_by"] = replacement
+                    orders.setdefault(replacement, {"reconciled": False})
+                    payload["funding_exit_order_id"] = replacement
+                if order_id == payload.get("funding_exit_order_id"):
+                    payload["funding_exit_status"] = status
+            except Exception:
+                blocked = True
+                errors.append(f"funding_order_unresolved:{order_id}")
+        # The broker interface does not establish whether a replacement inherits
+        # its predecessor's partial fills. Never sum those ambiguous successors.
+        ambiguous_successors: set[str] = set()
+        for record in orders.values():
+            if record.get("replaced_by") and float(record.get("filled_qty") or 0.0) > 0:
+                successor = str(record["replaced_by"])
+                while successor and successor not in ambiguous_successors:
+                    ambiguous_successors.add(successor)
+                    successor = str(orders.get(successor, {}).get("replaced_by") or "")
+        if ambiguous_successors:
+            blocked = True
+            errors.append("partial_funding_replacement_requires_reconciliation")
+        verified_records = [record for order_id, record in orders.items() if order_id not in ambiguous_successors]
+        filled_quantity = sum(float(record.get("filled_qty") or 0.0) for record in verified_records)
+        realized = sum(float(record.get("realized_pnl") or 0.0) for record in verified_records)
+        if ambiguous_successors:
+            # A successor may offset predecessor profit with realized losses.
+            # Keep the observed amount diagnostic until net chain P/L is known.
+            payload["funding_ambiguous_predecessor_pnl"] = round(realized, 8)
+            realized = 0.0
+        else:
+            payload.pop("funding_ambiguous_predecessor_pnl", None)
+        valid_fills = bool(
+            not ambiguous_successors and filled_quantity > 0 and entry_qty is not None and filled_quantity <= entry_qty
+        )
+        if entry_qty is not None and filled_quantity > entry_qty:
+            blocked = True
+            errors.append("funding_fill_quantity_exceeds_entry")
+            realized = 0.0
+        for record in orders.values():
+            if not record.get("reconciled") or record.get("status") not in _TERMINAL_FUNDING_STATUSES:
+                blocked = True
+        position_qty = _finite_number(broker_by_symbol.get(primary_symbol, {}).get("qty")) or 0.0
+        if entry_qty is not None and position_qty > max(0.0, entry_qty - filled_quantity):
+            blocked = True
+            errors.append("primary_position_fill_snapshot_pending")
+        payload["primary_exit_filled_qty"] = filled_quantity
+        payload["primary_realized_pnl"] = round(realized, 8)
+        payload["funding_verified"] = valid_fills
+        runner_cost = _finite_number(payload.get("runner_cost")) or 0.0
+        payload["runner_funded"] = valid_fills and runner_cost > 0 and realized + 1e-8 >= runner_cost
+        payload["funding_exit_submitted"] = unidentified_submission or any(
+            not record.get("reconciled") or record.get("status") not in _TERMINAL_FUNDING_STATUSES
+            for record in orders.values()
+        )
+        payload["funding_exit_blocked"] = blocked
+        if valid_fills and all(record.get("reconciled") for record in orders.values()):
+            payload.pop("legacy_runner_protection", None)
+        if payload["runner_funded"]:
+            payload.setdefault("funded_at", _monitor_now().isoformat())
+        if errors:
+            payload["funding_reconciliation_error"] = ";".join(errors)
+        else:
+            payload.pop("funding_reconciliation_error", None)
 
 
 def _hard_safety_action(
@@ -724,19 +915,19 @@ def _rules_for_leg(rules: PositionMonitorRules, leg_role: str | None) -> Positio
     )
 
 
-def _pending_exit_orders_by_symbol(broker: Any) -> dict[str, dict[str, Any]]:
+def _pending_exit_orders_by_symbol(broker: Any) -> dict[str, dict[str, Any]] | None:
     if not hasattr(broker, "list_orders"):
-        return {}
+        return None
     try:
         orders = broker.list_orders(status="open", limit=100, direction="desc")
     except Exception:
-        return {}
+        return None
     pending: dict[str, dict[str, Any]] = {}
     for order in orders:
         symbol = str(order.get("symbol") or "").upper()
         side = str(order.get("side") or "").lower()
         status = str(order.get("status") or "").lower()
-        if not symbol or side != "sell" or status not in {"new", "accepted", "partially_filled", "pending_new", "pending_replace"}:
+        if not symbol or side != "sell" or status in _TERMINAL_FUNDING_STATUSES:
             continue
         pending.setdefault(symbol, order)
     return pending
