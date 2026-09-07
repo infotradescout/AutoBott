@@ -46,7 +46,7 @@ Local paper dashboard, no PowerShell setup:
 Double-click start_paper_dashboard.cmd
 ```
 
-That launcher auto-loads `C:\Users\flavo\Downloads\AutoBott.env`, applies the local paper defaults, starts the dashboard on `http://127.0.0.1:8000`, and uses dashboard token `autobott-local` unless you override it in the env file.
+That launcher auto-loads `C:\Users\flavo\Downloads\AutoBott.env`, applies the local paper defaults, and starts the dashboard on `http://127.0.0.1:8000`. Set `AUTOBOTT_DASHBOARD_AUTH_TOKEN` in that env file to a unique secret; the launcher does not provide or print a default token.
 
 Run the test suite:
 

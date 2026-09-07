@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+from math import isfinite
 from dataclasses import dataclass, replace
 from datetime import UTC, date, datetime
 from pathlib import Path
@@ -16,7 +17,14 @@ from .hosted_policy import (
     active_build_sha,
     is_hosted_paper_runtime,
 )
-from .position_store import load_open_positions, save_open_positions
+from .pair_lifecycle import (
+    PairAction,
+    PairLegMark,
+    PairLifecycleRules,
+    PairLifecycleState,
+    evaluate_pair_lifecycle,
+)
+from .position_store import OpenPosition, load_open_positions, save_open_positions
 from .runtime_paths import data_root
 
 
@@ -49,9 +57,12 @@ class PositionMonitorRules:
     runner_trailing_activation_pct: float = 0.50
     runner_trailing_drawdown_pct: float = 0.25
     runner_stop_loss_pct: float = 0.70
+    pair_max_loss_pct: float = 0.35
+    funded_runner_trailing_activation_pct: float = 0.75
+    funded_runner_trailing_drawdown_pct: float = 0.35
+    funded_runner_catastrophic_stop_loss_pct: float = 0.90
+    runner_funding_buffer_dollars: float = 0.0
     pending_entry_max_age_seconds: int = 180
-    # Disabled for library/replay callers. Hosted paper loads a code-owned
-    # two-DTE floor through load_position_monitor_rules().
     exit_min_dte: int = -1
 
 
@@ -80,6 +91,11 @@ def load_position_monitor_rules() -> PositionMonitorRules:
         runner_trailing_activation_pct=float(os.getenv("AUTOBOTT_RUNNER_EXIT_TRAILING_ACTIVATION_PCT", "0.50")),
         runner_trailing_drawdown_pct=float(os.getenv("AUTOBOTT_RUNNER_EXIT_TRAILING_DRAWDOWN_PCT", "0.25")),
         runner_stop_loss_pct=float(os.getenv("AUTOBOTT_RUNNER_EXIT_STOP_LOSS_PCT", "0.70")),
+        pair_max_loss_pct=float(os.getenv("AUTOBOTT_PAIR_MAX_LOSS_PCT", "0.35")),
+        funded_runner_trailing_activation_pct=float(os.getenv("AUTOBOTT_FUNDED_RUNNER_TRAILING_ACTIVATION_PCT", "0.75")),
+        funded_runner_trailing_drawdown_pct=float(os.getenv("AUTOBOTT_FUNDED_RUNNER_TRAILING_DRAWDOWN_PCT", "0.35")),
+        funded_runner_catastrophic_stop_loss_pct=float(os.getenv("AUTOBOTT_FUNDED_RUNNER_CATASTROPHIC_STOP_PCT", "0.90")),
+        runner_funding_buffer_dollars=max(0.0, float(os.getenv("AUTOBOTT_RUNNER_FUNDING_BUFFER_DOLLARS", "0"))),
         pending_entry_max_age_seconds=max(30, int(os.getenv("AUTOBOTT_PENDING_ENTRY_MAX_AGE_SECONDS", "180"))),
         exit_min_dte=max(-1, int(os.getenv("AUTOBOTT_EXIT_MIN_DTE", "-1"))),
     )
@@ -87,6 +103,10 @@ def load_position_monitor_rules() -> PositionMonitorRules:
 
 def trailing_peak_state_path() -> Path:
     return data_root() / "execution" / "trailing_peaks.json"
+
+
+def pair_lifecycle_state_path() -> Path:
+    return data_root() / "execution" / "pair_lifecycle_state.json"
 
 
 def _load_trailing_peaks(*, state_path: str | Path | None = None) -> dict[str, float]:
@@ -106,6 +126,23 @@ def _save_trailing_peaks(peaks: dict[str, float], *, state_path: str | Path | No
     path.write_text(json.dumps(peaks, indent=2, sort_keys=True), encoding="utf-8")
 
 
+def _load_pair_states(*, state_path: str | Path | None = None) -> dict[str, dict[str, Any]]:
+    path = Path(state_path) if state_path is not None else pair_lifecycle_state_path()
+    if not path.exists():
+        return {}
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError):
+        return {}
+    return payload if isinstance(payload, dict) else {}
+
+
+def _save_pair_states(states: dict[str, dict[str, Any]], *, state_path: str | Path | None = None) -> None:
+    path = Path(state_path) if state_path is not None else pair_lifecycle_state_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(states, indent=2, sort_keys=True), encoding="utf-8")
+
+
 def run_position_monitor(
     *,
     broker: AlpacaExecutionBroker | None = None,
@@ -113,6 +150,7 @@ def run_position_monitor(
     journal_path: str | None = None,
     trailing_state_path: str | Path | None = None,
     position_store_path: str | Path | None = None,
+    pair_state_path: str | Path | None = None,
 ) -> dict[str, Any]:
     resolved_rules = rules or load_position_monitor_rules()
     if not resolved_rules.enabled:
@@ -128,7 +166,28 @@ def run_position_monitor(
     except Exception:
         stored_positions = []
     stored_by_symbol = {position.option_symbol.upper(): position for position in stored_positions}
+    broker_by_symbol = {
+        str(position.get("symbol") or "").upper(): position
+        for position in positions
+        if str(position.get("symbol") or "").strip()
+    }
     peaks = _load_trailing_peaks(state_path=trailing_state_path)
+    pair_states = _load_pair_states(state_path=pair_state_path)
+    _reconcile_pair_funding(
+        pair_states,
+        broker=resolved_broker,
+        broker_by_symbol=broker_by_symbol,
+        stored_positions=stored_positions,
+        pending_exits=pending_exits,
+    )
+    pending_exits = pending_exits or {}
+    pair_actions, pair_managed_symbols = _build_pair_actions(
+        broker_by_symbol=broker_by_symbol,
+        stored_positions=stored_positions,
+        peaks=peaks,
+        pair_states=pair_states,
+        rules=resolved_rules,
+    )
     open_symbols: set[str] = set()
     actions: list[dict[str, Any]] = []
     stale_entry_actions = _cancel_stale_pending_entries(
@@ -146,8 +205,14 @@ def run_position_monitor(
             open_symbols.add(symbol)
         stored_position = stored_by_symbol.get(symbol)
         leg_role = stored_position.leg_role if stored_position is not None else None
-        rules_action = _monitor_action(position, _rules_for_leg(resolved_rules, leg_role), peaks, leg_role=leg_role)
-        action = _position_cost_cap_action(position, broker=resolved_broker, leg_role=leg_role) or rules_action
+        hard_action = _hard_safety_action(position, resolved_rules, leg_role=leg_role)
+        pair_action = pair_actions.get(symbol) if symbol in pair_managed_symbols else None
+        rules_action = (
+            pair_action
+            if symbol in pair_managed_symbols
+            else _monitor_action(position, _rules_for_leg(resolved_rules, leg_role), peaks, leg_role=leg_role)
+        )
+        action = _position_cost_cap_action(position, broker=resolved_broker, leg_role=leg_role) or hard_action or rules_action
         if action is None:
             continue
         if stored_position is not None:
@@ -169,7 +234,16 @@ def run_position_monitor(
             )
             continue
         try:
-            if action["reason"] in {"stop_loss", "trailing_stop", "dte_floor", "position_cost_cap_breached"} and hasattr(resolved_broker, "cancel_order"):
+            if action["reason"] in {
+                "stop_loss",
+                "trailing_stop",
+                "dte_floor",
+                "position_cost_cap_breached",
+                "pair_max_loss_reached",
+                "funded_runner_trailing_drawdown",
+                "funded_runner_catastrophic_stop",
+                "unfunded_runner_stop_loss",
+            } and hasattr(resolved_broker, "cancel_order"):
                 canceled_ids = _cancel_pending_orders_for_symbol(
                     action["symbol"],
                     pending_orders,
@@ -188,10 +262,24 @@ def run_position_monitor(
             action["submitted"] = True
             action["broker_order_id"] = order.broker_order_id
             action["state"] = order.state.value
+            if action["reason"] == "primary_profit_funds_runner" and stored_position is not None and stored_position.trade_group_id:
+                group_state = pair_states.setdefault(stored_position.trade_group_id, {})
+                group_state["funding_exit_submitted"] = True
+                group_state["funding_exit_order_id"] = order.broker_order_id
+                group_state["funding_exit_status"] = order.state.value
+                if order.broker_order_id:
+                    group_state.setdefault("funding_exit_orders", {})[order.broker_order_id] = {
+                        "status": order.state.value,
+                        "reconciled": False,
+                    }
+                group_state["primary_profit_at_exit_submission"] = float(action.get("primary_pnl") or 0.0)
+                group_state["runner_cost"] = float(action.get("runner_cost") or 0.0)
+                group_state["runner_symbol"] = stored_position.paired_option_symbol
         except Exception as exc:
             action["submitted"] = False
             action["error"] = str(exc)
         actions.append(action)
+    _save_pair_states(pair_states, state_path=pair_state_path)
     _save_trailing_peaks(
         {symbol: value for symbol, value in peaks.items() if symbol in open_symbols},
         state_path=trailing_state_path,
@@ -212,7 +300,410 @@ def run_position_monitor(
         "checked": len(positions),
         "actions": actions,
         "position_store_pruned": len(stored_positions) - len(retained_positions),
+        "pair_groups_managed": len({
+            position.trade_group_id
+            for position in stored_positions
+            if position.trade_group_id and position.option_symbol.upper() in pair_managed_symbols
+        }),
     }
+
+
+def _pair_rules(rules: PositionMonitorRules) -> PairLifecycleRules:
+    return PairLifecycleRules(
+        funding_buffer_dollars=rules.runner_funding_buffer_dollars,
+        max_pair_loss_pct=rules.pair_max_loss_pct,
+        unfunded_runner_stop_loss_pct=rules.runner_stop_loss_pct,
+        funded_runner_trailing_activation_pct=rules.funded_runner_trailing_activation_pct,
+        funded_runner_trailing_drawdown_pct=rules.funded_runner_trailing_drawdown_pct,
+        catastrophic_runner_stop_loss_pct=rules.funded_runner_catastrophic_stop_loss_pct,
+    ).validate()
+
+
+def _build_pair_actions(
+    *,
+    broker_by_symbol: dict[str, dict[str, Any]],
+    stored_positions: list[OpenPosition],
+    peaks: dict[str, float],
+    pair_states: dict[str, dict[str, Any]],
+    rules: PositionMonitorRules,
+) -> tuple[dict[str, dict[str, Any]], set[str]]:
+    groups: dict[str, dict[str, OpenPosition]] = {}
+    for stored in stored_positions:
+        if not stored.trade_group_id or stored.leg_role not in {"primary", "runner"}:
+            continue
+        groups.setdefault(stored.trade_group_id, {})[stored.leg_role] = stored
+
+    actions: dict[str, dict[str, Any]] = {}
+    managed: set[str] = set()
+    resolved_pair_rules = _pair_rules(rules)
+    for group_id, group in groups.items():
+        primary_store = group.get("primary")
+        runner_store = group.get("runner")
+        if runner_store is None:
+            continue
+        state_payload = pair_states.get(group_id, {})
+        primary_symbol = primary_store.option_symbol.upper() if primary_store else state_payload.get("primary_symbol")
+        runner_symbol = runner_store.option_symbol.upper()
+        primary_position = broker_by_symbol.get(primary_symbol or "")
+        runner_position = broker_by_symbol.get(runner_symbol)
+
+        if runner_position is None:
+            continue
+        runner_return = float(runner_position.get("unrealized_plpc") or 0.0)
+        runner_peak = max(peaks.get(runner_symbol, runner_return), runner_return)
+        peaks[runner_symbol] = runner_peak
+        runner_mark = _pair_leg_mark(runner_position, runner_store, peak_return_pct=runner_peak)
+        if runner_mark is None:
+            continue
+
+        if primary_position is not None and primary_store is not None:
+            primary_return = float(primary_position.get("unrealized_plpc") or 0.0)
+            primary_peak = max(peaks.get(primary_symbol or "", primary_return), primary_return)
+            if primary_symbol:
+                peaks[primary_symbol] = primary_peak
+            primary_mark = _pair_leg_mark(primary_position, primary_store, peak_return_pct=primary_peak)
+            if primary_mark is None:
+                continue
+            decision = evaluate_pair_lifecycle(
+                primary=primary_mark,
+                runner=runner_mark,
+                state=PairLifecycleState(
+                    primary_realized_pnl=float(state_payload.get("primary_realized_pnl") or 0.0),
+                    runner_entry_cost=_float_or_none(state_payload.get("runner_cost")),
+                ),
+                rules=resolved_pair_rules,
+            )
+            managed.update({primary_symbol or "", runner_symbol})
+            if (
+                decision.action is PairAction.EXIT_PRIMARY
+                and primary_symbol
+                and not state_payload.get("funding_exit_submitted")
+                and not state_payload.get("funding_exit_blocked")
+            ):
+                actions[primary_symbol] = _pair_action_payload(
+                    symbol=primary_symbol,
+                    position=primary_position,
+                    stored=primary_store,
+                    decision=decision,
+                )
+            elif decision.action is PairAction.EXIT_BOTH:
+                if primary_symbol:
+                    actions[primary_symbol] = _pair_action_payload(
+                        symbol=primary_symbol,
+                        position=primary_position,
+                        stored=primary_store,
+                        decision=decision,
+                    )
+                actions[runner_symbol] = _pair_action_payload(
+                    symbol=runner_symbol,
+                    position=runner_position,
+                    stored=runner_store,
+                    decision=decision,
+                )
+            elif decision.action is PairAction.EXIT_RUNNER:
+                actions[runner_symbol] = _pair_action_payload(
+                    symbol=runner_symbol,
+                    position=runner_position,
+                    stored=runner_store,
+                    decision=decision,
+                )
+            continue
+
+        decision = evaluate_pair_lifecycle(
+            primary=None,
+            runner=runner_mark,
+            state=PairLifecycleState(
+                primary_open=False,
+                runner_open=True,
+                primary_realized_pnl=float(state_payload.get("primary_realized_pnl") or 0.0),
+                runner_entry_cost=_float_or_none(state_payload.get("runner_cost")),
+                legacy_runner_protection=bool(state_payload.get("legacy_runner_protection")),
+            ),
+            rules=resolved_pair_rules,
+        )
+        managed.add(runner_symbol)
+        if decision.action is PairAction.EXIT_RUNNER:
+            actions[runner_symbol] = _pair_action_payload(
+                symbol=runner_symbol,
+                position=runner_position,
+                stored=runner_store,
+                decision=decision,
+            )
+    managed.discard("")
+    return actions, managed
+
+
+def _pair_leg_mark(
+    position: dict[str, Any],
+    stored: OpenPosition,
+    *,
+    peak_return_pct: float | None,
+) -> PairLegMark | None:
+    entry_price = _float_or_none(position.get("avg_entry_price")) or stored.entry_limit_price
+    current_price = _float_or_none(position.get("current_price")) or entry_price
+    quantity = int(float(position.get("qty") or stored.quantity or 0))
+    if entry_price <= 0 or current_price < 0 or quantity <= 0:
+        return None
+    return PairLegMark(
+        entry_price=entry_price,
+        current_price=current_price,
+        quantity=quantity,
+        peak_return_pct=peak_return_pct,
+    )
+
+
+def _pair_action_payload(
+    *,
+    symbol: str,
+    position: dict[str, Any],
+    stored: OpenPosition,
+    decision: Any,
+) -> dict[str, Any]:
+    return {
+        "reason": decision.reason,
+        "symbol": symbol,
+        "quantity": int(float(position.get("qty") or stored.quantity)),
+        "unrealized_plpc": float(position.get("unrealized_plpc") or 0.0),
+        "current_price": float(position.get("current_price") or position.get("avg_entry_price") or stored.entry_limit_price),
+        "leg_role": stored.leg_role,
+        "pair_entry_cost": decision.pair_entry_cost,
+        "pair_mark_value": decision.pair_mark_value,
+        "pair_pnl": decision.pair_pnl,
+        "pair_return_pct": decision.pair_return_pct,
+        "primary_pnl": decision.primary_pnl,
+        "runner_pnl": decision.runner_pnl,
+        "runner_cost": decision.runner_cost,
+        "runner_funded": decision.runner_funded,
+        "funding_surplus": decision.funding_surplus,
+    }
+
+
+_TERMINAL_FUNDING_STATUSES = {"filled", "canceled", "cancelled", "rejected", "expired", "replaced"}
+
+
+def _finite_number(value: Any) -> float | None:
+    number = _float_or_none(value)
+    return number if number is not None and isfinite(number) else None
+
+
+def _capture_pair_entry(
+    payload: dict[str, Any], role: str, stored: OpenPosition | None, position: dict[str, Any] | None, broker: Any,
+) -> None:
+    if stored is not None:
+        payload[f"{role}_symbol"] = stored.option_symbol.upper()
+        payload[f"{role}_entry_order_id"] = stored.broker_order_id
+    symbol = payload.get(f"{role}_symbol")
+    entry_order_id = payload.get(f"{role}_entry_order_id")
+    entry_qty = _finite_number(payload.get(f"{role}_entry_filled_qty")) or 0.0
+    position_qty = _finite_number((position or {}).get("qty")) or 0.0
+    exited_qty = float(payload.get("primary_exit_filled_qty") or 0.0) if role == "primary" else 0.0
+    has_basis = bool(payload.get(f"{role}_entry_filled_avg_price") and entry_qty > 0)
+    unresolved_exit = role == "primary" and "funding_order_unresolved:" in str(payload.get("funding_reconciliation_error") or "")
+    if has_basis and entry_qty >= position_qty + exited_qty and not unresolved_exit:
+        return
+    # Entry limits are intentions, not execution costs. Prefer the entry order's
+    # fills, with the broker's actual position basis as a recovery source.
+    entry = None
+    if hasattr(broker, "get_order") and entry_order_id:
+        try:
+            candidate = broker.get_order(entry_order_id)
+            if (
+                str(candidate.get("symbol") or "").upper() == symbol
+                and str(candidate.get("side") or "").lower() == "buy"
+            ):
+                entry = candidate
+        except Exception:
+            pass
+    price = _finite_number((entry or {}).get("filled_avg_price"))
+    quantity = _finite_number((entry or {}).get("filled_qty"))
+    if price is None or price <= 0 or quantity is None or quantity <= 0:
+        if has_basis:
+            return
+        price = _finite_number((position or {}).get("avg_entry_price"))
+        quantity = _finite_number((position or {}).get("qty"))
+    if price is not None and price > 0 and quantity is not None and quantity > 0:
+        payload[f"{role}_entry_filled_avg_price"] = price
+        payload[f"{role}_entry_filled_qty"] = quantity
+        payload[f"{role}_entry_cost"] = round(price * quantity * 100.0, 8)
+        if role == "runner":
+            payload["runner_cost"] = payload["runner_entry_cost"]
+
+
+def _reconcile_pair_funding(
+    pair_states: dict[str, dict[str, Any]],
+    *,
+    broker: Any,
+    broker_by_symbol: dict[str, dict[str, Any]],
+    stored_positions: list[OpenPosition],
+    pending_exits: dict[str, dict[str, Any]] | None,
+) -> None:
+    groups: dict[str, dict[str, OpenPosition]] = {}
+    for stored in stored_positions:
+        if stored.trade_group_id and stored.leg_role in {"primary", "runner"}:
+            groups.setdefault(stored.trade_group_id, {})[stored.leg_role] = stored
+    for group_id, group in groups.items():
+        payload = pair_states.setdefault(group_id, {})
+        if payload.get("runner_funded") and not payload.get("funding_verified"):
+            payload["legacy_runner_protection"] = True
+        for role, stored in group.items():
+            _capture_pair_entry(payload, role, stored, broker_by_symbol.get(stored.option_symbol.upper()), broker)
+        primary_symbol = str(payload.get("primary_symbol") or "").upper()
+        if "primary" not in group and payload.get("primary_entry_order_id"):
+            _capture_pair_entry(payload, "primary", None, broker_by_symbol.get(primary_symbol), broker)
+        orders = payload.setdefault("funding_exit_orders", {})
+        old_id = payload.get("funding_exit_order_id")
+        if old_id:
+            orders.setdefault(str(old_id), {"reconciled": False})
+        pending = (pending_exits or {}).get(primary_symbol)
+        if pending is not None:
+            pending_id = str(pending.get("id") or pending.get("broker_order_id") or "")
+            if pending_id:
+                orders.setdefault(pending_id, {"reconciled": False})
+                payload["funding_exit_order_id"] = pending_id
+
+        # An old latch without an order identity cannot safely prove cancellation
+        # or funding. Keep it retryable for reconciliation, without another sell.
+        unidentified_submission = bool(payload.get("funding_exit_submitted") and not orders)
+        blocked = pending_exits is None or unidentified_submission
+        errors: list[str] = []
+        if pending_exits is None:
+            errors.append("open_orders_unavailable")
+        if payload.get("funding_exit_submitted") and not orders:
+            errors.append("funding_order_identity_unavailable")
+        entry_price = _finite_number(payload.get("primary_entry_filled_avg_price"))
+        entry_qty = _finite_number(payload.get("primary_entry_filled_qty"))
+        for order_id, record in list(orders.items()):
+            if record.get("reconciled") and record.get("status") in _TERMINAL_FUNDING_STATUSES:
+                continue
+            try:
+                order = broker.get_order(order_id)
+                if (
+                    str(order.get("id") or "") != order_id
+                    or str(order.get("symbol") or "").upper() != primary_symbol
+                    or str(order.get("side") or "").lower() != "sell"
+                ):
+                    raise ValueError("funding_order_identity_mismatch")
+                status = str(order.get("status") or "").lower()
+                quantity = _finite_number(order.get("filled_qty"))
+                price = _finite_number(order.get("filled_avg_price"))
+                if quantity is None or quantity < 0 or (status == "filled" and quantity <= 0):
+                    raise ValueError("funding_fill_quantity_unavailable")
+                if quantity < float(record.get("filled_qty") or 0.0):
+                    raise ValueError("funding_fill_quantity_regressed")
+                if quantity > 0 and (
+                    price is None or price <= 0 or entry_price is None or entry_qty is None or quantity > entry_qty
+                ):
+                    raise ValueError("funding_fill_basis_unavailable")
+                if status == "replaced" and not order.get("replaced_by"):
+                    raise ValueError("funding_replacement_identity_unavailable")
+                record.update(
+                    status=status,
+                    filled_qty=quantity,
+                    filled_avg_price=price,
+                    realized_pnl=(price - entry_price) * quantity * 100.0 if quantity > 0 else 0.0,
+                    reconciled=True,
+                )
+                if status == "replaced" and order.get("replaced_by"):
+                    replacement = str(order["replaced_by"])
+                    record["replaced_by"] = replacement
+                    orders.setdefault(replacement, {"reconciled": False})
+                    payload["funding_exit_order_id"] = replacement
+                if order_id == payload.get("funding_exit_order_id"):
+                    payload["funding_exit_status"] = status
+            except Exception:
+                blocked = True
+                errors.append(f"funding_order_unresolved:{order_id}")
+        # The broker interface does not establish whether a replacement inherits
+        # its predecessor's partial fills. Never sum those ambiguous successors.
+        ambiguous_successors: set[str] = set()
+        for record in orders.values():
+            if record.get("replaced_by") and float(record.get("filled_qty") or 0.0) > 0:
+                successor = str(record["replaced_by"])
+                while successor and successor not in ambiguous_successors:
+                    ambiguous_successors.add(successor)
+                    successor = str(orders.get(successor, {}).get("replaced_by") or "")
+        if ambiguous_successors:
+            blocked = True
+            errors.append("partial_funding_replacement_requires_reconciliation")
+        verified_records = [record for order_id, record in orders.items() if order_id not in ambiguous_successors]
+        filled_quantity = sum(float(record.get("filled_qty") or 0.0) for record in verified_records)
+        realized = sum(float(record.get("realized_pnl") or 0.0) for record in verified_records)
+        if ambiguous_successors:
+            # A successor may offset predecessor profit with realized losses.
+            # Keep the observed amount diagnostic until net chain P/L is known.
+            payload["funding_ambiguous_predecessor_pnl"] = round(realized, 8)
+            realized = 0.0
+        else:
+            payload.pop("funding_ambiguous_predecessor_pnl", None)
+        valid_fills = bool(
+            not ambiguous_successors and filled_quantity > 0 and entry_qty is not None and filled_quantity <= entry_qty
+        )
+        if entry_qty is not None and filled_quantity > entry_qty:
+            blocked = True
+            errors.append("funding_fill_quantity_exceeds_entry")
+            realized = 0.0
+        for record in orders.values():
+            if not record.get("reconciled") or record.get("status") not in _TERMINAL_FUNDING_STATUSES:
+                blocked = True
+        position_qty = _finite_number(broker_by_symbol.get(primary_symbol, {}).get("qty")) or 0.0
+        if entry_qty is not None and position_qty > max(0.0, entry_qty - filled_quantity):
+            blocked = True
+            errors.append("primary_position_fill_snapshot_pending")
+        payload["primary_exit_filled_qty"] = filled_quantity
+        payload["primary_realized_pnl"] = round(realized, 8)
+        payload["funding_verified"] = valid_fills
+        runner_cost = _finite_number(payload.get("runner_cost")) or 0.0
+        payload["runner_funded"] = valid_fills and runner_cost > 0 and realized + 1e-8 >= runner_cost
+        payload["funding_exit_submitted"] = unidentified_submission or any(
+            not record.get("reconciled") or record.get("status") not in _TERMINAL_FUNDING_STATUSES
+            for record in orders.values()
+        )
+        payload["funding_exit_blocked"] = blocked
+        if valid_fills and all(record.get("reconciled") for record in orders.values()):
+            payload.pop("legacy_runner_protection", None)
+        if payload["runner_funded"]:
+            payload.setdefault("funded_at", _monitor_now().isoformat())
+        if errors:
+            payload["funding_reconciliation_error"] = ";".join(errors)
+        else:
+            payload.pop("funding_reconciliation_error", None)
+
+
+def _hard_safety_action(
+    position: dict[str, Any],
+    rules: PositionMonitorRules,
+    *,
+    leg_role: str | None,
+) -> dict[str, Any] | None:
+    symbol = str(position.get("symbol") or "").upper()
+    if not symbol:
+        return None
+    qty = int(float(position.get("qty") or 0))
+    current_price = float(position.get("current_price") or position.get("avg_entry_price") or 0.0)
+    unrealized_plpc = float(position.get("unrealized_plpc") or 0.0)
+    expiration = _option_expiration(symbol)
+    dte = (expiration - _monitor_now().date()).days if expiration is not None else None
+    if rules.exit_min_dte >= 0 and dte is not None and dte <= rules.exit_min_dte:
+        return {
+            "reason": "dte_floor",
+            "symbol": symbol,
+            "quantity": qty,
+            "unrealized_plpc": unrealized_plpc,
+            "current_price": current_price,
+            "dte": dte,
+            "expiration": expiration.isoformat(),
+            "leg_role": leg_role,
+        }
+    if qty > rules.max_contracts_per_option:
+        return {
+            "reason": "trim_excess_contracts",
+            "symbol": symbol,
+            "quantity": qty - rules.max_contracts_per_option,
+            "unrealized_plpc": unrealized_plpc,
+            "current_price": current_price,
+            "leg_role": leg_role,
+        }
+    return None
 
 
 def _monitor_action(
@@ -302,8 +793,6 @@ def _position_cost_cap_action(
     broker: AlpacaExecutionBroker,
     leg_role: str | None,
 ) -> dict[str, Any] | None:
-    """Flatten a market fill that exceeded the selected-contract cost cap."""
-
     config = getattr(broker, "config", None)
     effective_limit = (
         config.effective_max_position_cost()
@@ -322,8 +811,6 @@ def _position_cost_cap_action(
         return None
     per_contract_notional = round(average_entry * 100, 2)
     filled_notional = round(per_contract_notional * quantity, 2)
-    # Quantity excess is handled by trim_excess_contracts. This guard exists
-    # for slippage that makes even one selected contract breach the debit cap.
     if per_contract_notional <= max_position_cost:
         return None
     return {
@@ -348,7 +835,7 @@ def _submit_monitor_exit(
     journal_path: str | None,
 ) -> ExecutionOrder:
     symbol = action["symbol"]
-    is_take_profit = action["reason"] == "take_profit"
+    is_take_profit = action["reason"] in {"take_profit", "primary_profit_funds_runner"}
     limit_price = _exit_limit_price(
         float(action["current_price"]),
         rules=rules,
@@ -380,6 +867,8 @@ def _submit_monitor_exit(
             "paired_option_symbol": action.get("paired_option_symbol"),
             "entry_policy_version": action.get("entry_policy_version"),
             "entry_build_sha": action.get("entry_build_sha"),
+            "pair_pnl": action.get("pair_pnl"),
+            "runner_funded": action.get("runner_funded"),
             "exit_policy_version": HOSTED_POLICY_VERSION if is_hosted_paper_runtime() else "local-default",
             "build_sha": active_build_sha(),
         },
@@ -399,14 +888,14 @@ def _submit_monitor_exit(
                 "order_type": intent.order_type.value,
                 "take_profit_tier": action.get("take_profit_tier"),
                 "unrealized_plpc": action["unrealized_plpc"],
+                "pair_pnl": action.get("pair_pnl"),
+                "runner_funded": action.get("runner_funded"),
                 "state": order.state.value,
                 "broker_order_id": order.broker_order_id,
             },
             journal_path=journal_path,
         )
     except Exception:
-        # The broker order is authoritative. A telemetry write failure must
-        # not turn an accepted risk-reducing exit into a reported failure.
         pass
     return order
 
@@ -426,19 +915,19 @@ def _rules_for_leg(rules: PositionMonitorRules, leg_role: str | None) -> Positio
     )
 
 
-def _pending_exit_orders_by_symbol(broker: Any) -> dict[str, dict[str, Any]]:
+def _pending_exit_orders_by_symbol(broker: Any) -> dict[str, dict[str, Any]] | None:
     if not hasattr(broker, "list_orders"):
-        return {}
+        return None
     try:
         orders = broker.list_orders(status="open", limit=100, direction="desc")
     except Exception:
-        return {}
+        return None
     pending: dict[str, dict[str, Any]] = {}
     for order in orders:
         symbol = str(order.get("symbol") or "").upper()
         side = str(order.get("side") or "").lower()
         status = str(order.get("status") or "").lower()
-        if not symbol or side != "sell" or status not in {"new", "accepted", "partially_filled", "pending_new", "pending_replace"}:
+        if not symbol or side != "sell" or status in _TERMINAL_FUNDING_STATUSES:
             continue
         pending.setdefault(symbol, order)
     return pending

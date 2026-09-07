@@ -4,15 +4,17 @@ import os
 from dataclasses import dataclass
 from typing import Iterable
 
-from .hosted_policy import HOSTED_MIN_OPEN_INTEREST, is_hosted_paper_runtime
+from .hosted_policy import is_hosted_paper_runtime
 from .phase1_models import OptionContractSnapshot, OptionType, SelectedContract
+from .strategy_policy import HOSTED_STRATEGY_POLICY
 
 
 @dataclass(frozen=True)
 class CoreRunnerRules:
-    """Risk and liquidity rules for one primary plus one convex runner."""
+    """Risk, liquidity, and convexity rules for one primary plus one runner."""
 
     runner_max_cost_ratio: float = 0.40
+    runner_target_cost_ratio: float = 0.25
     core_max_spread_pct: float = 0.18
     runner_max_spread_pct: float = 0.25
     core_min_open_interest: int = 100
@@ -20,6 +22,9 @@ class CoreRunnerRules:
     core_min_volume: int = 10
     runner_min_volume: int = 1
     core_min_abs_delta: float = 0.25
+    runner_min_abs_delta: float = 0.10
+    runner_max_abs_delta: float = 0.35
+    runner_target_abs_delta: float = 0.20
     primary_target_profit_pct: float = 0.50
     primary_stop_loss_pct: float = 0.45
     runner_target_profit_pct: float = 1.00
@@ -28,6 +33,8 @@ class CoreRunnerRules:
     def validate(self) -> "CoreRunnerRules":
         if not 0 < self.runner_max_cost_ratio < 1:
             raise ValueError("runner_max_cost_ratio_must_be_between_zero_and_one")
+        if not 0 < self.runner_target_cost_ratio <= self.runner_max_cost_ratio:
+            raise ValueError("runner_target_cost_ratio_must_fit_runner_cost_cap")
         if self.core_max_spread_pct <= 0 or self.runner_max_spread_pct <= 0:
             raise ValueError("core_runner_spread_caps_must_be_positive")
         if min(
@@ -39,6 +46,8 @@ class CoreRunnerRules:
             raise ValueError("core_runner_liquidity_minimums_must_be_nonnegative")
         if not 0 < self.core_min_abs_delta < 1:
             raise ValueError("core_min_abs_delta_must_be_between_zero_and_one")
+        if not 0 < self.runner_min_abs_delta <= self.runner_target_abs_delta <= self.runner_max_abs_delta < 1:
+            raise ValueError("runner_delta_window_invalid")
         return self
 
 
@@ -47,6 +56,7 @@ class CoreRunnerPair:
     primary: SelectedContract
     runner: SelectedContract
     estimated_group_cost: float
+    runner_cost_ratio: float = 0.0
 
     def __post_init__(self) -> None:
         if self.primary.option_symbol == self.runner.option_symbol:
@@ -55,22 +65,30 @@ class CoreRunnerPair:
 
 def load_core_runner_rules() -> CoreRunnerRules:
     if is_hosted_paper_runtime():
+        policy = HOSTED_STRATEGY_POLICY
         return CoreRunnerRules(
-            runner_max_cost_ratio=0.40,
-            core_max_spread_pct=0.18,
-            runner_max_spread_pct=0.25,
-            core_min_open_interest=HOSTED_MIN_OPEN_INTEREST,
-            runner_min_open_interest=HOSTED_MIN_OPEN_INTEREST,
-            core_min_volume=10,
-            runner_min_volume=1,
-            core_min_abs_delta=0.25,
-            primary_target_profit_pct=0.30,
-            primary_stop_loss_pct=0.22,
+            runner_max_cost_ratio=policy.runner_max_cost_ratio,
+            runner_target_cost_ratio=policy.runner_target_cost_ratio,
+            core_max_spread_pct=policy.core_max_spread_pct,
+            runner_max_spread_pct=policy.runner_max_spread_pct,
+            core_min_open_interest=policy.core_min_open_interest,
+            runner_min_open_interest=policy.runner_min_open_interest,
+            core_min_volume=policy.core_min_volume,
+            runner_min_volume=policy.runner_min_volume,
+            core_min_abs_delta=policy.core_min_abs_delta,
+            runner_min_abs_delta=policy.runner_min_abs_delta,
+            runner_max_abs_delta=policy.runner_max_abs_delta,
+            runner_target_abs_delta=policy.runner_target_abs_delta,
+            # These legacy fields only populate compatibility metadata. Actual
+            # pair exits are controlled by pair_lifecycle.py.
+            primary_target_profit_pct=0.50,
+            primary_stop_loss_pct=0.45,
             runner_target_profit_pct=1.00,
-            runner_stop_loss_pct=0.70,
+            runner_stop_loss_pct=policy.unfunded_runner_stop_loss_pct,
         ).validate()
     return CoreRunnerRules(
         runner_max_cost_ratio=float(os.getenv("AUTOBOTT_RUNNER_MAX_COST_RATIO", "0.40")),
+        runner_target_cost_ratio=float(os.getenv("AUTOBOTT_RUNNER_TARGET_COST_RATIO", "0.25")),
         core_max_spread_pct=float(os.getenv("AUTOBOTT_CORE_MAX_SPREAD_PCT", "0.18")),
         runner_max_spread_pct=float(os.getenv("AUTOBOTT_RUNNER_MAX_SPREAD_PCT", "0.25")),
         core_min_open_interest=int(os.getenv("AUTOBOTT_CORE_MIN_OPEN_INTEREST", "100")),
@@ -78,6 +96,9 @@ def load_core_runner_rules() -> CoreRunnerRules:
         core_min_volume=int(os.getenv("AUTOBOTT_CORE_MIN_VOLUME", "10")),
         runner_min_volume=int(os.getenv("AUTOBOTT_RUNNER_MIN_VOLUME", "1")),
         core_min_abs_delta=float(os.getenv("AUTOBOTT_CORE_MIN_ABS_DELTA", "0.25")),
+        runner_min_abs_delta=float(os.getenv("AUTOBOTT_RUNNER_MIN_ABS_DELTA", "0.10")),
+        runner_max_abs_delta=float(os.getenv("AUTOBOTT_RUNNER_MAX_ABS_DELTA", "0.35")),
+        runner_target_abs_delta=float(os.getenv("AUTOBOTT_RUNNER_TARGET_ABS_DELTA", "0.20")),
         primary_target_profit_pct=float(os.getenv("AUTOBOTT_CORE_TARGET_PROFIT_PCT", "0.50")),
         primary_stop_loss_pct=float(os.getenv("AUTOBOTT_CORE_STOP_LOSS_PCT", "0.45")),
         runner_target_profit_pct=float(os.getenv("AUTOBOTT_RUNNER_TARGET_PROFIT_PCT", "1.00")),
@@ -93,8 +114,9 @@ def select_core_runner_pair(
 ) -> CoreRunnerPair | None:
     """Select one useful primary plus one distinct, cheaper convex runner.
 
-    The engine-selected contract is preferred. Price is deliberately not an
-    eligibility gate for paper execution; affordability is a dashboard concern.
+    The engine-selected primary is preferred. The runner must remain cheaper
+    and farther out-of-the-money, but it must retain enough delta to participate
+    in a real directional move instead of becoming a near-zero-delta lottery.
     """
 
     resolved = (rules or load_core_runner_rules()).validate()
@@ -114,6 +136,7 @@ def select_core_runner_pair(
             if not _is_valid_runner(core, runner, resolved):
                 continue
             estimated_group_cost = round((core.ask + runner.ask) * 100, 2)
+            runner_cost_ratio = runner.ask / core.ask
             primary = _selected_contract(
                 core,
                 target_profit_pct=resolved.primary_target_profit_pct,
@@ -130,7 +153,8 @@ def select_core_runner_pair(
                 0.0 if core.option_symbol == selected_primary.option_symbol else 1.0,
                 abs(abs(core.delta) - 0.50),
                 abs(core.strike - selected_primary.strike),
-                -abs(runner.delta),
+                abs(runner_cost_ratio - resolved.runner_target_cost_ratio),
+                abs(abs(runner.delta) - resolved.runner_target_abs_delta),
                 core.spread_pct + runner.spread_pct,
                 -float(runner.open_interest),
                 -float(runner.volume),
@@ -139,9 +163,10 @@ def select_core_runner_pair(
                 (
                     score,
                     CoreRunnerPair(
-                        primary,
-                        selected_runner,
-                        estimated_group_cost,
+                        primary=primary,
+                        runner=selected_runner,
+                        estimated_group_cost=estimated_group_cost,
+                        runner_cost_ratio=round(runner_cost_ratio, 4),
                     ),
                 )
             )
@@ -175,11 +200,13 @@ def _core_is_eligible(contract: OptionContractSnapshot, rules: CoreRunnerRules) 
 
 
 def _runner_is_liquid(contract: OptionContractSnapshot, rules: CoreRunnerRules) -> bool:
+    abs_delta = abs(contract.delta)
     return (
         0 < contract.bid <= contract.ask
         and contract.spread_pct <= rules.runner_max_spread_pct
         and contract.open_interest >= rules.runner_min_open_interest
         and (not contract.volume_available or contract.volume >= rules.runner_min_volume)
+        and rules.runner_min_abs_delta <= abs_delta <= rules.runner_max_abs_delta
     )
 
 
@@ -206,6 +233,10 @@ def _selected_contract(
     stop_loss_pct: float,
     role: str,
 ) -> SelectedContract:
+    if role == "primary":
+        exit_rule = "primary_harvest_when_profit_funds_runner_then_retain_runner"
+    else:
+        exit_rule = "runner_hold_for_convex_upside_after_funding_with_trailing_and_dte_risk_controls"
     return SelectedContract(
         option_symbol=contract.option_symbol,
         option_type=contract.option_type,
@@ -225,13 +256,12 @@ def _selected_contract(
         reward_risk_ratio=0.0,
         target_exit_mid=round(contract.mid * (1 + target_profit_pct), 4),
         stop_exit_mid=round(contract.mid * (1 - stop_loss_pct), 4),
-        exit_rule=(
-            f"{role}_take_profit_at_{int(target_profit_pct * 100)}pct_gain_"
-            f"or_stop_at_{int(stop_loss_pct * 100)}pct_loss_on_mid"
-        ),
+        exit_rule=exit_rule,
         score_reasons=[
             f"core_runner_{role}",
             "paper_pair_price_unrestricted",
+            "convex_runner_delta_window",
+            "pair_lifecycle_exit_policy",
         ],
         volume_available=contract.volume_available,
     )

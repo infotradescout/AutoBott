@@ -63,7 +63,9 @@ For the local Windows operator path, you can skip PowerShell entirely and launch
 start_paper_dashboard.cmd
 ```
 
-That launcher auto-loads `C:\Users\flavo\Downloads\AutoBott.env`, applies the local paper/session defaults, binds the dashboard to `127.0.0.1:8000`, and uses token `autobott-local` unless overridden.
+That launcher auto-loads `C:\Users\flavo\Downloads\AutoBott.env`, applies the local paper/session defaults, and binds the dashboard to `127.0.0.1:8000`. Set `AUTOBOTT_DASHBOARD_AUTH_TOKEN` in that env file to a unique secret; the launcher does not provide or print a default token.
+
+The hosted dashboard also requires `AUTOBOTT_DASHBOARD_AUTH_TOKEN` to be configured as a secret in Render before deployment. Leave the service undeployed or locked until the owner records that configuration.
 
 ## Cutover Command
 
