@@ -3,7 +3,7 @@ services:
     name: autobott-phase1-dashboard
     runtime: python
     buildCommand: pip install .
-    startCommand: python -m autobott_v2.dashboard_app
+    startCommand: python -m autobott_v2.dashboard_app_v2
     healthCheckPath: /api/health
     disks:
       - name: autobott-runtime
