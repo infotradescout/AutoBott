@@ -147,25 +147,27 @@ def _cockpit_html() -> str:
 </head>
 <body><div class="shell">
 <header class="top"><div class="brand"><div class="mark">AB</div><div><h1>AutoBott</h1><div class="sub" id="policy">Paper trading</div></div></div><div class="chips"><span class="chip good">PAPER ONLY</span><span class="chip warn">REAL MONEY OFF</span><span class="chip" id="session-chip">SESSION CHECKING</span></div><div class="actions"><button class="btn primary" onclick="arm()">Arm Paper</button><button class="btn" onclick="pauseTrading()">Pause</button><button class="btn danger" onclick="kill()">Kill Switch</button><button class="btn" onclick="refreshAll()">Refresh</button></div></header>
+<main>
 <form class="access panel" id="access-form" onsubmit="unlock(event)"><label for="access-token">Dashboard access</label><input id="access-token" type="password" autocomplete="off" placeholder="Enter dashboard token"><button class="btn" type="submit">Unlock</button><button class="btn" type="button" onclick="lock()">Lock</button><span class="access-status" id="auth-status" role="status">Locked</span></form>
 <div class="notice" id="notice" role="status"></div>
 <section class="hero"><div class="metric"><div class="label">Paper Equity</div><div class="value" id="equity">—</div><div class="delta" id="cash">—</div></div><div class="metric"><div class="label">Today</div><div class="value" id="daypl">—</div><div class="delta" id="daypct">—</div></div><div class="metric"><div class="label">Open Trades</div><div class="value" id="paircount">—</div><div class="delta" id="legs">—</div></div><div class="metric"><div class="label">Runtime</div><div class="value" id="runtime">—</div><div class="delta" id="last-refresh">—</div></div></section>
 <section class="section"><div class="section-head"><h2>Core + Runner Trades</h2><span id="trade-summary">Waiting for account data</span></div><div class="pairs" id="pairs"></div></section>
 <section class="section" id="standalone-section" hidden><div class="section-head"><h2>Other Open Positions</h2><span>Not linked to a core + runner trade</span></div><div class="pairs" id="standalone"></div></section>
 <section class="section lower"><div class="panel"><h3>Recent Decisions</h3><div class="feed" id="feed"><div class="empty">Loading current decisions…</div></div></div><div class="panel"><h3>System State</h3><div class="state-list" id="state"></div></div></section>
-</div>
+</main></div>
 <script>
 
 const money=n=>n!=null&&Number.isFinite(Number(n))?`$${Number(n).toFixed(2)}`:'—';
 const pct=n=>n!=null&&Number.isFinite(Number(n))?`${(Number(n)*100).toFixed(1)}%`:'—';
 const esc=s=>String(s??'').replaceAll('&','&amp;').replaceAll('<','&lt;').replaceAll('>','&gt;');
-let generation=0, refreshing=false, authorized=false, killed=false, refreshFailed=false;
+let generation=0, refreshing=null, authorized=false, killed=false, refreshFailed=false, commandPending=false;
 const token=()=>{try{return sessionStorage.getItem('dashboardToken')||''}catch{return ''}};
-function controls(enabled){document.querySelectorAll('.actions .btn').forEach(b=>{if(b.textContent!=='Refresh')b.disabled=!enabled})}
+function controls(enabled){document.querySelectorAll('.actions .btn').forEach(b=>{if(b.textContent!=='Refresh')b.disabled=!enabled||commandPending})}
 async function api(path,opts={}){
   const t=token();
   const r=await fetch(path,{...opts,headers:{'Content-Type':'application/json',...(t?{'Authorization':`Bearer ${t}`}:{})}});
   let p;try{p=await r.json()}catch{throw new Error('The server returned an unreadable response.')}
+  if(path==='/api/health'&&r.status===503&&p?.session_supervisor?.stalled===true)return p;
   if(!r.ok||p.ok===false){const e=new Error(r.status===401?'Dashboard access required.':p.detail||p.error||`Request failed (${r.status}).`);e.status=r.status;throw e}
   return p;
 }
@@ -204,20 +206,30 @@ function renderPairs(data){
 }
 function renderAccount(data){const a=data.account||{};document.getElementById('equity').textContent=money(a.equity);document.getElementById('cash').textContent=`Cash ${money(a.cash)}`;const pl=Number(a.day_pl||0),e=document.getElementById('daypl');e.textContent=money(a.day_pl);e.className=`value ${pl>=0?'goodText':'badText'}`;document.getElementById('daypct').textContent=a.day_pl_pct==null?'—':`${Number(a.day_pl_pct).toFixed(2)}% today`}
 function renderState(safety,session,health){
-  killed=!!safety.kill_switch_enabled;const armed=!!safety.execution_enabled&&!killed;
-  document.getElementById('runtime').textContent=killed?'KILLED':armed?'ARMED':'PAUSED';document.getElementById('runtime').className=`value ${killed?'badText':armed?'goodText':''}`;
-  const alive=!!session.thread_alive,chip=document.getElementById('session-chip');chip.textContent=alive?'SESSION RUNNING':'SESSION STOPPED';chip.className=`chip ${alive?'good':'warn'}`;
+  killed=!!safety.kill_switch_enabled;const armed=!!safety.execution_enabled&&!killed,blocked=armed&&safety.order_placement_enabled!==true;
+  const runtime=killed?'KILLED':blocked?'BLOCKED':armed?'ARMED':'PAUSED';
+  document.getElementById('runtime').textContent=runtime;document.getElementById('runtime').className=`value ${killed?'badText':armed&&!blocked?'goodText':''}`;
+  const stalled=health.session_supervisor?.stalled===true,alive=!!session.thread_alive&&!stalled,chip=document.getElementById('session-chip');chip.textContent=stalled?'SESSION STALLED':alive?'SESSION RUNNING':'SESSION STOPPED';chip.className=`chip ${stalled?'bad':alive?'good':'warn'}`;
   document.getElementById('policy').textContent=health.policy_version||'Paper trading';
   const lastCycle=session.state?.last_cycle_at;
-  document.getElementById('state').innerHTML=[['Broker','Alpaca paper'],['Real money','Locked off'],['Execution',armed?'Armed':'Paused'],['Kill switch',killed?'Active':'Off'],['Session',alive?'Running':'Stopped'],['Last cycle',lastCycle?new Date(lastCycle).toLocaleString():'No cycle recorded'],['Policy',health.policy_version||'Unknown']].map(([a,b])=>`<div class="state-row"><span class="muted">${esc(a)}</span><strong>${esc(b)}</strong></div>`).join('');
+  document.getElementById('state').innerHTML=[['Broker','Alpaca paper'],['Real money','Locked off'],['Execution',blocked?'Blocked by safety configuration':armed?'Armed':'Paused'],['Kill switch',killed?'Active':'Off'],['Session',stalled?'Stopped unexpectedly':alive?'Running':'Stopped'],['Last cycle',lastCycle?new Date(lastCycle).toLocaleString():'No cycle recorded'],['Policy',health.policy_version||'Unknown']].map(([a,b])=>`<div class="state-row"><span class="muted">${esc(a)}</span><strong>${esc(b)}</strong></div>`).join('');
 }
 function renderFeed(data){
   const rows=data.decisions||[],root=document.getElementById('feed');
   if(!rows.length){root.innerHTML='<div class="empty">No recent decision cards available.</div>';return}
   root.innerHTML=rows.slice(-8).reverse().map(row=>{const d=row.decision_card||row,ts=d.timestamp||row.recorded_at||'',side=d.direction?.bias||'neutral',status=d.decision||'—',why=d.blocked_reason||d.explanation||'';return `<div class="feed-row"><span class="feed-time">${ts?esc(new Date(ts).toLocaleString()):'—'}</span><span><strong>${esc(d.ticker||row.symbol||'—')} · ${esc(side)}</strong><br><span class="muted">${esc(String(why).slice(0,120))}</span></span><span class="chip ${status==='TRADE_CANDIDATE'?'good':''}">${esc(status)}</span></div>`}).join('');
 }
-async function refreshAll(){
-  if(refreshing)return;const revision=generation;refreshing=true;
+function refreshAll(){
+  if(commandPending)return Promise.resolve();
+  if(refreshing)return refreshing;
+  const revision=generation;
+  refreshing=refreshSnapshot(revision).finally(()=>{
+    refreshing=null;
+    if(revision!==generation&&!commandPending)return refreshAll();
+  });
+  return refreshing;
+}
+async function refreshSnapshot(revision){
   try{
     if(!token()){clearAccount('Unlock the dashboard to view your paper account.');return}
     const [pairs,safety,session,health,feed]=await Promise.all([api('/api/v2/pairs'),api('/api/safety'),api('/api/session/status'),api('/api/health'),api('/api/decisions/latest')]);
@@ -227,9 +239,14 @@ async function refreshAll(){
     authorized=true;controls(true);document.getElementById('auth-status').textContent='Unlocked for this browser session';
     document.getElementById('last-refresh').textContent=`Updated ${new Date().toLocaleTimeString()}`;
   }catch(e){if(revision!==generation)return;refreshFailed=true;clearAccount(e.status===401?'Enter a valid dashboard token.':'Account refresh failed.');document.getElementById('auth-status').textContent=e.status===401?'Locked':'Connection unavailable';note(e.message,true)}
-  finally{refreshing=false;if(revision!==generation)refreshAll()}
 }
-async function action(path,body,success){if(!authorized)return;controls(false);try{await api(path,{method:'POST',body:JSON.stringify(body)});note(success)}catch(e){note(e.message,true)}finally{await refreshAll()}}
+async function action(path,body,success){
+  if(!authorized||commandPending)return;
+  commandPending=true;const revision=++generation;controls(false);
+  try{await api(path,{method:'POST',body:JSON.stringify(body)});if(revision===generation)note(success)}
+  catch(e){if(revision===generation)note(e.message,true)}
+  finally{commandPending=false;await refreshAll()}
+}
 async function arm(){if(killed&&!confirm('Clear the kill switch and resume paper trading?'))return;await action('/api/runtime/arm-paper',{reason:'v2_cockpit_arm_paper'},'Paper execution armed.')}
 async function pauseTrading(){await action('/api/runtime/disable-execution',{reason:'v2_cockpit_pause'},'Paper execution paused.')}
 async function kill(){if(!authorized||!confirm('Engage the paper-trading kill switch?'))return;await action('/api/runtime/kill-switch',{enabled:true,reason:'v2_cockpit_kill_switch'},'Kill switch engaged.')}

@@ -19,6 +19,25 @@ Use one Render Web Service for v1:
 
 Deploy remains blocked until the persistent disk and hosted secrets below are configured. Render web services are ephemeral by default, so `data/` and `artifacts/` are not durable without this disk-backed layout.
 
+### PR #39 validation build
+
+The existing `autobott-v2-validation-39` service must install the development
+extra before invoking pytest. Its validation build command is:
+
+```sh
+python -m pip install ".[dev]" && python -m pytest
+```
+
+`pip install .` installs runtime dependencies only; pytest is declared in the
+`dev` extra. This validation-service correction does not change the production
+service's runtime dependency installation. Keep broker credentials absent and
+session autostart and order placement disabled in the validation service.
+Where Node.js is available, also run `node --test tests/cockpit_state.test.cjs`.
+
+The v2 cockpit entry point is `python -m autobott_v2.dashboard_app_v2`.
+Configuring a validation build does not establish production deployment,
+operator access, or supervised paper-trading evidence.
+
 ## Required Hosted Secrets
 
 - `ALPACA_API_KEY_ID=<paper key>`
