@@ -52,9 +52,14 @@ Run the test suite:
 
 ```powershell
 python -m pip install ".[dev]"
-python -m pytest
+python scripts/validate_offline.py
 node --test tests/cockpit_state.test.cjs
 ```
+
+The Python runner removes inherited deployment settings and credentials, isolates
+runtime files, and blocks outbound network and non-read-only child processes.
+It records source identity and JUnit results under `artifacts/offline-validation/`.
+Individual pytest targets can be passed after the runner filename.
 
 The Node.js check exercises the shipped dashboard script with synthetic responses,
 including command ordering, stale refreshes, authentication, and stalled sessions.

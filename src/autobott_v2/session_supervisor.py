@@ -89,7 +89,8 @@ def load_session_supervisor_config() -> SessionSupervisorConfig:
     raw_batch_size = os.getenv("AUTOBOTT_SESSION_SYMBOL_BATCH_SIZE")
     run_forever = True if hosted_paper else _normalize_bool(os.getenv("AUTOBOTT_SESSION_RUN_FOREVER"), default=False)
     return SessionSupervisorConfig(
-        enabled=True if hosted_paper else _normalize_bool(os.getenv("AUTOBOTT_SESSION_AUTOSTART"), default=True),
+        # Startup safety switches remain deployment-owned in hosted paper mode.
+        enabled=_normalize_bool(os.getenv("AUTOBOTT_SESSION_AUTOSTART"), default=True),
         symbols=symbols,
         interval_seconds=(
             HOSTED_SESSION_INTERVAL_SECONDS
@@ -123,10 +124,8 @@ def load_session_supervisor_config() -> SessionSupervisorConfig:
             else (os.getenv("AUTOBOTT_SESSION_MARKET_TIMEZONE") or "America/New_York").strip()
             or "America/New_York"
         ),
-        arm_paper_execution_on_start=(
-            True
-            if hosted_paper
-            else _normalize_bool(os.getenv("AUTOBOTT_SESSION_ARM_PAPER_EXECUTION"), default=True)
+        arm_paper_execution_on_start=_normalize_bool(
+            os.getenv("AUTOBOTT_SESSION_ARM_PAPER_EXECUTION"), default=True
         ),
         position_monitor_heartbeat_enabled=(
             HOSTED_POSITION_MONITOR_HEARTBEAT_ENABLED

@@ -58,4 +58,4 @@ def test_hosted_alpaca_config_forces_paper_despite_poisoned_render_env(monkeypat
     assert config.data_base_url == "https://data.alpaca.markets"
     assert config.live_trading_enabled is False
     assert config.paper_only is True
-    assert config.allow_order_placement is True
+    assert config.allow_order_placement is False

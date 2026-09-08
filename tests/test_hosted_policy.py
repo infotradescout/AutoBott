@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import pytest
+
 from autobott_v2.core_runner import load_core_runner_rules
 from autobott_v2.execution_config import load_alpaca_execution_config
 from autobott_v2.defined_risk_spreads import load_defined_risk_spread_rules
@@ -9,6 +11,7 @@ from autobott_v2.phase1_snapshot_capture import (
     _manual_mirror_capture_max_contract_cost,
 )
 from autobott_v2.session_supervisor import load_session_supervisor_config
+from autobott_v2.phase1_alpaca_config import load_alpaca_paper_config
 from autobott_v2.position_monitor import load_position_monitor_rules
 from autobott_v2.trading_cycle import _hosted_capture_rules, _hosted_execution_rules
 
@@ -64,7 +67,7 @@ def test_hosted_session_ignores_stale_render_strategy_values(monkeypatch) -> Non
     assert config.start_time == "09:35:00"
     assert config.end_time == "15:55:00"
     assert config.market_timezone == "America/New_York"
-    assert config.arm_paper_execution_on_start is True
+    assert config.arm_paper_execution_on_start is False
     assert config.position_monitor_heartbeat_enabled is False
     assert config.position_monitor_heartbeat_seconds == 90
 
@@ -91,7 +94,7 @@ def test_hosted_execution_ignores_stale_render_risk_values(monkeypatch) -> None:
     assert config.trading_base_url == "https://paper-api.alpaca.markets"
     assert config.data_base_url == "https://data.alpaca.markets"
     assert config.allow_live_trading is False
-    assert config.allow_order_placement is True
+    assert config.allow_order_placement is False
     assert config.max_position_cost == 1000.0
     assert config.max_daily_loss == 750.0
     assert config.max_open_positions == 6
@@ -101,6 +104,59 @@ def test_hosted_execution_ignores_stale_render_risk_values(monkeypatch) -> None:
     assert load_core_runner_rules().core_min_open_interest == 0
     assert load_core_runner_rules().runner_min_open_interest == 0
     assert load_position_monitor_rules().exit_min_dte == 2
+
+
+@pytest.mark.parametrize(
+    "value,enabled",
+    [(None, True), ("true", True), ("false", False), ("0", False), ("off", False), (" FALSE ", False), ("invalid", False), ("", False)],
+)
+def test_hosted_hard_safety_controls_honor_explicit_off_values(monkeypatch, value, enabled) -> None:
+    monkeypatch.setenv("RENDER", "true")
+    for name in (
+        "AUTOBOTT_ALLOW_ORDER_PLACEMENT",
+        "AUTOBOTT_SESSION_AUTOSTART",
+        "AUTOBOTT_SESSION_ARM_PAPER_EXECUTION",
+    ):
+        if value is None:
+            monkeypatch.delenv(name, raising=False)
+        else:
+            monkeypatch.setenv(name, value)
+
+    execution = load_alpaca_execution_config()
+    paper = load_alpaca_paper_config()
+    session = load_session_supervisor_config()
+
+    assert execution.allow_order_placement is enabled
+    assert execution.risk_controls().allow_order_placement is enabled
+    assert paper.allow_order_placement is enabled
+    assert session.enabled is enabled
+    assert session.arm_paper_execution_on_start is enabled
+    assert execution.allow_live_trading is False
+    assert paper.paper_only is True
+    assert paper.live_trading_enabled is False
+    assert session.symbols[:3] == ["VIX", "VXX", "UVXY"]
+    assert session.interval_seconds == 90
+
+
+@pytest.mark.parametrize("disabled", [
+    "AUTOBOTT_ALLOW_ORDER_PLACEMENT",
+    "AUTOBOTT_SESSION_AUTOSTART",
+    "AUTOBOTT_SESSION_ARM_PAPER_EXECUTION",
+])
+def test_hosted_safety_switches_do_not_override_each_other(monkeypatch, disabled) -> None:
+    monkeypatch.setenv("RENDER", "true")
+    for name in (
+        "AUTOBOTT_ALLOW_ORDER_PLACEMENT",
+        "AUTOBOTT_SESSION_AUTOSTART",
+        "AUTOBOTT_SESSION_ARM_PAPER_EXECUTION",
+    ):
+        monkeypatch.setenv(name, "false" if name == disabled else "true")
+
+    session = load_session_supervisor_config()
+    assert load_alpaca_execution_config().allow_order_placement is (disabled != "AUTOBOTT_ALLOW_ORDER_PLACEMENT")
+    assert load_alpaca_paper_config().allow_order_placement is (disabled != "AUTOBOTT_ALLOW_ORDER_PLACEMENT")
+    assert session.enabled is (disabled != "AUTOBOTT_SESSION_AUTOSTART")
+    assert session.arm_paper_execution_on_start is (disabled != "AUTOBOTT_SESSION_ARM_PAPER_EXECUTION")
 
 
 def test_hosted_capture_storage_mode_ignores_stale_duplicate_write_flag(monkeypatch) -> None:

@@ -76,10 +76,9 @@ def load_alpaca_paper_config() -> AlpacaPaperConfig:
             if hosted_paper
             else _normalize_bool(os.getenv("AUTOBOTT_PAPER_ONLY"), default=True)
         ),
-        allow_order_placement=(
-            True
-            if hosted_paper
-            else _normalize_bool(os.getenv("AUTOBOTT_ALLOW_ORDER_PLACEMENT"), default=False)
+        # Match execution's deployment-owned order switch, including hosted stops.
+        allow_order_placement=_normalize_bool(
+            os.getenv("AUTOBOTT_ALLOW_ORDER_PLACEMENT"), default=hosted_paper
         ),
     )
 
