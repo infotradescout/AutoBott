@@ -157,8 +157,9 @@ def _cockpit_html() -> str:
 </main></div>
 <script>
 
-const money=n=>n!=null&&Number.isFinite(Number(n))?`$${Number(n).toFixed(2)}`:'—';
-const pct=n=>n!=null&&Number.isFinite(Number(n))?`${(Number(n)*100).toFixed(1)}%`:'—';
+const numeric=n=>(typeof n==='number'||typeof n==='string'&&n.trim()!=='')&&Number.isFinite(Number(n))?Number(n):null;
+const money=n=>{const value=numeric(n);return value===null?'—':`$${value.toFixed(2)}`};
+const pct=n=>{const value=numeric(n);return value===null?'—':`${(value*100).toFixed(1)}%`};
 const esc=s=>String(s??'').replaceAll('&','&amp;').replaceAll('<','&lt;').replaceAll('>','&gt;');
 let generation=0, refreshing=null, authorized=false, killed=false, refreshFailed=false, commandPending=false;
 const token=()=>{try{return sessionStorage.getItem('dashboardToken')||''}catch{return ''}};
@@ -187,8 +188,8 @@ function lock(){generation++;try{sessionStorage.removeItem('dashboardToken')}cat
 async function unlock(event){event.preventDefault();const value=document.getElementById('access-token').value;if(!value)return;generation++;try{sessionStorage.setItem('dashboardToken',value)}catch{note('Session storage is unavailable in this browser.',true);return}document.getElementById('access-token').value='';await refreshAll()}
 function legCard(leg,role){
   if(!leg)return `<div class="leg"><div class="role">${role}</div><div class="contract muted">Closed</div></div>`;
-  const pl=Number(leg.unrealized_pl||0);
-  return `<div class="leg"><div class="leg-head"><span class="role">${role}</span><span class="${pl>=0?'goodText':'badText'}">${money(pl)}</span></div><div class="contract">${esc(leg.symbol)}</div><div class="leg-grid"><div><div class="label">Entry / share</div><div class="small-v">${money(leg.avg_entry_price)}</div></div><div><div class="label">Now / share</div><div class="small-v">${money(leg.current_price)}</div></div><div><div class="label">Contracts</div><div class="small-v">${esc(leg.qty??'—')}</div></div><div><div class="label">Return</div><div class="small-v">${pct(leg.unrealized_plpc)}</div></div></div></div>`;
+  const pl=numeric(leg.unrealized_pl);
+  return `<div class="leg"><div class="leg-head"><span class="role">${role}</span><span class="${pl===null?'muted':pl>=0?'goodText':'badText'}">${money(pl)}</span></div><div class="contract">${esc(leg.symbol)}</div><div class="leg-grid"><div><div class="label">Entry / share</div><div class="small-v">${money(leg.avg_entry_price)}</div></div><div><div class="label">Now / share</div><div class="small-v">${money(leg.current_price)}</div></div><div><div class="label">Contracts</div><div class="small-v">${esc(leg.qty??'—')}</div></div><div><div class="label">Return</div><div class="small-v">${pct(leg.unrealized_plpc)}</div></div></div></div>`;
 }
 function renderPairs(data){
   const pairs=data.pairs||[],other=data.standalone_positions||[];

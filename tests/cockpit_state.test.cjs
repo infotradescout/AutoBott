@@ -173,3 +173,37 @@ test('an execution request blocked by safety configuration is not displayed as a
   assert.equal(e.get('runtime').textContent, 'BLOCKED');
   assert.match(e.get('state').innerHTML, /Blocked by safety configuration/);
 });
+
+test('missing broker marks stay unavailable instead of becoming a zero-dollar gain', () => {
+  const e = cockpit();
+  for (const value of [undefined, null, '', '   ', 'unavailable']) {
+    e.context.position = {
+      symbol: 'SPY261016C00600000', qty: '1',
+      unrealized_pl: value, avg_entry_price: value, current_price: value,
+      unrealized_plpc: value,
+    };
+    const html = e.run("legCard(position, 'CORE')");
+    assert.doesNotMatch(html, /\$0\.00|0\.0%|goodText|badText/);
+    assert.match(html, /SPY261016C00600000/);
+    assert.equal((html.match(/—/g) || []).length, 4);
+  }
+});
+
+test('available broker marks preserve genuine zero, profit, and loss', () => {
+  const e = cockpit();
+  for (const [value, expected, tone] of [
+    ['0', '$0.00', 'goodText'],
+    ['12.5', '$12.50', 'goodText'],
+    ['-4.25', '$-4.25', 'badText'],
+  ]) {
+    e.context.position = {
+      symbol: 'SPY261016C00600000', qty: '1', unrealized_pl: value,
+      avg_entry_price: '0.25', current_price: '0', unrealized_plpc: '0',
+    };
+    const html = e.run("legCard(position, 'RUNNER')");
+    assert.ok(html.includes(`class="${tone}">${expected}</span>`));
+    assert.match(html, /\$0\.25/);
+    assert.match(html, /\$0\.00/);
+    assert.match(html, /0\.0%/);
+  }
+});
