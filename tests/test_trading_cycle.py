@@ -240,6 +240,9 @@ class FakeBroker:
         self.open_positions_seen = []
         self.mleg_calls = []
 
+    def get_account(self):
+        return {"id": "synthetic-account"}
+
     def submit_order(self, intent, *, current_daily_realized_pnl=0.0, open_positions=0):
         self.submitted.append(intent)
         self.open_positions_seen.append(open_positions)
@@ -991,6 +994,8 @@ def test_run_trading_cycle_uses_recent_loss_guard(tmp_path) -> None:
             },
         ]
     )
+    for index, order in enumerate(broker.orders):
+        order["id"] = f"synthetic-loss-order-{index}"
     try:
         result = trading_cycle.run_trading_cycle(
             symbols=["AAPL"],
@@ -1072,7 +1077,8 @@ def test_account_wide_same_day_realized_loss_blocks_new_entry(tmp_path) -> None:
     assert daily["source"] == "broker_fill_outcomes"
 
 
-def test_hosted_outcome_sync_failure_blocks_entries_but_not_risk_reducing_exits(tmp_path, monkeypatch) -> None:
+@pytest.mark.parametrize("journal_conflict", [False, True])
+def test_hosted_outcome_sync_failure_blocks_entries_but_not_risk_reducing_exits(tmp_path, monkeypatch, journal_conflict) -> None:
     monkeypatch.setenv("RENDER", "true")
     monkeypatch.setenv("ALPACA_ENV", "paper")
     save_runtime_state(default_runtime_state(), state_path=tmp_path / "runtime_state.json")
@@ -1093,6 +1099,11 @@ def test_hosted_outcome_sync_failure_blocks_entries_but_not_risk_reducing_exits(
             }
         ]
     )
+    if journal_conflict:
+        broker.list_orders = lambda **kwargs: []
+        (tmp_path / "trade_outcomes.jsonl").write_text(
+            '{"outcome_id":"unowned-historical-row","pnl":-100}\n'
+        )
     try:
         result = trading_cycle.run_trading_cycle(
             symbols=["AAPL"],
@@ -1108,6 +1119,11 @@ def test_hosted_outcome_sync_failure_blocks_entries_but_not_risk_reducing_exits(
         trading_cycle.load_runtime_state = original
         trading_cycle.load_open_positions = original_positions
 
+    if journal_conflict:
+        assert (tmp_path / "trade_outcomes.jsonl").read_text() == '{"outcome_id":"unowned-historical-row","pnl":-100}\n'
+        outcome_sync = next(row for row in result.execution_outcomes if row["disposition"] == "trade_outcome_learning_summary")
+        assert outcome_sync["error"] == "outcome_journal_reconciliation_required"
+        assert outcome_sync["reconciliation"]["unresolved"]
     assert [intent.side.value for intent in broker.submitted] == ["sell_to_close"]
     assert result.orders_submitted == []
     assert result.trade_attempted_count == 0

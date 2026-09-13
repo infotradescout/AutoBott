@@ -1183,7 +1183,7 @@ def test_dashboard_options_timeline_pairs_round_trips_and_clusters(monkeypatch, 
     monkeypatch.setattr(
         dashboard_app,
         "record_trade_outcomes_from_orders",
-        lambda _orders: {
+        lambda _orders, *, persist: {
             "summary_policy_version": "hosted-vix-profit-v1",
             "group_summary": {
                 "completed_groups": 4,
@@ -1211,6 +1211,38 @@ def test_dashboard_options_timeline_pairs_round_trips_and_clusters(monkeypatch, 
     alias_status, alias_body = _invoke_app("GET", "/api/trading/timeline", token="dashboard-token")
     assert alias_status.startswith("200")
     assert json.loads(alias_body)["status"] == "options_timeline_ready"
+
+
+def test_authenticated_timeline_get_uses_real_matcher_without_journal_writes(monkeypatch, tmp_path):
+    _auth_env(monkeypatch, tmp_path)
+
+    class Config:
+        def validate(self):
+            return self
+
+    orders = [
+        {"id": "buy", "symbol": "TEST260918C00100000", "side": "buy", "status": "filled",
+         "qty": "2", "filled_qty": "2", "filled_avg_price": "2", "filled_at": "2026-09-11T14:00:00Z"},
+        {"id": "sell-1", "symbol": "TEST260918C00100000", "side": "sell", "status": "filled",
+         "qty": "1", "filled_qty": "1", "filled_avg_price": "2.5", "filled_at": "2026-09-11T14:01:00Z"},
+        {"id": "sell-2", "symbol": "TEST260918C00100000", "side": "sell", "status": "canceled",
+         "qty": "2", "filled_qty": "1", "filled_avg_price": "1.5", "filled_at": "2026-09-11T14:02:00Z"},
+    ]
+    monkeypatch.setattr(dashboard_app, "load_alpaca_paper_config", Config)
+    monkeypatch.setattr(dashboard_app, "AlpacaPaperClient", lambda config: None)
+    monkeypatch.setattr(dashboard_app, "_dashboard_all_orders", lambda client, config: orders)
+    before = {str(path): path.read_bytes() for path in tmp_path.rglob("*") if path.is_file()}
+    for route in ("/api/options/timeline", "/api/trading/timeline"):
+        status, body = _invoke_app("GET", route, token="dashboard-token")
+        assert status.startswith("200")
+        payload = json.loads(body)
+        assert payload["summary"]["realized_pnl"] == 0
+        assert payload["summary"]["round_trips"] == 2
+        assert payload["summary"]["pending_orders"] == 0
+        assert payload["outcome_learning"]["recorded"] == 0
+        assert payload["accounting_complete"] is False
+    after = {str(path): path.read_bytes() for path in tmp_path.rglob("*") if path.is_file()}
+    assert before == after
 
 
 def test_dashboard_uses_content_blocker_safe_routes_and_surfaces_fetch_errors() -> None:

@@ -4,14 +4,16 @@ import json
 import math
 import os
 import threading
+import tempfile
 from datetime import UTC, date, datetime
+from decimal import Decimal
 from hashlib import sha256
 from pathlib import Path
 from typing import Any
 from zoneinfo import ZoneInfo
 
 from .execution_journal import load_execution_journal
-from .jsonl_retention import compact_jsonl_tail
+from .outcome_ingestion import plan_outcome_append
 from .hosted_policy import (
     HOSTED_LOSS_GUARD_CONSECUTIVE_LOSSES,
     HOSTED_LOSS_GUARD_LOOKBACK,
@@ -77,13 +79,6 @@ def sync_trade_outcomes_from_broker(
             history_complete = len(orders) < limit
     except Exception as exc:
         return {"ok": False, "recorded": 0, "error": str(exc), "outcomes": [], "blocked_underlyings": []}
-    summary = record_trade_outcomes_from_orders(
-        orders,
-        journal_path=journal_path,
-        execution_journal_path=execution_journal_path,
-        execution_journal_rows=execution_journal_rows,
-        trading_day=trading_day,
-    )
     resolved_trading_day = _resolve_trading_day(trading_day)
     unmatched_sell_events = _unmatched_realized_sell_events(orders)
     current_day_unmatched = [
@@ -92,6 +87,25 @@ def sync_trade_outcomes_from_broker(
         if event["event_time"] is None
         or event["event_time"].astimezone(ZoneInfo("America/New_York")).date() == resolved_trading_day
     ]
+    try:
+        account_scope = verified_broker_account_scope(broker)
+    except (ValueError, AttributeError) as exc:
+        account_scope = None
+        scope_error = str(exc)
+    else:
+        scope_error = None
+    summary = record_trade_outcomes_from_orders(
+        orders,
+        journal_path=journal_path,
+        execution_journal_path=execution_journal_path,
+        execution_journal_rows=execution_journal_rows,
+        trading_day=trading_day,
+        account_scope=account_scope,
+        persist=history_complete and not current_day_unmatched,
+    )
+    if scope_error:
+        summary["ok"] = False
+        summary["error"] = scope_error
     historical_unmatched = [event for event in unmatched_sell_events if event not in current_day_unmatched]
     current_day_symbols = sorted({str(event["symbol"]) for event in current_day_unmatched})
     historical_symbols = sorted({str(event["symbol"]) for event in historical_unmatched})
@@ -112,7 +126,7 @@ def sync_trade_outcomes_from_broker(
         summary["daily_pnl_complete"] = False
     else:
         summary["history_complete"] = not historical_symbols
-        summary["daily_pnl_complete"] = True
+        summary["daily_pnl_complete"] = bool(summary["ok"])
     if historical_symbols:
         summary["history_warning"] = (
             f"broker_order_history_historical_unmatched_sells:{','.join(historical_symbols)}"
@@ -123,6 +137,20 @@ def sync_trade_outcomes_from_broker(
     return summary
 
 
+def verified_broker_account_scope(broker: Any) -> str:
+    """Bind journal identity to the account returned by this authenticated broker."""
+    config = broker.config
+    environment = getattr(config, "environment", getattr(config, "env", None))
+    environment = getattr(environment, "value", environment)
+    if environment not in {"paper", "live"}:
+        raise ValueError("verified_broker_environment_required")
+    account = broker.get_account()
+    account_id = account.get("id") if isinstance(account, dict) else None
+    if not isinstance(account_id, str) or not account_id.strip():
+        raise ValueError("verified_broker_account_required")
+    return f"alpaca:{environment}:{account_id.strip()}"
+
+
 def record_trade_outcomes_from_orders(
     orders: list[dict[str, Any]],
     *,
@@ -130,18 +158,17 @@ def record_trade_outcomes_from_orders(
     execution_journal_path: str | Path | None = None,
     execution_journal_rows: list[dict[str, Any]] | None = None,
     trading_day: date | datetime | str | None = None,
+    account_scope: str | None = None,
+    persist: bool = True,
 ) -> dict[str, Any]:
-    # The dashboard and the trading loop can sync the same broker history at
-    # the same time.  Keep load/deduplicate/append/compact as one transaction
-    # within the hosted process so a read-only dashboard refresh cannot race a
-    # cycle into duplicate or truncated JSONL records.
+    # One canonical load/validate/append transaction. Dashboard reads use
+    # persist=False and never change journal history as a side effect of GET.
     with _TRADE_OUTCOME_LOCK:
         return _record_trade_outcomes_from_orders_locked(
-            orders,
-            journal_path=journal_path,
+            orders, journal_path=journal_path,
             execution_journal_path=execution_journal_path,
             execution_journal_rows=execution_journal_rows,
-            trading_day=trading_day,
+            trading_day=trading_day, account_scope=account_scope, persist=persist,
         )
 
 
@@ -152,52 +179,118 @@ def _record_trade_outcomes_from_orders_locked(
     execution_journal_path: str | Path | None = None,
     execution_journal_rows: list[dict[str, Any]] | None = None,
     trading_day: date | datetime | str | None = None,
+    account_scope: str | None = None,
+    persist: bool = True,
 ) -> dict[str, Any]:
-    existing = {str(row.get("outcome_id")) for row in load_trade_outcomes(journal_path=journal_path)}
-    resolved_execution_rows = _resolve_execution_journal_rows(
-        execution_journal_rows,
-        execution_journal_path=execution_journal_path,
+    path = Path(journal_path) if journal_path is not None else trade_outcome_journal_path()
+    existing = load_trade_outcomes(journal_path=path)
+    execution_rows = _resolve_execution_journal_rows(
+        execution_journal_rows, execution_journal_path=execution_journal_path,
         outcome_journal_path=journal_path,
     )
-    outcomes = build_trade_outcomes_from_orders(orders, execution_journal_rows=resolved_execution_rows)
-    live_fill_outcomes = build_trade_outcomes_from_orders(
-        orders,
-        execution_journal_rows=resolved_execution_rows,
-        include_nonterminal_fills=True,
+    outcomes = build_trade_outcomes_from_orders(orders, execution_journal_rows=execution_rows)
+    live_outcomes = build_trade_outcomes_from_orders(
+        orders, execution_journal_rows=execution_rows, include_nonterminal_fills=True,
     )
-    new_rows = [row for row in outcomes if row["outcome_id"] not in existing]
-    path = Path(journal_path) if journal_path is not None else trade_outcome_journal_path()
+    plan: dict[str, Any] = {
+        "append_safe": False, "new_rows": [], "accounting_complete": False,
+        "requires_reconciliation": True, "unresolved": [], "conflicts": [],
+        "historical_duplicates": [], "history_rewritten": False,
+    }
+    if account_scope:
+        plan = plan_outcome_append(existing, outcomes, account_scope=account_scope)
+        # An unscoped historical row may only be evaluated in this account if
+        # both broker IDs appear in its authenticated, freshly matched history.
+        owned_pairs = {(r["symbol"], r["entry_broker_order_id"], r["exit_broker_order_id"]) for r in outcomes}
+        for index, row in enumerate(existing):
+            if not row.get("account_scope") and (
+                row.get("symbol"), row.get("entry_broker_order_id"), row.get("exit_broker_order_id")
+            ) not in owned_pairs:
+                plan["unresolved"].append({"origin": "existing", "index": index,
+                                           "reason": "historical_account_ownership_unverified"})
+    else:
+        plan["unresolved"].append({"reason": "verified_account_scope_required"})
+    # The lenient display reader cannot authorize writes over damaged history.
+    if path.exists():
+        try:
+            for line in path.read_text(encoding="utf-8").splitlines():
+                if line.strip() and not isinstance(json.loads(line), dict):
+                    raise ValueError("invalid_journal_record")
+        except (ValueError, UnicodeError):
+            plan["unresolved"].append({"reason": "journal_record_unreadable"})
+    if plan["unresolved"] or plan["conflicts"] or plan["historical_duplicates"]:
+        plan.update(append_safe=False, identity_check_complete=False, new_rows=[], requires_reconciliation=True)
+    new_rows = plan["new_rows"] if persist else []
+    snapshot = None
     if new_rows:
+        snapshot = _snapshot_journal(path)
         _append_trade_outcomes(path, new_rows)
-    all_rows = load_trade_outcomes(journal_path=journal_path)
     summary_policy_version = HOSTED_POLICY_VERSION if is_hosted_paper_runtime() else None
-    current_policy_rows = _filter_rows_for_policy(all_rows, summary_policy_version)
-    completed_groups = build_completed_trade_groups(current_policy_rows)
-    provisional_outcomes = [row for row in live_fill_outcomes if row.get("provisional_fill")]
-    return {
-        "ok": True,
-        "recorded": len(new_rows),
-        "outcomes": new_rows,
+    # Fresh broker-derived quantities own this view. Historical duplicates and
+    # legacy corrections remain diagnostic; they cannot inflate current P/L.
+    current_policy_rows = _filter_rows_for_policy(outcomes, summary_policy_version)
+    result = {
+        "ok": bool(plan["append_safe"]) if persist else True,
+        "recorded": len(new_rows), "outcomes": new_rows,
+        "broker_outcomes": live_outcomes,
         "summary_policy_version": summary_policy_version,
         "summary": summarize_trade_outcomes(current_policy_rows),
-        "completed_groups": completed_groups,
+        "completed_groups": build_completed_trade_groups(current_policy_rows),
         "group_summary": summarize_completed_trade_groups(current_policy_rows),
-        # Daily loss protection is account-wide. A legacy-policy loss still
-        # reduced today's paper account equity and must not disappear merely
-        # because the strategy version changed.
-        # Permanent rows deliberately wait for a terminal broker state so a
-        # cumulative partial fill cannot be appended and counted twice when it
-        # later completes.  Intraday protection still includes the currently
-        # realized, nonterminal quantity from the fresh broker snapshot.
-        "daily_realized_pnl": daily_realized_pnl(
-            [*all_rows, *provisional_outcomes],
-            trading_day=trading_day,
-        ),
-        "blocked_underlyings": recent_loss_guard(
-            all_rows,
-            policy_version=summary_policy_version,
-        )["blocked_underlyings"],
+        "daily_realized_pnl": daily_realized_pnl(live_outcomes, trading_day=trading_day),
+        "blocked_underlyings": recent_loss_guard(outcomes, policy_version=summary_policy_version)["blocked_underlyings"],
+        "winner_bias": recent_winner_bias(outcomes, policy_version=summary_policy_version),
+        "accounting_complete": False,  # Fees and full account history are separate reconciliation.
+        "identity_check_complete": bool(plan["append_safe"]),
+        "reconciliation": {k: v for k, v in plan.items() if k != "new_rows"},
+        "journal_snapshot": snapshot,
+        "view_source": "broker_order_fills",
+        "journal_history_rewritten": False,
+        "journal_diagnostics": {
+            "verified": False,
+            "summary": summarize_trade_outcomes(_filter_rows_for_policy(existing, summary_policy_version)),
+            "daily_realized_pnl": daily_realized_pnl(existing, trading_day=trading_day),
+        },
+        "persistence_enabled": persist,
     }
+    if not result["ok"]:
+        result["error"] = "outcome_journal_reconciliation_required"
+    return result
+
+
+def _snapshot_journal(path: Path) -> str | None:
+    """Atomically retain one content-verified pre-migration snapshot, without overwrite."""
+    snapshots = list(path.parent.glob(f"{path.name}.pre-identity-v2-*.jsonl"))
+    if snapshots:
+        if len(snapshots) != 1:
+            raise ValueError("journal_snapshot_ambiguous")
+        snapshot = snapshots[0]
+        digest = sha256(snapshot.read_bytes()).hexdigest()
+        if snapshot.name != f"{path.name}.pre-identity-v2-{digest}.jsonl":
+            raise ValueError("journal_snapshot_corrupt")
+        return str(snapshot)
+    if not path.exists() or not path.stat().st_size:
+        return None
+    content = path.read_bytes()
+    digest = sha256(content).hexdigest()
+    snapshot = path.with_name(f"{path.name}.pre-identity-v2-{digest}.jsonl")
+    temp_path = None
+    try:
+        with tempfile.NamedTemporaryFile(dir=path.parent, prefix=".outcome-snapshot-", delete=False) as temp:
+            temp_path = Path(temp.name)
+            temp.write(content)
+            temp.flush()
+            os.fsync(temp.fileno())
+        # Link publishes complete bytes atomically and never overwrites.
+        try:
+            os.link(temp_path, snapshot)
+        except FileExistsError:
+            if snapshot.read_bytes() != content:
+                raise ValueError("journal_snapshot_corrupt")
+    finally:
+        if temp_path is not None:
+            temp_path.unlink(missing_ok=True)
+    return str(snapshot)
 
 
 def build_trade_outcomes_from_orders(
@@ -206,22 +299,62 @@ def build_trade_outcomes_from_orders(
     execution_journal_rows: list[dict[str, Any]] | None = None,
     include_nonterminal_fills: bool = False,
 ) -> list[dict[str, Any]]:
+    return match_broker_order_lots(
+        orders, execution_journal_rows=execution_journal_rows,
+        include_nonterminal_fills=include_nonterminal_fills,
+    )["outcomes"]
+
+
+def match_broker_order_lots(
+    orders: list[dict[str, Any]],
+    *,
+    execution_journal_rows: list[dict[str, Any]] | None = None,
+    include_nonterminal_fills: bool = True,
+) -> dict[str, Any]:
+    """Quantity-aware FIFO view shared by accounting, risk checks and timeline.
+
+    Broker order IDs are required for persistence, but a read-only view can
+    display old synthetic/captured rows without inventing broker identities.
+    """
     journal_index = _execution_journal_index(execution_journal_rows or [])
-    normalized = sorted(
-        (_enrich_order_from_execution_journal(_normalize_order(order), journal_index) for order in orders),
-        key=lambda row: row["event_time"] or datetime.min.replace(tzinfo=UTC),
-    )
+    normalized = []
+    seen: dict[str, dict[str, Any]] = {}
+    for source in orders:
+        row = _enrich_order_from_execution_journal(_normalize_order(source), journal_index)
+        raw_quantity = source.get("filled_qty")
+        if raw_quantity not in (None, "") and (
+            _float_or_none(raw_quantity) is None or not math.isfinite(row["filled_qty"]) or row["filled_qty"] < 0
+        ):
+            raise ValueError("invalid_broker_filled_quantity")
+        if row["filled_qty"] > 0:
+            price = row["filled_avg_price"]
+            if price is None or not math.isfinite(price) or price < 0:
+                raise ValueError("invalid_broker_fill_price")
+            if row["event_time"] is None:
+                raise ValueError("broker_fill_time_required")
+            if source.get("asset_class") not in (None, "", "us_option"):
+                raise ValueError("unsupported_broker_asset_class")
+            if source.get("contract_multiplier", 100) not in (100, 100.0, "100"):
+                raise ValueError("unsupported_contract_multiplier")
+        order_id = row.get("broker_order_id")
+        if order_id and order_id in seen:
+            if row != seen[order_id]:
+                raise ValueError("conflicting_broker_order_snapshot")
+            continue
+        if order_id:
+            seen[order_id] = row
+        normalized.append(row)
+    normalized.sort(key=lambda row: (row["event_time"] or datetime.min.replace(tzinfo=UTC),
+                                     0 if row["side"] == "buy" else 1))
     open_buys: dict[str, list[dict[str, Any]]] = {}
     outcomes: list[dict[str, Any]] = []
+    pending: list[dict[str, Any]] = []
+    unmatched: list[dict[str, Any]] = []
     for order in normalized:
-        # Alpaca reports filled_qty cumulatively. Recording a partially-filled
-        # order and then its final filled state would double-count the first
-        # fill in this append-only ledger. Wait for the terminal fill.
-        if order["status"] not in _TERMINAL_FILL_STATUSES and not (
-            include_nonterminal_fills and _order_has_realized_fill(order)
-        ):
-            continue
-        if order["filled_qty"] <= 0 or order["filled_avg_price"] is None:
+        terminal = order["status"] in _TERMINAL_FILL_STATUSES
+        if not terminal:
+            pending.append(dict(order, pending_kind="open_order"))
+        if not _order_has_realized_fill(order):
             continue
         if order["side"] == "buy":
             open_buys.setdefault(order["symbol"], []).append({"order": order, "remaining_qty": order["filled_qty"]})
@@ -234,46 +367,30 @@ def build_trade_outcomes_from_orders(
             lot = queue[0]
             matched_qty = min(float(lot["remaining_qty"]), remaining_sell_qty)
             outcome = _outcome_from_pair(lot["order"], order, qty=matched_qty)
-            if order["status"] not in _TERMINAL_FILL_STATUSES:
+            if not terminal or lot["order"]["status"] not in _TERMINAL_FILL_STATUSES:
                 outcome["provisional_fill"] = True
             outcomes.append(outcome)
             lot["remaining_qty"] = round(float(lot["remaining_qty"]) - matched_qty, 10)
             remaining_sell_qty = round(remaining_sell_qty - matched_qty, 10)
             if lot["remaining_qty"] <= 0:
                 queue.pop(0)
-    return outcomes
+        if remaining_sell_qty > 0:
+            unmatched.append(dict(order, unmatched_qty=remaining_sell_qty))
+    for lots in open_buys.values():
+        for lot in lots:
+            pending.append(dict(lot["order"], remaining_filled_qty=lot["remaining_qty"],
+                                pending_kind="open_filled_buy"))
+    # Allocate every actual fill before selecting permanent rows. Dropping an
+    # earlier partial buy/sell first would assign a later terminal exit to the
+    # wrong lot. Nonterminal participation stays provisional until finalized.
+    visible_outcomes = outcomes if include_nonterminal_fills else [
+        row for row in outcomes if not row.get("provisional_fill")
+    ]
+    return {"outcomes": visible_outcomes, "pending": pending, "unmatched_sells": unmatched}
 
 
 def _unmatched_realized_sell_events(orders: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    inventory: dict[str, float] = {}
-    unmatched: list[dict[str, Any]] = []
-    normalized = sorted(
-        (_normalize_order(order) for order in orders),
-        key=lambda row: row["event_time"] or datetime.min.replace(tzinfo=UTC),
-    )
-    for order in normalized:
-        if not _order_has_realized_fill(order):
-            continue
-        quantity = float(order["filled_qty"] or 0.0)
-        if quantity <= 0:
-            continue
-        symbol = str(order["symbol"] or "").upper()
-        if order["side"] == "buy":
-            inventory[symbol] = inventory.get(symbol, 0.0) + quantity
-        elif order["side"] == "sell":
-            available = inventory.get(symbol, 0.0)
-            if quantity > available + 1e-9:
-                unmatched.append(
-                    {
-                        "symbol": symbol,
-                        "event_time": order["event_time"],
-                        "unmatched_qty": round(quantity - available, 10),
-                    }
-                )
-                inventory[symbol] = 0.0
-            else:
-                inventory[symbol] = available - quantity
-    return unmatched
+    return match_broker_order_lots(orders)["unmatched_sells"]
 
 
 def load_trade_outcomes(*, journal_path: str | Path | None = None, limit: int | None = None) -> list[dict[str, Any]]:
@@ -321,7 +438,8 @@ def _append_trade_outcomes(path: Path, rows: list[dict[str, Any]]) -> None:
             handle.write("\n")
         for row in rows:
             handle.write(f"{json.dumps(row, sort_keys=True)}\n")
-    compact_jsonl_tail(path)
+        handle.flush()
+        os.fsync(handle.fileno())
 
 
 def summarize_trade_outcomes(rows: list[dict[str, Any]]) -> dict[str, Any]:
@@ -592,7 +710,7 @@ def _outcome_from_pair(entry: dict[str, Any], exit_order: dict[str, Any], *, qty
     entry_price = float(entry["filled_avg_price"])
     exit_price = float(exit_order["filled_avg_price"])
     matched_qty = qty if qty is not None else min(float(entry["filled_qty"]), float(exit_order["filled_qty"]))
-    pnl = round((exit_price - entry_price) * matched_qty * 100.0, 2)
+    pnl = float(((Decimal(str(exit_price)) - Decimal(str(entry_price))) * Decimal(str(matched_qty)) * 100).quantize(Decimal("0.01")))
     return_pct = ((exit_price - entry_price) / entry_price) if entry_price else 0.0
     symbol = str(entry["symbol"])
     parts = _option_symbol_parts(symbol)
@@ -709,6 +827,8 @@ def _normalize_order(order: dict[str, Any]) -> dict[str, Any]:
         "symbol": str(order.get("symbol") or "").upper(),
         "side": str(order.get("side") or "").lower(),
         "status": str(order.get("status") or "").lower(),
+        "qty": _float_or_zero(order.get("qty")),
+        "limit_price": _float_or_none(order.get("limit_price")),
         "filled_qty": _float_or_zero(order.get("filled_qty")),
         "filled_avg_price": _float_or_none(order.get("filled_avg_price")),
         "submitted_at": submitted_at.isoformat() if submitted_at else None,
