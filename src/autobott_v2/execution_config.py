@@ -132,10 +132,9 @@ def load_alpaca_execution_config() -> AlpacaExecutionConfig:
             if hosted_paper
             else _normalize_bool(os.getenv("AUTOBOTT_LIVE_TRADING_ENABLED"), default=False)
         ),
-        allow_order_placement=(
-            True
-            if hosted_paper
-            else _normalize_bool(os.getenv("AUTOBOTT_ALLOW_ORDER_PLACEMENT"), default=False)
+        # Hosted policy supplies the default, but deployment can always stop orders.
+        allow_order_placement=_normalize_bool(
+            os.getenv("AUTOBOTT_ALLOW_ORDER_PLACEMENT"), default=hosted_paper
         ),
         max_position_cost=(
             HOSTED_MAX_POSITION_COST

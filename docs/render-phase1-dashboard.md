@@ -19,6 +19,39 @@ Use one Render Web Service for v1:
 
 Deploy remains blocked until the persistent disk and hosted secrets below are configured. Render web services are ephemeral by default, so `data/` and `artifacts/` are not durable without this disk-backed layout.
 
+### PR #39 validation build
+
+The existing `autobott-v2-validation-39` service must install the development
+extra before invoking pytest. Its validation build command is:
+
+```sh
+python -m pip install ".[dev]" && python scripts/validate_offline.py && node --test tests/cockpit_state.test.cjs
+```
+
+`pip install .` installs runtime dependencies only; pytest is declared in the
+`dev` extra. This validation-service correction does not change the production
+service's runtime dependency installation. Keep broker credentials absent and
+session autostart and order placement disabled in the validation service.
+The source-owned Python runner removes inherited Render and broker settings for
+the test process, uses isolated data directories, blocks outbound network, and
+fails if a test or application code swallows a blocked operation. Tests that
+exercise hosted behavior supply their own explicit fixtures. Node.js is required
+for the cockpit state checks in the command above.
+
+For this validation service, use `codex/autobott-release-validation-20260908`,
+the branch for PR #40 on top of PR #39, and `/api/health` as the health check.
+No broker credentials, dashboard token, secret files, or environment groups are
+needed to verify the locked cockpit and public health endpoint.
+
+Explicit `false` values for `AUTOBOTT_ALLOW_ORDER_PLACEMENT`,
+`AUTOBOTT_SESSION_AUTOSTART`, and `AUTOBOTT_SESSION_ARM_PAPER_EXECUTION` must
+remain effective on Render. These hard controls are separate from the
+code-owned hosted strategy parameters.
+
+The v2 cockpit entry point is `python -m autobott_v2.dashboard_app_v2`.
+Configuring a validation build does not establish production deployment,
+operator access, or supervised paper-trading evidence.
+
 ## Required Hosted Secrets
 
 - `ALPACA_API_KEY_ID=<paper key>`
@@ -63,7 +96,9 @@ For the local Windows operator path, you can skip PowerShell entirely and launch
 start_paper_dashboard.cmd
 ```
 
-That launcher auto-loads `C:\Users\flavo\Downloads\AutoBott.env`, applies the local paper/session defaults, binds the dashboard to `127.0.0.1:8000`, and uses token `autobott-local` unless overridden.
+That launcher auto-loads `C:\Users\flavo\Downloads\AutoBott.env`, applies the local paper/session defaults, and binds the dashboard to `127.0.0.1:8000`. Set `AUTOBOTT_DASHBOARD_AUTH_TOKEN` in that env file to a unique secret; the launcher does not provide or print a default token.
+
+The hosted dashboard also requires `AUTOBOTT_DASHBOARD_AUTH_TOKEN` to be configured as a secret in Render before deployment. Leave the service undeployed or locked until the owner records that configuration.
 
 ## Cutover Command
 

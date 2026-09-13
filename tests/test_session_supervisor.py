@@ -1,5 +1,9 @@
 from __future__ import annotations
 
+import threading
+
+import pytest
+
 import autobott_v2.session_supervisor as supervisor
 
 
@@ -56,6 +60,47 @@ def test_load_session_supervisor_config_run_forever_ignores_max_cycles(monkeypat
 
     assert config.run_forever is True
     assert config.max_cycles is None
+
+
+def test_hosted_autostart_off_never_starts_session_or_monitor(monkeypatch) -> None:
+    monkeypatch.setenv("RENDER", "true")
+    monkeypatch.setenv("AUTOBOTT_SESSION_AUTOSTART", "false")
+    monkeypatch.setattr(
+        supervisor,
+        "_start_session_thread",
+        lambda *_args, **_kwargs: pytest.fail("Disabled autostart must not create any worker"),
+    )
+
+    assert supervisor.maybe_start_session_supervisor() is False
+
+
+def test_hosted_arm_off_does_not_rearm_runtime_when_session_runs(monkeypatch) -> None:
+    monkeypatch.setenv("RENDER", "true")
+    monkeypatch.setenv("AUTOBOTT_SESSION_ARM_PAPER_EXECUTION", "false")
+    monkeypatch.setattr(supervisor, "_SESSION_STATE", supervisor.SessionSupervisorState())
+    monkeypatch.setattr(
+        supervisor,
+        "arm_paper_execution",
+        lambda **_kwargs: pytest.fail("Disabled startup arming must preserve the runtime lock"),
+    )
+    calls = []
+
+    def fake_run_trading_session(**kwargs):
+        calls.append(kwargs)
+
+        class Result:
+            def to_json_dict(self):
+                return {"cycles_completed": 1}
+
+        return Result()
+
+    monkeypatch.setattr(supervisor, "run_trading_session", fake_run_trading_session)
+    stop_event = threading.Event()
+    supervisor._run_session(supervisor.load_session_supervisor_config(), stop_event)
+
+    assert len(calls) == 1
+    assert stop_event.is_set()
+    assert supervisor._SESSION_STATE.last_error is None
 
 
 def test_load_session_supervisor_config_expands_top_options_universe(monkeypatch) -> None:

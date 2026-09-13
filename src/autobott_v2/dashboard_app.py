@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import copy
+import hmac
 import json
 import os
 import threading
@@ -51,7 +52,7 @@ from .runtime_control import (
 )
 from .runtime_paths import gate_path as default_gate_path
 from .runtime_paths import phase1_replay_campaign_root, phase1_snapshots_root
-from .trade_outcomes import record_trade_outcomes_from_orders
+from .trade_outcomes import record_trade_outcomes_from_orders, match_broker_order_lots
 
 
 JsonDict = dict[str, Any]
@@ -83,11 +84,16 @@ class _DashboardBrokerReadError(RuntimeError):
 def app(environ: dict[str, Any], start_response: Callable[..., Any]) -> list[bytes]:
     method = environ.get("REQUEST_METHOD", "GET").upper()
     path = environ.get("PATH_INFO", "/")
+    headers = _extract_headers(environ)
     body = _read_body(environ)
 
     strict_json = path in {"/api/options/timeline", "/api/trading/timeline"}
     try:
-        status_code, content_type, payload = handle_request(method, path, {}, body)
+        status_code, content_type, payload = handle_request(method, path, headers, body)
+    except PermissionError:
+        status_code = 401
+        content_type = "application/json; charset=utf-8"
+        payload = {"ok": False, "error": "unauthorized"}
     except Exception as exc:  # pragma: no cover
         status_code = 500
         content_type = "application/json; charset=utf-8"
@@ -125,6 +131,7 @@ def handle_request(method: str, path: str, headers: dict[str, str], body: bytes)
         payload = _health_payload()
         return (200 if payload["ok"] else 503), "application/json; charset=utf-8", payload
     if path.startswith("/api/"):
+        _require_auth(headers)
         if path == "/api/safety" and method == "GET":
             return 200, "application/json; charset=utf-8", _safety_payload()
         if path == "/api/alpaca/status" and method == "GET":
@@ -765,8 +772,8 @@ def _options_timeline_payload() -> JsonDict:
         return {"ok": False, "status": "alpaca_request_failed", "detail": str(exc)}
 
     normalized = sorted((_normalize_order_for_timeline(order) for order in orders), key=lambda row: row["event_time"] or datetime.min.replace(tzinfo=UTC))
-    round_trips, pending = _timeline_round_trips(normalized)
-    outcome_learning = record_trade_outcomes_from_orders(orders)
+    round_trips, pending = _timeline_round_trips(orders)
+    outcome_learning = record_trade_outcomes_from_orders(orders, persist=False)
     current_policy_groups = outcome_learning.get("group_summary") or {}
     clusters = _timeline_clusters(normalized, round_trips)
     warnings = _timeline_warnings(clusters, round_trips, pending)
@@ -780,6 +787,8 @@ def _options_timeline_payload() -> JsonDict:
         "clusters": sorted(clusters, key=lambda row: row.get("bucket_start") or "", reverse=True)[:20],
         "warnings": warnings,
         "outcome_learning": outcome_learning,
+        "accounting_complete": False,
+        "unmatched_sell_count": sum(row["classification"] == "unmatched_sell" for row in round_trips),
         "summary": {
             "orders_seen": len(normalized),
             "round_trips": len(round_trips),
@@ -820,52 +829,14 @@ def _normalize_order_for_timeline(order: dict[str, Any]) -> JsonDict:
 
 
 def _timeline_round_trips(orders: list[JsonDict]) -> tuple[list[JsonDict], list[JsonDict]]:
-    open_buys: dict[str, list[JsonDict]] = {}
-    round_trips: list[JsonDict] = []
-    pending: list[JsonDict] = []
-    for order in orders:
-        symbol = str(order.get("symbol") or "")
-        side = str(order.get("side") or "")
-        status = str(order.get("status") or "")
-        filled_qty = float(order.get("filled_qty") or 0.0)
-        filled_price = order.get("filled_avg_price")
-        if status not in {"filled", "partially_filled"}:
-            if status in {"new", "accepted", "pending_new", "pending_replace"}:
-                pending.append(_public_timeline_order(order))
-            continue
-        if filled_qty <= 0 or filled_price is None:
-            continue
-        if side == "buy":
-            open_buys.setdefault(symbol, []).append(order)
-            continue
-        if side != "sell":
-            continue
-        buy = open_buys.get(symbol, []).pop(0) if open_buys.get(symbol) else None
-        if buy is None:
-            round_trips.append(_unmatched_sell_round_trip(order))
-            continue
-        entry_price = float(buy.get("filled_avg_price") or 0.0)
-        exit_price = float(filled_price)
-        qty = min(float(buy.get("filled_qty") or 0.0), filled_qty)
-        pnl = round((exit_price - entry_price) * qty * 100.0, 2)
-        return_pct = ((exit_price - entry_price) / entry_price) if entry_price else 0.0
-        round_trips.append(
-            {
-                "symbol": symbol,
-                **_option_symbol_parts(symbol),
-                "entry_time": buy.get("filled_at") or buy.get("submitted_at"),
-                "exit_time": order.get("filled_at") or order.get("submitted_at"),
-                "entry_price": entry_price,
-                "exit_price": exit_price,
-                "qty": qty,
-                "pnl": pnl,
-                "return_pct": round(return_pct, 4),
-                "classification": _round_trip_classification(return_pct),
-            }
-        )
-    for buys in open_buys.values():
-        for buy in buys:
-            pending.append(_public_timeline_order(buy) | {"pending_kind": "open_filled_buy"})
+    matched = match_broker_order_lots(orders)
+    round_trips = [dict(row, classification=_round_trip_classification(row["return_pct"]))
+                   for row in matched["outcomes"]]
+    round_trips.extend(_unmatched_sell_round_trip(dict(row, filled_qty=row["unmatched_qty"]))
+                       for row in matched["unmatched_sells"])
+    pending = [dict(_public_timeline_order(row), pending_kind=row["pending_kind"],
+                    remaining_filled_qty=row.get("remaining_filled_qty"))
+               for row in matched["pending"]]
     return round_trips, pending
 
 
@@ -878,7 +849,7 @@ def _unmatched_sell_round_trip(order: JsonDict) -> JsonDict:
         "entry_price": None,
         "exit_price": order.get("filled_avg_price"),
         "qty": order.get("filled_qty"),
-        "pnl": 0.0,
+        "pnl": None,
         "return_pct": None,
         "classification": "unmatched_sell",
     }
@@ -2048,7 +2019,7 @@ def _dashboard_html() -> str:
           </div>
           <div class="mini">
             <div class="mini-label">Dashboard Access</div>
-            <div class="mono">DIRECT</div>
+            <div class="mono" id="auth-state-text">LOCKED</div>
           </div>
           <div class="mini">
             <div class="mini-label">Health</div>
@@ -2149,11 +2120,17 @@ def _dashboard_html() -> str:
           <div class="group-head">
             <div>
               <h2>Operator Actions</h2>
-              <div class="section-note">Paper-trading controls are available directly from this operator console.</div>
+              <div class="section-note">Token-gated controls. Set the dashboard token before protected actions will succeed.</div>
             </div>
-            <span class="badge safe">READY</span>
+            <span class="badge warn" id="action-state">TOKEN REQUIRED</span>
           </div>
           <div class="group-grid">
+            <div class="group">
+              <div class="group-title">Auth</div>
+              <button class="primary" onclick="setToken()">Set Dashboard Token</button>
+              <button class="ghost" onclick="clearToken()">Clear Token</button>
+              <div class="button-note">Protected panels stay locked until a valid dashboard token is accepted.</div>
+            </div>
             <div class="group">
               <div class="group-title">Runtime</div>
               <button class="primary" onclick="armPaperMode()">Arm paper execution</button>
@@ -2212,13 +2189,46 @@ def _dashboard_html() -> str:
   <script>
     const dashboardState = {
       version: 'loading',
+      authState: 'LOCKED',
       safety: null,
       corpus: null,
       campaign: null,
       session: null
     };
 
-    const apiHeaders = () => ({ 'Content-Type': 'application/json' });
+    const apiHeaders = () => {
+      const token = sessionStorage.getItem('dashboardToken') || '';
+      return token
+        ? { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' }
+        : { 'Content-Type': 'application/json' };
+    };
+
+    function setToken() {
+      const value = window.prompt('Enter dashboard auth token');
+      if (value) {
+        sessionStorage.setItem('dashboardToken', value);
+        setAuthState('LOCKED');
+        logEntry('Token updated', 'Dashboard token stored in browser session. Refreshing protected panels.', 'warn');
+        refreshAll();
+      }
+    }
+
+    function clearToken() {
+      sessionStorage.removeItem('dashboardToken');
+      setAuthState('LOCKED');
+      logEntry('Token cleared', 'Protected panels are locked again until a valid token is set.', 'warn');
+      refreshAll();
+    }
+
+    function setAuthState(state) {
+      dashboardState.authState = state;
+      document.getElementById('auth-state-text').textContent = state;
+      const action = document.getElementById('action-state');
+      if (action) {
+        action.textContent = state === 'AUTHENTICATED' ? 'CONTROLLED ACCESS' : 'TOKEN REQUIRED';
+        action.className = `badge ${state === 'AUTHENTICATED' ? 'safe' : 'warn'}`;
+      }
+    }
 
     async function callApi(path, options = {}) {
       try {
@@ -2235,6 +2245,11 @@ def _dashboard_html() -> str:
               detail: `${path} returned HTTP ${response.status} with invalid JSON: ${error?.message || error}`
             };
           }
+        }
+        if (response.status === 401) {
+          setAuthState('LOCKED');
+        } else if (response.ok && path !== '/api/health' && sessionStorage.getItem('dashboardToken')) {
+          setAuthState('AUTHENTICATED');
         }
         return { ok: response.ok, status: response.status, payload };
       } catch (error) {
@@ -2314,6 +2329,10 @@ def _dashboard_html() -> str:
     function renderDashboardPanel(targetId, result, formatter) {
       const target = document.getElementById(targetId);
       if (!result.ok) {
+        if (result.status === 401) {
+          target.innerHTML = emptyState('Locked', 'Dashboard token required. Use Set Dashboard Token before viewing this panel.');
+          return false;
+        }
         target.innerHTML = errorState('Request failed', result.payload.detail || result.payload.error || 'Unknown error', result.payload);
         return false;
       }
@@ -2921,6 +2940,16 @@ def _dashboard_html() -> str:
 """
 
 
+def _require_auth(headers: dict[str, str]) -> None:
+    expected = os.getenv("AUTOBOTT_DASHBOARD_AUTH_TOKEN", "")
+    if not expected:
+        raise PermissionError("dashboard_auth_token_not_configured")
+    provided = headers.get("authorization", "")
+    scheme, separator, token = provided.partition(" ")
+    if separator != " " or scheme.lower() != "bearer" or not hmac.compare_digest(token.encode("utf-8"), expected.encode("utf-8")):
+        raise PermissionError("dashboard_auth_required")
+
+
 def _extract_headers(environ: dict[str, Any]) -> dict[str, str]:
     headers: dict[str, str] = {}
     for key, value in environ.items():
@@ -2965,7 +2994,12 @@ def _parse_datetime(value: Any) -> datetime | None:
 
 
 def _reason(status_code: int) -> str:
-    return {200: "OK", 404: "Not Found", 500: "Internal Server Error"}.get(status_code, "OK")
+    return {
+        200: "OK",
+        401: "Unauthorized",
+        404: "Not Found",
+        500: "Internal Server Error",
+    }.get(status_code, "OK")
 
 
 def _corpus_root() -> Path:
@@ -3034,14 +3068,11 @@ def _thesis_failure_sort_key(row: JsonDict) -> tuple[float, float, float, str]:
 
 
 def main() -> int:
-    bootstrap_env_file()
-    host = os.getenv("HOST", "0.0.0.0")
-    port = int(os.getenv("PORT", "8000"))
-    maybe_start_session_supervisor()
-    with make_server(host, port, app, server_class=_ThreadingWSGIServer) as httpd:
-        print(f"AutoBott dashboard serving on http://{host}:{port}")
-        httpd.serve_forever()
-    return 0
+    # Existing Render services and the Windows launcher still use this module.
+    # Keep one cockpit entry point across retained service configuration.
+    from .dashboard_app_v2 import main as cockpit_main
+
+    return cockpit_main()
 
 
 if __name__ == "__main__":
