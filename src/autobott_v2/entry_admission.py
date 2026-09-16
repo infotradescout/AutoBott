@@ -1,0 +1,235 @@
+"""Read-only entry revalidation; no broker, exit, or accounting writes."""
+from __future__ import annotations
+
+from collections.abc import Callable, Mapping
+from dataclasses import dataclass, replace
+from datetime import UTC, datetime
+import math
+from typing import Any
+
+from .bar_timing import aware_utc, bar_duration
+from .core_runner import CoreRunnerPair, CoreRunnerRules, select_core_runner_pair
+from .hosted_policy import signal_proxy_for
+from .phase1_engine import _contract_rejection_reasons
+from .phase1_models import DecisionCard, DecisionInput, DecisionStatus, ExecutionLayer, Phase1Rules
+from .phase1_validate import _contract_from_payload, _cycle_profile_from_snapshot
+from .quote_observation import observed_quote_fields
+
+
+@dataclass(frozen=True)
+class EntryMarketRules:
+    # Operational freshness bounds, not fitted success/holding-period rules.
+    # 30 seconds matches the existing execution simulator's quote-age ceiling.
+    max_quote_age_seconds: float = 30.0
+    max_decision_age_seconds: float = 30.0
+
+    def __post_init__(self) -> None:
+        for value in (self.max_quote_age_seconds, self.max_decision_age_seconds):
+            if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value) or value <= 0:
+                raise ValueError("invalid_entry_market_age_limit")
+
+
+class EntryMarketRejected(ValueError):
+    def __init__(self, reason: str, detail: str | None = None):
+        self.reason = reason
+        self.detail = detail or reason
+        super().__init__(self.detail)
+
+
+def _age(timestamp: datetime, now: datetime, maximum: float, label: str) -> float:
+    age = (now - timestamp).total_seconds()
+    if age < 0:
+        raise EntryMarketRejected("entry_future_timestamp", label)
+    if age > maximum:
+        raise EntryMarketRejected("entry_stale_market_evidence", label)
+    return age
+
+
+def _quote(raw: Any, now: datetime, maximum: float, symbol: str):
+    try:
+        bid, ask, timestamp = observed_quote_fields(raw, allow_zero_bid=False)
+    except ValueError as exc:
+        raise EntryMarketRejected("entry_quote_invalid", f"{symbol}:{exc}") from exc
+    stamp = aware_utc(timestamp)
+    return bid, ask, stamp, _age(stamp, now, maximum, symbol)
+
+
+def _completed_evidence(snapshot: Mapping[str, Any], decision: DecisionCard) -> dict[str, Any]:
+    proof = snapshot.get("bar_evidence", {})
+    if proof.get("timestamp_semantics") != "interval_start" or proof.get("completed_bars_only") is not True:
+        raise EntryMarketRejected("entry_completed_bar_evidence_missing")
+    cutoff = aware_utc(proof.get("cutoff"))
+    if cutoff > aware_utc(decision.timestamp):
+        raise EntryMarketRejected("entry_bar_cutoff_after_decision")
+    duration = bar_duration(proof.get("timeframe"))
+    last_closed = {}
+    groups = {"underlying": snapshot.get("market_bars", [])}
+    context = snapshot.get("context", {})
+    groups.update({key: context.get(key, []) for key in ("spy_bars", "qqq_bars", "vix_bars")})
+    for label, rows in groups.items():
+        if not rows:
+            raise EntryMarketRejected("entry_completed_bar_evidence_missing", label)
+        times = [aware_utc(row.get("timestamp")) for row in rows]
+        if any(a >= b for a, b in zip(times, times[1:])):
+            raise EntryMarketRejected("entry_bar_order_invalid", label)
+        if any(t + duration > cutoff for t in times):
+            raise EntryMarketRejected("entry_unfinished_bar", label)
+        last_closed[label] = (times[-1] + duration).isoformat()
+    return {"timeframe": proof["timeframe"], "cutoff": cutoff.isoformat(), "last_closed": last_closed}
+
+
+def filter_entry_quote_candidates(
+    decision_input: DecisionInput, snapshot: Mapping[str, Any], *, rules: EntryMarketRules | None = None,
+) -> tuple[DecisionInput, dict[str, Any]]:
+    """Keep stale/invalid quotes out of the ranking, not just out of submission.
+
+    The source snapshot stays unchanged, including rejected observations.
+    This is runtime input admission, not a retrospective rewrite of replay data.
+    """
+    rules = rules or EntryMarketRules()
+    now = aware_utc(decision_input.timestamp)
+    if snapshot.get("ticker") != decision_input.ticker or aware_utc(snapshot.get("timestamp")) != now:
+        raise EntryMarketRejected("entry_snapshot_identity_mismatch")
+    stock = snapshot.get("underlying_quote", {})
+    _quote({"bp": stock.get("bid"), "ap": stock.get("ask"), "t": stock.get("quote_timestamp")},
+           now, rules.max_quote_age_seconds, decision_input.ticker)
+    raw_by_symbol: dict[str, list[Mapping[str, Any]]] = {}
+    for row in snapshot.get("option_chain", []):
+        raw_by_symbol.setdefault(row.get("option_symbol"), []).append(row)
+    allowed, rejected = [], []
+    for contract in decision_input.option_chain:
+        matches = raw_by_symbol.get(contract.option_symbol, [])
+        try:
+            if len(matches) != 1:
+                raise EntryMarketRejected("entry_contract_identity_missing_or_ambiguous")
+            row = matches[0]
+            _quote({"bp": row.get("bid"), "ap": row.get("ask"), "t": row.get("quote_timestamp")},
+                   now, rules.max_quote_age_seconds, contract.option_symbol)
+        except EntryMarketRejected as exc:
+            rejected.append({"option_symbol": contract.option_symbol, "reason": exc.reason})
+        else:
+            allowed.append(contract)
+    return replace(decision_input, option_chain=allowed), {
+        "checked_at": now.isoformat(), "max_quote_age_seconds": rules.max_quote_age_seconds,
+        "eligible_contracts": len(allowed), "rejected": rejected,
+    }
+
+
+def refresh_entry_admission(
+    decision: DecisionCard,
+    pair: CoreRunnerPair | None,
+    snapshot: Mapping[str, Any],
+    data_client: Any,
+    *,
+    decision_rules: Phase1Rules,
+    pair_rules: CoreRunnerRules | None,
+    authorized_prices: Mapping[str, float],
+    now_fn: Callable[[], datetime],
+    rules: EntryMarketRules | None = None,
+) -> dict[str, Any]:
+    """Recheck EXACT approved contracts just before the submission callback.
+
+    Only reads market quotes. Returned evidence does not change order prices,
+    thresholds, exits, or selection. Indicative-feed quotes are not represented
+    as executable prices. Greeks/OI remain captured metadata, bounded by the
+    decision-age ceiling, not newly broker-verified or recalculated Greeks.
+    """
+    try:
+        rules = rules or EntryMarketRules()
+        if decision.decision is not DecisionStatus.TRADE_CANDIDATE or decision.selected_contract is None:
+            raise EntryMarketRejected("entry_not_approved")
+        if snapshot.get("ticker") != decision.ticker or aware_utc(snapshot.get("timestamp")) != aware_utc(decision.timestamp):
+            raise EntryMarketRejected("entry_snapshot_identity_mismatch")
+        before = aware_utc(now_fn())
+        _age(aware_utc(decision.timestamp), before, rules.max_decision_age_seconds, "decision")
+        bars = _completed_evidence(snapshot, decision)
+        primary = decision.selected_contract
+        if pair is not None and pair.primary.option_symbol != primary.option_symbol:
+            raise EntryMarketRejected("entry_primary_identity_changed")
+        contracts = [primary] if pair is None else [pair.primary, pair.runner]
+        symbols = [contract.option_symbol for contract in contracts]
+        if len(set(symbols)) != len(symbols):
+            raise EntryMarketRejected("entry_duplicate_contract_identity")
+        originals = {}
+        for contract in contracts:
+            matches = [row for row in snapshot.get("option_chain", []) if row.get("option_symbol") == contract.option_symbol]
+            if len(matches) != 1:
+                raise EntryMarketRejected("entry_contract_identity_missing_or_ambiguous", contract.option_symbol)
+            row = matches[0]
+            if (row.get("underlying", "").upper() != decision.ticker.upper()
+                    or row.get("expiration") != contract.expiration.isoformat()
+                    or row.get("strike") != contract.strike
+                    or row.get("option_type") != contract.option_type.value):
+                raise EntryMarketRejected("entry_contract_identity_changed", contract.option_symbol)
+            originals[contract.option_symbol] = row
+        option_getter = getattr(data_client, "get_latest_option_quotes", None)
+        stock_getter = getattr(data_client, "get_latest_stock_quotes", None)
+        if not callable(option_getter) or not callable(stock_getter):
+            raise EntryMarketRejected("entry_quote_refresh_unavailable")
+        signal_symbol = signal_proxy_for(decision.ticker)
+        try:
+            option_quotes = option_getter(symbols)
+            stock_quotes = stock_getter([signal_symbol])
+        except Exception as exc:
+            raise EntryMarketRejected("entry_quote_refresh_failed", type(exc).__name__) from exc
+        after = aware_utc(now_fn())
+        if after < before:
+            raise EntryMarketRejected("entry_clock_regressed")
+        decision_age = _age(aware_utc(decision.timestamp), after, rules.max_decision_age_seconds, "decision")
+        if not isinstance(option_quotes, Mapping) or not isinstance(stock_quotes, Mapping):
+            raise EntryMarketRejected("entry_quote_response_invalid")
+        sbid, sask, stime, sage = _quote(stock_quotes.get(signal_symbol), after, rules.max_quote_age_seconds, signal_symbol)
+        source_stock_time = aware_utc(snapshot["underlying_quote"]["quote_timestamp"])
+        _age(source_stock_time, aware_utc(decision.timestamp), rules.max_quote_age_seconds, "captured_underlying")
+        if stime < source_stock_time:
+            raise EntryMarketRejected("entry_quote_timestamp_regressed", signal_symbol)
+        fresh = []
+        quote_evidence = []
+        for approved in contracts:
+            symbol = approved.option_symbol
+            bid, ask, timestamp, age = _quote(option_quotes.get(symbol), after, rules.max_quote_age_seconds, symbol)
+            source_time = aware_utc(originals[symbol]["quote_timestamp"])
+            _age(source_time, aware_utc(decision.timestamp), rules.max_quote_age_seconds, f"captured:{symbol}")
+            if timestamp < source_time:
+                raise EntryMarketRejected("entry_quote_timestamp_regressed", symbol)
+            authorized = authorized_prices.get(symbol)
+            if isinstance(authorized, bool) or not isinstance(authorized, (int, float)) or not math.isfinite(authorized) or authorized <= 0:
+                raise EntryMarketRejected("entry_authorized_price_missing", symbol)
+            # Do not chase a higher ask beyond the ORIGINAL allowance. A passive
+            # limit can remain passive; this does not promise a fill at the ask.
+            ceiling = max(approved.ask, authorized)
+            if ask > ceiling:
+                raise EntryMarketRejected("entry_quote_above_original_allowance", symbol)
+            fresh.append(replace(_contract_from_payload(originals[symbol]), bid=bid, ask=ask))
+            quote_evidence.append({"option_symbol": symbol, "bid": bid, "ask": ask,
+                "quote_timestamp": timestamp.isoformat(), "quote_age_seconds": age,
+                "original_ask": approved.ask, "original_price_allowance": ceiling})
+        layer = ExecutionLayer.TACTICAL if decision.execution_layer in {ExecutionLayer.TACTICAL, ExecutionLayer.BOTH} else ExecutionLayer.RIDER
+        underlying = (sbid + sask) / 2 if signal_symbol == decision.ticker.upper() else float(snapshot["underlying_quote"]["last"])
+        rejections = _contract_rejection_reasons(fresh[0], underlying, after.date(), decision_rules, layer,
+                                                _cycle_profile_from_snapshot(snapshot.get("cycle_profile", {})))
+        if rejections:
+            raise EntryMarketRejected("entry_primary_contract_no_longer_eligible", ",".join(rejections))
+        if pair is not None:
+            if pair_rules is None:
+                raise EntryMarketRejected("entry_pair_rules_missing")
+            checked = select_core_runner_pair(pair.primary, fresh, rules=pair_rules)
+            if checked is None or checked.runner.option_symbol != pair.runner.option_symbol:
+                raise EntryMarketRejected("entry_pair_no_longer_eligible")
+        feed = getattr(data_client, "option_feed", getattr(data_client, "feed", "unreported"))
+        return {
+            "schema_version": "entry_admission.v1", "decision_id": decision.decision_id,
+            "checked_at": after.isoformat(), "decision_age_seconds": decision_age,
+            "max_quote_age_seconds": rules.max_quote_age_seconds,
+            "max_decision_age_seconds": rules.max_decision_age_seconds,
+            "primary_option_symbol": primary.option_symbol, "quotes": quote_evidence,
+            "signal_symbol": signal_symbol, "signal_quote_timestamp": stime.isoformat(),
+            "signal_quote_age_seconds": sage, "completed_bars": bars,
+            "underlying_reference_basis": "fresh_equity_mid" if signal_symbol == decision.ticker.upper() else "captured_index_estimate_with_fresh_proxy",
+            "options_feed": feed, "executable_fill_verified": False,
+            "entry_edge_established": False,
+        }
+    except EntryMarketRejected:
+        raise
+    except (ValueError, TypeError, KeyError, AttributeError, OverflowError) as exc:
+        raise EntryMarketRejected("entry_market_evidence_invalid", type(exc).__name__) from exc

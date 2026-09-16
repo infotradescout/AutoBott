@@ -27,14 +27,14 @@ class FakeCaptureClient:
         return {
             symbol.upper(): [
                 {
-                    "t": (end - timedelta(minutes=34 - index)).isoformat(),
+                    "t": (end - timedelta(minutes=limit - 1 - index)).isoformat(),
                     "o": base + index * 0.1,
                     "h": base + index * 0.1 + 0.2,
                     "l": base + index * 0.1 - 0.2,
                     "c": base + index * 0.1 + 0.05,
                     "v": 1000 + index * 10,
                 }
-                for index in range(35)
+                for index in range(limit)
             ]
             for symbol, base in ((symbol, _base_price(symbol)) for symbol in symbols)
         }
