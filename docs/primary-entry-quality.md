@@ -4,7 +4,7 @@
 
 A primary entry must create a meaningful favorable move in the selected option within its intended holding window, before an unacceptable initial drawdown. Exit management is evaluated separately against an unchanged exit policy. A favorable underlying move, a fleeting green mark, or a winning secondary leg is not a substitute for primary-contract opportunity.
 
-This change adds a read-only assessment to the existing replay path. It does not alter primary-entry selection, broker execution, live/paper settings, exit rules, outcome accounting, or safety gates. It is measurement infrastructure, not a demonstrated strategy improvement.
+The initial change added a read-only assessment to the existing replay path. The subsequent entry-selection corrections in `entry-selection-integrity.md` extend this PR beyond instrumentation. Broker execution, live/paper settings, exit rules, outcome accounting, and safety gates remain unchanged. Neither checkpoint demonstrates an entry-method advantage.
 
 ## Existing mismatch found
 
@@ -31,7 +31,7 @@ A missing protocol, invalid fill basis, missing selected-contract quotes, crosse
 
 ## Replay use and reproducibility
 
-Call the existing `run_replay` with `entry_quality_rules_by_role={"tactical": tactical_rules, "rider": rider_rules}` after fixing the study protocol. Omit a role and its fills remain unscorable; one role never inherits another role's horizon. The assessment writes `entry_quality.jsonl` and adds `entry_quality` to `scorecard.json` and the return object. Its protocol values and SHA-256 hashes are written to the manifest before entry assessment begins. Existing exit/fill configuration and input snapshot hashes remain intact.
+For the v2 entry method, explicitly use `entry_engine="v2"` and supply the resolved `decision_rules`; the backward-compatible default remains the legacy engine. See `entry-selection-integrity.md` for the execution-parity limitation. Call `run_replay` with `entry_quality_rules_by_role={"tactical": tactical_rules, "rider": rider_rules}` after fixing the study protocol. Omit a role and its fills remain unscorable; one role never inherits another role's horizon. The assessment writes `entry_quality.jsonl` and adds `entry_quality` to `scorecard.json` and the return object. Its protocol values and SHA-256 hashes are written to the manifest before entry assessment begins. Existing exit/fill configuration and input snapshot hashes remain intact.
 
 The manifest explicitly reports `entry_quality_preregistration_verified: false`: a saved hash is an identity check, not evidence that the protocol was committed before anyone examined the sample. Independently retain the protocol commit, data cutoff, entry/exit code revisions, and holdout assignment. Do not relabel a retrospective exploratory run as preregistered.
 
@@ -43,7 +43,7 @@ Replay labels its fill evidence `simulated_fill`. The module can label supplied 
 
 To establish an entry-method advantage, freeze a development/chronological-holdout split, prospective success thresholds, contract-availability rules, entry-method versions, and the same exit/fill settings for both methods. Keep overlapping observation windows out of opposite sides of the split. Compare primary opportunity rate, unscorable coverage, time to target, pre-opportunity drawdown, and unchanged-exit net expectancy against a predeclared relevant baseline. Preserve ticker/session/leg attribution rather than pooling secondary winners into the primary. Account for clustered trades when estimating uncertainty. Do not tune on the holdout or select hindsight option contracts or selling points. The report deliberately leaves `edge_established` false.
 
-## Validation performed
+## Initial measurement-patch validation
 
 40 synthetic unittest methods passed under Python 3.13.5 in an isolated sandbox with socket/DNS connection attempts denied (zero attempts). This includes 36 evaluator tests and four replay-orchestration tests. The replay tests exercise the candidate `run_replay` with mocked existing engine, simulation, exit, and gate dependencies; they are not a complete-repository or broker integration run. The source-owned test file can run with normal repository imports in a full checkout.
 
