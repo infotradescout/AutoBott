@@ -10,11 +10,12 @@ from typing import Any
 
 from .core_runner import load_core_runner_rules, select_core_runner_pair
 from .execution_broker import AlpacaExecutionBroker
+from .entry_admission import EntryMarketRejected, filter_entry_quote_candidates, refresh_entry_admission
 from .defined_risk_spreads import append_defined_risk_spread_candidate, select_defined_risk_spread
 from .execution_models import BrokerEnvironment
 from .execution_journal import append_execution_outcome, execution_journal_path
 from .execution_reconciler import reconcile_open_positions
-from .execution_orchestrator import ExecutionRejectedError, submit_core_runner_to_broker, submit_decision_to_broker
+from .execution_orchestrator import build_trade_intent_from_decision, ExecutionRejectedError, submit_core_runner_to_broker, submit_decision_to_broker
 from .ghost_trades import append_ghost_trade, observe_ghost_trades
 from .hosted_policy import (
     HOSTED_BAR_TIMEFRAME,
@@ -45,12 +46,17 @@ from .phase1_models import (
 )
 from .phase1_snapshot_capture import CaptureRules, capture_symbol_snapshot
 from .phase1_validate import _decision_input_from_snapshot, _load_snapshot
+from .primary_followthrough import configured_observation_rules, register_primary_observation, poll_primary_observations
 from .position_store import load_open_positions
 from .position_monitor import run_position_monitor
 from .runtime_control import load_runtime_state
-from .runtime_paths import data_root, phase1_snapshots_root
+from .runtime_paths import artifacts_root, data_root, phase1_snapshots_root
 from .storage_retention import prune_snapshot_storage
 from .trade_outcomes import sync_trade_outcomes_from_broker
+
+
+def _entry_check_now() -> datetime:
+    return datetime.now(tz=UTC)
 
 
 def decision_journal_path() -> Path:
@@ -193,7 +199,7 @@ def run_trading_cycle(
                 symbol=symbol,
                 corpus_root=resolved_corpus_root,
                 scheduled_market_time=snapshot_time,
-                captured_at_utc=captured_at,
+                captured_at_utc=captured_at if captured_at_utc is not None else datetime.now(tz=UTC),
                 corpus_type="production_capture" if resolved_broker.config.environment.value == "live" else "paper_capture",
                 market_timezone="America/New_York",
                 volatility_proxy_symbol="VIXY",
@@ -202,7 +208,9 @@ def run_trading_cycle(
             )
             snapshot = _load_snapshot(Path(snapshot_path))
             decision_input = _decision_input_from_snapshot(snapshot)
-            decision = build_decision_card(decision_input, _hosted_execution_rules())
+            decision_input, entry_quote_filter = filter_entry_quote_candidates(decision_input, snapshot)
+            entry_rules = _hosted_execution_rules()
+            decision = build_decision_card(decision_input, entry_rules)
         except Exception as exc:
             _append_skip(
                 skipped,
@@ -266,6 +274,7 @@ def run_trading_cycle(
             )
         snapshot_paths.append(snapshot_path)
         decision_payload = decision.to_json_dict()
+        decision_payload["entry_quote_filter"] = entry_quote_filter
         decisions.append(decision_payload)
         try:
             append_decision_card(decision_payload, snapshot_path=snapshot_path, log_path=decision_log_path)
@@ -559,6 +568,44 @@ def run_trading_cycle(
 
         def _mark_submission_attempt(intent: Any) -> None:
             nonlocal trade_attempted_count, submission_attempted
+            authorized_prices = {intent.option_symbol: intent.limit_price}
+            if core_runner_pair is not None:
+                runner_intent = build_trade_intent_from_decision(
+                    decision, contract=core_runner_pair.runner, quantity=1,
+                    environment=resolved_broker.config.environment,
+                    max_position_cost=resolved_broker.config.effective_max_position_cost(),
+                )
+                authorized_prices[runner_intent.option_symbol] = runner_intent.limit_price
+            try:
+                admission = refresh_entry_admission(
+                    decision, core_runner_pair, snapshot, resolved_data_client,
+                    decision_rules=entry_rules, pair_rules=core_runner_rules,
+                    authorized_prices=authorized_prices, now_fn=_entry_check_now,
+                )
+            except EntryMarketRejected as exc:
+                raise ExecutionRejectedError(exc.reason, detail=exc.detail) from exc
+            _record_execution_outcome(
+                execution_outcomes, ticker=symbol.upper(), decision_id=decision.decision_id,
+                thesis_id=thesis_id, disposition="entry_market_revalidated",
+                detail="exact selected contracts refreshed before first submission",
+                journal_path=execution_log_path, payload=admission,
+            )
+            try:
+                observation_rules = configured_observation_rules()
+                if observation_rules is not None:
+                    watch_id = register_primary_observation(
+                        artifacts_root() / "primary_followthrough", snapshot, admission, observation_rules)
+                    _record_execution_outcome(
+                        execution_outcomes, ticker=symbol.upper(), decision_id=decision.decision_id,
+                        thesis_id=thesis_id, disposition="primary_observation_registered",
+                        detail="admission is not a fill; continue primary quotes after exits",
+                        journal_path=execution_log_path, payload={"watch_id": watch_id},
+                    )
+            except Exception as exc:
+                # Observation failures are explicit but cannot disable exits or
+                # reinterpret broker permissions/accounting safeguards.
+                execution_outcomes.append({"disposition": "primary_observation_registration_failed",
+                    "decision_id": decision.decision_id, "error_type": type(exc).__name__, "detail": str(exc)})
             _remember_setup_event(setup_event_id, execution_log_path, recent_setup_events)
             submission_attempted = True
             trade_attempted_count += 1
@@ -671,6 +718,15 @@ def run_trading_cycle(
                     journal_path=execution_log_path,
                     payload={"exception_type": type(exc).__name__},
                 )
+
+    try:
+        if configured_observation_rules() is not None:
+            followthrough = poll_primary_observations(
+                artifacts_root() / "primary_followthrough", resolved_data_client, now_fn=_entry_check_now)
+            execution_outcomes.append({"disposition": "primary_observation_poll", **followthrough})
+    except Exception as exc:
+        execution_outcomes.append({"disposition": "primary_observation_poll_failed",
+            "error_type": type(exc).__name__, "detail": str(exc)})
 
     finished_at = datetime.now(tz=UTC)
     return TradingCycleResult(

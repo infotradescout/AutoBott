@@ -219,8 +219,13 @@ def _volume_impulse(bars: list[MarketBar]) -> float:
     if baseline <= 0:
         return 0.0
     ratio = bars[-1].volume / baseline
-    direction = 1.0 if bars[-1].close >= bars[-1].open else -1.0
-    return direction * _squash((ratio - 1.0) / 0.75)
+    current = bars[-1]
+    if current.close == current.open:
+        return 0.0
+    direction = 1.0 if current.close > current.open else -1.0
+    # Low activity is absence of confirmation, not opposite-side buying/selling.
+    # Only excess volume contributes directional evidence; doji bars are neutral.
+    return direction * _squash(max(0.0, ratio - 1.0) / 0.75)
 
 
 def _failed_breakout(bars: list[MarketBar]) -> bool:

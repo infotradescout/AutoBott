@@ -7,6 +7,32 @@ import pytest
 import autobott_v2.session_supervisor as supervisor
 
 
+
+@pytest.fixture(autouse=True)
+def _join_test_workers_before_restoring_mocks(monkeypatch):
+    # Keep each worker's dependencies mocked until that worker has finished.
+    # The last test deliberately replaces global thread references, so capture
+    # the thread/event pair at creation rather than trusting the final globals.
+    from types import SimpleNamespace
+    workers = []
+
+    def tracked_thread(*args, **kwargs):
+        worker = threading.Thread(*args, **kwargs)
+        workers.append((worker, kwargs["args"][-1]))
+        return worker
+
+    monkeypatch.setattr(supervisor, "threading", SimpleNamespace(
+        Thread=tracked_thread, Event=threading.Event,
+    ))
+    yield
+    for _, stop_event in workers:
+        stop_event.set()
+    for worker, _ in workers:
+        if worker.ident is not None:
+            worker.join(timeout=2)
+        assert not worker.is_alive(), "test supervisor worker escaped fixture teardown"
+
+
 def _reset_supervisor_state() -> None:
     supervisor._SESSION_THREAD = None
     supervisor._POSITION_MONITOR_THREAD = None
