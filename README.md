@@ -46,13 +46,24 @@ Local paper dashboard, no PowerShell setup:
 Double-click start_paper_dashboard.cmd
 ```
 
-That launcher auto-loads `C:\Users\flavo\Downloads\AutoBott.env`, applies the local paper defaults, starts the dashboard on `http://127.0.0.1:8000`, and uses dashboard token `autobott-local` unless you override it in the env file.
+That launcher auto-loads `C:\Users\flavo\Downloads\AutoBott.env`, applies the local paper defaults, and starts the dashboard on `http://127.0.0.1:8000`. Set `AUTOBOTT_DASHBOARD_AUTH_TOKEN` in that env file to a unique secret; the launcher does not provide or print a default token.
 
 Run the test suite:
 
 ```powershell
-pytest
+python -m pip install ".[dev]"
+python scripts/validate_offline.py
+node --test tests/cockpit_state.test.cjs
 ```
+
+The Python runner removes inherited deployment settings and credentials, isolates
+runtime files, and blocks outbound network and non-read-only child processes.
+It records source identity and JUnit results under `artifacts/offline-validation/`.
+Individual pytest targets can be passed after the runner filename.
+
+The Node.js check exercises the shipped dashboard script with synthetic responses,
+including command ordering, stale refreshes, authentication, and stalled sessions.
+It does not connect to a broker.
 
 Validate a captured market/options snapshot and optionally append the decision card to a JSONL ledger:
 

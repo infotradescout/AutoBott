@@ -50,7 +50,7 @@ from .position_monitor import run_position_monitor
 from .runtime_control import load_runtime_state
 from .runtime_paths import data_root, phase1_snapshots_root
 from .storage_retention import prune_snapshot_storage
-from .trade_outcomes import recent_loss_guard, recent_winner_bias, sync_trade_outcomes_from_broker
+from .trade_outcomes import sync_trade_outcomes_from_broker
 
 
 def decision_journal_path() -> Path:
@@ -156,21 +156,14 @@ def run_trading_cycle(
             "outcomes": [],
             "error": f"{type(exc).__name__}: {exc}",
         }
-    hosted_policy_version = HOSTED_POLICY_VERSION if is_hosted_paper_runtime() else None
-    loss_guard = recent_loss_guard(
-        journal_path=outcome_journal_path,
-        policy_version=hosted_policy_version,
-    )
-    winner_bias = recent_winner_bias(
-        journal_path=outcome_journal_path,
-        policy_version=hosted_policy_version,
-    )
+    loss_guard = {"blocked_underlyings": outcome_learning_summary.get("blocked_underlyings", [])}
+    winner_bias = outcome_learning_summary.get("winner_bias") or {"preferred_underlyings": [], "reasons": {}}
     hosted_paper = is_hosted_paper_runtime()
     broker_daily_pnl_available = (
         bool(outcome_learning_summary.get("ok"))
         and outcome_learning_summary.get("daily_realized_pnl") is not None
     )
-    daily_pnl_available = not hosted_paper or broker_daily_pnl_available
+    daily_pnl_available = (not hosted_paper and not hasattr(resolved_broker, "list_orders")) or broker_daily_pnl_available
     effective_daily_realized_pnl = (
         float(outcome_learning_summary["daily_realized_pnl"])
         if broker_daily_pnl_available

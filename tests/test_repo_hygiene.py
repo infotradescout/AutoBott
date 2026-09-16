@@ -1,17 +1,18 @@
 from __future__ import annotations
 
+import subprocess
 from pathlib import Path
+
+import pytest
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
 
 def _tracked_paths() -> list[str]:
-    git_index = (REPO_ROOT / ".git" / "index")
-    if not git_index.exists():
+    # Linked worktrees use a .git file; Git resolves its actual index location.
+    if not (REPO_ROOT / ".git").exists():
         return []
-    import subprocess
-
     result = subprocess.run(
         ["git", "ls-files"],
         cwd=REPO_ROOT,
@@ -23,14 +24,50 @@ def _tracked_paths() -> list[str]:
 
 
 def _is_git_ignored(path: Path) -> bool:
-    import subprocess
-
     result = subprocess.run(
         ["git", "check-ignore", "-q", str(path)],
         cwd=REPO_ROOT,
         check=False,
     )
     return result.returncode == 0
+
+
+def test_tracked_paths_reads_real_index_through_worktree_git_file(monkeypatch, tmp_path: Path) -> None:
+    if not (REPO_ROOT / ".git").exists():
+        pytest.skip("Source exports do not contain a Git index to reuse")
+
+    git_dir = subprocess.run(
+        ["git", "rev-parse", "--absolute-git-dir"],
+        cwd=REPO_ROOT,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    expected = subprocess.run(
+        ["git", "ls-files"],
+        cwd=REPO_ROOT,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.splitlines()
+    assert Path(__file__).relative_to(REPO_ROOT).as_posix() in expected
+
+    # Reuse the real index through Git's worktree pointer format, read-only.
+    (tmp_path / ".git").write_text(f"gitdir: {git_dir}\n", encoding="utf-8")
+    monkeypatch.setitem(globals(), "REPO_ROOT", tmp_path)
+
+    assert _tracked_paths() == expected
+
+
+def test_tracked_paths_allows_source_export_without_git(monkeypatch, tmp_path: Path) -> None:
+    monkeypatch.setitem(globals(), "REPO_ROOT", tmp_path)
+    monkeypatch.setattr(
+        subprocess,
+        "run",
+        lambda *_args, **_kwargs: pytest.fail("Source exports must not invoke Git"),
+    )
+
+    assert _tracked_paths() == []
 
 
 def test_forbidden_generated_artifacts_not_tracked() -> None:

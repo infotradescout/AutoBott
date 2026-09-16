@@ -4,6 +4,9 @@ import json
 from datetime import UTC, datetime
 from zoneinfo import ZoneInfo
 
+import pytest
+
+from autobott_v2.hosted_policy import HOSTED_POLICY_VERSION
 from autobott_v2.trade_outcomes import (
     build_trade_outcomes_from_orders,
     daily_realized_pnl,
@@ -61,8 +64,10 @@ def test_trade_outcomes_persist_winner_loser_and_reason(tmp_path) -> None:
         },
     ]
 
-    result = record_trade_outcomes_from_orders(orders, journal_path=tmp_path / "trade_outcomes.jsonl")
-    repeat = record_trade_outcomes_from_orders(orders, journal_path=tmp_path / "trade_outcomes.jsonl")
+    for index, order in enumerate(orders):
+        order["id"] = f"synthetic-order-{index}"
+    result = record_trade_outcomes_from_orders(orders, journal_path=tmp_path / "trade_outcomes.jsonl", account_scope="alpaca:paper:synthetic-account")
+    repeat = record_trade_outcomes_from_orders(orders, journal_path=tmp_path / "trade_outcomes.jsonl", account_scope="alpaca:paper:synthetic-account")
 
     assert result["recorded"] == 2
     assert repeat["recorded"] == 0
@@ -123,6 +128,7 @@ def test_execution_journal_enriches_legs_and_builds_one_completed_pair(tmp_path)
         orders,
         journal_path=tmp_path / "trade_outcomes.jsonl",
         execution_journal_rows=execution_rows,
+        account_scope="alpaca:paper:synthetic-account",
     )
 
     assert result["recorded"] == 2
@@ -178,10 +184,10 @@ def test_cumulative_partial_fill_is_recorded_once_only_after_terminal_fill(tmp_p
         status="partially_filled",
     )
 
-    partial = record_trade_outcomes_from_orders([entry, partial_exit], journal_path=journal_path)
+    partial = record_trade_outcomes_from_orders([entry, partial_exit], journal_path=journal_path, account_scope="alpaca:paper:synthetic-account")
     final_exit = {**partial_exit, "status": "filled", "filled_qty": "2", "filled_at": "2026-07-09T14:31:00Z"}
-    final = record_trade_outcomes_from_orders([entry, final_exit], journal_path=journal_path)
-    repeat = record_trade_outcomes_from_orders([entry, final_exit], journal_path=journal_path)
+    final = record_trade_outcomes_from_orders([entry, final_exit], journal_path=journal_path, account_scope="alpaca:paper:synthetic-account")
+    repeat = record_trade_outcomes_from_orders([entry, final_exit], journal_path=journal_path, account_scope="alpaca:paper:synthetic-account")
 
     assert partial["recorded"] == 0
     assert final["recorded"] == 1
@@ -212,7 +218,7 @@ def test_live_partial_loss_is_included_in_daily_guard_without_persisting(tmp_pat
         status="partially_filled",
     )
 
-    result = record_trade_outcomes_from_orders([entry, partial_exit], journal_path=journal_path)
+    result = record_trade_outcomes_from_orders([entry, partial_exit], journal_path=journal_path, account_scope="alpaca:paper:synthetic-account")
 
     assert result["recorded"] == 0
     assert result["daily_realized_pnl"] == -900.0
@@ -286,22 +292,26 @@ def test_no_loss_profit_factors_are_strict_json_with_explicit_status() -> None:
     json.dumps({"summary": leg_summary, "group_summary": group_summary}, allow_nan=False)
 
 
-def test_hosted_loss_guard_ignores_legacy_cohort_and_cannot_be_disabled(monkeypatch) -> None:
+@pytest.mark.parametrize("configured_value", [None, "false"])
+def test_hosted_loss_guard_ignores_legacy_cohort_and_cannot_be_disabled(monkeypatch, configured_value) -> None:
     monkeypatch.setenv("RENDER", "true")
     monkeypatch.setenv("ALPACA_ENV", "paper")
-    monkeypatch.setenv("AUTOBOTT_RECENT_LOSS_GUARD_ENABLED", "false")
+    if configured_value is None:
+        monkeypatch.delenv("AUTOBOTT_RECENT_LOSS_GUARD_ENABLED", raising=False)
+    else:
+        monkeypatch.setenv("AUTOBOTT_RECENT_LOSS_GUARD_ENABLED", configured_value)
     legacy = [
         {"underlying": "AAPL", "pnl": -100.0, "outcome_id": "legacy-1", "exit_time": "2026-07-01T14:00:00Z"},
         {"underlying": "AAPL", "pnl": -100.0, "outcome_id": "legacy-2", "exit_time": "2026-07-01T15:00:00Z"},
     ]
     current = [
-        _group_leg("current-1", "primary", 40.0, "current-primary", "2026-07-22T14:30:00Z", policy_version="hosted-vix-profit-v1"),
-        _group_leg("current-1", "runner", -10.0, "current-runner", "2026-07-22T14:31:00Z", policy_version="hosted-vix-profit-v1"),
+        _group_leg("current-1", "primary", 40.0, "current-primary", "2026-07-22T14:30:00Z", policy_version=HOSTED_POLICY_VERSION),
+        _group_leg("current-1", "runner", -10.0, "current-runner", "2026-07-22T14:31:00Z", policy_version=HOSTED_POLICY_VERSION),
     ]
 
     guard = recent_loss_guard(
         [*legacy, *current],
-        policy_version="hosted-vix-profit-v1",
+        policy_version=HOSTED_POLICY_VERSION,
     )
 
     assert guard["enabled"] is True
@@ -320,7 +330,7 @@ def test_hosted_learning_thresholds_are_code_owned_and_require_minimum_sample(mo
             "underlying": "AAPL",
             "pnl": -10.0,
             "outcome_id": f"loss-{index}",
-            "policy_version": "hosted-vix-profit-v1",
+            "policy_version": HOSTED_POLICY_VERSION,
             "policy_attribution_source": "entry_execution_metadata",
         }
         for index in range(5)
@@ -330,16 +340,20 @@ def test_hosted_learning_thresholds_are_code_owned_and_require_minimum_sample(mo
             "underlying": "MSFT",
             "pnl": 10.0,
             "outcome_id": f"win-{index}",
-            "policy_version": "hosted-vix-profit-v1",
+            "policy_version": HOSTED_POLICY_VERSION,
             "policy_attribution_source": "entry_execution_metadata",
         }
         for index in range(5)
     ]
 
-    assert recent_loss_guard(losses[:4], policy_version="hosted-vix-profit-v1")["blocked_underlyings"] == []
-    assert recent_loss_guard(losses, policy_version="hosted-vix-profit-v1")["blocked_underlyings"] == ["AAPL"]
-    assert recent_winner_bias(wins[:4], policy_version="hosted-vix-profit-v1")["preferred_underlyings"] == []
-    assert recent_winner_bias(wins, policy_version="hosted-vix-profit-v1")["preferred_underlyings"] == ["MSFT"]
+    assert recent_loss_guard(losses[:4], policy_version=HOSTED_POLICY_VERSION)["blocked_underlyings"] == []
+    assert recent_loss_guard(losses, policy_version=HOSTED_POLICY_VERSION)["blocked_underlyings"] == ["AAPL"]
+    assert recent_winner_bias(wins[:4], policy_version=HOSTED_POLICY_VERSION)["preferred_underlyings"] == []
+    assert recent_winner_bias(wins, policy_version=HOSTED_POLICY_VERSION)["preferred_underlyings"] == ["MSFT"]
+    unverified_losses = [{**row, "policy_attribution_source": None} for row in losses]
+    unverified_wins = [{**row, "policy_attribution_source": None} for row in wins]
+    assert recent_loss_guard(unverified_losses, policy_version=HOSTED_POLICY_VERSION)["blocked_underlyings"] == []
+    assert recent_winner_bias(unverified_wins, policy_version=HOSTED_POLICY_VERSION)["preferred_underlyings"] == []
 
 
 def test_volatility_proxies_share_one_loss_and_winner_learning_bucket(monkeypatch) -> None:
@@ -415,7 +429,7 @@ def test_trade_outcome_reader_skips_malformed_jsonl_records(tmp_path) -> None:
     assert [row["outcome_id"] for row in rows] == ["good-1", "good-2"]
 
 
-def test_trade_outcome_append_recovers_after_truncated_final_record(tmp_path) -> None:
+def test_trade_outcome_append_preserves_and_blocks_on_truncated_record(tmp_path) -> None:
     journal_path = tmp_path / "trade_outcomes.jsonl"
     journal_path.write_text('{"outcome_id":"truncated"', encoding="utf-8")
     symbol = "AAPL260814C00105000"
@@ -426,11 +440,14 @@ def test_trade_outcome_append_recovers_after_truncated_final_record(tmp_path) ->
             _broker_order(symbol, "sell", "exit", "3.00", "2026-07-22T15:00:00Z"),
         ],
         journal_path=journal_path,
+        account_scope="alpaca:paper:synthetic-account",
     )
 
-    assert result["recorded"] == 1
-    assert result["summary"]["closed_trades"] == 1
-    assert len(load_trade_outcomes(journal_path=journal_path)) == 1
+    assert result["recorded"] == 0
+    assert result["ok"] is False
+    assert result["summary"]["closed_trades"] == 1  # Broker view remains available.
+    assert journal_path.read_text() == '{"outcome_id":"truncated"'
+    assert len(load_trade_outcomes(journal_path=journal_path)) == 0
 
 
 def test_hosted_summary_is_current_policy_but_daily_pnl_is_account_wide(tmp_path, monkeypatch) -> None:
@@ -452,18 +469,21 @@ def test_hosted_summary_is_current_policy_but_daily_pnl_is_account_wide(tmp_path
             "underlying": "MSFT",
             "pnl": 40.0,
             "exit_time": exit_time,
-            "policy_version": "hosted-vix-profit-v1",
+            "policy_version": HOSTED_POLICY_VERSION,
             "policy_attribution_source": "entry_execution_metadata",
         },
     ]
     journal_path.write_text("".join(f"{json.dumps(row)}\n" for row in rows), encoding="utf-8")
 
-    result = record_trade_outcomes_from_orders([], journal_path=journal_path)
+    result = record_trade_outcomes_from_orders([], journal_path=journal_path, account_scope="alpaca:paper:synthetic-account")
 
-    assert result["summary_policy_version"] == "hosted-vix-profit-v1"
-    assert result["summary"]["closed_trades"] == 1
-    assert result["summary"]["net_pnl"] == 40.0
-    assert result["daily_realized_pnl"] == -60.0
+    assert result["summary_policy_version"] == HOSTED_POLICY_VERSION
+    assert result["journal_diagnostics"]["summary"]["closed_trades"] == 1
+    assert result["journal_diagnostics"]["summary"]["net_pnl"] == 40.0
+    assert result["journal_diagnostics"]["daily_realized_pnl"] == -60.0
+    assert result["journal_diagnostics"]["verified"] is False
+    assert result["daily_realized_pnl"] == 0.0
+    assert result["ok"] is False
 
 
 def test_daily_realized_pnl_uses_new_york_trading_date() -> None:
@@ -605,6 +625,12 @@ def test_sync_fails_closed_on_unmatched_terminal_sell(tmp_path) -> None:
 
 def test_sync_warns_but_does_not_block_on_historical_unmatched_sell(tmp_path) -> None:
     class BrokerWithHistoricalGap:
+        from types import SimpleNamespace
+        config = SimpleNamespace(environment="paper")
+
+        def get_account(self):
+            return {"id": "synthetic-account"}
+
         def list_orders(self, *, status="all", limit=200, direction="desc"):
             return [
                 _broker_order(
@@ -701,14 +727,14 @@ def test_hosted_summary_excludes_pre_fix_exit_attribution(tmp_path, monkeypatch)
             "outcome_id": "misattributed-legacy-exit",
             "underlying": "AAPL",
             "pnl": -400.0,
-            "policy_version": "hosted-vix-profit-v1",
+            "policy_version": HOSTED_POLICY_VERSION,
             "match_source": "execution_journal",
         },
         {
             "outcome_id": "verified-current-entry",
             "underlying": "VIX",
             "pnl": 50.0,
-            "policy_version": "hosted-vix-profit-v1",
+            "policy_version": HOSTED_POLICY_VERSION,
             "policy_attribution_source": "entry_execution_metadata",
             "match_source": "execution_journal",
         },
@@ -716,10 +742,12 @@ def test_hosted_summary_excludes_pre_fix_exit_attribution(tmp_path, monkeypatch)
     journal_path = tmp_path / "trade_outcomes.jsonl"
     journal_path.write_text("".join(f"{json.dumps(row)}\n" for row in rows), encoding="utf-8")
 
-    result = record_trade_outcomes_from_orders([], journal_path=journal_path)
+    result = record_trade_outcomes_from_orders([], journal_path=journal_path, account_scope="alpaca:paper:synthetic-account")
 
-    assert result["summary"]["closed_trades"] == 1
-    assert result["summary"]["net_pnl"] == 50.0
+    assert result["journal_diagnostics"]["summary"]["closed_trades"] == 1
+    assert result["journal_diagnostics"]["summary"]["net_pnl"] == 50.0
+    assert result["summary"]["closed_trades"] == 0
+    assert result["ok"] is False
 
 
 def _broker_order(
