@@ -239,6 +239,9 @@ class AlpacaExecutionBroker:
             payload={"limit_price": f"{limit_price:.2f}"},
         )
 
+    def get_account(self) -> dict:
+        return self._request_json("GET", "/v2/account")
+
     def list_open_positions(self) -> list[dict]:
         payload = self._request_json("GET", "/v2/positions")
         return payload if isinstance(payload, list) else []

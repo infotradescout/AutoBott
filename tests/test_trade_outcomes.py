@@ -64,8 +64,10 @@ def test_trade_outcomes_persist_winner_loser_and_reason(tmp_path) -> None:
         },
     ]
 
-    result = record_trade_outcomes_from_orders(orders, journal_path=tmp_path / "trade_outcomes.jsonl")
-    repeat = record_trade_outcomes_from_orders(orders, journal_path=tmp_path / "trade_outcomes.jsonl")
+    for index, order in enumerate(orders):
+        order["id"] = f"synthetic-order-{index}"
+    result = record_trade_outcomes_from_orders(orders, journal_path=tmp_path / "trade_outcomes.jsonl", account_scope="alpaca:paper:synthetic-account")
+    repeat = record_trade_outcomes_from_orders(orders, journal_path=tmp_path / "trade_outcomes.jsonl", account_scope="alpaca:paper:synthetic-account")
 
     assert result["recorded"] == 2
     assert repeat["recorded"] == 0
@@ -126,6 +128,7 @@ def test_execution_journal_enriches_legs_and_builds_one_completed_pair(tmp_path)
         orders,
         journal_path=tmp_path / "trade_outcomes.jsonl",
         execution_journal_rows=execution_rows,
+        account_scope="alpaca:paper:synthetic-account",
     )
 
     assert result["recorded"] == 2
@@ -181,10 +184,10 @@ def test_cumulative_partial_fill_is_recorded_once_only_after_terminal_fill(tmp_p
         status="partially_filled",
     )
 
-    partial = record_trade_outcomes_from_orders([entry, partial_exit], journal_path=journal_path)
+    partial = record_trade_outcomes_from_orders([entry, partial_exit], journal_path=journal_path, account_scope="alpaca:paper:synthetic-account")
     final_exit = {**partial_exit, "status": "filled", "filled_qty": "2", "filled_at": "2026-07-09T14:31:00Z"}
-    final = record_trade_outcomes_from_orders([entry, final_exit], journal_path=journal_path)
-    repeat = record_trade_outcomes_from_orders([entry, final_exit], journal_path=journal_path)
+    final = record_trade_outcomes_from_orders([entry, final_exit], journal_path=journal_path, account_scope="alpaca:paper:synthetic-account")
+    repeat = record_trade_outcomes_from_orders([entry, final_exit], journal_path=journal_path, account_scope="alpaca:paper:synthetic-account")
 
     assert partial["recorded"] == 0
     assert final["recorded"] == 1
@@ -215,7 +218,7 @@ def test_live_partial_loss_is_included_in_daily_guard_without_persisting(tmp_pat
         status="partially_filled",
     )
 
-    result = record_trade_outcomes_from_orders([entry, partial_exit], journal_path=journal_path)
+    result = record_trade_outcomes_from_orders([entry, partial_exit], journal_path=journal_path, account_scope="alpaca:paper:synthetic-account")
 
     assert result["recorded"] == 0
     assert result["daily_realized_pnl"] == -900.0
@@ -426,7 +429,7 @@ def test_trade_outcome_reader_skips_malformed_jsonl_records(tmp_path) -> None:
     assert [row["outcome_id"] for row in rows] == ["good-1", "good-2"]
 
 
-def test_trade_outcome_append_recovers_after_truncated_final_record(tmp_path) -> None:
+def test_trade_outcome_append_preserves_and_blocks_on_truncated_record(tmp_path) -> None:
     journal_path = tmp_path / "trade_outcomes.jsonl"
     journal_path.write_text('{"outcome_id":"truncated"', encoding="utf-8")
     symbol = "AAPL260814C00105000"
@@ -437,11 +440,14 @@ def test_trade_outcome_append_recovers_after_truncated_final_record(tmp_path) ->
             _broker_order(symbol, "sell", "exit", "3.00", "2026-07-22T15:00:00Z"),
         ],
         journal_path=journal_path,
+        account_scope="alpaca:paper:synthetic-account",
     )
 
-    assert result["recorded"] == 1
-    assert result["summary"]["closed_trades"] == 1
-    assert len(load_trade_outcomes(journal_path=journal_path)) == 1
+    assert result["recorded"] == 0
+    assert result["ok"] is False
+    assert result["summary"]["closed_trades"] == 1  # Broker view remains available.
+    assert journal_path.read_text() == '{"outcome_id":"truncated"'
+    assert len(load_trade_outcomes(journal_path=journal_path)) == 0
 
 
 def test_hosted_summary_is_current_policy_but_daily_pnl_is_account_wide(tmp_path, monkeypatch) -> None:
@@ -469,12 +475,15 @@ def test_hosted_summary_is_current_policy_but_daily_pnl_is_account_wide(tmp_path
     ]
     journal_path.write_text("".join(f"{json.dumps(row)}\n" for row in rows), encoding="utf-8")
 
-    result = record_trade_outcomes_from_orders([], journal_path=journal_path)
+    result = record_trade_outcomes_from_orders([], journal_path=journal_path, account_scope="alpaca:paper:synthetic-account")
 
     assert result["summary_policy_version"] == HOSTED_POLICY_VERSION
-    assert result["summary"]["closed_trades"] == 1
-    assert result["summary"]["net_pnl"] == 40.0
-    assert result["daily_realized_pnl"] == -60.0
+    assert result["journal_diagnostics"]["summary"]["closed_trades"] == 1
+    assert result["journal_diagnostics"]["summary"]["net_pnl"] == 40.0
+    assert result["journal_diagnostics"]["daily_realized_pnl"] == -60.0
+    assert result["journal_diagnostics"]["verified"] is False
+    assert result["daily_realized_pnl"] == 0.0
+    assert result["ok"] is False
 
 
 def test_daily_realized_pnl_uses_new_york_trading_date() -> None:
@@ -616,6 +625,12 @@ def test_sync_fails_closed_on_unmatched_terminal_sell(tmp_path) -> None:
 
 def test_sync_warns_but_does_not_block_on_historical_unmatched_sell(tmp_path) -> None:
     class BrokerWithHistoricalGap:
+        from types import SimpleNamespace
+        config = SimpleNamespace(environment="paper")
+
+        def get_account(self):
+            return {"id": "synthetic-account"}
+
         def list_orders(self, *, status="all", limit=200, direction="desc"):
             return [
                 _broker_order(
@@ -727,10 +742,12 @@ def test_hosted_summary_excludes_pre_fix_exit_attribution(tmp_path, monkeypatch)
     journal_path = tmp_path / "trade_outcomes.jsonl"
     journal_path.write_text("".join(f"{json.dumps(row)}\n" for row in rows), encoding="utf-8")
 
-    result = record_trade_outcomes_from_orders([], journal_path=journal_path)
+    result = record_trade_outcomes_from_orders([], journal_path=journal_path, account_scope="alpaca:paper:synthetic-account")
 
-    assert result["summary"]["closed_trades"] == 1
-    assert result["summary"]["net_pnl"] == 50.0
+    assert result["journal_diagnostics"]["summary"]["closed_trades"] == 1
+    assert result["journal_diagnostics"]["summary"]["net_pnl"] == 50.0
+    assert result["summary"]["closed_trades"] == 0
+    assert result["ok"] is False
 
 
 def _broker_order(

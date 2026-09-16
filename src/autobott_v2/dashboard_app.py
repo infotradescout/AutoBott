@@ -52,7 +52,7 @@ from .runtime_control import (
 )
 from .runtime_paths import gate_path as default_gate_path
 from .runtime_paths import phase1_replay_campaign_root, phase1_snapshots_root
-from .trade_outcomes import record_trade_outcomes_from_orders
+from .trade_outcomes import record_trade_outcomes_from_orders, match_broker_order_lots
 
 
 JsonDict = dict[str, Any]
@@ -772,8 +772,8 @@ def _options_timeline_payload() -> JsonDict:
         return {"ok": False, "status": "alpaca_request_failed", "detail": str(exc)}
 
     normalized = sorted((_normalize_order_for_timeline(order) for order in orders), key=lambda row: row["event_time"] or datetime.min.replace(tzinfo=UTC))
-    round_trips, pending = _timeline_round_trips(normalized)
-    outcome_learning = record_trade_outcomes_from_orders(orders)
+    round_trips, pending = _timeline_round_trips(orders)
+    outcome_learning = record_trade_outcomes_from_orders(orders, persist=False)
     current_policy_groups = outcome_learning.get("group_summary") or {}
     clusters = _timeline_clusters(normalized, round_trips)
     warnings = _timeline_warnings(clusters, round_trips, pending)
@@ -787,6 +787,8 @@ def _options_timeline_payload() -> JsonDict:
         "clusters": sorted(clusters, key=lambda row: row.get("bucket_start") or "", reverse=True)[:20],
         "warnings": warnings,
         "outcome_learning": outcome_learning,
+        "accounting_complete": False,
+        "unmatched_sell_count": sum(row["classification"] == "unmatched_sell" for row in round_trips),
         "summary": {
             "orders_seen": len(normalized),
             "round_trips": len(round_trips),
@@ -827,52 +829,14 @@ def _normalize_order_for_timeline(order: dict[str, Any]) -> JsonDict:
 
 
 def _timeline_round_trips(orders: list[JsonDict]) -> tuple[list[JsonDict], list[JsonDict]]:
-    open_buys: dict[str, list[JsonDict]] = {}
-    round_trips: list[JsonDict] = []
-    pending: list[JsonDict] = []
-    for order in orders:
-        symbol = str(order.get("symbol") or "")
-        side = str(order.get("side") or "")
-        status = str(order.get("status") or "")
-        filled_qty = float(order.get("filled_qty") or 0.0)
-        filled_price = order.get("filled_avg_price")
-        if status not in {"filled", "partially_filled"}:
-            if status in {"new", "accepted", "pending_new", "pending_replace"}:
-                pending.append(_public_timeline_order(order))
-            continue
-        if filled_qty <= 0 or filled_price is None:
-            continue
-        if side == "buy":
-            open_buys.setdefault(symbol, []).append(order)
-            continue
-        if side != "sell":
-            continue
-        buy = open_buys.get(symbol, []).pop(0) if open_buys.get(symbol) else None
-        if buy is None:
-            round_trips.append(_unmatched_sell_round_trip(order))
-            continue
-        entry_price = float(buy.get("filled_avg_price") or 0.0)
-        exit_price = float(filled_price)
-        qty = min(float(buy.get("filled_qty") or 0.0), filled_qty)
-        pnl = round((exit_price - entry_price) * qty * 100.0, 2)
-        return_pct = ((exit_price - entry_price) / entry_price) if entry_price else 0.0
-        round_trips.append(
-            {
-                "symbol": symbol,
-                **_option_symbol_parts(symbol),
-                "entry_time": buy.get("filled_at") or buy.get("submitted_at"),
-                "exit_time": order.get("filled_at") or order.get("submitted_at"),
-                "entry_price": entry_price,
-                "exit_price": exit_price,
-                "qty": qty,
-                "pnl": pnl,
-                "return_pct": round(return_pct, 4),
-                "classification": _round_trip_classification(return_pct),
-            }
-        )
-    for buys in open_buys.values():
-        for buy in buys:
-            pending.append(_public_timeline_order(buy) | {"pending_kind": "open_filled_buy"})
+    matched = match_broker_order_lots(orders)
+    round_trips = [dict(row, classification=_round_trip_classification(row["return_pct"]))
+                   for row in matched["outcomes"]]
+    round_trips.extend(_unmatched_sell_round_trip(dict(row, filled_qty=row["unmatched_qty"]))
+                       for row in matched["unmatched_sells"])
+    pending = [dict(_public_timeline_order(row), pending_kind=row["pending_kind"],
+                    remaining_filled_qty=row.get("remaining_filled_qty"))
+               for row in matched["pending"]]
     return round_trips, pending
 
 
@@ -885,7 +849,7 @@ def _unmatched_sell_round_trip(order: JsonDict) -> JsonDict:
         "entry_price": None,
         "exit_price": order.get("filled_avg_price"),
         "qty": order.get("filled_qty"),
-        "pnl": 0.0,
+        "pnl": None,
         "return_pct": None,
         "classification": "unmatched_sell",
     }
