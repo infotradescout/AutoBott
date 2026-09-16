@@ -193,7 +193,7 @@ def run_trading_cycle(
                 symbol=symbol,
                 corpus_root=resolved_corpus_root,
                 scheduled_market_time=snapshot_time,
-                captured_at_utc=captured_at,
+                captured_at_utc=captured_at if captured_at_utc is not None else datetime.now(tz=UTC),
                 corpus_type="production_capture" if resolved_broker.config.environment.value == "live" else "paper_capture",
                 market_timezone="America/New_York",
                 volatility_proxy_symbol="VIXY",
