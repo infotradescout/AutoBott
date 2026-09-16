@@ -5,6 +5,8 @@ from collections.abc import Callable, Mapping
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 import math
+import hashlib
+import json
 from typing import Any
 
 from .bar_timing import aware_utc, bar_duration
@@ -228,6 +230,18 @@ def refresh_entry_admission(
             "underlying_reference_basis": "fresh_equity_mid" if signal_symbol == decision.ticker.upper() else "captured_index_estimate_with_fresh_proxy",
             "options_feed": feed, "executable_fill_verified": False,
             "entry_edge_established": False,
+            # Retain normalized entry-time observations for an offline study.
+            # No credentials, future path, order submission, or new data read.
+            "recorded_refresh": {
+                "snapshot_hash": hashlib.sha256(json.dumps(snapshot, sort_keys=True,
+                    allow_nan=False, separators=(",", ":")).encode()).hexdigest(),
+                "requested_at": before.isoformat(), "received_at": after.isoformat(),
+                "options_feed": feed,
+                "authorized_prices": {c.option_symbol: authorized_prices[c.option_symbol] for c in contracts},
+                "option_quotes": {q["option_symbol"]: {"bp": q["bid"], "ap": q["ask"],
+                    "t": q["quote_timestamp"]} for q in quote_evidence},
+                "stock_quotes": {signal_symbol: {"bp": sbid, "ap": sask, "t": stime.isoformat()}},
+            },
         }
     except EntryMarketRejected:
         raise

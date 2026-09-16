@@ -245,7 +245,13 @@ def test_snapshot_capture_records_corpus_type(tmp_path) -> None:
     assert manifest["corpus_type"] == "paper_capture"
 
 
-def test_snapshot_capture_records_market_and_utc_timestamps(tmp_path) -> None:
+def test_snapshot_capture_records_market_and_utc_timestamps(tmp_path, monkeypatch) -> None:
+    # This fixture asserts an exact receipt timestamp, so its elapsed clock
+    # must also be deterministic. Real capture latency is tested separately.
+    import autobott_v2.phase1_snapshot_capture as capture
+    original_capture = capture.capture_symbol_snapshot
+    monkeypatch.setattr(capture, "capture_symbol_snapshot",
+                        lambda **kwargs: original_capture(**kwargs, monotonic_fn=lambda: 0.0))
     capture_snapshot_session(
         symbols=["SPY"],
         corpus_root=tmp_path,
