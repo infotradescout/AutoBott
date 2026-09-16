@@ -26,6 +26,7 @@ function mock({ version = expected, paper = true, authorize = true, quantity = 1
   return { request, calls };
 }
 test('aggregates quantities and detects duplicate stored symbols', () => assert.deepEqual(inventory([{ symbol: 'TEST', qty: 1 }, { option_symbol: 'TEST', quantity: 2 }]), { quantities: { TEST: 3 }, duplicateSymbols: ['TEST'] }));
+test('stored option identity takes precedence over its underlying label', () => assert.deepEqual(inventory([{ symbol: 'NKE', option_symbol: 'NKE260925P00035500', quantity: 1 }, { symbol: 'NKE', option_symbol: 'NKE260925P00037000', quantity: 1 }]), { quantities: { NKE260925P00035500: 1, NKE260925P00037000: 1 }, duplicateSymbols: [] }));
 test('rejects malformed quantities', () => assert.throws(() => inventory([{ symbol: 'TEST', qty: 'NaN' }])));
 test('rejects missing private token without a request', async () => { const m = mock(); await assert.rejects(verify({ token: '', expected, request: m.request })); assert.equal(m.calls.length, 0); });
 test('rejects old deployed revision before protected reads', async () => { const m = mock({ version: 'b'.repeat(40) }); await assert.rejects(verify({ token, expected, request: m.request })); assert.deepEqual(m.calls, ['/api/health']); });
