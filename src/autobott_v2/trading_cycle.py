@@ -46,10 +46,11 @@ from .phase1_models import (
 )
 from .phase1_snapshot_capture import CaptureRules, capture_symbol_snapshot
 from .phase1_validate import _decision_input_from_snapshot, _load_snapshot
+from .primary_followthrough import configured_observation_rules, register_primary_observation, poll_primary_observations
 from .position_store import load_open_positions
 from .position_monitor import run_position_monitor
 from .runtime_control import load_runtime_state
-from .runtime_paths import data_root, phase1_snapshots_root
+from .runtime_paths import artifacts_root, data_root, phase1_snapshots_root
 from .storage_retention import prune_snapshot_storage
 from .trade_outcomes import sync_trade_outcomes_from_broker
 
@@ -589,6 +590,22 @@ def run_trading_cycle(
                 detail="exact selected contracts refreshed before first submission",
                 journal_path=execution_log_path, payload=admission,
             )
+            try:
+                observation_rules = configured_observation_rules()
+                if observation_rules is not None:
+                    watch_id = register_primary_observation(
+                        artifacts_root() / "primary_followthrough", snapshot, admission, observation_rules)
+                    _record_execution_outcome(
+                        execution_outcomes, ticker=symbol.upper(), decision_id=decision.decision_id,
+                        thesis_id=thesis_id, disposition="primary_observation_registered",
+                        detail="admission is not a fill; continue primary quotes after exits",
+                        journal_path=execution_log_path, payload={"watch_id": watch_id},
+                    )
+            except Exception as exc:
+                # Observation failures are explicit but cannot disable exits or
+                # reinterpret broker permissions/accounting safeguards.
+                execution_outcomes.append({"disposition": "primary_observation_registration_failed",
+                    "decision_id": decision.decision_id, "error_type": type(exc).__name__, "detail": str(exc)})
             _remember_setup_event(setup_event_id, execution_log_path, recent_setup_events)
             submission_attempted = True
             trade_attempted_count += 1
@@ -701,6 +718,15 @@ def run_trading_cycle(
                     journal_path=execution_log_path,
                     payload={"exception_type": type(exc).__name__},
                 )
+
+    try:
+        if configured_observation_rules() is not None:
+            followthrough = poll_primary_observations(
+                artifacts_root() / "primary_followthrough", resolved_data_client, now_fn=_entry_check_now)
+            execution_outcomes.append({"disposition": "primary_observation_poll", **followthrough})
+    except Exception as exc:
+        execution_outcomes.append({"disposition": "primary_observation_poll_failed",
+            "error_type": type(exc).__name__, "detail": str(exc)})
 
     finished_at = datetime.now(tz=UTC)
     return TradingCycleResult(
