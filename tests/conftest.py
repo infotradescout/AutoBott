@@ -1,25 +1,19 @@
-"""Diagnostic capture for the existing synthetic trading-cycle regressions."""
-from dataclasses import asdict
+"""Read-only failure evidence for the synthetic cycle regression suite."""
+from dataclasses import asdict, is_dataclass
 import json
 import pytest
 
 
-@pytest.fixture(autouse=True)
-def synthetic_cycle_failure_evidence(request, monkeypatch):
-    if request.node.path.name != "test_trading_cycle.py":
+@pytest.hookimpl(hookwrapper=True)
+def pytest_runtest_makereport(item, call):
+    outcome = yield
+    report = outcome.get_result()
+    if not report.failed or item.path.name != "test_trading_cycle.py" or call.excinfo is None:
         return
-    import autobott_v2.trading_cycle as cycle
-    original = cycle.build_decision_card
-
-    def capture(decision_input, rules=None):
-        result = original(decision_input, rules)
-        print("SYNTHETIC_CYCLE_DECISION " + json.dumps({
-            "timestamp": decision_input.timestamp.isoformat(),
-            "market_bars": len(decision_input.market_bars),
-            "cycle_profile": asdict(decision_input.cycle_profile),
-            "rules": asdict(rules) if rules is not None else None,
-            "decision": asdict(result),
-        }, default=str, sort_keys=True))
-        return result
-
-    monkeypatch.setattr(cycle, "build_decision_card", capture)
+    evidence = []
+    for entry in call.excinfo.traceback:
+        for name, value in entry.frame.f_locals.items():
+            if name in {"result", "first", "second"} and is_dataclass(value) and hasattr(value, "decisions"):
+                evidence.append({"name": name, "result": asdict(value)})
+    if evidence:
+        report.sections.append(("SYNTHETIC_CYCLE_FAILURE", json.dumps(evidence, default=str, sort_keys=True)))
