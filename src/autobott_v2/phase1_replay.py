@@ -6,6 +6,7 @@ from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
+from .entry_quality import EntryQualityRules, evaluate_entry_quality, summarize_entry_quality
 from .phase1_engine import build_decision_card
 from .phase1_execution_sim import ExecutionSimRules, simulate_execution
 from .phase1_exit_engine import ExitRules, evaluate_exit
@@ -24,7 +25,13 @@ def run_replay(
     fill_model: str = "realistic_mid_penalty",
     promote_gate: bool = False,
     active_gate_path: str | Path | None = None,
+    entry_quality_rules_by_role: dict[str, EntryQualityRules] | None = None,
 ) -> dict[str, Any]:
+    # Explicit per-role horizons/thresholds: never infer them from future prices.
+    entry_quality_rules_by_role = dict(entry_quality_rules_by_role or {})
+    if any(role not in {"tactical", "rider"} or not isinstance(rules, EntryQualityRules)
+           for role, rules in entry_quality_rules_by_role.items()):
+        raise ValueError("entry quality rules must map tactical/rider roles to EntryQualityRules")
     snapshot_paths = _snapshot_paths(snapshots)
     artifact_dir = (Path(artifacts_root) if artifacts_root is not None else default_artifacts_root() / "phase1_replay") / run_id
     artifact_dir.mkdir(parents=True, exist_ok=True)
@@ -35,6 +42,7 @@ def run_replay(
     positions_path = artifact_dir / "positions.jsonl"
     outcomes_path = artifact_dir / "outcomes.jsonl"
     thesis_path = artifact_dir / "thesis_validation.jsonl"
+    entry_quality_path = artifact_dir / "entry_quality.jsonl"
     manifest_path = artifact_dir / "manifest.json"
 
     decisions: list[dict[str, Any]] = []
@@ -43,12 +51,21 @@ def run_replay(
     positions: list[dict[str, Any]] = []
     outcomes: list[dict[str, Any]] = []
     thesis_results = []
+    entry_quality_results = []
     terminal_events = []
     open_positions = []
     execution_rules = _execution_rules(fill_model)
     exit_rules = _exit_rules(fill_model)
     snapshots_payload = [_load_snapshot(snapshot_path) for snapshot_path in snapshot_paths]
     manifest = _manifest(run_id, snapshot_paths, snapshots_payload, fill_model, execution_rules, exit_rules)
+    # Freeze the assessment protocol alongside unchanged exit/fill settings.
+    # This records configuration, not proof of preregistration or a held-out test.
+    manifest["entry_quality_protocols"] = {
+        role: {"rules": rules.to_json_dict(), "rules_hash": rules.config_hash}
+        for role, rules in sorted(entry_quality_rules_by_role.items())
+    }
+    manifest["entry_quality_preregistration_verified"] = False
+    manifest["entry_quality_evidence_kind"] = "simulated_fill"
     manifest_path.write_text(json.dumps(manifest, indent=2, sort_keys=True), encoding="utf-8")
 
     for snapshot_path, snapshot in zip(snapshot_paths, snapshots_payload):
@@ -111,7 +128,18 @@ def run_replay(
         for event in execution_events:
             orders.append(event.to_json_dict())
             if event.filled:
-                fills.append(event.to_json_dict())
+                # Assess the filled contract and fill basis, never an unfilled
+                # candidate or another leg's option. This has no order/gate effect.
+                event_row = event.to_json_dict()
+                primary_symbol = decision_card.selected_contract.option_symbol if decision_card.selected_contract else None
+                entry_quality_results.append(evaluate_entry_quality(
+                    event_row,
+                    snapshots_payload,
+                    entry_quality_rules_by_role.get(event_row.get("leg_role")),
+                    is_primary=bool(event.selected_contract and event.selected_contract.option_symbol == primary_symbol),
+                    evidence_kind="simulated_fill",
+                ))
+                fills.append(event_row)
                 positions.append(event.to_json_dict())
                 open_positions.append(event)
             else:
@@ -123,6 +151,7 @@ def run_replay(
     _write_jsonl(positions_path, positions)
     _write_jsonl(outcomes_path, outcomes)
     _write_jsonl(thesis_path, [result.to_json_dict() for result in thesis_results])
+    _write_jsonl(entry_quality_path, entry_quality_results)
 
     replay_gate_path = artifact_dir / "gate.json"
     scorecard = update_phase1_gate(terminal_events, replay_gate_path)
@@ -130,7 +159,13 @@ def run_replay(
     scorecard["decision_stats"]["decisions_generated"] = len(decisions)
     scorecard["decision_stats"]["no_trade_decisions"] = len([decision for decision in decisions if decision.get("decision") == "NO_TRADE"])
     scorecard["fill_model"] = fill_model
-    scorecard["thesis_validation"] = summarize_thesis_results(thesis_results)
+    thesis_summary = {
+        **summarize_thesis_results(thesis_results),
+        "measurement_basis": "underlying_direction_only",
+        "entry_quality_evidence": False,
+    }
+    scorecard["thesis_validation"] = thesis_summary
+    scorecard["entry_quality"] = summarize_entry_quality(entry_quality_results)
     replay_gate_path.write_text(json.dumps(scorecard, indent=2, sort_keys=True), encoding="utf-8")
     gate_result = load_phase1_gate(replay_gate_path)
     if promote_gate:
@@ -153,7 +188,8 @@ def run_replay(
         "orders_filled": len(fills),
         "closed_trades": len(outcomes),
         "gate_reason": gate_result.reason,
-        "thesis_validation": summarize_thesis_results(thesis_results),
+        "thesis_validation": thesis_summary,
+        "entry_quality": scorecard["entry_quality"],
     }
 
 
@@ -208,9 +244,11 @@ def _summary(
             f"Win rate: {scorecard.get('win_rate', 0.0)}",
             f"Profit factor: {scorecard.get('profit_factor', 0.0)}",
             f"Max drawdown: {scorecard.get('max_drawdown_pct_observed', 0.0)}",
-            f"Theory pass rate: {scorecard.get('thesis_validation', {}).get('pass_rate', 0.0)}",
+            f"Underlying-direction diagnostic (not entry quality): {scorecard.get('thesis_validation', {}).get('pass_rate', 0.0)}",
             f"2DTE thesis pass rate: {scorecard.get('thesis_validation', {}).get('tactical_2dte_pass_rate', 0.0)}",
             f"Reversal thesis pass rate: {scorecard.get('thesis_validation', {}).get('reversal_pass_rate', 0.0)}",
+            f"Primary entry opportunity assessment: {scorecard.get('entry_quality', {}).get('primary', {})}",
+            "Entry-method edge: not established by opportunity diagnostics alone.",
             f"Gate eligibility result: {gate_reason}",
         ]
     )
