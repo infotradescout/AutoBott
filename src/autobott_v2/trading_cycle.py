@@ -47,6 +47,7 @@ from .phase1_models import (
 from .phase1_snapshot_capture import CaptureRules, capture_symbol_snapshot
 from .phase1_validate import _decision_input_from_snapshot, _load_snapshot
 from .primary_followthrough import configured_observation_rules, register_primary_observation, poll_primary_observations
+from .primary_fill_capture import paper_capture_scope, bind_primary_submission, poll_primary_fills
 from .position_store import load_open_positions
 from .position_monitor import run_position_monitor
 from .runtime_control import load_runtime_state
@@ -182,6 +183,12 @@ def run_trading_cycle(
     orders_submitted: list[dict[str, Any]] = []
     skipped: list[dict[str, Any]] = []
     execution_outcomes: list[dict[str, Any]] = []
+    observation_account_scope = None
+    try:
+        if configured_observation_rules() is not None:
+            observation_account_scope = paper_capture_scope(resolved_broker)
+    except Exception as exc:
+        execution_outcomes.append({"disposition": "primary_fill_scope_unavailable", "error_type": type(exc).__name__})
     execution_rejected_count_by_reason: dict[str, int] = {}
     scanner_candidates_count = 0
     trade_attempted_count = 0
@@ -565,9 +572,10 @@ def run_trading_cycle(
             continue
 
         submission_attempted = False
+        watch_id = None
 
         def _mark_submission_attempt(intent: Any) -> None:
-            nonlocal trade_attempted_count, submission_attempted
+            nonlocal trade_attempted_count, submission_attempted, watch_id
             authorized_prices = {intent.option_symbol: intent.limit_price}
             if core_runner_pair is not None:
                 runner_intent = build_trade_intent_from_decision(
@@ -624,6 +632,19 @@ def run_trading_cycle(
                 },
             )
 
+        def _capture_submitted_primary(order: Any) -> None:
+            if watch_id is None or order.intent.option_symbol != decision.selected_contract.option_symbol:
+                return
+            try:
+                if observation_account_scope is None:
+                    raise ValueError("verified_capture_scope_unavailable")
+                bind_primary_submission(artifacts_root() / "primary_followthrough", watch_id,
+                                        order, account_scope=observation_account_scope)
+                execution_outcomes.append({"disposition": "primary_submission_captured", "watch_id": watch_id})
+            except Exception as exc:
+                execution_outcomes.append({"disposition": "primary_submission_capture_failed", "watch_id": watch_id,
+                                           "error_type": type(exc).__name__, "detail": str(exc)})
+
         try:
             if core_runner_pair is not None:
                 submitted_orders = submit_core_runner_to_broker(
@@ -634,6 +655,7 @@ def run_trading_cycle(
                     open_positions=open_positions,
                     journal_path=execution_log_path,
                     on_submission_attempt=_mark_submission_attempt,
+                    on_order_submitted=_capture_submitted_primary,
                 )
             else:
                 submitted_orders = (
@@ -645,6 +667,7 @@ def run_trading_cycle(
                         open_positions=open_positions,
                         journal_path=execution_log_path,
                         on_submission_attempt=_mark_submission_attempt,
+                        on_order_submitted=_capture_submitted_primary,
                     ),
                 )
             open_positions += len(submitted_orders)
@@ -727,6 +750,13 @@ def run_trading_cycle(
     except Exception as exc:
         execution_outcomes.append({"disposition": "primary_observation_poll_failed",
             "error_type": type(exc).__name__, "detail": str(exc)})
+
+    try:
+        if configured_observation_rules() is not None:
+            fills = poll_primary_fills(artifacts_root() / "primary_followthrough", resolved_broker, now_fn=_entry_check_now)
+            execution_outcomes.append({"disposition": "primary_fill_capture_poll", **fills})
+    except Exception as exc:
+        execution_outcomes.append({"disposition": "primary_fill_capture_poll_failed", "error_type": type(exc).__name__})
 
     finished_at = datetime.now(tz=UTC)
     return TradingCycleResult(

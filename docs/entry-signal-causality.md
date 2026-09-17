@@ -39,3 +39,10 @@ The next slice preserves admission identity in runtime exports and requires
 account-scoped submission/broker-order linkage for actual-fill market studies.
 Continue from `docs/primary-fill-linkage-20260917.md`; neither matching symbols
 nor synthetic test passes establish a profitable entry advantage.
+
+## Runtime continuation - 2026-09-17
+
+Dashboard/session routing and automatic account-scoped primary receipt/fill
+capture are implemented in `docs/entry-runtime-capture-20260917.md`. This
+supersedes the earlier missing-collector/routing status, not the remaining
+review, production acceptance or market-profitability requirements.
