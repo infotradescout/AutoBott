@@ -12,6 +12,7 @@ from typing import Any
 from .bar_timing import aware_utc, bar_duration
 from .core_runner import CoreRunnerPair, CoreRunnerRules, select_core_runner_pair
 from .hosted_policy import signal_proxy_for
+from .live_entry_thesis import assess_live_entry_thesis
 from .phase1_engine import _contract_rejection_reasons
 from .phase1_models import DecisionCard, DecisionInput, DecisionStatus, ExecutionLayer, Phase1Rules
 from .phase1_validate import _contract_from_payload, _cycle_profile_from_snapshot
@@ -58,6 +59,16 @@ def _quote(raw: Any, now: datetime, maximum: float, symbol: str):
         raise EntryMarketRejected("entry_quote_invalid", f"{symbol}:{exc}") from exc
     stamp = aware_utc(timestamp)
     return bid, ask, stamp, _age(stamp, now, maximum, symbol)
+
+
+def _live_thesis(snapshot: Mapping[str, Any], decision: DecisionCard, *,
+                 signal_symbol: str, bid: float, ask: float, stage: str) -> dict[str, Any]:
+    evidence = assess_live_entry_thesis(snapshot, direction=decision.direction.bias.value,
+                                        signal_symbol=signal_symbol, bid=bid, ask=ask)
+    if evidence["status"] == "invalidated":
+        raise EntryMarketRejected("entry_signal_price_invalidated",
+                                  f"{stage}:{decision.direction.bias.value}:{evidence['boundary']}")
+    return {"stage": stage, **evidence}
 
 
 def _completed_evidence(snapshot: Mapping[str, Any], decision: DecisionCard, *,
@@ -148,9 +159,11 @@ def refresh_entry_admission(
     """Recheck EXACT approved contracts just before the submission callback.
 
     Only reads market quotes. Returned evidence does not change order prices,
-    thresholds, exits, or selection. Indicative-feed quotes are not represented
-    as executable prices. Greeks/OI remain captured metadata, bounded by the
-    decision-age ceiling, not newly broker-verified or recalculated Greeks.
+    exits, or selection. The candidate entry policy rejects a captured or
+    refreshed quote wholly beyond the completed signal bar against direction.
+    Indicative-feed quotes are not represented as executable prices. Greeks/OI
+    remain captured metadata, bounded by the decision-age ceiling, not newly
+    broker-verified or recalculated Greeks.
     """
     try:
         rules = rules or EntryMarketRules()
@@ -161,6 +174,13 @@ def refresh_entry_admission(
         before = aware_utc(now_fn())
         _age(aware_utc(decision.timestamp), before, rules.max_decision_age_seconds, "decision")
         bars = _completed_evidence(snapshot, decision, checked_at=before, rules=rules)
+        signal_symbol = signal_proxy_for(decision.ticker)
+        captured_stock = snapshot.get("underlying_quote", {})
+        cbid, cask, _, _ = _quote({"bp": captured_stock.get("bid"), "ap": captured_stock.get("ask"),
+                                  "t": captured_stock.get("quote_timestamp")},
+                                 aware_utc(decision.timestamp), rules.max_quote_age_seconds, decision.ticker)
+        captured_thesis = _live_thesis(snapshot, decision, signal_symbol=signal_symbol,
+                                      bid=cbid, ask=cask, stage="capture")
         primary = decision.selected_contract
         if pair is not None and pair.primary.option_symbol != primary.option_symbol:
             raise EntryMarketRejected("entry_primary_identity_changed")
@@ -184,7 +204,6 @@ def refresh_entry_admission(
         stock_getter = getattr(data_client, "get_latest_stock_quotes", None)
         if not callable(option_getter) or not callable(stock_getter):
             raise EntryMarketRejected("entry_quote_refresh_unavailable")
-        signal_symbol = signal_proxy_for(decision.ticker)
         try:
             option_quotes = option_getter(symbols)
             stock_quotes = stock_getter([signal_symbol])
@@ -203,6 +222,8 @@ def refresh_entry_admission(
         _age(source_stock_time, aware_utc(decision.timestamp), rules.max_quote_age_seconds, "captured_underlying")
         if stime < source_stock_time:
             raise EntryMarketRejected("entry_quote_timestamp_regressed", signal_symbol)
+        refreshed_thesis = _live_thesis(snapshot, decision, signal_symbol=signal_symbol,
+                                       bid=sbid, ask=sask, stage="refresh")
         fresh = []
         quote_evidence = []
         for approved in contracts:
@@ -245,6 +266,7 @@ def refresh_entry_admission(
             "primary_option_symbol": primary.option_symbol, "quotes": quote_evidence,
             "signal_symbol": signal_symbol, "signal_quote_timestamp": stime.isoformat(),
             "signal_quote_age_seconds": sage, "completed_bars": bars,
+            "live_signal_thesis": {"at_capture": captured_thesis, "at_refresh": refreshed_thesis},
             "underlying_reference_basis": "fresh_equity_mid" if signal_symbol == decision.ticker.upper() else "captured_index_estimate_with_fresh_proxy",
             "options_feed": feed, "executable_fill_verified": False,
             "entry_edge_established": False,
