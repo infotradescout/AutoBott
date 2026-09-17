@@ -117,7 +117,8 @@ def evaluate_primary_case(case: Mapping[str, Any], protocol: PrimaryStudyProtoco
         if not aware_utc(protocol.evaluation_start) <= timestamp < aware_utc(protocol.evaluation_end):
             return {**result, "status": "outside_evaluation_window", "reason": "entry_time_outside_fixed_window"}
         parsed = _decision_input_from_snapshot(snapshot)
-        _completed_evidence(snapshot, SimpleNamespace(timestamp=parsed.timestamp))
+        _completed_evidence(snapshot, SimpleNamespace(timestamp=parsed.timestamp),
+                            checked_at=timestamp, rules=protocol.admission)
         parsed, exclusions = filter_entry_quote_candidates(parsed, snapshot, rules=protocol.admission)
         result["candidate_quote_filter"] = exclusions
         decision = (v2_builder if engine == "v2" else legacy_builder)(parsed, protocol.decision)

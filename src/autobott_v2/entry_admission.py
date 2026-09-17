@@ -24,9 +24,13 @@ class EntryMarketRules:
     # 30 seconds matches the existing execution simulator's quote-age ceiling.
     max_quote_age_seconds: float = 30.0
     max_decision_age_seconds: float = 30.0
+    # One completed interval plus bounded provider publication delay.
+    # No overnight/weekend exemption: new entries wait for fresh signal bars.
+    max_bar_publication_delay_seconds: float = 30.0
 
     def __post_init__(self) -> None:
-        for value in (self.max_quote_age_seconds, self.max_decision_age_seconds):
+        for value in (self.max_quote_age_seconds, self.max_decision_age_seconds,
+                      self.max_bar_publication_delay_seconds):
             if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value) or value <= 0:
                 raise ValueError("invalid_entry_market_age_limit")
 
@@ -56,7 +60,8 @@ def _quote(raw: Any, now: datetime, maximum: float, symbol: str):
     return bid, ask, stamp, _age(stamp, now, maximum, symbol)
 
 
-def _completed_evidence(snapshot: Mapping[str, Any], decision: DecisionCard) -> dict[str, Any]:
+def _completed_evidence(snapshot: Mapping[str, Any], decision: DecisionCard, *,
+                        checked_at: datetime, rules: EntryMarketRules) -> dict[str, Any]:
     proof = snapshot.get("bar_evidence", {})
     if proof.get("timestamp_semantics") != "interval_start" or proof.get("completed_bars_only") is not True:
         raise EntryMarketRejected("entry_completed_bar_evidence_missing")
@@ -64,7 +69,9 @@ def _completed_evidence(snapshot: Mapping[str, Any], decision: DecisionCard) -> 
     if cutoff > aware_utc(decision.timestamp):
         raise EntryMarketRejected("entry_bar_cutoff_after_decision")
     duration = bar_duration(proof.get("timeframe"))
-    last_closed = {}
+    checked_at = aware_utc(checked_at)
+    maximum_age = duration.total_seconds() + rules.max_bar_publication_delay_seconds
+    last_closed, ages = {}, {}
     groups = {"underlying": snapshot.get("market_bars", [])}
     context = snapshot.get("context", {})
     groups.update({key: context.get(key, []) for key in ("spy_bars", "qqq_bars", "vix_bars")})
@@ -76,8 +83,17 @@ def _completed_evidence(snapshot: Mapping[str, Any], decision: DecisionCard) -> 
             raise EntryMarketRejected("entry_bar_order_invalid", label)
         if any(t + duration > cutoff for t in times):
             raise EntryMarketRejected("entry_unfinished_bar", label)
-        last_closed[label] = (times[-1] + duration).isoformat()
-    return {"timeframe": proof["timeframe"], "cutoff": cutoff.isoformat(), "last_closed": last_closed}
+        close = times[-1] + duration
+        age = (checked_at - close).total_seconds()
+        if age < 0:
+            raise EntryMarketRejected("entry_future_timestamp", label)
+        if age > maximum_age:
+            raise EntryMarketRejected("entry_stale_completed_bar", label)
+        last_closed[label], ages[label] = close.isoformat(), age
+    return {"timeframe": proof["timeframe"], "cutoff": cutoff.isoformat(),
+            "last_closed": last_closed, "checked_at": checked_at.isoformat(),
+            "max_completed_bar_age_seconds": maximum_age,
+            "completed_bar_ages_seconds": ages}
 
 
 def filter_entry_quote_candidates(
@@ -144,7 +160,7 @@ def refresh_entry_admission(
             raise EntryMarketRejected("entry_snapshot_identity_mismatch")
         before = aware_utc(now_fn())
         _age(aware_utc(decision.timestamp), before, rules.max_decision_age_seconds, "decision")
-        bars = _completed_evidence(snapshot, decision)
+        bars = _completed_evidence(snapshot, decision, checked_at=before, rules=rules)
         primary = decision.selected_contract
         if pair is not None and pair.primary.option_symbol != primary.option_symbol:
             raise EntryMarketRejected("entry_primary_identity_changed")
@@ -178,6 +194,8 @@ def refresh_entry_admission(
         if after < before:
             raise EntryMarketRejected("entry_clock_regressed")
         decision_age = _age(aware_utc(decision.timestamp), after, rules.max_decision_age_seconds, "decision")
+        # Provider latency counts against the signal deadline as well.
+        bars = _completed_evidence(snapshot, decision, checked_at=after, rules=rules)
         if not isinstance(option_quotes, Mapping) or not isinstance(stock_quotes, Mapping):
             raise EntryMarketRejected("entry_quote_response_invalid")
         sbid, sask, stime, sage = _quote(stock_quotes.get(signal_symbol), after, rules.max_quote_age_seconds, signal_symbol)
