@@ -58,8 +58,20 @@ class AlpacaMarketDataClient:
         from .entry_market_context import fetch_entry_context
         if self.data_url.rstrip("/") != "https://data.alpaca.markets":
             raise ValueError("entry_context_data_endpoint_not_approved")
-        return fetch_entry_context(lambda path,params:self._get_json_with_retry(path,params),
-                                   symbol,signal_symbol=signal_symbol,cutoff=cutoff,stock_feed=self.stock_feed)
+        context = fetch_entry_context(lambda path,params:self._get_json_with_retry(path,params),
+                                      symbol,signal_symbol=signal_symbol,cutoff=cutoff,stock_feed=self.stock_feed)
+        from .entry_schedule_context import EntryScheduleSource, attach_entry_schedule
+        if self.trading_url.rstrip("/") != "https://paper-api.alpaca.markets":
+            raise ValueError("entry_schedule_paper_calendar_endpoint_required")
+        if not hasattr(self, "_entry_schedule_source"):
+            self._entry_schedule_source = EntryScheduleSource(
+                lambda params: self._get_json_with_retry("/v2/calendar", params, base_url=self.trading_url))
+        context = attach_entry_schedule(context, self._entry_schedule_source, cutoff)
+        from .entry_sector_context import SectorContextSource, attach_sector_context
+        if not hasattr(self, "_entry_sector_source"):
+            self._entry_sector_source = SectorContextSource(
+                lambda path,params: self._get_json_with_retry(path,params))
+        return attach_sector_context(context, self._entry_sector_source)
 
     def __init__(self, config: AlpacaReadOnlyConfig | None = None, *, feed: str = "indicative", stock_feed: str = "iex") -> None:
         self.config = config or load_alpaca_read_only_config()

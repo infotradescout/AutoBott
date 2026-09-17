@@ -36,8 +36,21 @@ class AlpacaPaperClient:
         base = self.config.data_base_url.rstrip("/")
         if base != "https://data.alpaca.markets":
             raise ValueError("entry_context_data_endpoint_not_approved")
-        return fetch_entry_context(lambda path,params:self._get_json_with_retry(base,path,params),
-                                   symbol,signal_symbol=signal_symbol,cutoff=cutoff,stock_feed="iex")
+        context = fetch_entry_context(lambda path,params:self._get_json_with_retry(base,path,params),
+                                      symbol,signal_symbol=signal_symbol,cutoff=cutoff,stock_feed="iex")
+        from .entry_schedule_context import EntryScheduleSource, attach_entry_schedule
+        trading_base = self.config.trading_base_url.rstrip("/")
+        if trading_base != "https://paper-api.alpaca.markets":
+            raise ValueError("entry_schedule_paper_calendar_endpoint_required")
+        if not hasattr(self, "_entry_schedule_source"):
+            self._entry_schedule_source = EntryScheduleSource(
+                lambda params: self._get_json_with_retry(trading_base, "/v2/calendar", params))
+        context = attach_entry_schedule(context, self._entry_schedule_source, cutoff)
+        from .entry_sector_context import SectorContextSource, attach_sector_context
+        if not hasattr(self, "_entry_sector_source"):
+            self._entry_sector_source = SectorContextSource(
+                lambda path,params: self._get_json_with_retry(base,path,params))
+        return attach_sector_context(context, self._entry_sector_source)
 
 
     def __init__(self, config: AlpacaPaperConfig | None = None) -> None:

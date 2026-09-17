@@ -20,6 +20,8 @@ from typing import Any, Mapping
 
 from .bar_timing import aware_utc
 from .entry_market_context import POLICY as ENTRY_CONTEXT_POLICY
+from .entry_schedule_context import POLICY as ENTRY_SCHEDULE_POLICY
+from .entry_sector_context import POLICY as ENTRY_SECTOR_POLICY
 from .core_runner import CoreRunnerRules, select_core_runner_pair
 from .entry_admission import (EntryMarketRejected, EntryMarketRules, _completed_evidence,
                               filter_entry_quote_candidates, refresh_entry_admission)
@@ -272,7 +274,13 @@ def run_primary_study(tape: Mapping[str, Any], protocol: PrimaryStudyProtocol,
                 "preregistration_verified": False,
                 "selection_and_admission": "production_functions",
                 "full_account_broker_replay": False, "independent_samples_assumed": False,
-                "entry_context_policy":dict(ENTRY_CONTEXT_POLICY),
+                "entry_context_policy":deepcopy(ENTRY_CONTEXT_POLICY),
+                "entry_schedule_policy":deepcopy(ENTRY_SCHEDULE_POLICY),
+                "entry_sector_policy":deepcopy(ENTRY_SECTOR_POLICY),
+                "cases_with_recorded_schedule":sum(isinstance(c["snapshot"].get("entry_context",{}).get("schedule"),dict)
+                    for c in cases if isinstance(c["snapshot"].get("entry_context",{}),dict)),
+                "cases_with_recorded_sector_context":sum(isinstance(c["snapshot"].get("entry_context",{}).get("sector_context"),dict)
+                    for c in cases if isinstance(c["snapshot"].get("entry_context",{}),dict)),
                 "cases_with_recorded_entry_context":sum(isinstance(c["snapshot"].get("entry_context"),dict) for c in cases),
                 "fill_linkage_required": protocol.fill_basis == "linked_primary_fill",
                 "fill_linkage_authenticates_source_files": False,

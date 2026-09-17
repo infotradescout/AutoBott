@@ -134,7 +134,7 @@ def assess_entry_context(snapshot: Mapping, *, direction: str, checked_at, bid=N
     context=snapshot.get("entry_context")
     if context is None:
         return {"status":"not_recorded", "reason":"legacy_snapshot_without_entry_context"}
-    if not isinstance(context,Mapping) or context.get("schema_version")!="entry_context.v1":
+    if not isinstance(context,Mapping) or context.get("schema_version") not in {"entry_context.v1", "entry_context.v2", "entry_context.v3"}:
         raise ValueError("entry_context_schema_invalid")
     if context.get("status")!="observed":
         return {"status":"unavailable","reason":"provider_context_unavailable"}
@@ -166,6 +166,17 @@ def assess_entry_context(snapshot: Mapping, *, direction: str, checked_at, bid=N
     recent=bars[-6:]
     times=[aware_utc(r["timestamp"]) for r in recent]
     market_date=now.astimezone(NY).date()
+    local_now=now.astimezone(NY)
+    if local_now.weekday() >= 5 or not (9,30) <= (local_now.hour,local_now.minute) < (16,0):
+        return {"status":"unavailable","reason":"entry_check_outside_regular_session"}
+    from .entry_schedule_context import assess_entry_schedule
+    if context["schema_version"] in {"entry_context.v2", "entry_context.v3"} and "schedule" not in context:
+        raise ValueError("entry_context_native_schedule_required")
+    schedule_evidence=assess_entry_schedule(context.get("schedule"), checked_at=now,
+        snapshot_received_at=receipt, bar_times=times)
+    if schedule_evidence["status"] not in {"not_recorded", "observed_no_listed_event_block"}:
+        return {"status":schedule_evidence["status"],"reason":schedule_evidence["reason"],
+                "schedule_evidence":schedule_evidence}
     if any(t.astimezone(NY).date()!=market_date or not (9,30)<=(t.astimezone(NY).hour,t.astimezone(NY).minute)<(16,0) for t in times):
         return {"status":"unavailable","reason":"minute_trigger_requires_current_regular_session"}
     if any((b-a).total_seconds()!=60 for a,b in zip(times,times[1:])):
@@ -182,7 +193,7 @@ def assess_entry_context(snapshot: Mapping, *, direction: str, checked_at, bid=N
               "trigger_close":current["close"],"last_volume":current["volume"],"baseline_volume":baseline,
               "news_ids":[r["id"] for r in articles],"news_count":len(articles),
               "news_directional_score_used":False,"event_calendar_verified":False,
-              "context_hash":digest(context),"bar_age_seconds":age}
+              "context_hash":digest(context),"bar_age_seconds":age,"schedule_evidence":schedule_evidence}
     latest_version=max((aware_utc(r["updated_at"]) for r in articles),default=None)
     if latest_version is not None and latest_version>times[-1]:
         return {**response,"status":"wait","reason":"post_news_completed_bar_required",
@@ -201,4 +212,12 @@ def assess_entry_context(snapshot: Mapping, *, direction: str, checked_at, bid=N
                 return {**response,"status":"wait","reason":"current_quote_lost_intraday_trigger"}
         else:
             response["current_quote_trigger_check"]="not_comparable_proxy_units"
+    from .entry_sector_context import assess_sector_context
+    if context["schema_version"] == "entry_context.v3" and "sector_context" not in context:
+        raise ValueError("entry_context_native_sector_required")
+    sector_evidence=assess_sector_context(context, direction=direction, own_bars=bars,
+                                        checked_at=now, receipt=receipt)
+    response["sector_evidence"]=sector_evidence
+    if sector_evidence["status"] not in {"not_recorded","not_applicable","confirmed"}:
+        return {**response,"status":sector_evidence["status"],"reason":sector_evidence["reason"]}
     return {**response,"status":"confirmed","reason":"completed_minute_breakout_with_volume"}
