@@ -19,6 +19,7 @@ from types import SimpleNamespace
 from typing import Any, Mapping
 
 from .bar_timing import aware_utc
+from .entry_market_context import POLICY as ENTRY_CONTEXT_POLICY
 from .core_runner import CoreRunnerRules, select_core_runner_pair
 from .entry_admission import (EntryMarketRejected, EntryMarketRules, _completed_evidence,
                               filter_entry_quote_candidates, refresh_entry_admission)
@@ -271,6 +272,8 @@ def run_primary_study(tape: Mapping[str, Any], protocol: PrimaryStudyProtocol,
                 "preregistration_verified": False,
                 "selection_and_admission": "production_functions",
                 "full_account_broker_replay": False, "independent_samples_assumed": False,
+                "entry_context_policy":dict(ENTRY_CONTEXT_POLICY),
+                "cases_with_recorded_entry_context":sum(isinstance(c["snapshot"].get("entry_context"),dict) for c in cases),
                 "fill_linkage_required": protocol.fill_basis == "linked_primary_fill",
                 "fill_linkage_authenticates_source_files": False,
                 "exit_policy": "not_executed_primary_opportunity_only"}
@@ -295,6 +298,9 @@ def run_primary_study(tape: Mapping[str, Any], protocol: PrimaryStudyProtocol,
                "confirmed_opportunities_per_recorded_sample": sum(q["status"] == "pass" for q in quality) / len(cases) if cases else None,
                "median_time_to_first_target_seconds": middle("first_target_seconds"),
                "median_pre_opportunity_adverse_return": middle("adverse_before_opportunity_pct"),
+               "entry_context_admission_statuses":dict(Counter(
+                   r.get("admission",{}).get("entry_context_evidence",{}).get("at_refresh",{}).get("status","not_admitted")
+                   for r in results)),
                "edge_established": False, "realized_pnl_computed": False}
     report = {"manifest": manifest, "summary": summary, "results": results}
     report["report_hash"] = digest(report)

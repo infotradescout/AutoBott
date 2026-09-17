@@ -10,6 +10,7 @@ import json
 from typing import Any
 
 from .bar_timing import aware_utc, bar_duration
+from .entry_market_context import assess_entry_context
 from .core_runner import CoreRunnerPair, CoreRunnerRules, select_core_runner_pair
 from .hosted_policy import signal_proxy_for
 from .live_entry_thesis import assess_live_entry_thesis
@@ -69,6 +70,15 @@ def _live_thesis(snapshot: Mapping[str, Any], decision: DecisionCard, *,
         raise EntryMarketRejected("entry_signal_price_invalidated",
                                   f"{stage}:{decision.direction.bias.value}:{evidence['boundary']}")
     return {"stage": stage, **evidence}
+
+
+def _entry_context(snapshot, decision, data_client, *, checked_at, bid, ask):
+    evidence = assess_entry_context(snapshot,direction=decision.direction.bias.value,
+                                    checked_at=checked_at,bid=bid,ask=ask)
+    legacy = evidence["status"] == "not_recorded"
+    if evidence["status"] != "confirmed" and not (legacy and not getattr(data_client,"requires_entry_context",False)):
+        raise EntryMarketRejected("entry_context_not_confirmed", evidence["reason"])
+    return evidence
 
 
 def _completed_evidence(snapshot: Mapping[str, Any], decision: DecisionCard, *,
@@ -181,6 +191,7 @@ def refresh_entry_admission(
                                  aware_utc(decision.timestamp), rules.max_quote_age_seconds, decision.ticker)
         captured_thesis = _live_thesis(snapshot, decision, signal_symbol=signal_symbol,
                                       bid=cbid, ask=cask, stage="capture")
+        captured_context = _entry_context(snapshot,decision,data_client,checked_at=before,bid=cbid,ask=cask)
         primary = decision.selected_contract
         if pair is not None and pair.primary.option_symbol != primary.option_symbol:
             raise EntryMarketRejected("entry_primary_identity_changed")
@@ -224,6 +235,7 @@ def refresh_entry_admission(
             raise EntryMarketRejected("entry_quote_timestamp_regressed", signal_symbol)
         refreshed_thesis = _live_thesis(snapshot, decision, signal_symbol=signal_symbol,
                                        bid=sbid, ask=sask, stage="refresh")
+        refreshed_context = _entry_context(snapshot,decision,data_client,checked_at=after,bid=sbid,ask=sask)
         fresh = []
         quote_evidence = []
         for approved in contracts:
@@ -267,6 +279,7 @@ def refresh_entry_admission(
             "signal_symbol": signal_symbol, "signal_quote_timestamp": stime.isoformat(),
             "signal_quote_age_seconds": sage, "completed_bars": bars,
             "live_signal_thesis": {"at_capture": captured_thesis, "at_refresh": refreshed_thesis},
+            "entry_context_evidence": {"at_capture":captured_context,"at_refresh":refreshed_context},
             "underlying_reference_basis": "fresh_equity_mid" if signal_symbol == decision.ticker.upper() else "captured_index_estimate_with_fresh_proxy",
             "options_feed": feed, "executable_fill_verified": False,
             "entry_edge_established": False,
