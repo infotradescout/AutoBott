@@ -25,3 +25,17 @@ A pinned-source synthetic demonstration compares the old scorer loaded from the 
 This repair changes `signal_evidence.py` and only the shared price-reference helper in `phase1_engine.py`, plus a new pure reference module and tests. Contract selection, order handling, entry admission, exits, risk controls, accounting, capture and runtime settings are unchanged in this slice. No profit target, drawdown limit, stop or order permission is loosened. It does not establish a profitable primary-entry advantage.
 
 The repository's Gemini-before-merge requirement remains in force; a pending or failed external-review attempt is not approval. The tested candidate can be deployed to the existing isolated no-order validation service without representing it as the production paper release. Actual market comparison, independent review and production running-revision verification remain separate acceptance evidence.
+
+## Follow-up review - 2026-09-17
+
+A subsequent adversarial review reproduced stale completed bars passing entry
+admission with fresh quotes. The bounded signal-age repair, failing-before
+cases and remaining release gates are recorded in
+`docs/entry-signal-freshness-review-20260917.md`.
+
+## Fill evidence continuation - 2026-09-17
+
+The next slice preserves admission identity in runtime exports and requires
+account-scoped submission/broker-order linkage for actual-fill market studies.
+Continue from `docs/primary-fill-linkage-20260917.md`; neither matching symbols
+nor synthetic test passes establish a profitable entry advantage.

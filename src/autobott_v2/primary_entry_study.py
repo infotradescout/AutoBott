@@ -26,6 +26,7 @@ from .entry_quality import EntryQualityRules, evaluate_entry_quality, summarize_
 from .phase1_engine import build_decision_card as legacy_builder
 from .phase1_engine_v2 import build_decision_card as v2_builder
 from .phase1_models import DecisionStatus, Phase1Rules
+from .primary_fill_linkage import linked_primary_fill
 from .phase1_snapshot_contract import validate_market_snapshot
 from .phase1_validate import _decision_input_from_snapshot
 
@@ -61,7 +62,7 @@ class PrimaryStudyProtocol:
         development = aware_utc(self.development_last_entry_at)
         if not development + timedelta(seconds=self.quality.holding_seconds) <= start < end:
             raise ValueError("development_windows_overlap_evaluation_or_invalid_window")
-        if self.fill_basis not in {"recorded_primary_fill", "refresh_ask_shadow"}:
+        if self.fill_basis not in {"recorded_primary_fill", "linked_primary_fill", "refresh_ask_shadow"}:
             raise ValueError("explicit_supported_fill_basis_required")
         if type(self.minimum_paired_scorable) is not int or self.minimum_paired_scorable <= 0:
             raise ValueError("positive_minimum_paired_scorable_required")
@@ -117,7 +118,8 @@ def evaluate_primary_case(case: Mapping[str, Any], protocol: PrimaryStudyProtoco
         if not aware_utc(protocol.evaluation_start) <= timestamp < aware_utc(protocol.evaluation_end):
             return {**result, "status": "outside_evaluation_window", "reason": "entry_time_outside_fixed_window"}
         parsed = _decision_input_from_snapshot(snapshot)
-        _completed_evidence(snapshot, SimpleNamespace(timestamp=parsed.timestamp))
+        _completed_evidence(snapshot, SimpleNamespace(timestamp=parsed.timestamp),
+                            checked_at=timestamp, rules=protocol.admission)
         parsed, exclusions = filter_entry_quote_candidates(parsed, snapshot, rules=protocol.admission)
         result["candidate_quote_filter"] = exclusions
         decision = (v2_builder if engine == "v2" else legacy_builder)(parsed, protocol.decision)
@@ -150,8 +152,13 @@ def evaluate_primary_case(case: Mapping[str, Any], protocol: PrimaryStudyProtoco
             authorized_prices=refresh["authorized_prices"], now_fn=lambda: next(clock), rules=protocol.admission)
         result["admission"] = admission
         primary_quote = next(q for q in admission["quotes"] if q["option_symbol"] == pair.primary.option_symbol)
-        if protocol.fill_basis == "recorded_primary_fill":
-            fills = [f for f in case.get("fills", []) if f.get("option_symbol") == pair.primary.option_symbol]
+        if protocol.fill_basis in {"recorded_primary_fill", "linked_primary_fill"}:
+            if protocol.fill_basis == "linked_primary_fill":
+                linkage = linked_primary_fill(case, pair.primary.option_symbol)
+                result["fill_linkage"] = linkage
+                fills = [linkage["fill"]]
+            else:
+                fills = [f for f in case.get("fills", []) if f.get("option_symbol") == pair.primary.option_symbol]
             if len(fills) != 1:
                 return {**result, "status": "missing_or_ambiguous_fill", "reason": "exactly_one_primary_fill_required"}
             fill = fills[0]
@@ -162,7 +169,9 @@ def evaluate_primary_case(case: Mapping[str, Any], protocol: PrimaryStudyProtoco
             start = aware_utc(fill["timestamp"])
             if not 0 <= (start - received).total_seconds() <= protocol.max_fill_delay_seconds:
                 raise ValueError("recorded_fill_time_outside_declared_admission_window")
-            price, evidence_kind, fill_model = fill["price"], "broker_recorded_fill", "supplied_recorded_primary_fill"
+            price, evidence_kind = fill["price"], "broker_recorded_fill"
+            fill_model = ("account_scoped_submission_and_broker_order" if protocol.fill_basis == "linked_primary_fill"
+                          else "supplied_recorded_primary_fill")
         else:
             start, price = received, primary_quote["ask"]
             evidence_kind, fill_model = "simulated_fill", "recorded_refresh_ask_assumption_no_order"
@@ -213,7 +222,10 @@ def case_from_runtime_evidence(*, sample_id: str, snapshot: Mapping[str, Any],
         raise ValueError("runtime_refresh_missing_or_bound_to_another_snapshot")
     return {"sample_id": sample_id, "snapshot": deepcopy(snapshot),
             "refresh": deepcopy(capsule), "outcome_snapshots": deepcopy(outcome_snapshots),
-            "fills": deepcopy(fills)}
+            "fills": deepcopy(fills),
+            "recorded_admission": {"decision_id": admission_event.get("decision_id"),
+                "primary_option_symbol": admission_event.get("primary_option_symbol"),
+                "checked_at": admission_event.get("checked_at"), "snapshot_hash": capsule["snapshot_hash"]}}
 
 
 def source_fingerprint() -> str:
@@ -230,6 +242,8 @@ def run_primary_study(tape: Mapping[str, Any], protocol: PrimaryStudyProtocol,
         raise ValueError("explicit_tape_schema_and_source_required")
     if tape.get("cohort_scope") not in {"all_recorded_scans", "admitted_entries_only"}:
         raise ValueError("explicit_cohort_scope_required")
+    if tape["source_kind"] == "recorded_market" and protocol.fill_basis == "recorded_primary_fill":
+        raise ValueError("linked_primary_fill_required_for_recorded_market")
     cases = deepcopy(tape["cases"])
     if not isinstance(cases, list) or any(not isinstance(c, dict) or not isinstance(c.get("sample_id"), str) or not c["sample_id"].strip() for c in cases):
         raise ValueError("identified_cases_required")
@@ -247,7 +261,7 @@ def run_primary_study(tape: Mapping[str, Any], protocol: PrimaryStudyProtocol,
         raise ValueError("duplicate_snapshot_identity")
     order_ids = [f.get("broker_order_id") for case in cases for f in case.get("fills", [])
                  if isinstance(f, dict) and f.get("broker_order_id")]
-    if len(order_ids) != len(set(order_ids)):
+    if protocol.fill_basis != "linked_primary_fill" and len(order_ids) != len(set(order_ids)):
         raise ValueError("duplicate_recorded_fill_order_identity")
     manifest = {"schema_version": "primary_entry_study.v1", "engine": engine,
                 "protocol": asdict(protocol), "protocol_hash": protocol.config_hash,
@@ -257,6 +271,8 @@ def run_primary_study(tape: Mapping[str, Any], protocol: PrimaryStudyProtocol,
                 "preregistration_verified": False,
                 "selection_and_admission": "production_functions",
                 "full_account_broker_replay": False, "independent_samples_assumed": False,
+                "fill_linkage_required": protocol.fill_basis == "linked_primary_fill",
+                "fill_linkage_authenticates_source_files": False,
                 "exit_policy": "not_executed_primary_opportunity_only"}
     output = Path(output_dir) if output_dir is not None else None
     if output is not None:
@@ -265,6 +281,10 @@ def run_primary_study(tape: Mapping[str, Any], protocol: PrimaryStudyProtocol,
     # Decision functions only receive entry-time fields; future paths are used
     # solely after exact primary selection and recorded admission.
     results = [evaluate_primary_case(c, protocol, engine=engine) for c in sorted(cases, key=lambda c: c["sample_id"])]
+    linked_ids = [(r["fill_linkage"]["account_scope"], r["fill_linkage"]["fill"]["broker_order_id"])
+                  for r in results if r.get("fill_linkage")]
+    if len(linked_ids) != len(set(linked_ids)):
+        raise ValueError("duplicate_linked_primary_fill_identity")
     quality = [r["quality"] for r in results if r["quality"] is not None]
     statuses = dict(Counter(r["status"] for r in results))
     def middle(key: str) -> float | None:
