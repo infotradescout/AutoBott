@@ -55,3 +55,10 @@ Gemini review and accepted paper-production release remain required. No review
 request is an approval. Authenticated receipt/order collection, historical
 account reconciliation, protected runtime access and complete primary quote paths
 remain outstanding. `entry_advantage_established=false` remains the status.
+
+## Runtime continuation - 2026-09-17
+
+Dashboard/session routing and automatic account-scoped primary receipt/fill
+capture are implemented in `docs/entry-runtime-capture-20260917.md`. This
+supersedes the earlier missing-collector/routing status, not the remaining
+review, production acceptance or market-profitability requirements.

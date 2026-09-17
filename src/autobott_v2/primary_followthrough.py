@@ -202,5 +202,7 @@ def export_primary_observations(root: str | Path, *, source_kind: str) -> dict[s
     return {"schema_version": "primary_entry_tape.v1", "source_kind": source_kind,
             "cohort_scope": "admitted_entries_only", "cases": [deepcopy(r["case"]) for r in rows],
             "capture_statuses": {r["watch_id"]: r["status"] for r in rows},
-            "fill_provenance": "not_collected_admission_is_not_a_fill",
+            "fill_provenance": ("per_watch_account_scoped_capture" if any(r["case"].get("primary_submission_receipts") for r in rows)
+                                else "not_collected_admission_is_not_a_fill"),
+            "fill_capture_statuses": {r["watch_id"]: r.get("fill_capture_status", "not_collected") for r in rows},
             "entry_edge_established": False}
