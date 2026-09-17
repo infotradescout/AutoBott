@@ -46,3 +46,8 @@ Dashboard/session routing and automatic account-scoped primary receipt/fill
 capture are implemented in `docs/entry-runtime-capture-20260917.md`. This
 supersedes the earlier missing-collector/routing status, not the remaining
 review, production acceptance or market-profitability requirements.
+
+## News and minute context continuation - 2026-09-17
+
+Continue from `docs/entry-news-minute-context-20260917.md` for native news and
+minute-trigger admission, actual provider connectivity and remaining limits.

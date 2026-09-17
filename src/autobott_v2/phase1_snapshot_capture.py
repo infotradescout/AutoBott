@@ -52,6 +52,15 @@ class CaptureRules:
 
 
 class AlpacaMarketDataClient:
+    requires_entry_context = True
+
+    def get_entry_context(self, symbol: str, *, signal_symbol: str, cutoff: datetime) -> dict[str, Any]:
+        from .entry_market_context import fetch_entry_context
+        if self.data_url.rstrip("/") != "https://data.alpaca.markets":
+            raise ValueError("entry_context_data_endpoint_not_approved")
+        return fetch_entry_context(lambda path,params:self._get_json_with_retry(path,params),
+                                   symbol,signal_symbol=signal_symbol,cutoff=cutoff,stock_feed=self.stock_feed)
+
     def __init__(self, config: AlpacaReadOnlyConfig | None = None, *, feed: str = "indicative", stock_feed: str = "iex") -> None:
         self.config = config or load_alpaca_read_only_config()
         if not self.config.has_credentials:
@@ -351,6 +360,17 @@ def capture_symbol_snapshot(
             timeframe=rules.bar_timeframe,
             lookback_calendar_days=rules.lookback_calendar_days,
         )
+    entry_context = None
+    context_getter = getattr(data_client, "get_entry_context", None)
+    if callable(context_getter) or getattr(data_client, "requires_entry_context", False):
+        try:
+            entry_context = context_getter(symbol, signal_symbol=signal_symbol, cutoff=as_of_utc)
+            if not isinstance(entry_context, dict):
+                raise ValueError("entry_context_response_invalid")
+        except Exception as exc:
+            entry_context = {"schema_version":"entry_context.v1", "status":"unavailable",
+                             "reason":type(exc).__name__, "symbol":symbol,
+                             "signal_symbol":signal_symbol, "cutoff":as_of_utc.isoformat()}
     option_snapshots = data_client.get_option_chain_snapshots(symbol)
     quotes = data_client.get_latest_stock_quotes(bar_symbols)
     # Latest quotes arrive after the scheduled scan tick. Timestamp their
@@ -362,6 +382,8 @@ def capture_symbol_snapshot(
     if captured_at_utc.tzinfo is None or captured_at_utc.utcoffset() is None:
         raise ValueError("capture_start_requires_timezone")
     observed_at_utc = captured_at_utc.astimezone(UTC) + timedelta(seconds=elapsed)
+    if entry_context is not None:
+        entry_context = {**entry_context, "received_at":observed_at_utc.isoformat()}
 
     signal_bars = _normalize_stock_bars(signal_symbol, bars, rules.lookback_bars, as_of=as_of_utc, timeframe=rules.bar_timeframe)
     spy_bars = _normalize_stock_bars(context_symbols["spy"], bars, rules.lookback_bars, as_of=as_of_utc, timeframe=rules.bar_timeframe)
@@ -457,6 +479,12 @@ def capture_symbol_snapshot(
             "last_pivot_type": "unknown",
         },
     }
+    if entry_context is not None:
+        payload["entry_context"] = entry_context
+        payload["context"]["event_labels"] = ["scheduled_event_calendar_unverified",
+            "news_context_" + ("observed" if entry_context.get("status")=="observed" else "unavailable")]
+        # The legacy blackout flag does not certify news/calendar coverage.
+        # Native admission requires this capsule, so unavailable data cannot authorize entry.
     validate_market_snapshot(payload)
 
     filename = f"{scheduled_market_time.astimezone(tz).strftime('%H%M%S')}.json"

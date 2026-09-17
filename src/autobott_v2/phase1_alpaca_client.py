@@ -29,6 +29,17 @@ class _AlpacaResponseDecodeError(ValueError):
 class AlpacaPaperClient:
     option_feed = "indicative"
 
+    requires_entry_context = True
+
+    def get_entry_context(self, symbol: str, *, signal_symbol: str, cutoff: datetime) -> dict[str, Any]:
+        from .entry_market_context import fetch_entry_context
+        base = self.config.data_base_url.rstrip("/")
+        if base != "https://data.alpaca.markets":
+            raise ValueError("entry_context_data_endpoint_not_approved")
+        return fetch_entry_context(lambda path,params:self._get_json_with_retry(base,path,params),
+                                   symbol,signal_symbol=signal_symbol,cutoff=cutoff,stock_feed="iex")
+
+
     def __init__(self, config: AlpacaPaperConfig | None = None) -> None:
         self.config = (config or require_alpaca_paper_config()).validate()
         # One client instance is reused for a complete trading cycle. Cache the
