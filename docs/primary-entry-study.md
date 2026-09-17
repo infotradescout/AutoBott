@@ -60,3 +60,12 @@ Synthetic regression coverage includes actual v2 shell-to-offline primary/runner
 Still required for a market conclusion: genuinely fixed study settings, a traceable current market dataset and cohort, retained post-exit observations, the correct release/engine comparator, adequate scorable chronological evaluation coverage, and appropriate uncertainty analysis for correlated samples. Target-runtime validation, independent review, main merge and deployment are separate acceptance items. No live or paper order is placed by this runner.
 
 Full guarded source suite on Windows Python 3.11.9 / pytest 9.0.3: 783 top-level tests and 68 subtests passed with zero failures/errors/skips and zero prohibited network/process attempts. The 851 JUnit records include the 68 subtests. Runtime admission is AST-identical after removing the added recorded-refresh telemetry key; entry rules, both decision engines, pair selection, exits, broker submission and risk/accounting policies remain unchanged in this checkpoint.
+
+## Recorded-market fill linkage update - 2026-09-17
+
+Actual-fill recorded-market studies now require `fill_basis=linked_primary_fill`
+and exact admission/submission/account/broker-order records. The legacy
+`recorded_primary_fill` input mode is restricted to synthetic diagnostics.
+This supersedes any earlier description treating supplied fill fields as the
+complete actual-fill input contract. Shadow-ask evaluation remains hypothetical.
+See `docs/primary-fill-linkage-20260917.md` for schemas, compatibility and limits.

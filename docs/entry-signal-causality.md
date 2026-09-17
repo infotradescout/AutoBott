@@ -32,3 +32,10 @@ A subsequent adversarial review reproduced stale completed bars passing entry
 admission with fresh quotes. The bounded signal-age repair, failing-before
 cases and remaining release gates are recorded in
 `docs/entry-signal-freshness-review-20260917.md`.
+
+## Fill evidence continuation - 2026-09-17
+
+The next slice preserves admission identity in runtime exports and requires
+account-scoped submission/broker-order linkage for actual-fill market studies.
+Continue from `docs/primary-fill-linkage-20260917.md`; neither matching symbols
+nor synthetic test passes establish a profitable entry advantage.
