@@ -20,14 +20,23 @@ def calendar(*events):
             event("future", "20261231T083000")+"END:VCALENDAR")
 
 
-def source(at=AT, text=None, rows=None, calls=None):
+def fomc_calendar(day, rows=''):
+    return ('<div id="article"><div class="row-title">'+day.strftime('%B %Y')+
+        '</div>'+ (rows or '<div class="panel-body"><div class="col-xs-2">2:00 p.m.</div>'
+        '<div class="col-xs-7">Beige Book</div><div class="col-xs-3">2</div></div>') + '</div>')
+
+
+def source(at=AT, text=None, rows=None, calls=None, fomc=None):
     def read(params):
         if calls is not None: calls.append(("calendar",params))
         return rows if rows is not None else [{"date":at.date().isoformat(),"open":"09:30","close":"16:00"}]
     def public():
         if calls is not None: calls.append(("bls",None))
         return calendar() if text is None else text
-    return EntryScheduleSource(read, public_fetch=public, now_fn=lambda:at)
+    def fed(day):
+        if calls is not None: calls.append(("fomc", day.isoformat()))
+        return fomc_calendar(day) if fomc is None else fomc
+    return EntryScheduleSource(read, public_fetch=public, fomc_fetch=fed, now_fn=lambda:at)
 
 
 def scheduled_snapshot(*, at=AT, text=None, rows=None):
@@ -41,7 +50,8 @@ def test_captured_schedule_has_limited_scope_not_all_clear():
     evidence=assess(row)["schedule_evidence"]
     assert evidence["status"]=="observed_no_listed_event_block"
     assert evidence["all_market_event_coverage_verified"] is False
-    assert evidence["earnings_status"]==evidence["fomc_status"]=="not_integrated"
+    assert evidence["earnings_status"]=="not_integrated"
+    assert evidence["fomc_status"]=="listed_month_observed"
     assert row==before
 
 
@@ -115,19 +125,19 @@ def test_changed_schedule_payload_fails_integrity():
 def test_same_day_cache_is_bounded_and_copy_isolated():
     calls=[];reader=source(calls=calls)
     first=reader.collect(AT);again=reader.collect(AT)
-    assert len(calls)==2 and first==again
+    assert len(calls)==3 and first==again
     again["session"]["trading_day"]=False
     assert reader.collect(AT)["session"]["trading_day"] is True
     reader._now=lambda:AT+timedelta(seconds=901)
     reader.collect(AT)
-    assert len(calls)==4
+    assert len(calls)==6
 
 
 def test_regressed_clock_does_not_reuse_future_cache():
     calls=[];reader=source(calls=calls);reader.collect(AT)
     reader._now=lambda:AT-timedelta(seconds=1)
     reader.collect(AT)
-    assert len(calls)==4
+    assert len(calls)==6
 
 
 def test_provider_error_does_not_send_credentials_or_disclose_error_details():

@@ -20,7 +20,7 @@ from typing import Any, Mapping
 
 from .bar_timing import aware_utc
 from .entry_market_context import POLICY as ENTRY_CONTEXT_POLICY
-from .entry_schedule_context import POLICY as ENTRY_SCHEDULE_POLICY
+from .entry_schedule_context import FOMC_POLICY as ENTRY_SCHEDULE_POLICY
 from .entry_sector_context import POLICY as ENTRY_SECTOR_POLICY
 from .core_runner import CoreRunnerRules, select_core_runner_pair
 from .entry_admission import (EntryMarketRejected, EntryMarketRules, _completed_evidence,

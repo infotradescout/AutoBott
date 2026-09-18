@@ -5,7 +5,7 @@ import pytest
 from autobott_v2.entry_market_context import fetch_entry_context
 from autobott_v2.entry_schedule_context import EntryScheduleSource, attach_entry_schedule
 from autobott_v2.entry_sector_context import SectorContextSource, attach_sector_context
-from test_entry_schedule_context import source, calendar, event
+from test_entry_schedule_context import source, calendar, event, fomc_calendar
 from test_entry_sector_context import catalog, PeerProvider, peer_rows
 from test_entry_market_context import Provider, AT, assess
 from test_entry_market_timing import EntryTape, run_cycle
@@ -44,7 +44,7 @@ def test_native_adapters_request_only_approved_inputs_and_reuse_shared_context(m
     from autobott_v2.phase1_snapshot_capture import AlpacaMarketDataClient
     from test_phase1_alpaca_client import _config
     Schedule, Sector=EntryScheduleSource,SectorContextSource
-    monkeypatch.setattr(schedules,"EntryScheduleSource",lambda read:Schedule(read,public_fetch=lambda:calendar(),now_fn=lambda:AT))
+    monkeypatch.setattr(schedules,"EntryScheduleSource",lambda read:Schedule(read,public_fetch=lambda:calendar(),fomc_fetch=fomc_calendar,now_fn=lambda:AT))
     monkeypatch.setattr(sectors,"SectorContextSource",lambda read:Sector(read,catalog=catalog()))
     calls=[];provider=Provider();peer=PeerProvider()
     def read(base,path,params):
