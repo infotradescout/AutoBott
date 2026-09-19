@@ -215,13 +215,15 @@ def evaluate_completed_primary_watches(root: str | Path) -> dict[str, Any]:
     summary: dict[str, Any] = {
         "checked": 0, "evaluated": 0, "already_evaluated": 0,
         "not_configured": 0, "not_ready": 0, "errors": [],
-        "quality_statuses": {}, "broker_reads": 0, "broker_writes": 0, "journal_writes": 0,
+        "quality_statuses": {}, "underlying_diagnostics": {},
+        "broker_reads": 0, "broker_writes": 0, "journal_writes": 0,
         "edge_established": False,
     }
     if not root.exists():
         return summary
 
     statuses: Counter[str] = Counter()
+    diagnostics: Counter[str] = Counter()
     with _locked(root):
         for path in sorted(root.glob("*.json")):
             try:
@@ -238,6 +240,9 @@ def evaluate_completed_primary_watches(root: str | Path) -> dict[str, Any]:
                     quality = existing.get("quality", {})
                     if isinstance(quality, Mapping) and isinstance(quality.get("status"), str):
                         statuses[quality["status"]] += 1
+                    underlying = existing.get("underlying_response", {})
+                    if isinstance(underlying, Mapping) and isinstance(underlying.get("diagnostic"), str):
+                        diagnostics[underlying["diagnostic"]] += 1
                     continue
 
                 rules = _protocol_from_watch(row)
@@ -305,10 +310,12 @@ def evaluate_completed_primary_watches(root: str | Path) -> dict[str, Any]:
                 _write(path, row, PrimaryObservationRules(**row["rules"]))
                 summary["evaluated"] += 1
                 statuses[quality["status"]] += 1
+                diagnostics[underlying_response["diagnostic"]] += 1
             except Exception as exc:
                 summary["errors"].append({
                     "watch_id": path.stem,
                     "reason": f"{type(exc).__name__}:{exc}",
                 })
     summary["quality_statuses"] = dict(statuses)
+    summary["underlying_diagnostics"] = dict(diagnostics)
     return summary
