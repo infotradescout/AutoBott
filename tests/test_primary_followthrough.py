@@ -183,7 +183,7 @@ def test_polling_cadence_and_closed_windows_do_not_make_extra_requests(tmp_path)
     poll_primary_observations(root,q,now_fn=lambda:now)
     assert poll_primary_observations(root,q,now_fn=lambda:now)["observed"]==0
     assert len(q.calls)==1
-    later=START+timedelta(seconds=190)
+    later=START+timedelta(seconds=191)
     expired = Quotes(later)
     result = poll_primary_observations(root, expired, now_fn=lambda:later)
     assert result["window_closed"] == 1
