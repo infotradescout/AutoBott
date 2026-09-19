@@ -10,6 +10,7 @@ from __future__ import annotations
 from collections import Counter
 from copy import deepcopy
 from dataclasses import fields
+from datetime import timedelta
 import hashlib
 import json
 import os
@@ -132,7 +133,7 @@ def evaluate_completed_primary_watches(root: str | Path) -> dict[str, Any]:
                 start = aware_utc(fill["timestamp"])
                 if aware_utc(row.get("fill_window_start")) != start:
                     raise ValueError("primary_fill_window_start_mismatch")
-                end = start + __import__("datetime").timedelta(seconds=rules.holding_seconds)
+                end = start + timedelta(seconds=rules.holding_seconds)
 
                 entry = {
                     "decision_id": row.get("decision_id"),
