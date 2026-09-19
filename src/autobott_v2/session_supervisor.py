@@ -19,6 +19,7 @@ from .hosted_policy import (
 )
 from .options_universe import resolve_symbol_universe
 from .position_monitor import run_position_monitor
+from .primary_runtime_evidence import poll_primary_runtime_evidence_once
 from .runtime_control import arm_paper_execution
 from .session_runner import run_trading_session
 
@@ -208,6 +209,7 @@ def _run_session(config: SessionSupervisorConfig, stop_event: threading.Event) -
                 "current_daily_realized_pnl": config.daily_pnl,
             },
             on_cycle_complete=_record_cycle_result,
+            after_entry_window_runner=poll_primary_runtime_evidence_once,
         )
         with _SESSION_LOCK:
             _SESSION_STATE.last_result = result.to_json_dict()
