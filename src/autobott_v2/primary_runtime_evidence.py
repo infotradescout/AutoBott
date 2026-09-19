@@ -14,6 +14,7 @@ from typing import Any, Callable
 from .execution_broker import AlpacaExecutionBroker
 from .phase1_alpaca_client import AlpacaPaperClient
 from .primary_fill_capture import poll_primary_fills
+from .primary_development_metrics import materialize_primary_development_metrics
 from .primary_followthrough import poll_primary_observations
 from .runtime_paths import artifacts_root
 
@@ -36,6 +37,13 @@ def poll_primary_runtime_evidence_once(
             "observations": {"checked": 0, "observed": 0, "window_closed": 0,
                              "errors": [], "underlying_observed": 0,
                              "underlying_errors": [], "broker_writes": 0},
+            "development_metrics": {
+                "checked": 0, "materialized": 0, "already_materialized": 0,
+                "not_development": 0, "not_ready": 0, "errors": [],
+                "passes": None, "fails": None, "edge_established": False,
+                "eligible_for_holdout": False, "broker_reads": 0,
+                "broker_writes": 0, "journal_writes": 0,
+            },
             "trading_actions": 0,
         }
 
@@ -59,10 +67,23 @@ def poll_primary_runtime_evidence_once(
                         "underlying_observed": 0, "underlying_errors": [],
                         "broker_writes": 0}
 
+    try:
+        development_metrics = materialize_primary_development_metrics(evidence_root)
+    except Exception as exc:
+        development_metrics = {
+            "checked": 0, "materialized": 0, "already_materialized": 0,
+            "not_development": 0, "not_ready": 0,
+            "errors": [{"reason": f"{type(exc).__name__}:{exc}"}],
+            "passes": None, "fails": None, "edge_established": False,
+            "eligible_for_holdout": False, "broker_reads": 0,
+            "broker_writes": 0, "journal_writes": 0,
+        }
+
     return {
         "enabled": True,
         "root": str(evidence_root),
         "fills": fills,
         "observations": observations,
+        "development_metrics": development_metrics,
         "trading_actions": 0,
     }
