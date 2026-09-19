@@ -8,7 +8,7 @@ import pytest
 
 from autobott_v2.primary_followthrough import (
     PrimaryObservationRules, configured_observation_rules, register_primary_observation,
-    poll_primary_observations, export_primary_observations,
+    poll_primary_observations, export_primary_observations, _observation_window_end,
 )
 from test_primary_entry_study import make_case, assess, protocol, PRIMARY
 from test_entry_market_timing import START, run_cycle
@@ -40,6 +40,36 @@ def watch(tmp_path, **rule_changes):
     rules = replace(PrimaryObservationRules(180), **rule_changes)
     identity = register_primary_observation(root, case["snapshot"], result["admission"], rules)
     return root, identity, case, result, rules
+
+
+def test_session_development_capture_is_explicit_and_uses_exchange_close(monkeypatch):
+    monkeypatch.delenv("AUTOBOTT_PRIMARY_OBSERVATION_SECONDS", raising=False)
+    monkeypatch.setenv("AUTOBOTT_PRIMARY_DEVELOPMENT_CAPTURE", "session")
+    rules = configured_observation_rules()
+    assert rules == PrimaryObservationRules(23_400, end_basis="session_close")
+    opening = START - timedelta(minutes=5)
+    closing = START + timedelta(hours=6)
+    snapshot = {"entry_context": {"schedule": {"session": {
+        "trading_day": True, "open": opening.isoformat(), "close": closing.isoformat(),
+    }}}}
+    assert _observation_window_end(snapshot, START, rules) == closing
+
+    monkeypatch.setenv("AUTOBOTT_PRIMARY_OBSERVATION_SECONDS", "180")
+    with pytest.raises(ValueError, match="conflicting_primary_observation_modes"):
+        configured_observation_rules()
+
+
+def test_unknown_development_capture_mode_is_rejected(monkeypatch):
+    monkeypatch.delenv("AUTOBOTT_PRIMARY_OBSERVATION_SECONDS", raising=False)
+    monkeypatch.setenv("AUTOBOTT_PRIMARY_DEVELOPMENT_CAPTURE", "guess")
+    with pytest.raises(ValueError, match="unsupported_primary_development_capture_mode"):
+        configured_observation_rules()
+
+
+def test_session_development_capture_requires_observed_open_session():
+    rules = PrimaryObservationRules(23_400, end_basis="session_close")
+    with pytest.raises(ValueError, match="development_capture_session_required"):
+        _observation_window_end({"entry_context": {}}, START, rules)
 
 
 def test_persistent_registration_is_idempotent_and_never_invents_fill(tmp_path):
