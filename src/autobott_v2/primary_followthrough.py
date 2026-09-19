@@ -150,6 +150,9 @@ def register_primary_observation(root: str | Path, snapshot: Mapping[str, Any],
                 raise ValueError("cannot_change_existing_observation_window")
             if existing.get("quality_protocol") != row["quality_protocol"]:
                 raise ValueError("cannot_change_existing_quality_protocol")
+            if ("underlying_followthrough" in existing
+                    and existing["underlying_followthrough"] != row["underlying_followthrough"]):
+                raise ValueError("cannot_change_existing_underlying_followthrough")
             return watch_id
         active = sum(_read(p)["status"] == "observing" for p in root.glob("*.json"))
         if active >= rules.max_active:
@@ -162,7 +165,8 @@ def poll_primary_observations(root: str | Path, data_client: Any, *,
                               now_fn: Callable[[], datetime]) -> dict[str, Any]:
     root = Path(root)
     if not root.exists():
-        return {"checked": 0, "observed": 0, "window_closed": 0, "errors": [], "broker_writes": 0}
+        return {"checked": 0, "observed": 0, "window_closed": 0, "errors": [],
+                "underlying_observed": 0, "underlying_errors": [], "broker_writes": 0}
     before = aware_utc(now_fn())
     with _locked(root):
         due = []
