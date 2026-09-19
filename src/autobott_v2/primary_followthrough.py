@@ -17,6 +17,7 @@ import tempfile
 from typing import Any, Callable, Mapping
 
 from .bar_timing import aware_utc
+from .entry_quality import EntryQualityRules
 from .primary_entry_study import case_from_runtime_evidence, digest
 from .quote_observation import observed_quote_fields
 
@@ -90,7 +91,8 @@ def _read(path: Path, maximum: int = 2_000_000) -> dict:
 
 
 def register_primary_observation(root: str | Path, snapshot: Mapping[str, Any],
-                                 admission: Mapping[str, Any], rules: PrimaryObservationRules) -> str:
+                                 admission: Mapping[str, Any], rules: PrimaryObservationRules,
+                                 *, quality_rules: EntryQualityRules | None = None) -> str:
     root = Path(root)
     symbol = admission.get("primary_option_symbol")
     if not isinstance(symbol, str) or not symbol.strip():
@@ -104,11 +106,19 @@ def register_primary_observation(root: str | Path, snapshot: Mapping[str, Any],
     watch_id = digest({"snapshot": digest(snapshot), "primary": symbol, "received_at": start.isoformat()})
     case = case_from_runtime_evidence(snapshot=snapshot, admission_event=admission, sample_id=watch_id,
                                      outcome_snapshots=[], fills=[])
+    quality_protocol = None
+    if quality_rules is not None:
+        if quality_rules.holding_seconds > rules.window_seconds:
+            raise ValueError("observation_window_shorter_than_quality_holding_period")
+        quality_protocol = {"schema_version": "entry_quality_rules.v1",
+                            "rules": quality_rules.to_json_dict(),
+                            "rules_hash": quality_rules.config_hash}
     row = {"schema_version": "primary_observation.v1", "watch_id": watch_id,
            "decision_id": admission.get("decision_id"), "primary_option_symbol": symbol,
            "start": start.isoformat(), "window_end": (start+timedelta(seconds=rules.window_seconds)).isoformat(),
            "rules": asdict(rules), "status": "observing", "last_observed_at": None,
            "observation_window_basis": "admission_pending_fill",
+           "quality_protocol": quality_protocol,
            "fill_provenance": "not_collected_admission_is_not_a_fill", "case": case}
     with _locked(root):
         path = root / (watch_id + ".json")
@@ -116,6 +126,8 @@ def register_primary_observation(root: str | Path, snapshot: Mapping[str, Any],
             existing = _read(path, rules.max_case_bytes)
             if existing["rules"] != row["rules"]:
                 raise ValueError("cannot_change_existing_observation_window")
+            if existing.get("quality_protocol") != row["quality_protocol"]:
+                raise ValueError("cannot_change_existing_quality_protocol")
             return watch_id
         active = sum(_read(p)["status"] == "observing" for p in root.glob("*.json"))
         if active >= rules.max_active:
