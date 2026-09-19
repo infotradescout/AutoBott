@@ -47,6 +47,7 @@ def run_trading_session(
     cycle_runner: Callable[..., TradingCycleResult] = run_trading_cycle,
     cycle_kwargs: dict[str, Any] | None = None,
     on_cycle_complete: Callable[[dict[str, Any]], None] | None = None,
+    after_entry_window_runner: Callable[[], Any] | None = None,
 ) -> SessionRunResult:
     started_at = _now(now_fn)
     results: list[dict[str, Any]] = []
@@ -68,6 +69,13 @@ def run_trading_session(
             sleep_fn(interval_seconds)
             continue
         if end_time and current_time > end_time:
+            if after_entry_window_runner is not None:
+                try:
+                    after_entry_window_runner()
+                except Exception:
+                    # Evidence continuation is observational only and must never
+                    # terminate or mutate the trading-session supervisor.
+                    pass
             if _should_wait_for_next_window(continuous_window=continuous_window, max_cycles=max_cycles):
                 sleep_fn(interval_seconds)
                 continue

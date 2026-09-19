@@ -49,6 +49,7 @@ from .phase1_validate import _decision_input_from_snapshot, _load_snapshot
 from .primary_followthrough import configured_observation_rules, register_primary_observation, poll_primary_observations
 from .primary_fill_capture import paper_capture_scope, bind_primary_submission, poll_primary_fills
 from .primary_quality_runtime import configured_entry_quality_rules, evaluate_completed_primary_watches
+from .primary_development_metrics import materialize_primary_development_metrics
 from .position_store import load_open_positions
 from .position_monitor import run_position_monitor
 from .runtime_control import load_runtime_state
@@ -785,6 +786,14 @@ def run_trading_cycle(
         execution_outcomes.append({"disposition": "primary_entry_quality_poll", **quality_summary})
     except Exception as exc:
         execution_outcomes.append({"disposition": "primary_entry_quality_poll_failed",
+                                   "error_type": type(exc).__name__, "detail": str(exc)})
+    try:
+        development_summary = materialize_primary_development_metrics(
+            artifacts_root() / "primary_followthrough")
+        execution_outcomes.append({"disposition": "primary_development_metrics_poll",
+                                   **development_summary})
+    except Exception as exc:
+        execution_outcomes.append({"disposition": "primary_development_metrics_poll_failed",
                                    "error_type": type(exc).__name__, "detail": str(exc)})
 
     finished_at = datetime.now(tz=UTC)

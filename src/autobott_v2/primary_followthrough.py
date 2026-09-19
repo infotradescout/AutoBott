@@ -203,12 +203,25 @@ def poll_primary_observations(root: str | Path, data_client: Any, *,
         return {"checked": 0, "observed": 0, "window_closed": 0, "errors": [],
                 "underlying_observed": 0, "underlying_errors": [], "broker_writes": 0}
     before = aware_utc(now_fn())
+    expired = 0
     with _locked(root):
         due = []
         # Do not retain every historical snapshot/path in runtime memory.
         for path in sorted(root.glob("*.json")):
             row = _read(path)
-            if (row["status"] == "observing" and before >= aware_utc(row["start"])
+            if row["status"] != "observing":
+                continue
+            rules = PrimaryObservationRules(**row["rules"])
+            # Never let a restart or next-session cycle attach a post-window quote
+            # to yesterday's entry. Closing an expired watch is local-only and
+            # preserves any missing tail as missing evidence.
+            if before > aware_utc(row["window_end"]):
+                row["status"] = "window_closed"
+                row["closed_without_post_window_quote"] = True
+                _write(path, row, rules)
+                expired += 1
+                continue
+            if (before >= aware_utc(row["start"])
                     and (row["last_observed_at"] is None or
                          (before-aware_utc(row["last_observed_at"])).total_seconds() >= row["rules"]["minimum_poll_seconds"])):
                 underlying = row.get("underlying_followthrough", {})
@@ -216,7 +229,7 @@ def poll_primary_observations(root: str | Path, data_client: Any, *,
                             "underlying_symbol": (underlying.get("signal_symbol")
                                 if underlying.get("status") == "configured" else None)})
     if not due:
-        return {"checked": 0, "observed": 0, "window_closed": 0, "errors": [],
+        return {"checked": 0, "observed": 0, "window_closed": expired, "errors": [],
                 "underlying_observed": 0, "underlying_errors": [], "broker_writes": 0}
     symbols = sorted({r["primary_option_symbol"] for r in due})
     stock_symbols = sorted({r["underlying_symbol"] for r in due if r["underlying_symbol"]})
@@ -242,7 +255,7 @@ def poll_primary_observations(root: str | Path, data_client: Any, *,
         raise ValueError("primary_observation_clock_regressed")
     feed = getattr(data_client, "option_feed", getattr(data_client, "feed", "unreported"))
     stock_feed = getattr(data_client, "stock_feed", getattr(data_client, "feed", "unreported"))
-    summary = {"checked": len(due), "observed": 0, "window_closed": 0, "errors": [],
+    summary = {"checked": len(due), "observed": 0, "window_closed": expired, "errors": [],
                "underlying_observed": 0, "underlying_errors": [], "broker_writes": 0}
     with _locked(root):
         for initial in due:
@@ -287,8 +300,8 @@ def poll_primary_observations(root: str | Path, data_client: Any, *,
                     summary["underlying_errors"].append({"watch_id": row["watch_id"], "reason": str(exc)})
             observations.append(point)
             row["last_observed_at"] = after.isoformat()
-            # A receipt after the window closes the watch but does not fill in
-            # missed earlier quotes. The evaluator still enforces coverage gaps.
+            # A quote requested no later than the boundary may close the watch.
+            # Later cycles close locally before any provider request.
             if after >= aware_utc(row["window_end"]):
                 row["status"] = "window_closed"
                 summary["window_closed"] += 1
