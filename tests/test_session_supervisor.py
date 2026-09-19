@@ -46,6 +46,9 @@ def _reset_supervisor_state() -> None:
     supervisor._SESSION_STATE.last_error = None
     supervisor._SESSION_STATE.last_monitor_result = None
     supervisor._SESSION_STATE.last_monitor_error = None
+    supervisor._SESSION_STATE.last_evidence_result = None
+    supervisor._SESSION_STATE.last_evidence_error = None
+    supervisor._SESSION_STATE.last_evidence_at = None
     supervisor._SESSION_STATE.cycles_completed = 0
     supervisor._SESSION_STATE.last_cycle_at = None
 
@@ -164,9 +167,41 @@ def test_maybe_start_session_supervisor_starts_once(monkeypatch) -> None:
     assert calls
     assert calls[0]["continuous_window"] is True
     assert calls[0]["on_cycle_complete"] is supervisor._record_cycle_result
-    assert calls[0]["after_entry_window_runner"] is supervisor.poll_primary_runtime_evidence_once
+    assert calls[0]["after_entry_window_runner"] is supervisor._poll_and_record_primary_evidence
     second = supervisor.maybe_start_session_supervisor()
     assert second is False
+
+
+def test_supervisor_records_read_only_primary_evidence_summary(monkeypatch) -> None:
+    _reset_supervisor_state()
+    expected = {
+        "trading_actions": 0,
+        "fills": {"checked": 1, "filled": 1},
+        "observations": {"checked": 1, "observed": 1},
+        "development_metrics": {"materialized": 0},
+    }
+    monkeypatch.setattr(supervisor, "poll_primary_runtime_evidence_once", lambda: expected)
+    result = supervisor._poll_and_record_primary_evidence()
+    assert result == expected
+    status = supervisor.session_supervisor_status()["state"]
+    assert status["last_evidence_result"] == expected
+    assert status["last_evidence_error"] is None
+    assert status["last_evidence_at"] is not None
+
+
+def test_supervisor_evidence_exception_is_status_only(monkeypatch) -> None:
+    _reset_supervisor_state()
+
+    def broken():
+        raise RuntimeError("synthetic evidence failure")
+
+    monkeypatch.setattr(supervisor, "poll_primary_runtime_evidence_once", broken)
+    result = supervisor._poll_and_record_primary_evidence()
+    assert result["trading_actions"] == 0
+    status = supervisor.session_supervisor_status()["state"]
+    assert "RuntimeError: synthetic evidence failure" == status["last_evidence_error"]
+    assert status["last_evidence_result"] is None
+    assert status["last_evidence_at"] is not None
 
 
 def test_supervisor_publishes_each_cycle_before_session_finishes() -> None:
