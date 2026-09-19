@@ -407,7 +407,8 @@ def test_hosted_direct_vix_pair_posts_exact_returned_vixw_symbols(tmp_path, monk
     assert [intent.order_type for intent in broker.intents] == [OrderType.MARKET, OrderType.MARKET]
 
 
-def test_linked_pair_runner_failure_market_closes_filled_primary(tmp_path, monkeypatch) -> None:
+@pytest.mark.parametrize("observer_fails", [False, True])
+def test_linked_pair_runner_failure_market_closes_filled_primary(tmp_path, monkeypatch, observer_fails) -> None:
     import autobott_v2.execution_orchestrator as orchestrator
 
     monkeypatch.setenv("RENDER", "true")
@@ -439,6 +440,11 @@ def test_linked_pair_runner_failure_market_closes_filled_primary(tmp_path, monke
         def get_order(self, broker_order_id):
             return {"id": broker_order_id, "status": "filled", "filled_qty": "1"}
 
+    captured = []
+    def receipt_observer(order):
+        captured.append(order)
+        if observer_fails:
+            raise OSError("synthetic_observer_failure")
     broker = PartialPairBroker()
     selected = _decision_card().selected_contract
     assert selected is not None
@@ -471,8 +477,11 @@ def test_linked_pair_runner_failure_market_closes_filled_primary(tmp_path, monke
             CoreRunnerPair(primary, runner, estimated_group_cost=95.0),
             broker=broker,
             journal_path=str(tmp_path / "execution_orders.jsonl"),
+            on_order_submitted=receipt_observer,
         )
 
+    assert len(captured) == 1
+    assert captured[0].broker_order_id == "alpaca-order-1"
     assert excinfo.value.reason == "core_runner_paired_submission_partial_failure"
     assert broker.canceled == ["alpaca-order-1"]
     assert [intent.side for intent in broker.intents] == [

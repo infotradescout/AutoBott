@@ -19,6 +19,7 @@ from .hosted_policy import (
 )
 from .options_universe import resolve_symbol_universe
 from .position_monitor import run_position_monitor
+from .primary_runtime_evidence import poll_primary_runtime_evidence_once
 from .runtime_control import arm_paper_execution
 from .session_runner import run_trading_session
 
@@ -57,6 +58,9 @@ class SessionSupervisorState:
     last_error: str | None = None
     last_monitor_result: dict[str, Any] | None = None
     last_monitor_error: str | None = None
+    last_evidence_result: dict[str, Any] | None = None
+    last_evidence_error: str | None = None
+    last_evidence_at: datetime | None = None
     cycles_completed: int = 0
     last_cycle_at: datetime | None = None
 
@@ -65,6 +69,7 @@ class SessionSupervisorState:
         payload["started_at"] = self.started_at.astimezone(UTC).isoformat() if self.started_at else None
         payload["finished_at"] = self.finished_at.astimezone(UTC).isoformat() if self.finished_at else None
         payload["last_cycle_at"] = self.last_cycle_at.astimezone(UTC).isoformat() if self.last_cycle_at else None
+        payload["last_evidence_at"] = self.last_evidence_at.astimezone(UTC).isoformat() if self.last_evidence_at else None
         return payload
 
 
@@ -188,6 +193,22 @@ def session_supervisor_status() -> dict[str, Any]:
         }
 
 
+def _poll_and_record_primary_evidence() -> dict[str, Any]:
+    try:
+        result = poll_primary_runtime_evidence_once()
+    except Exception as exc:  # Defensive: observational evidence cannot stop the supervisor.
+        with _SESSION_LOCK:
+            _SESSION_STATE.last_evidence_result = None
+            _SESSION_STATE.last_evidence_error = f"{type(exc).__name__}: {exc}"
+            _SESSION_STATE.last_evidence_at = datetime.now(tz=UTC)
+        return {"trading_actions": 0, "error": f"{type(exc).__name__}: {exc}"}
+    with _SESSION_LOCK:
+        _SESSION_STATE.last_evidence_result = result
+        _SESSION_STATE.last_evidence_error = None
+        _SESSION_STATE.last_evidence_at = datetime.now(tz=UTC)
+    return result
+
+
 def _run_session(config: SessionSupervisorConfig, stop_event: threading.Event) -> None:
     global _SESSION_STATE
     try:
@@ -208,6 +229,7 @@ def _run_session(config: SessionSupervisorConfig, stop_event: threading.Event) -
                 "current_daily_realized_pnl": config.daily_pnl,
             },
             on_cycle_complete=_record_cycle_result,
+            after_entry_window_runner=_poll_and_record_primary_evidence,
         )
         with _SESSION_LOCK:
             _SESSION_STATE.last_result = result.to_json_dict()

@@ -10,11 +10,12 @@ from typing import Any
 
 from .core_runner import load_core_runner_rules, select_core_runner_pair
 from .execution_broker import AlpacaExecutionBroker
+from .entry_admission import EntryMarketRejected, filter_entry_quote_candidates, refresh_entry_admission
 from .defined_risk_spreads import append_defined_risk_spread_candidate, select_defined_risk_spread
 from .execution_models import BrokerEnvironment
 from .execution_journal import append_execution_outcome, execution_journal_path
 from .execution_reconciler import reconcile_open_positions
-from .execution_orchestrator import ExecutionRejectedError, submit_core_runner_to_broker, submit_decision_to_broker
+from .execution_orchestrator import build_trade_intent_from_decision, ExecutionRejectedError, submit_core_runner_to_broker, submit_decision_to_broker
 from .ghost_trades import append_ghost_trade, observe_ghost_trades
 from .hosted_policy import (
     HOSTED_BAR_TIMEFRAME,
@@ -45,12 +46,20 @@ from .phase1_models import (
 )
 from .phase1_snapshot_capture import CaptureRules, capture_symbol_snapshot
 from .phase1_validate import _decision_input_from_snapshot, _load_snapshot
+from .primary_followthrough import configured_observation_rules, register_primary_observation, poll_primary_observations
+from .primary_fill_capture import paper_capture_scope, bind_primary_submission, poll_primary_fills
+from .primary_quality_runtime import configured_entry_quality_rules, evaluate_completed_primary_watches
+from .primary_development_metrics import materialize_primary_development_metrics
 from .position_store import load_open_positions
 from .position_monitor import run_position_monitor
 from .runtime_control import load_runtime_state
-from .runtime_paths import data_root, phase1_snapshots_root
+from .runtime_paths import artifacts_root, data_root, phase1_snapshots_root
 from .storage_retention import prune_snapshot_storage
 from .trade_outcomes import sync_trade_outcomes_from_broker
+
+
+def _entry_check_now() -> datetime:
+    return datetime.now(tz=UTC)
 
 
 def decision_journal_path() -> Path:
@@ -176,6 +185,32 @@ def run_trading_cycle(
     orders_submitted: list[dict[str, Any]] = []
     skipped: list[dict[str, Any]] = []
     execution_outcomes: list[dict[str, Any]] = []
+    observation_account_scope = None
+    observation_rules = None
+    quality_rules = None
+    try:
+        observation_rules = configured_observation_rules()
+    except Exception as exc:
+        execution_outcomes.append({"disposition": "primary_observation_config_invalid",
+                                   "error_type": type(exc).__name__, "detail": str(exc)})
+    if observation_rules is not None:
+        try:
+            quality_rules = configured_entry_quality_rules()
+            if quality_rules is not None and observation_rules.end_basis != "fixed_duration":
+                execution_outcomes.append({
+                    "disposition": "primary_entry_quality_config_invalid",
+                    "error_type": "ValueError",
+                    "detail": "development_capture_does_not_accept_scoring_protocol",
+                })
+                quality_rules = None
+        except Exception as exc:
+            execution_outcomes.append({"disposition": "primary_entry_quality_config_invalid",
+                                       "error_type": type(exc).__name__, "detail": str(exc)})
+        try:
+            observation_account_scope = paper_capture_scope(resolved_broker)
+        except Exception as exc:
+            execution_outcomes.append({"disposition": "primary_fill_scope_unavailable",
+                                       "error_type": type(exc).__name__})
     execution_rejected_count_by_reason: dict[str, int] = {}
     scanner_candidates_count = 0
     trade_attempted_count = 0
@@ -193,7 +228,7 @@ def run_trading_cycle(
                 symbol=symbol,
                 corpus_root=resolved_corpus_root,
                 scheduled_market_time=snapshot_time,
-                captured_at_utc=captured_at,
+                captured_at_utc=captured_at if captured_at_utc is not None else datetime.now(tz=UTC),
                 corpus_type="production_capture" if resolved_broker.config.environment.value == "live" else "paper_capture",
                 market_timezone="America/New_York",
                 volatility_proxy_symbol="VIXY",
@@ -202,7 +237,9 @@ def run_trading_cycle(
             )
             snapshot = _load_snapshot(Path(snapshot_path))
             decision_input = _decision_input_from_snapshot(snapshot)
-            decision = build_decision_card(decision_input, _hosted_execution_rules())
+            decision_input, entry_quote_filter = filter_entry_quote_candidates(decision_input, snapshot)
+            entry_rules = _hosted_execution_rules()
+            decision = build_decision_card(decision_input, entry_rules)
         except Exception as exc:
             _append_skip(
                 skipped,
@@ -266,6 +303,7 @@ def run_trading_cycle(
             )
         snapshot_paths.append(snapshot_path)
         decision_payload = decision.to_json_dict()
+        decision_payload["entry_quote_filter"] = entry_quote_filter
         decisions.append(decision_payload)
         try:
             append_decision_card(decision_payload, snapshot_path=snapshot_path, log_path=decision_log_path)
@@ -556,9 +594,48 @@ def run_trading_cycle(
             continue
 
         submission_attempted = False
+        watch_id = None
 
         def _mark_submission_attempt(intent: Any) -> None:
-            nonlocal trade_attempted_count, submission_attempted
+            nonlocal trade_attempted_count, submission_attempted, watch_id
+            authorized_prices = {intent.option_symbol: intent.limit_price}
+            if core_runner_pair is not None:
+                runner_intent = build_trade_intent_from_decision(
+                    decision, contract=core_runner_pair.runner, quantity=1,
+                    environment=resolved_broker.config.environment,
+                    max_position_cost=resolved_broker.config.effective_max_position_cost(),
+                )
+                authorized_prices[runner_intent.option_symbol] = runner_intent.limit_price
+            try:
+                admission = refresh_entry_admission(
+                    decision, core_runner_pair, snapshot, resolved_data_client,
+                    decision_rules=entry_rules, pair_rules=core_runner_rules,
+                    authorized_prices=authorized_prices, now_fn=_entry_check_now,
+                )
+            except EntryMarketRejected as exc:
+                raise ExecutionRejectedError(exc.reason, detail=exc.detail) from exc
+            _record_execution_outcome(
+                execution_outcomes, ticker=symbol.upper(), decision_id=decision.decision_id,
+                thesis_id=thesis_id, disposition="entry_market_revalidated",
+                detail="exact selected contracts refreshed before first submission",
+                journal_path=execution_log_path, payload=admission,
+            )
+            try:
+                if observation_rules is not None:
+                    watch_id = register_primary_observation(
+                        artifacts_root() / "primary_followthrough", snapshot, admission, observation_rules,
+                        quality_rules=quality_rules)
+                    _record_execution_outcome(
+                        execution_outcomes, ticker=symbol.upper(), decision_id=decision.decision_id,
+                        thesis_id=thesis_id, disposition="primary_observation_registered",
+                        detail="admission is not a fill; continue primary quotes after exits",
+                        journal_path=execution_log_path, payload={"watch_id": watch_id},
+                    )
+            except Exception as exc:
+                # Observation failures are explicit but cannot disable exits or
+                # reinterpret broker permissions/accounting safeguards.
+                execution_outcomes.append({"disposition": "primary_observation_registration_failed",
+                    "decision_id": decision.decision_id, "error_type": type(exc).__name__, "detail": str(exc)})
             _remember_setup_event(setup_event_id, execution_log_path, recent_setup_events)
             submission_attempted = True
             trade_attempted_count += 1
@@ -577,6 +654,19 @@ def run_trading_cycle(
                 },
             )
 
+        def _capture_submitted_primary(order: Any) -> None:
+            if watch_id is None or order.intent.option_symbol != decision.selected_contract.option_symbol:
+                return
+            try:
+                if observation_account_scope is None:
+                    raise ValueError("verified_capture_scope_unavailable")
+                bind_primary_submission(artifacts_root() / "primary_followthrough", watch_id,
+                                        order, account_scope=observation_account_scope)
+                execution_outcomes.append({"disposition": "primary_submission_captured", "watch_id": watch_id})
+            except Exception as exc:
+                execution_outcomes.append({"disposition": "primary_submission_capture_failed", "watch_id": watch_id,
+                                           "error_type": type(exc).__name__, "detail": str(exc)})
+
         try:
             if core_runner_pair is not None:
                 submitted_orders = submit_core_runner_to_broker(
@@ -587,6 +677,7 @@ def run_trading_cycle(
                     open_positions=open_positions,
                     journal_path=execution_log_path,
                     on_submission_attempt=_mark_submission_attempt,
+                    on_order_submitted=_capture_submitted_primary,
                 )
             else:
                 submitted_orders = (
@@ -598,6 +689,7 @@ def run_trading_cycle(
                         open_positions=open_positions,
                         journal_path=execution_log_path,
                         on_submission_attempt=_mark_submission_attempt,
+                        on_order_submitted=_capture_submitted_primary,
                     ),
                 )
             open_positions += len(submitted_orders)
@@ -671,6 +763,38 @@ def run_trading_cycle(
                     journal_path=execution_log_path,
                     payload={"exception_type": type(exc).__name__},
                 )
+
+    try:
+        if observation_rules is not None:
+            followthrough = poll_primary_observations(
+                artifacts_root() / "primary_followthrough", resolved_data_client, now_fn=_entry_check_now)
+            execution_outcomes.append({"disposition": "primary_observation_poll", **followthrough})
+    except Exception as exc:
+        execution_outcomes.append({"disposition": "primary_observation_poll_failed",
+            "error_type": type(exc).__name__, "detail": str(exc)})
+
+    try:
+        if observation_rules is not None:
+            fills = poll_primary_fills(artifacts_root() / "primary_followthrough", resolved_broker, now_fn=_entry_check_now)
+            execution_outcomes.append({"disposition": "primary_fill_capture_poll", **fills})
+    except Exception as exc:
+        execution_outcomes.append({"disposition": "primary_fill_capture_poll_failed", "error_type": type(exc).__name__})
+
+    try:
+        quality_summary = evaluate_completed_primary_watches(
+            artifacts_root() / "primary_followthrough")
+        execution_outcomes.append({"disposition": "primary_entry_quality_poll", **quality_summary})
+    except Exception as exc:
+        execution_outcomes.append({"disposition": "primary_entry_quality_poll_failed",
+                                   "error_type": type(exc).__name__, "detail": str(exc)})
+    try:
+        development_summary = materialize_primary_development_metrics(
+            artifacts_root() / "primary_followthrough")
+        execution_outcomes.append({"disposition": "primary_development_metrics_poll",
+                                   **development_summary})
+    except Exception as exc:
+        execution_outcomes.append({"disposition": "primary_development_metrics_poll_failed",
+                                   "error_type": type(exc).__name__, "detail": str(exc)})
 
     finished_at = datetime.now(tz=UTC)
     return TradingCycleResult(
