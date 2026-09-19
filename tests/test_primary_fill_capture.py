@@ -85,6 +85,29 @@ def test_delayed_fill_extends_window_from_actual_purchase(tmp_path):
     assert row["observation_window_basis"] == "broker_recorded_primary_fill"
 
 
+def test_session_development_fill_never_extends_past_market_close(tmp_path):
+    root, watch_id, order, broker, now = prepared(tmp_path)
+    bind(root, watch_id, order)
+    session_close = now + timedelta(seconds=150)
+    row = load(root, watch_id)
+    row["rules"]["end_basis"] = "session_close"
+    row["window_end"] = session_close.isoformat()
+    row["observation_window_basis"] = "admission_pending_fill_session_close"
+    row["status"] = "window_closed"
+    (root / (watch_id + ".json")).write_text(json.dumps(row))
+
+    fill_at = now + timedelta(seconds=120)
+    broker.order["filled_at"] = fill_at.isoformat()
+    result = poll_primary_fills(root, broker, now_fn=lambda: fill_at)
+    assert result["filled"] == 1 and result["errors"] == []
+    row = load(root, watch_id)
+    assert aware_utc(row["fill_window_start"]) == fill_at
+    assert aware_utc(row["window_end"]) == session_close
+    assert row["observation_window_basis"] == "broker_recorded_primary_fill_to_session_close"
+    assert row["status"] == "observing"
+    assert row["reopened_after_primary_fill"] is True
+
+
 def test_unlinked_historical_watch_never_queries_broker(tmp_path):
     root, watch_id, order, broker, now = prepared(tmp_path)
     assert poll_primary_fills(root, broker, now_fn=lambda: now)["checked"] == 0
