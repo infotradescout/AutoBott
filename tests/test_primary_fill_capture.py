@@ -70,6 +70,21 @@ def test_automatic_fill_uses_broker_price_and_is_idempotent(tmp_path):
     assert export_primary_observations(root, source_kind="synthetic")["fill_capture_statuses"][watch_id] == "filled"
 
 
+def test_delayed_fill_extends_window_from_actual_purchase(tmp_path):
+    root, watch_id, order, broker, now = prepared(tmp_path)
+    bind(root, watch_id, order)
+    before = load(root, watch_id)
+    delayed_fill = now + timedelta(seconds=120)
+    broker.order["filled_at"] = delayed_fill.isoformat()
+    result = poll_primary_fills(root, broker, now_fn=lambda: delayed_fill)
+    assert result["filled"] == 1 and result["errors"] == []
+    row = load(root, watch_id)
+    assert aware_utc(row["pre_fill_window_end"]) == aware_utc(before["window_end"])
+    assert aware_utc(row["fill_window_start"]) == delayed_fill
+    assert aware_utc(row["window_end"]) == delayed_fill + timedelta(seconds=row["rules"]["window_seconds"])
+    assert row["observation_window_basis"] == "broker_recorded_primary_fill"
+
+
 def test_unlinked_historical_watch_never_queries_broker(tmp_path):
     root, watch_id, order, broker, now = prepared(tmp_path)
     assert poll_primary_fills(root, broker, now_fn=lambda: now)["checked"] == 0
@@ -122,19 +137,28 @@ def test_invalid_order_observation_cannot_become_a_fill(tmp_path, field, value):
     assert load(root, watch_id)["case"]["fills"] == []
 
 
-def test_partial_then_complete_fill_survives_restart_and_closed_quote_window(tmp_path):
+def test_partial_then_complete_fill_survives_restart_and_reopens_post_fill_window(tmp_path):
     root, watch_id, order, broker, now = prepared(tmp_path)
     bind(root, watch_id, order)
     broker.order.update(status="partially_filled", filled_qty="0.5")
     assert poll_primary_fills(root, broker, now_fn=lambda: now)["pending"] == 1
     assert load(root, watch_id)["case"]["fills"] == []
-    row = load(root, watch_id); row["status"] = "window_closed"
+    row = load(root, watch_id)
+    original_end = aware_utc(row["window_end"])
+    row["status"] = "window_closed"
     (root / (watch_id + ".json")).write_text(json.dumps(row))
-    restarted = ReadOnlyBroker({**broker.order, "status": "filled", "filled_qty": "1"})
-    result = poll_primary_fills(root, restarted, now_fn=lambda: now + timedelta(seconds=20))
+    completed_at = now + timedelta(seconds=220)
+    restarted = ReadOnlyBroker({**broker.order, "status": "filled", "filled_qty": "1",
+                                "filled_at": completed_at.isoformat()})
+    result = poll_primary_fills(root, restarted, now_fn=lambda: completed_at)
     assert result["filled"] == 1
-    assert len(load(root, watch_id)["broker_order_observation_history"]) == 2
-    assert load(root, watch_id)["status"] == "window_closed"
+    row = load(root, watch_id)
+    assert len(row["broker_order_observation_history"]) == 2
+    assert row["status"] == "observing"
+    assert row["reopened_after_primary_fill"] is True
+    assert aware_utc(row["pre_fill_window_end"]) == original_end
+    assert aware_utc(row["fill_window_start"]) == completed_at
+    assert aware_utc(row["window_end"]) == completed_at + timedelta(seconds=row["rules"]["window_seconds"])
 
 
 @pytest.mark.parametrize("status", ["canceled", "rejected", "expired"])
