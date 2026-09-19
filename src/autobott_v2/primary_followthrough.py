@@ -108,6 +108,7 @@ def register_primary_observation(root: str | Path, snapshot: Mapping[str, Any],
            "decision_id": admission.get("decision_id"), "primary_option_symbol": symbol,
            "start": start.isoformat(), "window_end": (start+timedelta(seconds=rules.window_seconds)).isoformat(),
            "rules": asdict(rules), "status": "observing", "last_observed_at": None,
+           "observation_window_basis": "admission_pending_fill",
            "fill_provenance": "not_collected_admission_is_not_a_fill", "case": case}
     with _locked(root):
         path = root / (watch_id + ".json")
