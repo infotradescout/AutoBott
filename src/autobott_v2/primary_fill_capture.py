@@ -2,7 +2,7 @@
 from __future__ import annotations
 from collections.abc import Callable, Mapping
 from copy import deepcopy
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 import re
 from typing import Any
@@ -167,6 +167,24 @@ def poll_primary_fills(root: str | Path, broker: Any, *, now_fn: Callable[[], da
                         row["case"] = candidate
                         row["fill_capture_status"] = "filled"
                         row["fill_provenance"] = "account_scoped_submission_and_broker_read"
+                        # Admission is not a fill. Once the broker supplies the actual
+                        # primary fill timestamp, preserve the predeclared duration but
+                        # anchor its end to the purchase we are trying to evaluate.
+                        fill_started = aware_utc(linked["fill"]["timestamp"])
+                        prior_end = aware_utc(row["window_end"])
+                        fill_end = fill_started + timedelta(seconds=rules.window_seconds)
+                        row.setdefault("pre_fill_window_end", prior_end.isoformat())
+                        row["fill_window_start"] = fill_started.isoformat()
+                        row["observation_window_basis"] = "broker_recorded_primary_fill"
+                        if fill_end > prior_end:
+                            row["window_end"] = fill_end.isoformat()
+                        # A watch may have closed while an order was still pending. Reopen
+                        # only when future post-fill time remains. Missing elapsed quotes
+                        # are never fabricated and will remain visible to the evaluator.
+                        observed_at = aware_utc(observation["received_at"])
+                        if row["status"] == "window_closed" and fill_end > observed_at:
+                            row["status"] = "observing"
+                            row["reopened_after_primary_fill"] = True
                         summary["filled"] += 1
                 elif status in {"canceled", "rejected", "expired"}:
                     row["case"]["broker_order_observations"] = [observation]

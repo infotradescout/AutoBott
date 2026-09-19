@@ -23,6 +23,8 @@ BLS_TITLES = ("Consumer Price Index", "Producer Price Index", "Employment Situat
 POLICY = {"id": "exchange_session_and_listed_bls.v1", "before_seconds": 600,
           "after_seconds": 300, "max_source_age_seconds": 900,
           "bls_titles": list(BLS_TITLES)}
+FOMC_POLICY = {**POLICY, "id": "exchange_session_listed_bls_fomc.v2",
+               "fomc_titles": ["FOMC Press Conference", "FOMC Meeting", "FOMC Minutes"]}
 MAX_BYTES = 1_000_000
 
 
@@ -121,9 +123,12 @@ def market_session(rows, day: date) -> dict:
 
 class EntryScheduleSource:
     """Cache each exact day's observations for at most 15 minutes, never across accounts/clients."""
-    def __init__(self, calendar_fetch: Callable, *, public_fetch: Callable | None = None, now_fn: Callable | None = None):
+    def __init__(self, calendar_fetch: Callable, *, public_fetch: Callable | None = None,
+                 fomc_fetch: Callable | None = None, now_fn: Callable | None = None):
+        from .entry_fomc_context import fetch_fomc_text
         self._calendar_fetch = calendar_fetch
         self._public_fetch = public_fetch or fetch_bls_text
+        self._fomc_fetch = fomc_fetch or fetch_fomc_text
         self._now = now_fn or (lambda: datetime.now(UTC))
         self._cache = None
 
@@ -134,10 +139,10 @@ class EntryScheduleSource:
             age = (before - aware_utc(self._cache["received_at"])).total_seconds()
             if 0 <= age <= POLICY["max_source_age_seconds"]:
                 return deepcopy(self._cache)
-        result = {"schema_version": "entry_schedule.v1", "policy": deepcopy(POLICY),
+        result = {"schema_version": "entry_schedule.v2", "policy": deepcopy(FOMC_POLICY),
                   "date": day.isoformat(), "source_authenticity_verified": False,
                   "calendar_source_url": "https://paper-api.alpaca.markets/v2/calendar",
-                  "earnings_status": "not_integrated", "fomc_status": "not_integrated",
+                  "earnings_status": "not_integrated", "fomc_status": "unavailable",
                   "all_market_event_coverage_verified": False}
         try:
             session = market_session(self._calendar_fetch({"start": day.isoformat(), "end": day.isoformat()}), day)
@@ -146,6 +151,8 @@ class EntryScheduleSource:
             if not first <= day <= last:
                 raise ValueError("schedule_date_outside_observed_bls_span")
             selected = [e for e in events if e["title"] in BLS_TITLES and aware_utc(e["at"]).astimezone(NY).date() == day]
+            from .entry_fomc_context import parse_fomc_calendar
+            fomc = parse_fomc_calendar(self._fomc_fetch(day), day)
             after = aware_utc(self._now())
             if after < before:
                 raise ValueError("schedule_collection_clock_regressed")
@@ -154,6 +161,7 @@ class EntryScheduleSource:
                 "observed_span": [first.isoformat(), last.isoformat()], "dataset_hash": digest(events),
                 "dataset_event_count": len(events), "historical_asof_verified": False},
                 received_at=after.isoformat())
+            result.update(fomc=fomc, fomc_status="listed_month_observed")
             result["payload_hash"] = digest(result)
             self._cache = deepcopy(result)
             return result
@@ -167,13 +175,17 @@ def attach_entry_schedule(context: dict, source: EntryScheduleSource, cutoff) ->
     if context.get("status") != "observed":
         return context
     return {**context, "schema_version": "entry_context.v2", "schedule": source.collect(cutoff),
-            "scheduled_event_calendar_status": "selected_bls_and_exchange_session_only"}
+            "scheduled_event_calendar_status": "selected_bls_fomc_and_exchange_session_only"}
 
 
 def assess_entry_schedule(schedule, *, checked_at, snapshot_received_at, bar_times: list) -> dict:
     if schedule is None:
         return {"status": "not_recorded", "reason": "legacy_context_without_schedule"}
-    if not isinstance(schedule, Mapping) or schedule.get("schema_version") != "entry_schedule.v1" or schedule.get("policy") != POLICY:
+    if not isinstance(schedule, Mapping):
+        raise ValueError("schedule_schema_or_policy_invalid")
+    schema = schedule.get("schema_version")
+    policy = FOMC_POLICY if schema == "entry_schedule.v2" else POLICY
+    if schema not in {"entry_schedule.v1", "entry_schedule.v2"} or schedule.get("policy") != policy:
         raise ValueError("schedule_schema_or_policy_invalid")
     if schedule.get("status") != "observed":
         return {"status": "unavailable", "reason": "schedule_source_unavailable"}
@@ -188,9 +200,10 @@ def assess_entry_schedule(schedule, *, checked_at, snapshot_received_at, bar_tim
         raise ValueError("schedule_exchange_source_mismatch")
     if schedule["date"] != day or session["date"] != day:
         raise ValueError("schedule_decision_date_mismatch")
-    common = {"policy_id": POLICY["id"], "schedule_hash": schedule["payload_hash"],
+    common = {"policy_id": policy["id"], "schedule_hash": schedule["payload_hash"],
               "scope": "listed_selected_bls_releases_only", "earnings_status": "not_integrated",
-              "fomc_status": "not_integrated", "all_market_event_coverage_verified": False}
+              "fomc_status": "not_assessed" if schema == "entry_schedule.v2" else "not_integrated",
+              "all_market_event_coverage_verified": False}
     if type(session.get("trading_day")) is not bool:
         raise ValueError("schedule_session_flag_invalid")
     if not session["trading_day"]:
@@ -222,4 +235,29 @@ def assess_entry_schedule(schedule, *, checked_at, snapshot_received_at, bar_tim
             active.append(event)
     if active:
         return {**common, "status": "wait", "reason": "scheduled_bls_release_window", "events": active}
+    if schema == "entry_schedule.v2":
+        from .entry_fomc_context import fomc_url, SCOPE, TITLES
+        fomc = schedule.get("fomc")
+        if (not isinstance(fomc, Mapping) or fomc.get("source_url") != fomc_url(now.astimezone(NY).date())
+                or fomc.get("scope") != SCOPE or fomc.get("month") != day[:7]
+                or not isinstance(fomc.get("events"), list) or len(fomc["events"]) > 100
+                or fomc.get("dataset_hash") != digest(fomc["events"])):
+            raise ValueError("schedule_fomc_coverage_invalid")
+        common.update(fomc_status="listed_month_observed", scope="listed_selected_bls_and_fomc_events_only")
+        ids, active = set(), []
+        for event in fomc["events"]:
+            at = aware_utc(event["at"])
+            if (event["id"] in ids or event["title"] not in TITLES or event["status"] != "CONFIRMED"
+                    or at.astimezone(NY).strftime("%Y-%m") != day[:7]):
+                raise ValueError("schedule_fomc_event_invalid")
+            ids.add(event["id"])
+            if at.astimezone(NY).date().isoformat() != day:
+                continue
+            start = at - timedelta(seconds=policy["before_seconds"])
+            end = at + timedelta(seconds=policy["after_seconds"])
+            if start <= now <= end or (now > end and aware_utc(bar_times[-1]) < end):
+                active.append(event)
+        if active:
+            return {**common, "status": "wait", "reason": "scheduled_fomc_release_window", "events": active}
+        return {**common, "status": "observed_no_listed_event_block", "reason": "no_listed_bls_or_fomc_event_in_window"}
     return {**common, "status": "observed_no_listed_event_block", "reason": "no_listed_bls_event_in_window"}
