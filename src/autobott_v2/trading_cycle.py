@@ -195,6 +195,13 @@ def run_trading_cycle(
     if observation_rules is not None:
         try:
             quality_rules = configured_entry_quality_rules()
+            if quality_rules is not None and observation_rules.end_basis != "fixed_duration":
+                execution_outcomes.append({
+                    "disposition": "primary_entry_quality_config_invalid",
+                    "error_type": "ValueError",
+                    "detail": "development_capture_does_not_accept_scoring_protocol",
+                })
+                quality_rules = None
         except Exception as exc:
             execution_outcomes.append({"disposition": "primary_entry_quality_config_invalid",
                                        "error_type": type(exc).__name__, "detail": str(exc)})
