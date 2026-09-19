@@ -61,6 +61,8 @@ def _protocol_from_watch(row: Mapping[str, Any]) -> EntryQualityRules | None:
     if protocol.get("rules_hash") != rules.config_hash:
         raise ValueError("bound_entry_quality_rules_hash_mismatch")
     observation = PrimaryObservationRules(**row["rules"])
+    if observation.end_basis != "fixed_duration":
+        raise ValueError("bound_quality_protocol_requires_fixed_observation_duration")
     if rules.holding_seconds > observation.window_seconds:
         raise ValueError("bound_quality_window_exceeds_observation_window")
     return rules
