@@ -171,6 +171,9 @@ def test_underlying_can_move_with_thesis_while_purchased_option_fails(tmp_path):
 
     result = evaluate_completed_primary_watches(root)
     assert result["quality_statuses"] == {"fail": 1}
+    assert result["underlying_diagnostics"] == {
+        "underlying_moved_with_direction_option_opportunity_failed": 1
+    }
     evaluation = load(root, watch_id)["entry_quality_evaluation"]
     assert evaluation["quality"]["status"] == "fail"
     response = evaluation["underlying_response"]
@@ -200,7 +203,8 @@ def test_underlying_moving_against_thesis_is_separated_from_contract_response(tm
     row["status"] = "window_closed"
     save(root, watch_id, row)
 
-    evaluate_completed_primary_watches(root)
+    result = evaluate_completed_primary_watches(root)
+    assert result["underlying_diagnostics"] == {"underlying_never_moved_with_direction": 1}
     response = load(root, watch_id)["entry_quality_evaluation"]["underlying_response"]
     assert response["status"] == "observed"
     assert response["max_directional_return_pct"] == 0
