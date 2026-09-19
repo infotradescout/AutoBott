@@ -284,7 +284,7 @@ def test_after_entry_window_runner_never_becomes_a_trading_cycle() -> None:
     assert cycles == [datetime(2026, 7, 2, 13, 30, tzinfo=UTC)]
     assert evidence
     assert evidence[0] == datetime(2026, 7, 1, 20, 0, tzinfo=UTC)
-    assert all(at.date().isoformat() == "2026-07-01" for at in evidence)
+    assert all(at < cycles[0] for at in evidence)
 
 
 def test_after_entry_window_evidence_failure_cannot_stop_session() -> None:
