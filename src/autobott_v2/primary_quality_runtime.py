@@ -13,6 +13,7 @@ from dataclasses import fields
 from datetime import timedelta
 import hashlib
 import json
+import math
 import os
 from pathlib import Path
 from typing import Any, Mapping
@@ -89,6 +90,125 @@ def _feed_issue(case: Mapping[str, Any], *, start, end) -> str | None:
     return None
 
 
+def _underlying_response(row: Mapping[str, Any], case: Mapping[str, Any], *,
+                         start, end, rules: EntryQualityRules,
+                         quality: Mapping[str, Any]) -> dict[str, Any]:
+    """Describe direct-underlying movement after fill without changing entry policy."""
+    config = row.get("underlying_followthrough")
+    base = {
+        "schema_version": "primary_underlying_response.v1",
+        "status": "not_recorded", "reason": None, "diagnostic": "not_available",
+        "symbol": None, "direction": None, "valid_quote_count": 0,
+        "baseline_basis": "first_valid_post_fill_underlying_midpoint",
+        "baseline_mid": None, "final_directional_return_pct": None,
+        "max_directional_return_pct": None, "min_directional_return_pct": None,
+        "first_favorable_seconds": None, "observed_span_seconds": None,
+        "causal_conclusion": False,
+        "note": ("Descriptive paired evidence only; no minimum underlying-move threshold "
+                 "was preregistered, so this does not prove signal or contract causality."),
+    }
+    if not isinstance(config, Mapping):
+        return {**base, "reason": "underlying_followthrough_not_recorded"}
+    if config.get("status") != "configured":
+        return {**base, "status": config.get("status", "not_recorded"),
+                "reason": config.get("reason", "underlying_followthrough_not_configured"),
+                "symbol": config.get("signal_symbol"), "direction": config.get("direction")}
+    symbol, direction = config.get("signal_symbol"), config.get("direction")
+    if not isinstance(symbol, str) or direction not in {"bullish", "bearish"}:
+        return {**base, "reason": "invalid_underlying_followthrough_identity"}
+
+    observations = case.get("outcome_snapshots")
+    if not isinstance(observations, list):
+        return {**base, "status": "insufficient", "reason": "underlying_path_not_recorded",
+                "symbol": symbol, "direction": direction}
+    points: list[tuple[Any, Any, float]] = []
+    issues: list[str] = []
+    seen: dict[str, tuple[float, float]] = {}
+    for observation in observations:
+        if not isinstance(observation, Mapping):
+            continue
+        try:
+            receipt = aware_utc(observation.get("timestamp"))
+        except (ValueError, TypeError):
+            issues.append("invalid_underlying_observation_timestamp")
+            continue
+        if receipt < start or receipt > end:
+            continue
+        chain = observation.get("underlying_chain")
+        if not isinstance(chain, list):
+            issues.append("underlying_chain_not_recorded")
+            continue
+        matches = [quote for quote in chain if isinstance(quote, Mapping)
+                   and quote.get("symbol") == symbol]
+        if not matches:
+            if observation.get("underlying_data_issue"):
+                issues.append(str(observation["underlying_data_issue"]))
+            continue
+        if len(matches) != 1:
+            issues.append("ambiguous_underlying_quote")
+            continue
+        quote = matches[0]
+        try:
+            bid, ask = quote.get("bid"), quote.get("ask")
+            if (isinstance(bid, bool) or isinstance(ask, bool)
+                    or not isinstance(bid, (int, float)) or not isinstance(ask, (int, float))
+                    or not math.isfinite(bid) or not math.isfinite(ask)
+                    or bid <= 0 or ask <= 0 or ask < bid):
+                raise ValueError("invalid_underlying_bid_ask")
+            quote_time = aware_utc(quote.get("quote_timestamp"))
+            age = (receipt - quote_time).total_seconds()
+            if quote_time < start:
+                raise ValueError("pre_fill_underlying_quote")
+            if age < 0 or age > rules.max_quote_age_seconds:
+                raise ValueError("future_or_stale_underlying_quote")
+            identity = quote_time.isoformat()
+            prices = (float(bid), float(ask))
+            if identity in seen:
+                if seen[identity] != prices:
+                    raise ValueError("conflicting_same_time_underlying_quotes")
+                continue
+            seen[identity] = prices
+            points.append((receipt, quote_time, (float(bid) + float(ask)) / 2.0))
+        except (ValueError, TypeError, OverflowError) as exc:
+            issues.append(str(exc))
+    points.sort(key=lambda item: (item[1], item[0]))
+    base.update(symbol=symbol, direction=direction, valid_quote_count=len(points),
+                data_issues=sorted(set(issues)))
+    if len(points) < 2:
+        return {**base, "status": "insufficient", "reason": "fewer_than_two_valid_post_fill_underlying_quotes"}
+
+    baseline = points[0][2]
+    directional = []
+    first_favorable = None
+    for receipt, quote_time, midpoint in points:
+        move = midpoint / baseline - 1.0
+        value = move if direction == "bullish" else -move
+        directional.append((receipt, quote_time, value))
+        if first_favorable is None and value > 0:
+            first_favorable = receipt
+    values = [value for _, _, value in directional]
+    max_move, min_move, final_move = max(values), min(values), values[-1]
+    quality_status = quality.get("status")
+    if quality_status == "pass":
+        diagnostic = "option_opportunity_observed"
+    elif quality_status == "fail" and max_move > 0:
+        diagnostic = "underlying_moved_with_direction_option_opportunity_failed"
+    elif quality_status == "fail":
+        diagnostic = "underlying_never_moved_with_direction"
+    else:
+        diagnostic = "option_quality_unscorable"
+    return {
+        **base, "status": "observed", "reason": "paired_direct_underlying_quotes",
+        "diagnostic": diagnostic, "baseline_mid": baseline,
+        "final_directional_return_pct": final_move,
+        "max_directional_return_pct": max_move,
+        "min_directional_return_pct": min_move,
+        "first_favorable_seconds": ((first_favorable - start).total_seconds()
+                                    if first_favorable is not None else None),
+        "observed_span_seconds": (points[-1][1] - points[0][1]).total_seconds(),
+    }
+
+
 def evaluate_completed_primary_watches(root: str | Path) -> dict[str, Any]:
     """Score complete broker-linked watches exactly once using their bound rules."""
     root = Path(root)
@@ -161,6 +281,8 @@ def evaluate_completed_primary_watches(root: str | Path) -> dict[str, Any]:
                     quality["passed"] = None
                     quality["reason"] = issue
                     quality["data_issues"] = sorted(set([*quality.get("data_issues", []), issue]))
+                underlying_response = _underlying_response(
+                    row, case, start=start, end=end, rules=rules, quality=quality)
 
                 evaluation = {
                     "schema_version": "primary_runtime_entry_quality.v1",
@@ -172,6 +294,7 @@ def evaluate_completed_primary_watches(root: str | Path) -> dict[str, Any]:
                     "fill_timestamp": fill["timestamp"],
                     "fill_price": fill["price"],
                     "quality": quality,
+                    "underlying_response": underlying_response,
                     "measurement_basis": "broker_fill_then_sampled_option_bid_net_of_declared_fees",
                     "exit_policy": "not_executed_primary_opportunity_only",
                     "source_authenticity_verified": False,
