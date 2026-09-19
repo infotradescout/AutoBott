@@ -1,6 +1,7 @@
 """Full native input and fake-broker entry checks for sector/calendar context."""
 from datetime import timedelta
 from copy import deepcopy
+import json
 import pytest
 from autobott_v2.entry_market_context import fetch_entry_context
 from autobott_v2.entry_schedule_context import EntryScheduleSource, attach_entry_schedule
@@ -34,6 +35,46 @@ def test_real_cycle_requires_sector_and_calendar_context(tmp_path,monkeypatch,sc
     else:
         assert result.trade_attempted_count==0
         assert any(r["reason"]=="entry_context_not_confirmed" for r in result.skipped)
+
+
+def test_development_capture_ignores_stale_scoring_config_and_keeps_raw_watch(tmp_path, monkeypatch):
+    def context(self, symbol, *, signal_symbol, cutoff):
+        result = fetch_entry_context(Provider(), symbol, signal_symbol=signal_symbol, cutoff=cutoff)
+        result = attach_entry_schedule(result, source(rows=None), cutoff)
+        result = attach_sector_context(
+            result, SectorContextSource(PeerProvider(peer_rows(.02)), catalog=catalog()))
+        return result
+
+    monkeypatch.setattr(EntryTape, "requires_entry_context", True, raising=False)
+    monkeypatch.setattr(EntryTape, "get_entry_context", context, raising=False)
+    monkeypatch.delenv("AUTOBOTT_PRIMARY_OBSERVATION_SECONDS", raising=False)
+    monkeypatch.setenv("AUTOBOTT_PRIMARY_DEVELOPMENT_CAPTURE", "session")
+    monkeypatch.setenv("AUTOBOTT_ARTIFACTS_ROOT", str(tmp_path / "artifacts"))
+    monkeypatch.setenv("AUTOBOTT_ENTRY_QUALITY_RULES_JSON", json.dumps({
+        "protocol_id": "stale-should-not-score-development",
+        "holding_seconds": 180,
+        "target_return_pct": .20,
+        "max_adverse_return_pct": .15,
+        "persistence_seconds": 60,
+        "max_quote_age_seconds": 30,
+        "max_observation_gap_seconds": 60,
+        "round_trip_fee_per_contract": 0,
+        "contract_multiplier": 100,
+    }))
+
+    result, broker, _ = run_cycle(tmp_path, monkeypatch, pair=True, v2=True)
+    assert len(broker.submitted) == 2
+    warning = next(row for row in result.execution_outcomes
+                   if row["disposition"] == "primary_entry_quality_config_invalid")
+    assert warning["detail"] == "development_capture_does_not_accept_scoring_protocol"
+
+    files = list((tmp_path / "artifacts" / "primary_followthrough").glob("*.json"))
+    assert len(files) == 1
+    watch = json.loads(files[0].read_text())
+    assert watch["quality_protocol"] is None
+    assert watch["rules"]["end_basis"] == "session_close"
+    assert watch["observation_window_basis"] == "admission_pending_fill_session_close"
+    assert watch["window_end"].endswith("20:00:00+00:00")
 
 
 @pytest.mark.parametrize("adapter",["paper","capture"])
