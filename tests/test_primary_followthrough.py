@@ -173,7 +173,7 @@ def test_observer_failure_does_not_remove_existing_entry_or_exit_guards(tmp_path
     monkeypatch.setenv("AUTOBOTT_PRIMARY_OBSERVATION_SECONDS","bad")
     result,broker,_=run_cycle(tmp_path,monkeypatch,pair=True,v2=True)
     assert len(broker.submitted)==2
-    assert any(r["disposition"]=="primary_observation_registration_failed" for r in result.execution_outcomes)
+    assert any(r["disposition"]=="primary_observation_config_invalid" for r in result.execution_outcomes)
     failed,broker,_=run_cycle(tmp_path/"second",monkeypatch,pair=True,v2=True,defect="stale")
     assert broker.submitted==[]
 
