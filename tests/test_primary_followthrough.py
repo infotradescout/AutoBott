@@ -16,12 +16,20 @@ from test_entry_market_timing import START, run_cycle
 
 class Quotes:
     option_feed = "indicative"
-    def __init__(self, at, *, bid=3.2, missing=False):
+    stock_feed = "synthetic-sip"
+    def __init__(self, at, *, bid=3.2, missing=False, stock_mid=103.5, stock_missing=False):
         self.at, self.bid, self.missing = at, bid, missing
+        self.stock_mid, self.stock_missing = stock_mid, stock_missing
         self.calls = []
+        self.stock_calls = []
     def get_latest_option_quotes(self, symbols):
         self.calls.append(list(symbols))
         return {} if self.missing else {s:{"bp":self.bid,"ap":self.bid+.05,"t":self.at.isoformat()} for s in symbols}
+    def get_latest_stock_quotes(self, symbols):
+        self.stock_calls.append(list(symbols))
+        if self.stock_missing:
+            return {}
+        return {s:{"bp":self.stock_mid-.01,"ap":self.stock_mid+.01,"t":self.at.isoformat()} for s in symbols}
 
 
 def watch(tmp_path, **rule_changes):
@@ -69,6 +77,50 @@ def test_runner_is_not_queried_to_mask_primary_result(tmp_path):
     now=START+timedelta(seconds=70);q=Quotes(now,bid=2)
     poll_primary_observations(root,q,now_fn=lambda:now)
     assert q.calls == [[PRIMARY]]
+
+
+def test_direct_underlying_is_recorded_separately_from_option_path(tmp_path):
+    root, _, _, _, _ = watch(tmp_path)
+    now = START + timedelta(seconds=70)
+    q = Quotes(now, stock_mid=104.25)
+    result = poll_primary_observations(root, q, now_fn=lambda: now)
+    assert result["underlying_observed"] == 1
+    assert q.stock_calls == [["AAPL"]]
+    point = export_primary_observations(root, source_kind="synthetic")["cases"][0]["outcome_snapshots"][0]
+    assert point["option_chain"][0]["option_symbol"] == PRIMARY
+    assert point["underlying_chain"] == [{
+        "symbol": "AAPL", "bid": 104.24, "ask": 104.26, "quote_timestamp": now.isoformat()
+    }]
+
+
+def test_underlying_quote_failure_does_not_erase_option_evidence(tmp_path):
+    root, _, _, _, _ = watch(tmp_path)
+    now = START + timedelta(seconds=70)
+    q = Quotes(now, stock_missing=True)
+    result = poll_primary_observations(root, q, now_fn=lambda: now)
+    assert result["observed"] == 1 and result["errors"] == []
+    assert result["underlying_observed"] == 0 and result["underlying_errors"]
+    point = export_primary_observations(root, source_kind="synthetic")["cases"][0]["outcome_snapshots"][0]
+    assert point["option_chain"][0]["option_symbol"] == PRIMARY
+    assert point["underlying_chain"] == []
+    assert point["underlying_data_issue"] == "missing_observed_quote"
+
+
+def test_proxy_signal_is_not_compared_in_incompatible_price_units(tmp_path):
+    case = make_case(tmp_path / "input")
+    result = assess(case)
+    admission = deepcopy(result["admission"])
+    admission["signal_symbol"] = "SPY"
+    admission["underlying_reference_basis"] = "captured_index_estimate_with_fresh_proxy"
+    admission["live_signal_thesis"]["at_refresh"]["signal_symbol"] = "SPY"
+    root = tmp_path / "watch"
+    identity = register_primary_observation(root, case["snapshot"], admission, PrimaryObservationRules(180))
+    row = json.loads((root / (identity + ".json")).read_text())
+    assert row["underlying_followthrough"]["status"] == "not_applicable"
+    now = START + timedelta(seconds=70)
+    q = Quotes(now)
+    poll_primary_observations(root, q, now_fn=lambda: now)
+    assert q.stock_calls == []
 
 
 def test_missing_quote_is_recorded_not_silently_dropped(tmp_path):
