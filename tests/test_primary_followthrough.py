@@ -38,6 +38,8 @@ def test_persistent_registration_is_idempotent_and_never_invents_fill(tmp_path):
     root, identity, case, result, rules = watch(tmp_path)
     assert register_primary_observation(root,case["snapshot"],result["admission"],rules)==identity
     assert len(list(root.glob("*.json"))) == 1
+    row = json.loads((root / (identity + ".json")).read_text())
+    assert row["observation_window_basis"] == "admission_pending_fill"
     tape = export_primary_observations(root,source_kind="synthetic")
     assert tape["cases"][0]["fills"] == []
     assert tape["cohort_scope"] == "admitted_entries_only"
