@@ -162,13 +162,19 @@ def test_missing_quote_is_recorded_not_silently_dropped(tmp_path):
     assert point["option_chain"]==[] and point["data_issue"]
 
 
-def test_late_restart_closes_window_without_fabricating_earlier_prices(tmp_path):
-    root, _, _, _, _=watch(tmp_path)
-    now=START+timedelta(hours=1)
-    result=poll_primary_observations(root,Quotes(now),now_fn=lambda:now)
-    assert result["window_closed"]==1
-    evaluated=assess(export_primary_observations(root,source_kind="synthetic")["cases"][0])
-    assert evaluated["quality"]["status"]=="unscorable"
+def test_late_restart_closes_window_without_post_window_provider_request(tmp_path):
+    root, identity, _, _, _ = watch(tmp_path)
+    now = START + timedelta(hours=1)
+    q = Quotes(now)
+    result = poll_primary_observations(root, q, now_fn=lambda: now)
+    assert result["window_closed"] == 1
+    assert result["checked"] == result["observed"] == 0
+    assert q.calls == [] and q.stock_calls == []
+    row = json.loads((root / (identity + ".json")).read_text())
+    assert row["closed_without_post_window_quote"] is True
+    assert row["case"]["outcome_snapshots"] == []
+    evaluated = assess(export_primary_observations(root, source_kind="synthetic")["cases"][0])
+    assert evaluated["quality"]["status"] == "unscorable"
 
 
 def test_polling_cadence_and_closed_windows_do_not_make_extra_requests(tmp_path):
@@ -178,7 +184,10 @@ def test_polling_cadence_and_closed_windows_do_not_make_extra_requests(tmp_path)
     assert poll_primary_observations(root,q,now_fn=lambda:now)["observed"]==0
     assert len(q.calls)==1
     later=START+timedelta(seconds=190)
-    poll_primary_observations(root,Quotes(later),now_fn=lambda:later)
+    expired = Quotes(later)
+    result = poll_primary_observations(root, expired, now_fn=lambda:later)
+    assert result["window_closed"] == 1
+    assert expired.calls == [] and expired.stock_calls == []
     assert poll_primary_observations(root,q,now_fn=lambda:later+timedelta(seconds=30))["observed"]==0
 
 
