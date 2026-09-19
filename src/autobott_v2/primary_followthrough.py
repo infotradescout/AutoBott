@@ -113,12 +113,34 @@ def register_primary_observation(root: str | Path, snapshot: Mapping[str, Any],
         quality_protocol = {"schema_version": "entry_quality_rules.v1",
                             "rules": quality_rules.to_json_dict(),
                             "rules_hash": quality_rules.config_hash}
+    ticker = snapshot.get("ticker")
+    thesis = admission.get("live_signal_thesis", {}).get("at_refresh", {})
+    signal_symbol = admission.get("signal_symbol", thesis.get("signal_symbol"))
+    direction = thesis.get("direction")
+    reference_basis = admission.get("underlying_reference_basis")
+    if not all(isinstance(value, str) and value.strip()
+               for value in (ticker, signal_symbol, direction, reference_basis)):
+        underlying_followthrough = {"status": "not_recorded", "reason": "direct_signal_identity_not_recorded"}
+    elif signal_symbol.upper() != ticker.upper() or reference_basis != "fresh_equity_mid":
+        underlying_followthrough = {
+            "status": "not_applicable", "reason": "proxy_or_non_equity_reference_basis",
+            "ticker": ticker.upper(), "signal_symbol": signal_symbol.upper(),
+            "direction": direction, "reference_basis": reference_basis,
+        }
+    elif direction not in {"bullish", "bearish"}:
+        underlying_followthrough = {"status": "not_recorded", "reason": "direction_not_recorded"}
+    else:
+        underlying_followthrough = {
+            "status": "configured", "ticker": ticker.upper(), "signal_symbol": signal_symbol.upper(),
+            "direction": direction, "reference_basis": reference_basis,
+        }
     row = {"schema_version": "primary_observation.v1", "watch_id": watch_id,
            "decision_id": admission.get("decision_id"), "primary_option_symbol": symbol,
            "start": start.isoformat(), "window_end": (start+timedelta(seconds=rules.window_seconds)).isoformat(),
            "rules": asdict(rules), "status": "observing", "last_observed_at": None,
            "observation_window_basis": "admission_pending_fill",
            "quality_protocol": quality_protocol,
+           "underlying_followthrough": underlying_followthrough,
            "fill_provenance": "not_collected_admission_is_not_a_fill", "case": case}
     with _locked(root):
         path = root / (watch_id + ".json")
@@ -150,11 +172,16 @@ def poll_primary_observations(root: str | Path, data_client: Any, *,
             if (row["status"] == "observing" and before >= aware_utc(row["start"])
                     and (row["last_observed_at"] is None or
                          (before-aware_utc(row["last_observed_at"])).total_seconds() >= row["rules"]["minimum_poll_seconds"])):
-                due.append({"watch_id": row["watch_id"], "primary_option_symbol": row["primary_option_symbol"]})
+                underlying = row.get("underlying_followthrough", {})
+                due.append({"watch_id": row["watch_id"], "primary_option_symbol": row["primary_option_symbol"],
+                            "underlying_symbol": (underlying.get("signal_symbol")
+                                if underlying.get("status") == "configured" else None)})
     if not due:
-        return {"checked": 0, "observed": 0, "window_closed": 0, "errors": [], "broker_writes": 0}
+        return {"checked": 0, "observed": 0, "window_closed": 0, "errors": [],
+                "underlying_observed": 0, "underlying_errors": [], "broker_writes": 0}
     symbols = sorted({r["primary_option_symbol"] for r in due})
-    if len(symbols) > 100:
+    stock_symbols = sorted({r["underlying_symbol"] for r in due if r["underlying_symbol"]})
+    if len(symbols) > 100 or len(stock_symbols) > 100:
         raise ValueError("primary_observation_provider_batch_limit")
     failure = None
     try:
@@ -163,11 +190,21 @@ def poll_primary_observations(root: str | Path, data_client: Any, *,
             raise ValueError("invalid_quote_response")
     except Exception as exc:
         failure, quotes = type(exc).__name__, {}
+    stock_failure, stock_quotes = None, {}
+    if stock_symbols:
+        try:
+            stock_quotes = data_client.get_latest_stock_quotes(stock_symbols)
+            if not isinstance(stock_quotes, Mapping):
+                raise ValueError("invalid_stock_quote_response")
+        except Exception as exc:
+            stock_failure, stock_quotes = type(exc).__name__, {}
     after = aware_utc(now_fn())
     if after < before:
         raise ValueError("primary_observation_clock_regressed")
     feed = getattr(data_client, "option_feed", getattr(data_client, "feed", "unreported"))
-    summary = {"checked": len(due), "observed": 0, "window_closed": 0, "errors": [], "broker_writes": 0}
+    stock_feed = getattr(data_client, "stock_feed", getattr(data_client, "feed", "unreported"))
+    summary = {"checked": len(due), "observed": 0, "window_closed": 0, "errors": [],
+               "underlying_observed": 0, "underlying_errors": [], "broker_writes": 0}
     with _locked(root):
         for initial in due:
             path = root / (initial["watch_id"] + ".json")
@@ -185,7 +222,9 @@ def poll_primary_observations(root: str | Path, data_client: Any, *,
                 continue
             symbol = row["primary_option_symbol"]
             point = {"ticker": row["case"]["snapshot"]["ticker"], "timestamp": after.isoformat(),
-                     "source": {"options_feed": feed, "name": "primary_followthrough_recorder"}, "option_chain": []}
+                     "source": {"options_feed": feed, "stock_feed": stock_feed,
+                                "name": "primary_followthrough_recorder"},
+                     "option_chain": [], "underlying_chain": []}
             try:
                 if failure:
                     raise ValueError("quote_request_failed:"+failure)
@@ -194,6 +233,19 @@ def poll_primary_observations(root: str | Path, data_client: Any, *,
             except ValueError as exc:
                 point["data_issue"] = str(exc)
                 summary["errors"].append({"watch_id": row["watch_id"], "reason": str(exc)})
+            underlying = row.get("underlying_followthrough", {})
+            if underlying.get("status") == "configured":
+                stock_symbol = underlying["signal_symbol"]
+                try:
+                    if stock_failure:
+                        raise ValueError("stock_quote_request_failed:"+stock_failure)
+                    ubid, uask, ustamp = observed_quote_fields(stock_quotes.get(stock_symbol), allow_zero_bid=False)
+                    point["underlying_chain"].append({
+                        "symbol": stock_symbol, "bid": ubid, "ask": uask, "quote_timestamp": ustamp})
+                    summary["underlying_observed"] += 1
+                except ValueError as exc:
+                    point["underlying_data_issue"] = str(exc)
+                    summary["underlying_errors"].append({"watch_id": row["watch_id"], "reason": str(exc)})
             observations.append(point)
             row["last_observed_at"] = after.isoformat()
             # A receipt after the window closes the watch but does not fill in
