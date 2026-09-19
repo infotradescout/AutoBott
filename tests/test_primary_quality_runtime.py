@@ -115,7 +115,7 @@ def test_completed_broker_linked_watch_materializes_actual_entry_quality_once(tm
     root, watch_id, case, _, submission, broker, rules = prepared_watch(tmp_path)
     bind_primary_submission(root, watch_id, submission, account_scope="alpaca:paper:synthetic-account")
     fill_at = case["broker_order_observations"][0]["order"]["filled_at"]
-    assert poll_primary_fills(root, broker, now_fn=lambda: __import__("autobott_v2.bar_timing", fromlist=["aware_utc"]).aware_utc(fill_at))["filled"] == 1
+    assert poll_primary_fills(root, broker, now_fn=lambda: aware_utc(fill_at))["filled"] == 1
 
     row = load(root, watch_id)
     row["case"]["outcome_snapshots"] = deepcopy(case["outcome_snapshots"])
@@ -136,6 +136,12 @@ def test_completed_broker_linked_watch_materializes_actual_entry_quality_once(tm
 
     second = evaluate_completed_primary_watches(root)
     assert second["evaluated"] == 0 and second["already_evaluated"] == 1
+
+    row = load(root, watch_id)
+    row["entry_quality_evaluation"]["quality"]["status"] = "fail"
+    save(root, watch_id, row)
+    tampered = evaluate_completed_primary_watches(root)
+    assert tampered["errors"] and "integrity_mismatch" in tampered["errors"][0]["reason"]
 
 
 def test_mixed_feed_path_remains_unscorable(tmp_path):
