@@ -108,8 +108,14 @@ def evaluate_completed_primary_watches(root: str | Path) -> dict[str, Any]:
                 row = _read(path)
                 summary["checked"] += 1
                 if row.get("entry_quality_evaluation") is not None:
+                    existing = row["entry_quality_evaluation"]
+                    if (not isinstance(existing, Mapping)
+                            or existing.get("schema_version") != "primary_runtime_entry_quality.v1"
+                            or existing.get("evaluation_hash") != _digest(
+                                {key: value for key, value in existing.items() if key != "evaluation_hash"})):
+                        raise ValueError("primary_entry_quality_evaluation_integrity_mismatch")
                     summary["already_evaluated"] += 1
-                    quality = row["entry_quality_evaluation"].get("quality", {})
+                    quality = existing.get("quality", {})
                     if isinstance(quality, Mapping) and isinstance(quality.get("status"), str):
                         statuses[quality["status"]] += 1
                     continue
