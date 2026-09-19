@@ -172,11 +172,16 @@ def poll_primary_fills(root: str | Path, broker: Any, *, now_fn: Callable[[], da
                         # anchor its end to the purchase we are trying to evaluate.
                         fill_started = aware_utc(linked["fill"]["timestamp"])
                         prior_end = aware_utc(row["window_end"])
-                        fill_end = fill_started + timedelta(seconds=rules.window_seconds)
+                        if rules.end_basis == "session_close":
+                            fill_end = prior_end
+                            basis = "broker_recorded_primary_fill_to_session_close"
+                        else:
+                            fill_end = fill_started + timedelta(seconds=rules.window_seconds)
+                            basis = "broker_recorded_primary_fill"
                         row.setdefault("pre_fill_window_end", prior_end.isoformat())
                         row["fill_window_start"] = fill_started.isoformat()
-                        row["observation_window_basis"] = "broker_recorded_primary_fill"
-                        if fill_end > prior_end:
+                        row["observation_window_basis"] = basis
+                        if rules.end_basis == "fixed_duration" and fill_end > prior_end:
                             row["window_end"] = fill_end.isoformat()
                         # A watch may have closed while an order was still pending. Reopen
                         # only when future post-fill time remains. Missing elapsed quotes
