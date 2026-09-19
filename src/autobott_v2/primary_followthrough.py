@@ -30,11 +30,16 @@ class PrimaryObservationRules:
     max_observations: int = 512
     max_case_bytes: int = 2_000_000
     max_store_bytes: int = 64_000_000
+    end_basis: str = "fixed_duration"
 
     def __post_init__(self) -> None:
-        for value in asdict(self).values():
+        for name in ("window_seconds", "minimum_poll_seconds", "max_active",
+                     "max_observations", "max_case_bytes", "max_store_bytes"):
+            value = getattr(self, name)
             if type(value) is not int or value <= 0:
                 raise ValueError("positive_integer_observation_rules_required")
+        if self.end_basis not in {"fixed_duration", "session_close"}:
+            raise ValueError("invalid_primary_observation_end_basis")
         if self.minimum_poll_seconds > self.window_seconds or self.max_active > 100:
             raise ValueError("invalid_primary_observation_bounds")
         if self.window_seconds > 86400:
@@ -43,9 +48,34 @@ class PrimaryObservationRules:
 
 def configured_observation_rules() -> PrimaryObservationRules | None:
     value = os.getenv("AUTOBOTT_PRIMARY_OBSERVATION_SECONDS")
-    if value is None or not value.strip():
+    development = os.getenv("AUTOBOTT_PRIMARY_DEVELOPMENT_CAPTURE")
+    if value is not None and value.strip() and development is not None and development.strip():
+        raise ValueError("conflicting_primary_observation_modes")
+    if value is not None and value.strip():
+        return PrimaryObservationRules(window_seconds=int(value))
+    if development is None or not development.strip():
         return None  # Collection window must be selected, not fitted from outcomes.
-    return PrimaryObservationRules(window_seconds=int(value))
+    if development.strip().lower() != "session":
+        raise ValueError("unsupported_primary_development_capture_mode")
+    # 6.5 regular-session hours is a storage/capacity bound, not a quality horizon.
+    return PrimaryObservationRules(window_seconds=23_400, end_basis="session_close")
+
+
+def _observation_window_end(snapshot: Mapping[str, Any], start: datetime,
+                            rules: PrimaryObservationRules) -> datetime:
+    if rules.end_basis == "fixed_duration":
+        return start + timedelta(seconds=rules.window_seconds)
+    schedule = snapshot.get("entry_context", {}).get("schedule", {})
+    session = schedule.get("session", {}) if isinstance(schedule, Mapping) else {}
+    if not isinstance(session, Mapping) or session.get("trading_day") is not True:
+        raise ValueError("development_capture_session_required")
+    opening, closing = aware_utc(session.get("open")), aware_utc(session.get("close"))
+    if not opening <= start < closing:
+        raise ValueError("development_capture_start_outside_session")
+    remaining = (closing - start).total_seconds()
+    if remaining <= 0 or remaining > rules.window_seconds:
+        raise ValueError("development_capture_session_bound_invalid")
+    return closing
 
 
 @contextmanager
@@ -98,6 +128,7 @@ def register_primary_observation(root: str | Path, snapshot: Mapping[str, Any],
     if not isinstance(symbol, str) or not symbol.strip():
         raise ValueError("primary_observation_symbol_required")
     start = aware_utc(admission["checked_at"])
+    window_end = _observation_window_end(snapshot, start, rules)
     capsule = admission.get("recorded_refresh", {})
     if aware_utc(capsule.get("received_at")) != start:
         raise ValueError("primary_observation_receipt_identity_mismatch")
@@ -108,6 +139,8 @@ def register_primary_observation(root: str | Path, snapshot: Mapping[str, Any],
                                      outcome_snapshots=[], fills=[])
     quality_protocol = None
     if quality_rules is not None:
+        if rules.end_basis != "fixed_duration":
+            raise ValueError("quality_protocol_requires_fixed_observation_duration")
         if quality_rules.holding_seconds > rules.window_seconds:
             raise ValueError("observation_window_shorter_than_quality_holding_period")
         quality_protocol = {"schema_version": "entry_quality_rules.v1",
@@ -136,9 +169,11 @@ def register_primary_observation(root: str | Path, snapshot: Mapping[str, Any],
         }
     row = {"schema_version": "primary_observation.v1", "watch_id": watch_id,
            "decision_id": admission.get("decision_id"), "primary_option_symbol": symbol,
-           "start": start.isoformat(), "window_end": (start+timedelta(seconds=rules.window_seconds)).isoformat(),
+           "start": start.isoformat(), "window_end": window_end.isoformat(),
            "rules": asdict(rules), "status": "observing", "last_observed_at": None,
-           "observation_window_basis": "admission_pending_fill",
+           "observation_window_basis": ("admission_pending_fill_session_close"
+                                         if rules.end_basis == "session_close"
+                                         else "admission_pending_fill"),
            "quality_protocol": quality_protocol,
            "underlying_followthrough": underlying_followthrough,
            "fill_provenance": "not_collected_admission_is_not_a_fill", "case": case}
