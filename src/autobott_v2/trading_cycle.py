@@ -48,6 +48,7 @@ from .phase1_snapshot_capture import CaptureRules, capture_symbol_snapshot
 from .phase1_validate import _decision_input_from_snapshot, _load_snapshot
 from .primary_followthrough import configured_observation_rules, register_primary_observation, poll_primary_observations
 from .primary_fill_capture import paper_capture_scope, bind_primary_submission, poll_primary_fills
+from .primary_quality_runtime import configured_entry_quality_rules, evaluate_completed_primary_watches
 from .position_store import load_open_positions
 from .position_monitor import run_position_monitor
 from .runtime_control import load_runtime_state
@@ -184,11 +185,24 @@ def run_trading_cycle(
     skipped: list[dict[str, Any]] = []
     execution_outcomes: list[dict[str, Any]] = []
     observation_account_scope = None
+    observation_rules = None
+    quality_rules = None
     try:
-        if configured_observation_rules() is not None:
-            observation_account_scope = paper_capture_scope(resolved_broker)
+        observation_rules = configured_observation_rules()
     except Exception as exc:
-        execution_outcomes.append({"disposition": "primary_fill_scope_unavailable", "error_type": type(exc).__name__})
+        execution_outcomes.append({"disposition": "primary_observation_config_invalid",
+                                   "error_type": type(exc).__name__, "detail": str(exc)})
+    if observation_rules is not None:
+        try:
+            quality_rules = configured_entry_quality_rules()
+        except Exception as exc:
+            execution_outcomes.append({"disposition": "primary_entry_quality_config_invalid",
+                                       "error_type": type(exc).__name__, "detail": str(exc)})
+        try:
+            observation_account_scope = paper_capture_scope(resolved_broker)
+        except Exception as exc:
+            execution_outcomes.append({"disposition": "primary_fill_scope_unavailable",
+                                       "error_type": type(exc).__name__})
     execution_rejected_count_by_reason: dict[str, int] = {}
     scanner_candidates_count = 0
     trade_attempted_count = 0
@@ -599,10 +613,10 @@ def run_trading_cycle(
                 journal_path=execution_log_path, payload=admission,
             )
             try:
-                observation_rules = configured_observation_rules()
                 if observation_rules is not None:
                     watch_id = register_primary_observation(
-                        artifacts_root() / "primary_followthrough", snapshot, admission, observation_rules)
+                        artifacts_root() / "primary_followthrough", snapshot, admission, observation_rules,
+                        quality_rules=quality_rules)
                     _record_execution_outcome(
                         execution_outcomes, ticker=symbol.upper(), decision_id=decision.decision_id,
                         thesis_id=thesis_id, disposition="primary_observation_registered",
@@ -743,7 +757,7 @@ def run_trading_cycle(
                 )
 
     try:
-        if configured_observation_rules() is not None:
+        if observation_rules is not None:
             followthrough = poll_primary_observations(
                 artifacts_root() / "primary_followthrough", resolved_data_client, now_fn=_entry_check_now)
             execution_outcomes.append({"disposition": "primary_observation_poll", **followthrough})
@@ -752,11 +766,19 @@ def run_trading_cycle(
             "error_type": type(exc).__name__, "detail": str(exc)})
 
     try:
-        if configured_observation_rules() is not None:
+        if observation_rules is not None:
             fills = poll_primary_fills(artifacts_root() / "primary_followthrough", resolved_broker, now_fn=_entry_check_now)
             execution_outcomes.append({"disposition": "primary_fill_capture_poll", **fills})
     except Exception as exc:
         execution_outcomes.append({"disposition": "primary_fill_capture_poll_failed", "error_type": type(exc).__name__})
+
+    try:
+        quality_summary = evaluate_completed_primary_watches(
+            artifacts_root() / "primary_followthrough")
+        execution_outcomes.append({"disposition": "primary_entry_quality_poll", **quality_summary})
+    except Exception as exc:
+        execution_outcomes.append({"disposition": "primary_entry_quality_poll_failed",
+                                   "error_type": type(exc).__name__, "detail": str(exc)})
 
     finished_at = datetime.now(tz=UTC)
     return TradingCycleResult(
