@@ -36,6 +36,9 @@ def prepared_watch(tmp_path, *, rules=None):
     case = linked_case(tmp_path / "source")
     admission = {
         **case["recorded_admission"],
+        "signal_symbol": "AAPL",
+        "underlying_reference_basis": "fresh_equity_mid",
+        "live_signal_thesis": {"at_refresh": {"direction": "bullish", "signal_symbol": "AAPL"}},
         "recorded_refresh": {
             **case["refresh"],
             "snapshot_hash": case["recorded_admission"]["snapshot_hash"],
@@ -133,6 +136,7 @@ def test_completed_broker_linked_watch_materializes_actual_entry_quality_once(tm
     assert evaluation["broker_order_id"] == submission.broker_order_id
     assert evaluation["quality"]["evidence_kind"] == "broker_recorded_fill"
     assert evaluation["quality"]["status"] == "pass"
+    assert evaluation["underlying_response"]["status"] == "insufficient"
     assert evaluation["edge_established"] is False
 
     second = evaluate_completed_primary_watches(root)
@@ -143,6 +147,64 @@ def test_completed_broker_linked_watch_materializes_actual_entry_quality_once(tm
     save(root, watch_id, row)
     tampered = evaluate_completed_primary_watches(root)
     assert tampered["errors"] and "integrity_mismatch" in tampered["errors"][0]["reason"]
+
+
+def test_underlying_can_move_with_thesis_while_purchased_option_fails(tmp_path):
+    root, watch_id, case, _, submission, broker, _ = prepared_watch(tmp_path)
+    broker.order["filled_avg_price"] = "4"
+    bind_primary_submission(root, watch_id, submission, account_scope="alpaca:paper:synthetic-account")
+    fill_at = aware_utc(case["broker_order_observations"][0]["order"]["filled_at"])
+    assert poll_primary_fills(root, broker, now_fn=lambda: fill_at)["filled"] == 1
+
+    row = load(root, watch_id)
+    path = deepcopy(case["outcome_snapshots"])
+    mids = [103.5, 104.0, 104.5]
+    for observation, midpoint in zip(path, mids):
+        observation["underlying_chain"] = [{
+            "symbol": "AAPL", "bid": midpoint-.01, "ask": midpoint+.01,
+            "quote_timestamp": observation["timestamp"],
+        }]
+        observation["source"]["stock_feed"] = "synthetic-sip"
+    row["case"]["outcome_snapshots"] = path
+    row["status"] = "window_closed"
+    save(root, watch_id, row)
+
+    result = evaluate_completed_primary_watches(root)
+    assert result["quality_statuses"] == {"fail": 1}
+    evaluation = load(root, watch_id)["entry_quality_evaluation"]
+    assert evaluation["quality"]["status"] == "fail"
+    response = evaluation["underlying_response"]
+    assert response["status"] == "observed"
+    assert response["direction"] == "bullish"
+    assert response["max_directional_return_pct"] > 0
+    assert response["diagnostic"] == "underlying_moved_with_direction_option_opportunity_failed"
+    assert response["causal_conclusion"] is False
+
+
+def test_underlying_moving_against_thesis_is_separated_from_contract_response(tmp_path):
+    root, watch_id, case, _, submission, broker, _ = prepared_watch(tmp_path)
+    broker.order["filled_avg_price"] = "4"
+    bind_primary_submission(root, watch_id, submission, account_scope="alpaca:paper:synthetic-account")
+    fill_at = aware_utc(case["broker_order_observations"][0]["order"]["filled_at"])
+    assert poll_primary_fills(root, broker, now_fn=lambda: fill_at)["filled"] == 1
+
+    row = load(root, watch_id)
+    path = deepcopy(case["outcome_snapshots"])
+    mids = [103.5, 103.0, 102.5]
+    for observation, midpoint in zip(path, mids):
+        observation["underlying_chain"] = [{
+            "symbol": "AAPL", "bid": midpoint-.01, "ask": midpoint+.01,
+            "quote_timestamp": observation["timestamp"],
+        }]
+    row["case"]["outcome_snapshots"] = path
+    row["status"] = "window_closed"
+    save(root, watch_id, row)
+
+    evaluate_completed_primary_watches(root)
+    response = load(root, watch_id)["entry_quality_evaluation"]["underlying_response"]
+    assert response["status"] == "observed"
+    assert response["max_directional_return_pct"] == 0
+    assert response["diagnostic"] == "underlying_never_moved_with_direction"
 
 
 def test_mixed_feed_path_remains_unscorable(tmp_path):
