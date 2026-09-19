@@ -164,6 +164,7 @@ def test_maybe_start_session_supervisor_starts_once(monkeypatch) -> None:
     assert calls
     assert calls[0]["continuous_window"] is True
     assert calls[0]["on_cycle_complete"] is supervisor._record_cycle_result
+    assert calls[0]["after_entry_window_runner"] is supervisor.poll_primary_runtime_evidence_once
     second = supervisor.maybe_start_session_supervisor()
     assert second is False
 
