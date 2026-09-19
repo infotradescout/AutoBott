@@ -145,6 +145,30 @@ def test_cycle_records_observation_without_changing_primary_order(tmp_path,monke
     assert tape["cases"][0]["fills"]==[]
 
 
+def test_cycle_binds_quality_protocol_before_submission(tmp_path, monkeypatch):
+    monkeypatch.setenv("AUTOBOTT_PRIMARY_OBSERVATION_SECONDS", "180")
+    monkeypatch.setenv("AUTOBOTT_ARTIFACTS_ROOT", str(tmp_path / "evidence"))
+    monkeypatch.setenv("AUTOBOTT_ENTRY_QUALITY_RULES_JSON", json.dumps({
+        "protocol_id": "synthetic-runtime-quality",
+        "holding_seconds": 180,
+        "target_return_pct": .20,
+        "max_adverse_return_pct": .15,
+        "persistence_seconds": 60,
+        "max_quote_age_seconds": 30,
+        "max_observation_gap_seconds": 60,
+        "round_trip_fee_per_contract": 0,
+        "contract_multiplier": 100,
+    }))
+    result, broker, _ = run_cycle(tmp_path, monkeypatch, pair=True, v2=True)
+    assert len(broker.submitted) == 2
+    files = list((tmp_path / "evidence" / "primary_followthrough").glob("*.json"))
+    assert len(files) == 1
+    row = json.loads(files[0].read_text())
+    assert row["quality_protocol"]["rules"]["protocol_id"] == "synthetic-runtime-quality"
+    assert row["quality_protocol"]["rules_hash"]
+    assert any(r["disposition"] == "primary_entry_quality_poll" for r in result.execution_outcomes)
+
+
 def test_observer_failure_does_not_remove_existing_entry_or_exit_guards(tmp_path,monkeypatch):
     monkeypatch.setenv("AUTOBOTT_PRIMARY_OBSERVATION_SECONDS","bad")
     result,broker,_=run_cycle(tmp_path,monkeypatch,pair=True,v2=True)
