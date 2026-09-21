@@ -17,7 +17,7 @@ export function decisionFunnel(decisions = []) {
       for (const layer of Array.isArray(contract.layers) ? contract.layers : []) {
         for (const reason of Array.isArray(layer.rejection_reasons) ? layer.rejection_reasons : []) {
           if (typeof reason !== 'string' || !/^[A-Za-z0-9_.:-]{1,120}$/.test(reason)) continue;
-          const kind = ['TACTICAL', 'RIDER'].includes(layer.layer) ? layer.layer : 'OTHER';
+          const kind = ['tactical', 'rider'].includes(layer.layer) ? layer.layer : 'other';
           const key = kind + ':' + reason;
           counts.set(key, (counts.get(key) || 0) + 1);
         }
