@@ -136,7 +136,8 @@ def read_budget_snapshot(broker: Any) -> BudgetSnapshot:
         raise BudgetBlocked("portfolio_fills_and_positions_disagree")
     by_client: dict[str, dict] = {}
     pending_sells: dict[str, Decimal] = {}
-    terminal = {"filled", "canceled", "cancelled", "expired", "replaced", "rejected", "done_for_day"}
+    # done_for_day can resume next session; it is not a final risk release.
+    terminal = {"filled", "canceled", "cancelled", "expired", "replaced", "rejected"}
     for row in orders:
         client = row.get("client_order_id")
         if isinstance(client, str) and client:
