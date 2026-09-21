@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import os
 import time
 from dataclasses import dataclass
@@ -52,6 +53,8 @@ def run_trading_session(
     results: list[dict[str, Any]] = []
     cycles_completed = 0
     kwargs = cycle_kwargs or {}
+    fixed_cadence = is_hosted_paper_runtime()
+    previous_cycle_tick: float | None = None
 
     while True:
         current = _now(now_fn)
@@ -73,6 +76,15 @@ def run_trading_session(
                 continue
             break
 
+        # Hosted intervals measure starts, not work time plus another full wait.
+        # There is only one cycle runner: an overrun never creates overlapping
+        # work or a queued burst of missed scans.
+        cycle_tick = time.monotonic() if fixed_cadence else None
+        start_gap = (
+            cycle_tick - previous_cycle_tick
+            if cycle_tick is not None and previous_cycle_tick is not None else None
+        )
+        previous_cycle_tick = cycle_tick
         cycle_symbols = _cycle_symbols(symbols, cycle_index=cycles_completed, batch_size=symbol_batch_size)
         try:
             result = cycle_runner(symbols=cycle_symbols, **kwargs)
@@ -80,15 +92,17 @@ def run_trading_session(
             # A single bad cycle (e.g. a data-feed hiccup) must not end the
             # whole session -- keep the loop alive and retry next interval.
             cycle_payload = {"error": f"{type(exc).__name__}: {exc}", "symbols": cycle_symbols}
+            _add_scan_cadence(cycle_payload, cycle_tick, start_gap, interval_seconds)
             results.append(cycle_payload)
             cycles_completed += 1
             if on_cycle_complete is not None:
                 on_cycle_complete(cycle_payload)
             if max_cycles is not None and cycles_completed >= max_cycles:
                 break
-            sleep_fn(interval_seconds)
+            _wait_after_cycle(interval_seconds, cycle_tick, sleep_fn)
             continue
         cycle_payload = result.to_json_dict()
+        _add_scan_cadence(cycle_payload, cycle_tick, start_gap, interval_seconds)
         results.append(cycle_payload)
         cycles_completed += 1
         if on_cycle_complete is not None:
@@ -96,7 +110,7 @@ def run_trading_session(
 
         if max_cycles is not None and cycles_completed >= max_cycles:
             break
-        sleep_fn(interval_seconds)
+        _wait_after_cycle(interval_seconds, cycle_tick, sleep_fn)
 
     finished_at = _now(now_fn)
     return SessionRunResult(
@@ -106,6 +120,31 @@ def run_trading_session(
         symbols=[symbol.upper() for symbol in symbols],
         cycle_results=results,
     )
+
+
+def _elapsed_cycle_seconds(started: float) -> float:
+    elapsed = time.monotonic() - started
+    # A defective injected clock must not cause a negative/NaN sleep or turn
+    # failed timing into permission to run repeated immediate scans.
+    return elapsed if math.isfinite(elapsed) and elapsed >= 0 else 0.0
+
+
+def _wait_after_cycle(interval: int, started: float | None, sleep_fn: Callable[[float], None]) -> None:
+    delay = interval if started is None else max(0.0, interval - _elapsed_cycle_seconds(started))
+    sleep_fn(delay)
+
+
+def _add_scan_cadence(payload: dict[str, Any], started: float | None, gap: float | None, interval: int) -> None:
+    if started is None:
+        return
+    elapsed = _elapsed_cycle_seconds(started)
+    payload["scan_cadence"] = {
+        "mode": "start_to_start",
+        "target_interval_seconds": interval,
+        "start_gap_seconds": round(gap, 6) if gap is not None and math.isfinite(gap) and gap >= 0 else None,
+        "cycle_work_seconds": round(elapsed, 6),
+        "overrun": elapsed > interval,
+    }
 
 
 def _cycle_symbols(symbols: list[str], *, cycle_index: int, batch_size: int | None) -> list[str]:
