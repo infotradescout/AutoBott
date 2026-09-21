@@ -21,12 +21,9 @@ from .execution_models import (
     validate_trade_intent,
 )
 from .hosted_policy import is_hosted_paper_runtime
+from . import portfolio_budget
 
 
-# Leave enough of Alpaca's trading-API budget for reconciliation and position
-# reads while a newly deployed paper worker is flattening stale positions. The
-# normal hosted cycle submits at most six entry legs, but recovery can require
-# dozens of urgent exits in one pass.
 _HOSTED_MUTATION_MIN_INTERVAL_SECONDS = 0.75
 _HOSTED_SUBMISSION_RETRY_DELAYS_SECONDS = (1.0, 2.0)
 
@@ -35,13 +32,8 @@ class BrokerAdapter(Protocol):
     def submit_order(self, intent: TradeIntent, *, current_daily_realized_pnl: float = 0.0, open_positions: int = 0) -> ExecutionOrder:
         ...
 
-    def submit_mleg_order(
-        self,
-        intents: tuple[TradeIntent, ...],
-        *,
-        current_daily_realized_pnl: float = 0.0,
-        open_positions: int = 0,
-    ) -> tuple[ExecutionOrder, ...]:
+    def submit_mleg_order(self, intents: tuple[TradeIntent, ...], *, current_daily_realized_pnl: float = 0.0,
+                          open_positions: int = 0) -> tuple[ExecutionOrder, ...]:
         ...
 
     def get_order(self, broker_order_id: str) -> dict:
@@ -53,46 +45,26 @@ class BrokerAdapter(Protocol):
     def replace_order(self, broker_order_id: str, *, limit_price: float) -> dict:
         ...
 
-    def list_orders(
-        self,
-        *,
-        status: str = "open",
-        limit: int = 100,
-        direction: str = "desc",
-        nested: bool = False,
-    ) -> list[dict]:
+    def list_orders(self, *, status: str = "open", limit: int = 100, direction: str = "desc", nested: bool = False) -> list[dict]:
         ...
 
 
 class AlpacaExecutionBroker:
     def __init__(self, config: AlpacaExecutionConfig | None = None) -> None:
         self.config = (config or require_alpaca_execution_config()).validate()
-        self._hosted_paper = (
-            is_hosted_paper_runtime()
-            and self.config.environment is BrokerEnvironment.PAPER
-        )
+        self._hosted_paper = is_hosted_paper_runtime() and self.config.environment is BrokerEnvironment.PAPER
         self._mutation_lock = threading.Lock()
         self._last_mutation_at: float | None = None
 
-    def submit_order(
-        self,
-        intent: TradeIntent,
-        *,
-        current_daily_realized_pnl: float = 0.0,
-        open_positions: int = 0,
-    ) -> ExecutionOrder:
-        risk_check = validate_trade_intent(
-            intent,
-            self.config.risk_controls(),
-            current_daily_realized_pnl=current_daily_realized_pnl,
-            open_positions=open_positions,
-        )
+    def submit_order(self, intent: TradeIntent, *, current_daily_realized_pnl: float = 0.0,
+                     open_positions: int = 0) -> ExecutionOrder:
+        risk_check = validate_trade_intent(intent, self.config.risk_controls(),
+            current_daily_realized_pnl=current_daily_realized_pnl, open_positions=open_positions)
         order = build_execution_order(intent, risk_check)
-
-        payload = self._submit_with_reconciliation(
-            order.intent,
-            client_order_id=order.client_order_id,
-        )
+        # No broker POST can precede this durable reservation. In ordinary mode
+        # and for sell-to-close, prepare_order is an identity operation.
+        order = portfolio_budget.prepare_order(self, order)
+        payload = self._submit_with_reconciliation(order.intent, client_order_id=order.client_order_id)
         return ExecutionOrder(
             order_id=order.order_id,
             client_order_id=str(payload.get("client_order_id") or order.client_order_id),
@@ -103,19 +75,8 @@ class AlpacaExecutionBroker:
         )
 
     def _submit_with_reconciliation(self, intent: TradeIntent, *, client_order_id: str) -> dict:
-        """Submit one order without duplicating an ambiguous broker request.
-
-        A timeout, 5xx, or 429 does not prove that Alpaca rejected the POST. We
-        first look up the stable client order id. Hosted paper execution retries
-        only after that lookup fails, and reuses the same id so a late first
-        request cannot create a second order.
-        """
-
-        max_attempts = 1 + (
-            len(_HOSTED_SUBMISSION_RETRY_DELAYS_SECONDS)
-            if self._hosted_paper
-            else 0
-        )
+        """Retry ambiguous requests only through the same client order ID."""
+        max_attempts = 1 + (len(_HOSTED_SUBMISSION_RETRY_DELAYS_SECONDS) if self._hosted_paper else 0)
         for attempt in range(max_attempts):
             try:
                 return self._submit_alpaca_order(intent, client_order_id=client_order_id)
@@ -130,15 +91,13 @@ class AlpacaExecutionBroker:
                     time.sleep(_HOSTED_SUBMISSION_RETRY_DELAYS_SECONDS[attempt])
         raise RuntimeError("alpaca_submission_retry_exhausted")
 
-    def submit_mleg_order(
-        self,
-        intents: tuple[TradeIntent, ...],
-        *,
-        current_daily_realized_pnl: float = 0.0,
-        open_positions: int = 0,
-    ) -> tuple[ExecutionOrder, ...]:
+    def submit_mleg_order(self, intents: tuple[TradeIntent, ...], *, current_daily_realized_pnl: float = 0.0,
+                          open_positions: int = 0) -> tuple[ExecutionOrder, ...]:
         """Submit option legs as one atomic Alpaca multi-leg order."""
-
+        if portfolio_budget.enabled(self):
+            # The hosted primary/runner path uses ordinary linked orders. Do
+            # not let an unimplemented multi-leg budget path bypass admission.
+            raise portfolio_budget.BudgetBlocked("portfolio_mleg_admission_not_supported")
         if len(intents) < 2 or len(intents) > 4:
             raise ValueError("mleg_requires_two_to_four_legs")
         if len({intent.option_symbol for intent in intents}) != len(intents):
@@ -149,58 +108,31 @@ class AlpacaExecutionBroker:
             raise ValueError("mleg_entry_requires_limit_orders")
         if any(intent.quantity != 1 for intent in intents):
             raise ValueError("mleg_entry_requires_one_contract_per_leg")
-
         planned_orders: list[ExecutionOrder] = []
         for index, intent in enumerate(intents):
-            risk_check = validate_trade_intent(
-                intent,
-                self.config.risk_controls(),
-                current_daily_realized_pnl=current_daily_realized_pnl,
-                open_positions=open_positions + index,
-            )
+            risk_check = validate_trade_intent(intent, self.config.risk_controls(),
+                current_daily_realized_pnl=current_daily_realized_pnl, open_positions=open_positions + index)
             planned_orders.append(build_execution_order(intent, risk_check))
-
         combined_limit_price = round(sum(order.intent.limit_price for order in planned_orders), 2)
         request_payload = {
-            "qty": "1",
-            "type": "limit",
-            "time_in_force": "day",
-            "order_class": "mleg",
-            "limit_price": f"{combined_limit_price:.2f}",
-            "client_order_id": planned_orders[0].client_order_id,
-            "legs": [
-                {
-                    "symbol": order.intent.option_symbol,
-                    "ratio_qty": "1",
-                    "side": "buy",
-                    "position_intent": "buy_to_open",
-                }
-                for order in planned_orders
-            ],
+            "qty": "1", "type": "limit", "time_in_force": "day", "order_class": "mleg",
+            "limit_price": f"{combined_limit_price:.2f}", "client_order_id": planned_orders[0].client_order_id,
+            "legs": [{"symbol": order.intent.option_symbol, "ratio_qty": "1", "side": "buy", "position_intent": "buy_to_open"}
+                     for order in planned_orders],
         }
         payload = self._request_json("POST", "/v2/orders", payload=request_payload)
         if not isinstance(payload, dict):
             raise ValueError("alpaca_mleg_response_invalid")
-
         parent_order_id = str(payload.get("id") or "") or None
-        child_by_symbol = {
-            str(leg.get("symbol") or "").upper(): leg
-            for leg in (payload.get("legs") or [])
-            if isinstance(leg, dict)
-        }
+        child_by_symbol = {str(leg.get("symbol") or "").upper(): leg for leg in (payload.get("legs") or []) if isinstance(leg, dict)}
         submitted_orders: list[ExecutionOrder] = []
         for order in planned_orders:
             child = child_by_symbol.get(order.intent.option_symbol.upper(), {})
-            submitted_orders.append(
-                ExecutionOrder(
-                    order_id=order.order_id,
-                    client_order_id=str(child.get("client_order_id") or order.client_order_id),
-                    intent=order.intent,
-                    state=_map_alpaca_status(child.get("status") or payload.get("status")),
-                    submitted_at=_parse_dt(child.get("submitted_at") or payload.get("submitted_at")),
-                    broker_order_id=child.get("id") or parent_order_id,
-                )
-            )
+            submitted_orders.append(ExecutionOrder(
+                order_id=order.order_id, client_order_id=str(child.get("client_order_id") or order.client_order_id),
+                intent=order.intent, state=_map_alpaca_status(child.get("status") or payload.get("status")),
+                submitted_at=_parse_dt(child.get("submitted_at") or payload.get("submitted_at")),
+                broker_order_id=child.get("id") or parent_order_id))
         if any(order.broker_order_id is None for order in submitted_orders):
             raise ValueError("alpaca_mleg_response_missing_order_id")
         return tuple(submitted_orders)
@@ -208,17 +140,13 @@ class AlpacaExecutionBroker:
     def _submit_alpaca_order(self, intent: TradeIntent, *, client_order_id: str) -> dict:
         side = "buy" if intent.side is OrderSide.BUY_TO_OPEN else "sell"
         request_payload = {
-            "symbol": intent.option_symbol,
-            "qty": str(intent.quantity),
-            "side": side,
-            "type": "limit" if intent.order_type is OrderType.LIMIT else "market",
-            "time_in_force": "day",
+            "symbol": intent.option_symbol, "qty": str(intent.quantity), "side": side,
+            "type": "limit" if intent.order_type is OrderType.LIMIT else "market", "time_in_force": "day",
             "position_intent": "buy_to_open" if intent.side is OrderSide.BUY_TO_OPEN else "sell_to_close",
             "client_order_id": client_order_id,
         }
         if intent.order_type is OrderType.LIMIT:
             request_payload["limit_price"] = f"{intent.limit_price:.2f}"
-
         return self._request_json("POST", "/v2/orders", payload=request_payload)
 
     def get_order(self, broker_order_id: str) -> dict:
@@ -233,70 +161,48 @@ class AlpacaExecutionBroker:
     def replace_order(self, broker_order_id: str, *, limit_price: float) -> dict:
         if limit_price <= 0:
             raise ValueError("limit_price_must_be_positive")
-        return self._request_json(
-            "PATCH",
-            f"/v2/orders/{broker_order_id}",
-            payload={"limit_price": f"{limit_price:.2f}"},
-        )
+        if portfolio_budget.enabled(self):
+            order = self.get_order(broker_order_id)
+            if not isinstance(order, dict) or order.get("side") not in {"buy", "sell"}:
+                raise portfolio_budget.BudgetBlocked("portfolio_replace_identity_unavailable")
+            if order["side"] == "buy":
+                new_price = portfolio_budget._number(limit_price, "portfolio_replace_price_invalid", positive=True)
+                old_price = portfolio_budget._number(order.get("limit_price"), "portfolio_replace_price_invalid", positive=True)
+                if new_price > old_price:
+                    raise portfolio_budget.BudgetBlocked("portfolio_buy_reprice_exceeds_reserved_cap")
+        return self._request_json("PATCH", f"/v2/orders/{broker_order_id}", payload={"limit_price": f"{limit_price:.2f}"})
 
     def get_account(self) -> dict:
         return self._request_json("GET", "/v2/account")
 
     def list_open_positions(self) -> list[dict]:
         payload = self._request_json("GET", "/v2/positions")
+        if portfolio_budget.enabled(self) and not isinstance(payload, list):
+            raise portfolio_budget.BudgetBlocked("portfolio_positions_unavailable")
         return payload if isinstance(payload, list) else []
 
-    def list_orders(
-        self,
-        *,
-        status: str = "open",
-        limit: int = 100,
-        direction: str = "desc",
-        nested: bool = False,
-        after: str | None = None,
-        until: str | None = None,
-    ) -> list[dict]:
-        params = {
-            "status": status,
-            "limit": str(limit),
-            "direction": direction,
-            "nested": "true" if nested else "false",
-        }
+    def list_orders(self, *, status: str = "open", limit: int = 100, direction: str = "desc",
+                    nested: bool = False, after: str | None = None, until: str | None = None) -> list[dict]:
+        params = {"status": status, "limit": str(limit), "direction": direction, "nested": "true" if nested else "false"}
         if after:
             params["after"] = after
         if until:
             params["until"] = until
         query = urllib.parse.urlencode(params)
         payload = self._request_json("GET", f"/v2/orders?{query}")
+        if portfolio_budget.enabled(self) and not isinstance(payload, list):
+            raise portfolio_budget.BudgetBlocked("portfolio_order_history_unavailable")
         return payload if isinstance(payload, list) else []
 
-    def list_order_history(
-        self,
-        *,
-        status: str = "all",
-        lookback_days: int = 60,
-        page_size: int = 500,
-        max_pages: int = 20,
-    ) -> list[dict]:
-        """Page the complete policy-relevant order window.
-
-        Hosted entries expire within 45 days. A 60-day window includes every
-        possible entry basis needed for today's realized-P/L calculation.
-        """
-
+    def list_order_history(self, *, status: str = "all", lookback_days: int = 60,
+                           page_size: int = 500, max_pages: int = 20) -> list[dict]:
+        """Page the complete policy-relevant order window; incomplete paging fails."""
         after = (datetime.now(tz=UTC) - timedelta(days=lookback_days)).isoformat()
         until: str | None = None
         rows: list[dict] = []
         seen_ids: set[str] = set()
         for _ in range(max_pages):
-            page = self.list_orders(
-                status=status,
-                limit=page_size,
-                direction="desc",
-                nested=False,
-                after=after,
-                until=until,
-            )
+            page = self.list_orders(status=status, limit=page_size, direction="desc", nested=False, after=after, until=until)
             new_rows = []
             for row in page:
                 order_id = str(row.get("id") or row.get("client_order_id") or "")
@@ -308,11 +214,8 @@ class AlpacaExecutionBroker:
             rows.extend(new_rows)
             if len(page) < page_size:
                 return rows
-            timestamps = [
-                str(row.get("submitted_at") or row.get("created_at") or "")
-                for row in page
-                if row.get("submitted_at") or row.get("created_at")
-            ]
+            timestamps = [str(row.get("submitted_at") or row.get("created_at") or "") for row in page
+                          if row.get("submitted_at") or row.get("created_at")]
             if not timestamps or not new_rows:
                 raise RuntimeError("broker_order_history_pagination_stalled")
             until = min(timestamps)
@@ -345,9 +248,7 @@ class AlpacaExecutionBroker:
         with self._mutation_lock:
             now = time.monotonic()
             if self._last_mutation_at is not None:
-                delay = _HOSTED_MUTATION_MIN_INTERVAL_SECONDS - (
-                    now - self._last_mutation_at
-                )
+                delay = _HOSTED_MUTATION_MIN_INTERVAL_SECONDS - (now - self._last_mutation_at)
                 if delay > 0:
                     time.sleep(delay)
                     now = time.monotonic()
@@ -364,21 +265,12 @@ class AlpacaExecutionBroker:
         raise RuntimeError("alpaca_get_retry_exhausted")
 
     def _request_json_once(self, method: str, path: str, *, payload: dict | None = None) -> dict | list:
-        headers = {
-            "APCA-API-KEY-ID": str(self.config.api_key),
-            "APCA-API-SECRET-KEY": str(self.config.secret_key),
-            "Accept": "application/json",
-        }
+        headers = {"APCA-API-KEY-ID": str(self.config.api_key), "APCA-API-SECRET-KEY": str(self.config.secret_key), "Accept": "application/json"}
         data = None
         if payload is not None:
             headers["Content-Type"] = "application/json"
             data = json.dumps(payload).encode("utf-8")
-        request = urllib.request.Request(
-            f"{self.config.trading_base_url}{path}",
-            data=data,
-            headers=headers,
-            method=method,
-        )
+        request = urllib.request.Request(f"{self.config.trading_base_url}{path}", data=data, headers=headers, method=method)
         try:
             with urllib.request.urlopen(request, timeout=30) as response:
                 body = response.read().decode("utf-8").strip()
@@ -397,20 +289,13 @@ class AlpacaExecutionBroker:
 def _map_alpaca_status(status: str | None) -> ExecutionState:
     normalized = (status or "").strip().lower()
     return {
-        "new": ExecutionState.SUBMITTED,
-        "accepted": ExecutionState.SUBMITTED,
-        "accepted_for_bidding": ExecutionState.SUBMITTED,
-        "pending_new": ExecutionState.SUBMITTED,
-        "pending_replace": ExecutionState.SUBMITTED,
-        "pending_cancel": ExecutionState.SUBMITTED,
-        "stopped": ExecutionState.SUBMITTED,
-        "calculated": ExecutionState.SUBMITTED,
-        "partially_filled": ExecutionState.PARTIALLY_FILLED,
-        "filled": ExecutionState.FILLED,
-        "canceled": ExecutionState.CANCELED,
-        "expired": ExecutionState.CANCELED,
-        "replaced": ExecutionState.CANCELED,
-        "rejected": ExecutionState.REJECTED,
+        "new": ExecutionState.SUBMITTED, "accepted": ExecutionState.SUBMITTED,
+        "accepted_for_bidding": ExecutionState.SUBMITTED, "pending_new": ExecutionState.SUBMITTED,
+        "pending_replace": ExecutionState.SUBMITTED, "pending_cancel": ExecutionState.SUBMITTED,
+        "stopped": ExecutionState.SUBMITTED, "calculated": ExecutionState.SUBMITTED,
+        "partially_filled": ExecutionState.PARTIALLY_FILLED, "filled": ExecutionState.FILLED,
+        "canceled": ExecutionState.CANCELED, "expired": ExecutionState.CANCELED,
+        "replaced": ExecutionState.CANCELED, "rejected": ExecutionState.REJECTED,
         "suspended": ExecutionState.REJECTED,
     }.get(normalized, ExecutionState.FAILED)
 
@@ -426,11 +311,7 @@ def _submission_result_requires_reconciliation(exc: Exception) -> bool:
     if _submission_result_is_ambiguous(exc):
         return True
     detail = str(exc).lower()
-    return (
-        "alpaca_http_422" in detail
-        and "client_order_id" in detail
-        and ("unique" in detail or "duplicate" in detail or "already" in detail)
-    )
+    return "alpaca_http_422" in detail and "client_order_id" in detail and ("unique" in detail or "duplicate" in detail or "already" in detail)
 
 
 def _parse_dt(value: str | None) -> datetime | None:
