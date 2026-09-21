@@ -21,6 +21,7 @@ from .options_universe import resolve_symbol_universe
 from .position_monitor import run_position_monitor
 from .runtime_control import arm_paper_execution
 from .session_runner import run_trading_session
+from .entry_runtime_status import build_entry_status, emit_entry_status
 
 
 def _normalize_bool(value: str | None, *, default: bool = False) -> bool:
@@ -59,6 +60,7 @@ class SessionSupervisorState:
     last_monitor_error: str | None = None
     cycles_completed: int = 0
     last_cycle_at: datetime | None = None
+    last_entry_status: dict[str, Any] | None = None
 
     def to_json_dict(self) -> dict[str, Any]:
         payload = asdict(self)
@@ -171,6 +173,7 @@ def _start_session_thread(config: SessionSupervisorConfig, *, consume_autostart:
         _SESSION_STATE.last_monitor_result = None
         _SESSION_STATE.cycles_completed = 0
         _SESSION_STATE.last_cycle_at = None
+        _SESSION_STATE.last_entry_status = None
         _SESSION_STOP_EVENT = threading.Event()
         _SESSION_THREAD = threading.Thread(target=_run_session, args=(config, _SESSION_STOP_EVENT), daemon=True, name="autobott-session")
         _SESSION_THREAD.start()
@@ -225,6 +228,11 @@ def _run_session(config: SessionSupervisorConfig, stop_event: threading.Event) -
 def _record_cycle_result(cycle_result: dict[str, Any]) -> None:
     """Publish every cycle while the continuous session is still running."""
 
+    # This summary is observational only. Failure must not stop the session.
+    try:
+        entry_status = build_entry_status(cycle_result)
+    except Exception:
+        entry_status = None
     with _SESSION_LOCK:
         _SESSION_STATE.cycles_completed += 1
         _SESSION_STATE.last_cycle_at = datetime.now(tz=UTC)
@@ -233,6 +241,13 @@ def _record_cycle_result(cycle_result: dict[str, Any]) -> None:
             "cycle_results": [cycle_result],
         }
         _SESSION_STATE.last_error = cycle_result.get("error")
+        _SESSION_STATE.last_entry_status = entry_status
+    # No stdout I/O while holding the shared runtime-state lock.
+    if entry_status is not None:
+        try:
+            emit_entry_status(entry_status)
+        except Exception:
+            pass
 
 
 def _ensure_position_monitor_thread_locked(config: SessionSupervisorConfig) -> None:

@@ -150,6 +150,7 @@ def _cockpit_html() -> str:
 <main>
 <form class="access panel" id="access-form" onsubmit="unlock(event)"><label for="access-token">Dashboard access</label><input id="access-token" type="password" autocomplete="off" placeholder="Enter dashboard token"><button class="btn" type="submit">Unlock</button><button class="btn" type="button" onclick="lock()">Lock</button><span class="access-status" id="auth-status" role="status">Locked</span></form>
 <div class="notice" id="notice" role="status"></div>
+<div class="notice" id="entry-notice" role="status"></div>
 <section class="hero"><div class="metric"><div class="label">Paper Equity</div><div class="value" id="equity">—</div><div class="delta" id="cash">—</div></div><div class="metric"><div class="label">Today</div><div class="value" id="daypl">—</div><div class="delta" id="daypct">—</div></div><div class="metric"><div class="label">Open Trades</div><div class="value" id="paircount">—</div><div class="delta" id="legs">—</div></div><div class="metric"><div class="label">Runtime</div><div class="value" id="runtime">—</div><div class="delta" id="last-refresh">—</div></div></section>
 <section class="section"><div class="section-head"><h2>Core + Runner Trades</h2><span id="trade-summary">Waiting for account data</span></div><div class="pairs" id="pairs"></div></section>
 <section class="section" id="standalone-section" hidden><div class="section-head"><h2>Other Open Positions</h2><span>Not linked to a core + runner trade</span></div><div class="pairs" id="standalone"></div></section>
@@ -183,6 +184,7 @@ function clearAccount(message){
   document.getElementById('session-chip').textContent='SESSION UNKNOWN';document.getElementById('session-chip').className='chip warn';
   document.getElementById('last-refresh').textContent='Account data unavailable';
   document.getElementById('trade-summary').textContent='Waiting for account data';
+  document.getElementById('entry-notice').textContent='';document.getElementById('entry-notice').classList.remove('show');
 }
 function lock(){generation++;try{sessionStorage.removeItem('dashboardToken')}catch{}document.getElementById('access-token').value='';document.getElementById('auth-status').textContent='Locked';clearAccount('Unlock the dashboard to view your paper account.');note('Dashboard locked.')}
 async function unlock(event){event.preventDefault();const value=document.getElementById('access-token').value;if(!value)return;generation++;try{sessionStorage.setItem('dashboardToken',value)}catch{note('Session storage is unavailable in this browser.',true);return}document.getElementById('access-token').value='';await refreshAll()}
@@ -206,14 +208,35 @@ function renderPairs(data){
   document.getElementById('standalone').innerHTML=other.map(leg=>legCard(leg,'OPEN POSITION')).join('');
 }
 function renderAccount(data){const a=data.account||{};document.getElementById('equity').textContent=money(a.equity);document.getElementById('cash').textContent=`Cash ${money(a.cash)}`;const pl=Number(a.day_pl||0),e=document.getElementById('daypl');e.textContent=money(a.day_pl);e.className=`value ${pl>=0?'goodText':'badText'}`;document.getElementById('daypct').textContent=a.day_pl_pct==null?'—':`${Number(a.day_pl_pct).toFixed(2)}% today`}
+function entryRuntimeView(safety,session,health,now=Date.now()){
+  const view=(label,reason,tone='')=>({label,reason,tone});
+  if(safety.kill_switch_enabled)return view('KILLED','The kill switch is active.','badText');
+  if(!safety.execution_enabled)return view('PAUSED','Paper execution is paused.');
+  if(safety.order_placement_enabled!==true)return view('BLOCKED','Blocked by safety configuration.','badText');
+  if(health.session_supervisor?.stalled===true)return view('STALLED','The scanning session stopped unexpectedly.','badText');
+  if(session.thread_alive!==true||session.state?.running===false)return view('STOPPED','The scanning session is not running.','badText');
+  const last=session.state?.last_entry_status;
+  if(!last||last.schema!=='entry_status.v1')return view('WAITING','Waiting for a completed scan with entry-status evidence.');
+  const dated=value=>typeof value==='string'&&/(?:Z|[+-]\d{2}:\d{2})$/.test(value)?Date.parse(value):NaN;
+  const completed=dated(last.cycle_finished_at),observed=dated(last.observed_at);
+  const interval=Number(session.config?.interval_seconds),maxAge=Math.max(120,Number.isFinite(interval)&&interval>0?interval*3:120)*1000;
+  if(!Number.isFinite(completed)||!Number.isFinite(observed))return view('UNKNOWN','The last scan has no verifiable completion timestamp.');
+  if(completed>now+30000||observed>now+30000||observed<completed-30000||now-completed>maxAge||now-observed>maxAge)return view('STALE','No recent completed scan is confirmed. The previous result must not be treated as current.');
+  const statuses={BLOCKED:['BLOCKED','badText'],ERROR:['SCAN ERROR','badText'],NO_CANDIDATES:['NO CANDIDATES',''],NO_ENTRIES:['NO ENTRIES',''],SUBMITTED:['ENTRY SUBMITTED','goodText'],UNKNOWN:['UNKNOWN','']};
+  const status=statuses[last.status];
+  if(!status||typeof last.reason!=='string')return view('UNKNOWN','Entry-status evidence is incomplete.');
+  if(last.status==='SUBMITTED'&&(!Number.isInteger(last.entry_submissions_count)||last.entry_submissions_count<1))return view('UNKNOWN','Entry submission evidence is incomplete.');
+  return view(status[0],last.reason,status[1]);
+}
 function renderState(safety,session,health){
   killed=!!safety.kill_switch_enabled;const armed=!!safety.execution_enabled&&!killed,blocked=armed&&safety.order_placement_enabled!==true;
-  const runtime=killed?'KILLED':blocked?'BLOCKED':armed?'ARMED':'PAUSED';
-  document.getElementById('runtime').textContent=runtime;document.getElementById('runtime').className=`value ${killed?'badText':armed&&!blocked?'goodText':''}`;
-  const stalled=health.session_supervisor?.stalled===true,alive=!!session.thread_alive&&!stalled,chip=document.getElementById('session-chip');chip.textContent=stalled?'SESSION STALLED':alive?'SESSION RUNNING':'SESSION STOPPED';chip.className=`chip ${stalled?'bad':alive?'good':'warn'}`;
+  const entry=entryRuntimeView(safety,session,health);
+  document.getElementById('runtime').textContent=entry.label;document.getElementById('runtime').className=`value ${entry.tone}`;
+  const entryNotice=document.getElementById('entry-notice');entryNotice.textContent=entry.reason;entryNotice.classList.add('show');
+  const stalled=health.session_supervisor?.stalled===true,alive=!!session.thread_alive&&!stalled,chip=document.getElementById('session-chip');chip.textContent=stalled?'SESSION STALLED':alive?'SESSION RUNNING':'SESSION STOPPED';chip.className=`chip ${stalled?'bad':alive&&entry.tone==='goodText'?'good':'warn'}`;
   document.getElementById('policy').textContent=health.policy_version||'Paper trading';
-  const lastCycle=session.state?.last_cycle_at;
-  document.getElementById('state').innerHTML=[['Broker','Alpaca paper'],['Real money','Locked off'],['Execution',blocked?'Blocked by safety configuration':armed?'Armed':'Paused'],['Kill switch',killed?'Active':'Off'],['Session',stalled?'Stopped unexpectedly':alive?'Running':'Stopped'],['Last cycle',lastCycle?new Date(lastCycle).toLocaleString():'No cycle recorded'],['Policy',health.policy_version||'Unknown']].map(([a,b])=>`<div class="state-row"><span class="muted">${esc(a)}</span><strong>${esc(b)}</strong></div>`).join('');
+  const lastCycle=session.state?.last_cycle_at,last=session.state?.last_entry_status;
+  document.getElementById('state').innerHTML=[['Broker','Alpaca paper'],['Real money','Locked off'],['Execution switch',blocked?'Blocked by safety configuration':armed?'Armed (permission only)':'Paused'],['Entry status',entry.label],['Last scan candidates',last?.candidates_count??'—'],['Last scan submissions',last?.entry_submissions_count??'—'],['Last scan rejections',last?.rejections_count??'—'],['Kill switch',killed?'Active':'Off'],['Session',stalled?'Stopped unexpectedly':alive?'Running':'Stopped'],['Last cycle',lastCycle?new Date(lastCycle).toLocaleString():'No cycle recorded'],['Policy',health.policy_version||'Unknown']].map(([a,b])=>`<div class="state-row"><span class="muted">${esc(a)}</span><strong>${esc(b)}</strong></div>`).join('');
 }
 function renderFeed(data){
   const rows=data.decisions||[],root=document.getElementById('feed');
