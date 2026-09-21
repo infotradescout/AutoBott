@@ -80,64 +80,29 @@ _SESSION_AUTOSTART_CONSUMED = False
 
 def load_session_supervisor_config() -> SessionSupervisorConfig:
     hosted_paper = is_hosted_paper_runtime()
-    symbol_source = (
-        HOSTED_SESSION_SYMBOL_TOKENS
-        if hosted_paper
-        else tuple(item.strip() for item in (os.getenv("AUTOBOTT_SESSION_SYMBOLS") or "SPY").split(",") if item.strip())
-    )
+    symbol_source = (HOSTED_SESSION_SYMBOL_TOKENS if hosted_paper else tuple(
+        item.strip() for item in (os.getenv("AUTOBOTT_SESSION_SYMBOLS") or "SPY").split(",") if item.strip()))
     symbols = resolve_symbol_universe(list(symbol_source))
     raw_max_cycles = os.getenv("AUTOBOTT_SESSION_MAX_CYCLES")
     raw_batch_size = os.getenv("AUTOBOTT_SESSION_SYMBOL_BATCH_SIZE")
     run_forever = True if hosted_paper else _normalize_bool(os.getenv("AUTOBOTT_SESSION_RUN_FOREVER"), default=False)
     return SessionSupervisorConfig(
-        # Startup safety switches remain deployment-owned in hosted paper mode.
         enabled=_normalize_bool(os.getenv("AUTOBOTT_SESSION_AUTOSTART"), default=True),
         symbols=symbols,
-        interval_seconds=(
-            HOSTED_SESSION_INTERVAL_SECONDS
-            if hosted_paper
-            else int(os.getenv("AUTOBOTT_SESSION_INTERVAL_SECONDS", "300"))
-        ),
+        interval_seconds=HOSTED_SESSION_INTERVAL_SECONDS if hosted_paper else int(os.getenv("AUTOBOTT_SESSION_INTERVAL_SECONDS", "300")),
         max_cycles=None if run_forever else (int(raw_max_cycles) if raw_max_cycles else None),
-        symbol_batch_size=(
-            HOSTED_SESSION_SYMBOL_BATCH_SIZE
-            if hosted_paper
-            else (int(raw_batch_size) if raw_batch_size else None)
-        ),
+        symbol_batch_size=HOSTED_SESSION_SYMBOL_BATCH_SIZE if hosted_paper else (int(raw_batch_size) if raw_batch_size else None),
         quantity=1 if hosted_paper else int(os.getenv("AUTOBOTT_SESSION_QUANTITY", "1")),
         position_count=0 if hosted_paper else int(os.getenv("AUTOBOTT_SESSION_POSITION_COUNT", "0")),
-        # Hosted cycles derive realized P/L from broker fills. A retained env
-        # value must never impersonate the live daily result.
         daily_pnl=0.0 if hosted_paper else float(os.getenv("AUTOBOTT_SESSION_DAILY_PNL", "0.0")),
-        start_time=_normalize_time_text(
-            HOSTED_SESSION_START_TIME
-            if hosted_paper
-            else (os.getenv("AUTOBOTT_SESSION_START_TIME") or "09:35")
-        ),
-        end_time=_normalize_time_text(
-            HOSTED_SESSION_END_TIME
-            if hosted_paper
-            else (os.getenv("AUTOBOTT_SESSION_END_TIME") or "15:55")
-        ),
-        market_timezone=(
-            HOSTED_SESSION_MARKET_TIMEZONE
-            if hosted_paper
-            else (os.getenv("AUTOBOTT_SESSION_MARKET_TIMEZONE") or "America/New_York").strip()
-            or "America/New_York"
-        ),
-        arm_paper_execution_on_start=_normalize_bool(
-            os.getenv("AUTOBOTT_SESSION_ARM_PAPER_EXECUTION"), default=True
-        ),
-        position_monitor_heartbeat_enabled=(
-            HOSTED_POSITION_MONITOR_HEARTBEAT_ENABLED
-            if hosted_paper
-            else _normalize_bool(os.getenv("AUTOBOTT_POSITION_MONITOR_HEARTBEAT_ENABLED"), default=False)
-        ),
-        position_monitor_heartbeat_seconds=(
-            HOSTED_POSITION_MONITOR_HEARTBEAT_SECONDS
-            if hosted_paper
-            else max(5, int(os.getenv("AUTOBOTT_POSITION_MONITOR_HEARTBEAT_SECONDS", "15")))
-        ),
+        start_time=_normalize_time_text(HOSTED_SESSION_START_TIME if hosted_paper else (os.getenv("AUTOBOTT_SESSION_START_TIME") or "09:35")),
+        end_time=_normalize_time_text(HOSTED_SESSION_END_TIME if hosted_paper else (os.getenv("AUTOBOTT_SESSION_END_TIME") or "15:55")),
+        market_timezone=(HOSTED_SESSION_MARKET_TIMEZONE if hosted_paper else (os.getenv("AUTOBOTT_SESSION_MARKET_TIMEZONE") or "America/New_York").strip() or "America/New_York"),
+        arm_paper_execution_on_start=_normalize_bool(os.getenv("AUTOBOTT_SESSION_ARM_PAPER_EXECUTION"), default=True),
+        position_monitor_heartbeat_enabled=(HOSTED_POSITION_MONITOR_HEARTBEAT_ENABLED if hosted_paper
+            else _normalize_bool(os.getenv("AUTOBOTT_POSITION_MONITOR_HEARTBEAT_ENABLED"), default=False)),
+        position_monitor_heartbeat_seconds=(HOSTED_POSITION_MONITOR_HEARTBEAT_SECONDS if hosted_paper
+            else max(5, int(os.getenv("AUTOBOTT_POSITION_MONITOR_HEARTBEAT_SECONDS", "15")))),
         run_forever=run_forever,
     )
 
@@ -181,12 +146,15 @@ def _start_session_thread(config: SessionSupervisorConfig, *, consume_autostart:
 def session_supervisor_status() -> dict[str, Any]:
     config = load_session_supervisor_config()
     with _SESSION_LOCK:
-        return {
-            "config": asdict(config),
-            "state": _SESSION_STATE.to_json_dict(),
+        status = {"config": asdict(config), "state": _SESSION_STATE.to_json_dict(),
             "thread_alive": bool(_SESSION_THREAD and _SESSION_THREAD.is_alive()),
-            "position_monitor_thread_alive": bool(_POSITION_MONITOR_THREAD and _POSITION_MONITOR_THREAD.is_alive()),
-        }
+            "position_monitor_thread_alive": bool(_POSITION_MONITOR_THREAD and _POSITION_MONITOR_THREAD.is_alive())}
+    # Provider diagnostics must never hold the supervisor's publication lock.
+    from .portfolio_status import optional_capacity_status
+    capacity = optional_capacity_status()
+    if capacity is not None:
+        status["portfolio_capacity"] = capacity
+    return status
 
 
 def _run_session(config: SessionSupervisorConfig, stop_event: threading.Event) -> None:
@@ -195,21 +163,13 @@ def _run_session(config: SessionSupervisorConfig, stop_event: threading.Event) -
         if config.arm_paper_execution_on_start:
             arm_paper_execution(reason="session_supervisor_autostart")
         result = run_trading_session(
-            symbols=config.symbols,
-            interval_seconds=config.interval_seconds,
-            start_time=_parse_optional_time(config.start_time),
-            end_time=_parse_optional_time(config.end_time),
-            market_timezone=config.market_timezone,
-            max_cycles=config.max_cycles,
-            symbol_batch_size=config.symbol_batch_size,
-            continuous_window=True,
-            cycle_kwargs={
-                "quantity": config.quantity,
-                "position_count": config.position_count,
-                "current_daily_realized_pnl": config.daily_pnl,
-            },
-            on_cycle_complete=_record_cycle_result,
-        )
+            symbols=config.symbols, interval_seconds=config.interval_seconds,
+            start_time=_parse_optional_time(config.start_time), end_time=_parse_optional_time(config.end_time),
+            market_timezone=config.market_timezone, max_cycles=config.max_cycles,
+            symbol_batch_size=config.symbol_batch_size, continuous_window=True,
+            cycle_kwargs={"quantity": config.quantity, "position_count": config.position_count,
+                          "current_daily_realized_pnl": config.daily_pnl},
+            on_cycle_complete=_record_cycle_result)
         with _SESSION_LOCK:
             _SESSION_STATE.last_result = result.to_json_dict()
             _SESSION_STATE.last_error = None
@@ -225,18 +185,11 @@ def _run_session(config: SessionSupervisorConfig, stop_event: threading.Event) -
 
 def _record_cycle_result(cycle_result: dict[str, Any]) -> None:
     """Publish every cycle while the continuous session is still running."""
-
     with _SESSION_LOCK:
         _SESSION_STATE.cycles_completed += 1
         _SESSION_STATE.last_cycle_at = datetime.now(tz=UTC)
-        _SESSION_STATE.last_result = {
-            "cycles_completed": _SESSION_STATE.cycles_completed,
-            "cycle_results": [cycle_result],
-        }
+        _SESSION_STATE.last_result = {"cycles_completed": _SESSION_STATE.cycles_completed, "cycle_results": [cycle_result]}
         _SESSION_STATE.last_error = cycle_result.get("error")
-
-    # A deliberate, paper-only repair runs after the completed cycle. It never
-    # changes the cycle's rejection result or skips any normal admission gate.
     if os.getenv("AUTOBOTT_ACCOUNTING_RECOVERY_MODE", "").strip().lower() in {"plan", "apply"}:
         try:
             from .accounting_recovery import maybe_recover_blocked_cycle
@@ -246,8 +199,6 @@ def _record_cycle_result(cycle_result: dict[str, Any]) -> None:
                     _SESSION_STATE.last_result["accounting_recovery"] = recovery
                 print("AUTOBOTT_ACCOUNTING_RECOVERY " + json.dumps(recovery, sort_keys=True, allow_nan=False), flush=True)
         except Exception as exc:
-            # Recovery/diagnostic failures cannot stop position monitoring or
-            # the supervisor; exception text can contain private broker data.
             print("AUTOBOTT_ACCOUNTING_RECOVERY " + json.dumps({"status": "blocked", "reason": "recovery_hook_failed", "error_type": type(exc).__name__}), flush=True)
 
 
@@ -258,12 +209,8 @@ def _ensure_position_monitor_thread_locked(config: SessionSupervisorConfig) -> N
     if _POSITION_MONITOR_THREAD is not None and _POSITION_MONITOR_THREAD.is_alive():
         return
     _POSITION_MONITOR_STOP_EVENT = threading.Event()
-    _POSITION_MONITOR_THREAD = threading.Thread(
-        target=_run_position_monitor_heartbeat,
-        args=(config, _POSITION_MONITOR_STOP_EVENT),
-        daemon=True,
-        name="autobott-position-monitor",
-    )
+    _POSITION_MONITOR_THREAD = threading.Thread(target=_run_position_monitor_heartbeat,
+        args=(config, _POSITION_MONITOR_STOP_EVENT), daemon=True, name="autobott-position-monitor")
     _POSITION_MONITOR_THREAD.start()
 
 
