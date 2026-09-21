@@ -211,6 +211,7 @@ class PremiumLedger:
         connection = sqlite3.connect(self.path, timeout=10)
         connection.execute("PRAGMA synchronous=FULL")
         connection.execute("CREATE TABLE IF NOT EXISTS reservations (scope TEXT NOT NULL, key TEXT NOT NULL, client TEXT NOT NULL, symbol TEXT NOT NULL, quantity TEXT NOT NULL, price TEXT NOT NULL, cents INTEGER NOT NULL CHECK(cents>0), state TEXT NOT NULL, PRIMARY KEY(scope,key), UNIQUE(scope,client))")
+        connection.execute("CREATE TABLE IF NOT EXISTS released_reservations (scope TEXT NOT NULL, key TEXT NOT NULL, client TEXT NOT NULL, symbol TEXT NOT NULL, quantity TEXT NOT NULL, price TEXT NOT NULL, cents INTEGER NOT NULL CHECK(cents>0), state TEXT NOT NULL, PRIMARY KEY(scope,client))")
         return connection
 
     def reserve(self, intents: tuple[Any, ...], *, limit_dollars: Any,
@@ -252,11 +253,24 @@ class PremiumLedger:
             if type(max_legs) is not int or max_legs <= 0 or len(active) + len(specs) > max_legs:
                 raise BudgetBlocked("portfolio_operational_position_limit")
             for spec in specs:
-                try:
-                    connection.execute("INSERT INTO reservations(scope,key,client,symbol,quantity,price,cents,state) VALUES(?,?,?,?,?,?,?,?)",
-                        (snapshot.account_scope, spec["key"], spec["client"], spec["symbol"], spec["quantity"], spec["limit"], spec["cents"], "reserved"))
-                except sqlite3.IntegrityError:
-                    raise BudgetBlocked("portfolio_entry_already_reserved") from None
+                previous = connection.execute(
+                    "SELECT scope,key,client,symbol,quantity,price,cents,state FROM reservations WHERE scope=? AND key=?",
+                    (snapshot.account_scope, spec["key"])).fetchone()
+                if previous is not None:
+                    if previous[7] != "not_submitted":
+                        raise BudgetBlocked("portfolio_entry_already_reserved")
+                    # Only a proven unattempted release can be retried. Preserve
+                    # its record and mint a new token to invalidate stale callers.
+                    connection.execute("INSERT INTO released_reservations VALUES(?,?,?,?,?,?,?,?)", previous)
+                    connection.execute(
+                        "UPDATE reservations SET client=?,symbol=?,quantity=?,price=?,cents=?,state='reserved' WHERE scope=? AND key=? AND state='not_submitted'",
+                        (spec["client"], spec["symbol"], spec["quantity"], spec["limit"], spec["cents"], snapshot.account_scope, spec["key"]))
+                else:
+                    try:
+                        connection.execute("INSERT INTO reservations(scope,key,client,symbol,quantity,price,cents,state) VALUES(?,?,?,?,?,?,?,?)",
+                            (snapshot.account_scope, spec["key"], spec["client"], spec["symbol"], spec["quantity"], spec["limit"], spec["cents"], "reserved"))
+                    except sqlite3.IntegrityError:
+                        raise BudgetBlocked("portfolio_entry_already_reserved") from None
             connection.commit()
             receipt = {"version": "paper_premium_budget.v1", "account_scope_hash": sha256(snapshot.account_scope.encode()).hexdigest(),
                 "cap_dollars": cap / 100, "held_dollars": snapshot.held_cents / 100,
@@ -273,7 +287,7 @@ class PremiumLedger:
         connection = self._connect()
         try:
             with connection:
-                cursor = connection.execute("UPDATE reservations SET state='attempted' WHERE scope=? AND key=? AND state='reserved'", (spec["scope"], spec["key"]))
+                cursor = connection.execute("UPDATE reservations SET state='attempted' WHERE scope=? AND key=? AND client=? AND state='reserved'", (spec["scope"], spec["key"], spec["client"]))
                 if cursor.rowcount != 1:
                     raise BudgetBlocked("portfolio_reservation_not_available")
         finally:
@@ -284,7 +298,7 @@ class PremiumLedger:
         try:
             with connection:
                 for spec in specs:
-                    connection.execute("UPDATE reservations SET state='not_submitted' WHERE scope=? AND key=? AND state='reserved'", (spec["scope"], spec["key"]))
+                    connection.execute("UPDATE reservations SET state='not_submitted' WHERE scope=? AND key=? AND client=? AND state='reserved'", (spec["scope"], spec["key"], spec["client"]))
         finally:
             connection.close()
 
