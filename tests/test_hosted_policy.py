@@ -187,11 +187,11 @@ def test_hosted_capture_and_execution_dte_windows_match(monkeypatch) -> None:
     capture = _hosted_capture_rules()
     execution = _hosted_execution_rules()
 
-    assert (capture.tactical_min_dte, capture.tactical_max_dte) == (5, 10)
+    assert (capture.tactical_min_dte, capture.tactical_max_dte) == (5, 13)
     assert (capture.rider_min_dte, capture.rider_max_dte) == (14, 45)
     assert (capture.option_chain_min_dte, capture.option_chain_max_dte) == (5, 45)
     assert capture.bar_timeframe == "1Hour"
-    assert (execution.intraday_min_dte, execution.intraday_max_dte) == (5, 10)
+    assert (execution.intraday_min_dte, execution.intraday_max_dte) == (5, 13)
     assert (execution.rider_min_dte, execution.rider_max_dte) == (14, 45)
     assert execution.min_open_interest == 0
     assert {"VIX", "VIXW", "VXX", "UVXY"}.issubset(execution.risk_off_bullish_exempt_symbols)
