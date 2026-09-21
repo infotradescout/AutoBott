@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import { verifyRuntimeAccounting } from './verify_runtime_reconciliation.mjs';
 const HOST = 'https://autobott-azl4.onrender.com';
-const PATHS = new Set(['/api/health', '/api/safety', '/api/account/positions', '/api/positions/open']);
+const PATHS = new Set(['/api/health', '/api/safety', '/api/account/positions', '/api/positions/open', '/api/account/orders']);
 const countReasons = rows => (rows || []).reduce((out, row) => {
   for (const reason of row.reasons || [row.reason || 'unspecified']) out[reason] = (out[reason] || 0) + 1;
   return out;
@@ -19,6 +19,9 @@ export function detailedSession(session = {}) {
     lastCycleAt: state.last_cycle_at, lastErrorPresent: Boolean(state.last_error),
     scanIntervalSeconds: session.config?.interval_seconds, symbolBatchSize: session.config?.symbol_batch_size,
     configuredSymbolCount: session.config?.symbols?.length,
+    scannerCandidates: cycle.scanner_candidates_count, tradeAttempts: cycle.trade_attempted_count,
+    skipped: (cycle.skipped || []).slice(0, 30).map(row => ({symbol:row.symbol,reason:row.reason})),
+    submitted: (cycle.orders_submitted || []).map(row => ({symbol:row.intent?.option_symbol || row.option_symbol, state:row.state || row.status, ...(row.broker_order_id ? {orderIdentityHash:hash(row.broker_order_id)} : {})})),
     currentBrokerOutcomeCount: rows.length, brokerOutcomeFirstTime: stamps[0], brokerOutcomeLastTime: stamps.at(-1),
     currentDayUnmatchedSellSymbols: accounting.current_day_unmatched_sell_symbols || [],
     historicalUnmatchedSellSymbols: accounting.historical_unmatched_sell_symbols || [],
@@ -57,11 +60,13 @@ export async function runReadonlyPreflight({ env = process.env, request = fetch,
   const safety = await get('/api/safety');
   const brokerPositions = positionSummary(await get('/api/account/positions'));
   const storedPositions = positionSummary(await get('/api/positions/open'),true);
+  const orderPayload = await get('/api/account/orders');
+  const recentBrokerOrders = {ok:orderPayload.ok, window:'latest_50_orders', rows:(orderPayload.orders || []).slice(0,10).map(row=>({symbol:row.symbol,side:row.side,quantity:row.qty,filledQuantity:row.filled_qty,status:row.status,submittedAt:row.submitted_at,filledAt:row.filled_at}))};
   assert.equal((await get('/api/health')).version,expected);
   write('AUTOBOTT_RUNTIME_ACCOUNTING ' + JSON.stringify({
     observedAt:new Date().toISOString(),expectedSource:expected,...report,detail,
     safety:{paperOnly:safety.paper_only,liveTradingEnabled:safety.live_trading_enabled,orderPlacementEnabled:safety.order_placement_enabled,executionEnabled:safety.execution_enabled,killSwitchEnabled:safety.kill_switch_enabled},
-    brokerPositions,storedPositions,
+    brokerPositions,storedPositions,recentBrokerOrders,
   }));
   return true;
 }
