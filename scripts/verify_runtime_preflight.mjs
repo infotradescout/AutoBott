@@ -9,16 +9,42 @@ const countReasons = rows => (rows || []).reduce((out, row) => {
   return out;
 }, {});
 const hash = value => createHash('sha256').update(String(value)).digest('hex');
+export function decisionFunnel(decisions = []) {
+  return (Array.isArray(decisions) ? decisions : []).slice(0, 25).map(row => {
+    const diagnostics = Array.isArray(row.contract_diagnostics) ? row.contract_diagnostics : [];
+    const counts = new Map();
+    for (const contract of diagnostics.slice(0, 2000)) {
+      for (const layer of Array.isArray(contract.layers) ? contract.layers : []) {
+        for (const reason of Array.isArray(layer.rejection_reasons) ? layer.rejection_reasons : []) {
+          if (typeof reason !== 'string' || !/^[A-Za-z0-9_.:-]{1,120}$/.test(reason)) continue;
+          const kind = ['tactical', 'rider'].includes(layer.layer) ? layer.layer : 'other';
+          const key = kind + ':' + reason;
+          counts.set(key, (counts.get(key) || 0) + 1);
+        }
+      }
+    }
+    return {symbol: row.ticker || row.symbol, decision: row.decision,
+      contractRows: diagnostics.length, summarizedContractRows: Math.min(2000, diagnostics.length),
+      contractLayerRejectionCounts: Object.fromEntries(counts)};
+  });
+}
 export function detailedSession(session = {}) {
   const state = session.state || {}, cycle = (state.last_result?.cycle_results || []).at(-1) || {};
   const accounting = (cycle.execution_outcomes || []).find(row => row.disposition === 'trade_outcome_learning_summary') || {};
   const rows = accounting.broker_outcomes || [];
   const stamps = rows.flatMap(row => [row.entry_time, row.exit_time]).filter(v => typeof v === 'string').sort();
+  const timing = cycle.scan_cadence;
   return {
     running: state.running, threadAlive: session.thread_alive, cyclesCompleted: state.cycles_completed,
     lastCycleAt: state.last_cycle_at, lastErrorPresent: Boolean(state.last_error),
     scanIntervalSeconds: session.config?.interval_seconds, symbolBatchSize: session.config?.symbol_batch_size,
     configuredSymbolCount: session.config?.symbols?.length,
+    scanCadence: timing ? {mode: timing.mode === 'start_to_start' ? timing.mode : 'unknown',
+      targetIntervalSeconds: Number.isFinite(timing.target_interval_seconds) ? timing.target_interval_seconds : null,
+      startGapSeconds: Number.isFinite(timing.start_gap_seconds) ? timing.start_gap_seconds : null,
+      cycleWorkSeconds: Number.isFinite(timing.cycle_work_seconds) ? timing.cycle_work_seconds : null,
+      overrun: typeof timing.overrun === 'boolean' ? timing.overrun : null} : null,
+    decisionFunnel: decisionFunnel(cycle.decisions),
     scannerCandidates: cycle.scanner_candidates_count, tradeAttempts: cycle.trade_attempted_count,
     skipped: (cycle.skipped || []).slice(0, 30).map(row => ({symbol:row.symbol,reason:row.reason})),
     submitted: (cycle.orders_submitted || []).map(row => ({symbol:row.intent?.option_symbol || row.option_symbol, state:row.state || row.status, ...(row.broker_order_id ? {orderIdentityHash:hash(row.broker_order_id)} : {})})),
