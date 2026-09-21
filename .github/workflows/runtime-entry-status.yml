@@ -1,0 +1,41 @@
+name: Runtime entry status validation
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - 'src/**/*.py'
+      - 'tests/**'
+      - 'scripts/validate_offline.py'
+      - '.github/workflows/runtime-entry-status.yml'
+      - 'pyproject.toml'
+
+permissions:
+  contents: read
+
+jobs:
+  offline-validation:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 8
+    steps:
+      - name: Check out exact pull request merge revision
+        env:
+          SOURCE_REPOSITORY: ${{ github.repository }}
+          SOURCE_SHA: ${{ github.sha }}
+        run: |
+          git init .
+          git remote add origin "https://github.com/${SOURCE_REPOSITORY}.git"
+          git fetch --depth=1 origin "${SOURCE_SHA}"
+          git checkout --detach FETCH_HEAD
+          test "$(git rev-parse HEAD)" = "${SOURCE_SHA}"
+      - name: Prepare isolated Python environment
+        run: |
+          python3 -c 'import sys; assert sys.version_info[:2] == (3, 12), sys.version'
+          python3 -m venv "${RUNNER_TEMP}/runtime-status-env"
+          "${RUNNER_TEMP}/runtime-status-env/bin/python" -m pip install 'pytest==9.0.2'
+      - name: Run the complete source-owned guarded Python suite
+        run: '"${RUNNER_TEMP}/runtime-status-env/bin/python" scripts/validate_offline.py'
+      - name: Run unchanged cockpit tests and entry-status regressions
+        run: |
+          node --version
+          node --test tests/cockpit_state.test.cjs tests/entry_runtime_ui.test.cjs
