@@ -19,7 +19,10 @@ class StrategyPolicy:
     lookback_calendar_days: int = 14
 
     tactical_min_dte: int = 5
-    tactical_max_dte: int = 10
+    # Include the next listed weekly expiry across the calendar gap without
+    # reducing the minimum runway or overlapping the rider window. Actual
+    # contracts and all non-expiry admission rules still determine eligibility.
+    tactical_max_dte: int = 13
     rider_min_dte: int = 14
     rider_max_dte: int = 45
     exit_min_dte: int = 2

@@ -12,7 +12,7 @@ def test_default_hosted_strategy_policy_is_valid() -> None:
 
     assert policy.validate() is policy
     assert policy.version == "hosted-core-runner-v2"
-    assert (policy.tactical_min_dte, policy.tactical_max_dte) == (5, 10)
+    assert (policy.tactical_min_dte, policy.tactical_max_dte) == (5, 13)
     assert (policy.rider_min_dte, policy.rider_max_dte) == (14, 45)
     assert policy.runner_min_abs_delta < policy.runner_target_abs_delta < policy.runner_max_abs_delta
     assert policy.runner_max_abs_delta > policy.core_min_abs_delta
