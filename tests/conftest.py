@@ -1,22 +1,29 @@
-"""Proof-only context recording; delegates every event to the unchanged guard."""
-import os
-import sys
+"""Keep synthetic test workers inside the lifetime of their mocked providers."""
 import threading
-import traceback
+import pytest
 
-contexts = []
-runner = sys.modules['__main__']
-original = runner.audit_event
 
-def contextual_audit(event, args, violations):
-    if event in runner.NETWORK_EVENTS:
-        frames = [f'{frame.filename}:{frame.lineno}:{frame.name}' for frame in traceback.extract_stack() if '/project/src/' in frame.filename]
-        contexts.append({'event': event, 'test': os.getenv('PYTEST_CURRENT_TEST'), 'thread': threading.current_thread().name, 'frames': frames})
-    return original(event, args, violations)
+@pytest.fixture(autouse=True)
+def join_test_owned_autobott_workers(monkeypatch):
+    original_start = threading.Thread.start
+    workers = []
 
-runner.audit_event = contextual_audit
+    def tracked_start(thread):
+        if thread.name in {'autobott-session', 'autobott-position-monitor'}:
+            args = getattr(thread, '_args', ())
+            stop_event = args[1] if len(args) > 1 and isinstance(args[1], threading.Event) else None
+            workers.append((thread, stop_event))
+        return original_start(thread)
 
-def pytest_sessionfinish(session, exitstatus):
-    reporter = session.config.pluginmanager.getplugin('terminalreporter')
-    for item in contexts:
-        reporter.write_line('DENIED_OPERATION_CONTEXT ' + str(item))
+    monkeypatch.setattr(threading.Thread, 'start', tracked_start)
+    yield
+    # This fixture depends on monkeypatch, so providers remain mocked until
+    # every worker it observed has finished, including deliberately orphaned
+    # references in the consumed-autostart/monitor-replacement regression.
+    for _, event in workers:
+        if event is not None:
+            event.set()
+    for thread, _ in workers:
+        if thread.ident is not None:
+            thread.join(timeout=2)
+        assert not thread.is_alive(), 'test-owned AutoBott worker outlived its provider fixtures'
