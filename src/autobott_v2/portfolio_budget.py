@@ -1,8 +1,8 @@
-"""Paper-only premium admission; this module never submits or cancels orders.
+"""Paper-only premium admission; never submits or cancels orders.
 
-A premium budget is not a guaranteed realized-loss limit. Fees, exercise and
-external account activity remain separate. Uncertain submissions retain their
-reservation until exact broker-order evidence accounts for them.
+Premium capacity is not a guaranteed realized-loss limit. Fees, exercise and
+external account activity remain separate. Uncertain submissions stay reserved
+until exact broker-order evidence accounts for them.
 """
 from __future__ import annotations
 
@@ -10,7 +10,7 @@ from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
-from decimal import Decimal, InvalidOperation, ROUND_CEILING
+from decimal import Decimal, InvalidOperation, ROUND_CEILING, ROUND_FLOOR
 from hashlib import sha256
 import json
 from pathlib import Path
@@ -21,7 +21,7 @@ from uuid import uuid4
 
 
 class BudgetBlocked(ValueError):
-    """Fixed public reason code; do not include account credentials or payloads."""
+    """Fixed public reason code, without credentials or raw account payloads."""
 
 
 def _number(value: Any, reason: str, *, positive: bool = False) -> Decimal:
@@ -41,8 +41,8 @@ def _quantity(value: Any) -> Decimal:
     return result
 
 
-def _cents(value: Decimal) -> int:
-    return int((value * 100).to_integral_value(rounding=ROUND_CEILING))
+def _cents(value: Decimal, *, ceiling: bool = True) -> int:
+    return int((value * 100).to_integral_value(rounding=ROUND_CEILING if ceiling else ROUND_FLOOR))
 
 
 def _root(symbol: str) -> str:
@@ -85,11 +85,7 @@ def _positions(rows: Any) -> dict[str, dict]:
 
 
 def read_budget_snapshot(broker: Any) -> BudgetSnapshot:
-    """Use account identity, complete broker fills and stable position quantities.
-
-    Marks may move between the two reads; use the larger. No pending sale or
-    unverified assignment is treated as a completed risk release.
-    """
+    """Require account identity, complete fill reads and stable held quantities."""
     from .trade_outcomes import match_broker_order_lots
     environment = getattr(broker.config.environment, "value", broker.config.environment)
     if (environment != "paper" or broker.config.allow_live_trading
@@ -115,7 +111,8 @@ def read_budget_snapshot(broker: Any) -> BudgetSnapshot:
     account_after = broker.get_account()
     if not isinstance(account_after, dict) or account_after.get("id") != account["id"]:
         raise BudgetBlocked("portfolio_account_changed_during_read")
-    if account_after.get("trading_blocked") is not False or account_after.get("status") != "ACTIVE":
+    if (account_after.get("trading_blocked") is not False or account_after.get("status") != "ACTIVE"
+            or account_after.get("currency") != "USD"):
         raise BudgetBlocked("portfolio_account_not_active_usd")
     buying_power = min(buying_power, _number(account_after.get("options_buying_power"), "portfolio_buying_power_unavailable"))
     cash = min(cash, _number(account_after.get("cash"), "portfolio_cash_unavailable"))
@@ -150,7 +147,6 @@ def read_budget_snapshot(broker: Any) -> BudgetSnapshot:
         if row.get("order_class") not in (None, "", "simple") or row.get("legs"):
             raise BudgetBlocked("portfolio_complex_open_order_unpriced")
         if row.get("side") == "sell":
-            # Still held until broker positions and fill quantities prove exit.
             if row.get("position_intent") not in (None, "sell_to_close"):
                 raise BudgetBlocked("portfolio_short_order_unsupported")
             continue
@@ -160,8 +156,7 @@ def read_budget_snapshot(broker: Any) -> BudgetSnapshot:
         _root(symbol)
         if row.get("type") != "limit":
             raise BudgetBlocked("portfolio_working_buy_has_no_price_cap")
-        quantity = _quantity(row.get("qty"))
-        filled = _quantity(row.get("filled_qty"))
+        quantity, filled = _quantity(row.get("qty")), _quantity(row.get("filled_qty"))
         if filled > quantity:
             raise BudgetBlocked("portfolio_filled_quantity_exceeds_order")
         price = _number(row.get("limit_price"), "portfolio_working_limit_invalid", positive=True)
@@ -169,7 +164,7 @@ def read_budget_snapshot(broker: Any) -> BudgetSnapshot:
         active_symbols.add(symbol)
     held = sum(_cents(max(r["cost"], r["mark"], before[s]["mark"], lot_cost.get(s, Decimal(0)))) for s, r in after.items())
     return BudgetSnapshot("alpaca:paper:" + account["id"], held, working,
-                          _cents(min(buying_power, cash)), frozenset(active_symbols), by_client, datetime.now(UTC))
+        _cents(min(buying_power, cash), ceiling=False), frozenset(active_symbols), by_client, datetime.now(UTC))
 
 
 def _order_spec(intent: Any) -> dict:
@@ -188,14 +183,14 @@ def _order_spec(intent: Any) -> dict:
     identity = str(intent.decision_id or intent.thesis_id or "")
     if not identity:
         raise BudgetBlocked("portfolio_decision_identity_required")
-    content = {"decision": identity, "symbol": symbol, "quantity": str(qty), "limit": str(price)}
+    content = {"decision": identity, "symbol": symbol, "quantity": str(qty.normalize()), "limit": str(price.normalize())}
     key = sha256(json.dumps(content, sort_keys=True).encode()).hexdigest()
     return {"key": key, "symbol": symbol, "quantity": str(qty), "limit": str(price),
             "cents": _cents(qty * price * 100), "client": "autobott-" + str(uuid4())}
 
 
 class PremiumLedger:
-    """SQLite serializes processes; commit reservation BEFORE any order request."""
+    """SQLite serializes processes; reservations commit before broker requests."""
     def __init__(self, path: Path):
         self.path = Path(path)
 
@@ -213,7 +208,7 @@ class PremiumLedger:
         specs = [_order_spec(intent) for intent in intents]
         if not specs or len({s["symbol"] for s in specs}) != len(specs):
             raise BudgetBlocked("portfolio_duplicate_entry_contract")
-        cap = _cents(_number(limit_dollars, "portfolio_budget_invalid", positive=True))
+        cap = _cents(_number(limit_dollars, "portfolio_budget_invalid", positive=True), ceiling=False)
         connection = self._connect()
         try:
             connection.execute("BEGIN IMMEDIATE")
@@ -228,8 +223,7 @@ class PremiumLedger:
                 order = snapshot.order_by_client.get(client)
                 if order is not None:
                     if (order.get("symbol") != symbol or str(order.get("side")) != "buy"
-                            or _quantity(order.get("qty")) != Decimal(quantity)
-                            or order.get("type") != "limit"
+                            or _quantity(order.get("qty")) != Decimal(quantity) or order.get("type") != "limit"
                             or _number(order.get("limit_price"), "portfolio_receipt_price_invalid") > Decimal(price)):
                         raise BudgetBlocked("portfolio_reservation_receipt_conflict")
                     connection.execute("UPDATE reservations SET state='broker_observed' WHERE scope=? AND key=?", (snapshot.account_scope, key))
@@ -249,15 +243,16 @@ class PremiumLedger:
                 raise BudgetBlocked("portfolio_operational_position_limit")
             for spec in specs:
                 try:
-                    connection.execute("INSERT INTO reservations VALUES(?,?,?,?,?,?,?,?,?)", (snapshot.account_scope, spec["key"], spec["client"], spec["symbol"], spec["quantity"], spec["limit"], spec["cents"], "reserved"))
+                    connection.execute("INSERT INTO reservations(scope,key,client,symbol,quantity,price,cents,state) VALUES(?,?,?,?,?,?,?,?)",
+                        (snapshot.account_scope, spec["key"], spec["client"], spec["symbol"], spec["quantity"], spec["limit"], spec["cents"], "reserved"))
                 except sqlite3.IntegrityError:
                     raise BudgetBlocked("portfolio_entry_already_reserved") from None
             connection.commit()
             receipt = {"version": "paper_premium_budget.v1", "account_scope_hash": sha256(snapshot.account_scope.encode()).hexdigest(),
-                       "cap_dollars": cap / 100, "held_dollars": snapshot.held_cents / 100,
-                       "working_buy_dollars": snapshot.working_buy_cents / 100,
-                       "uncertain_submission_dollars": uncertain / 100, "reserved_dollars": required / 100,
-                       "remaining_dollars": (cap - used - required) / 100}
+                "cap_dollars": cap / 100, "held_dollars": snapshot.held_cents / 100,
+                "working_buy_dollars": snapshot.working_buy_cents / 100,
+                "uncertain_submission_dollars": uncertain / 100, "reserved_dollars": required / 100,
+                "remaining_dollars": (cap - used - required) / 100}
             for spec in specs:
                 spec["scope"] = snapshot.account_scope
             return receipt, specs
@@ -311,14 +306,27 @@ def reserve_pair(broker: Any, intents: tuple[Any, ...]) -> Iterator[dict | None]
         yield receipt
     finally:
         _GROUP.reset(token)
-        # Attempted/uncertain rows never expire or release on a caught error.
-        ledger.release_unattempted(specs)
+        try:
+            ledger.release_unattempted(specs)
+        except (OSError, sqlite3.Error, BudgetBlocked):
+            # Keep the conservative holds. Cleanup failure cannot masquerade as
+            # failure of a pair that already reached the broker.
+            print('AUTOBOTT_PREMIUM_LEDGER {"cleanup":"unconfirmed","reservations_retained":true}', flush=True)
+
+
+def bounded_intent(intent: Any) -> Any:
+    from .execution_models import OrderType
+    if getattr(intent.side, "value", intent.side) != "buy_to_open":
+        return intent
+    return replace(intent, order_type=OrderType.LIMIT,
+        metadata={**intent.metadata, "premium_budget_price_cap": intent.limit_price})
 
 
 def prepare_order(broker: Any, order: Any) -> Any:
-    """Return a durable, one-use client ID; no broker write happens here."""
+    """Apply a bounded price and a durable one-use client ID before submission."""
     if not enabled(broker) or getattr(order.intent.side, "value", order.intent.side) != "buy_to_open":
         return order
+    order = replace(order, intent=bounded_intent(order.intent))
     spec = _order_spec(order.intent)
     group = _GROUP.get()
     if group is not None:
@@ -333,3 +341,23 @@ def prepare_order(broker: Any, order: Any) -> Any:
         spec = specs[0]
     ledger.mark_attempted(spec)
     return replace(order, client_order_id=spec["client"])
+
+
+def submit_budgeted_pair(decision: Any, pair: Any, **kwargs: Any) -> Any:
+    """Reserve both legs before invoking the unchanged native pair submitter."""
+    from .execution_orchestrator import build_trade_intent_from_decision, submit_core_runner_to_broker, ExecutionRejectedError
+    from .execution_models import OrderType
+    broker = kwargs.get("broker")
+    if broker is None or not enabled(broker):
+        return submit_core_runner_to_broker(decision, pair, **kwargs)
+    group_id = f"core-runner:{decision.decision_id}"
+    intents = tuple(build_trade_intent_from_decision(decision, quantity=1,
+        environment=broker.config.environment, max_position_cost=broker.config.effective_max_position_cost(),
+        contract=contract, leg_role=role, trade_group_id=group_id, paired_option_symbol=other.option_symbol,
+        order_type=OrderType.LIMIT) for contract, role, other in (
+            (pair.primary, "primary", pair.runner), (pair.runner, "runner", pair.primary)))
+    try:
+        with reserve_pair(broker, intents):
+            return submit_core_runner_to_broker(decision, pair, **kwargs)
+    except BudgetBlocked as exc:
+        raise ExecutionRejectedError(str(exc)) from exc
