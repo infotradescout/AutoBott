@@ -135,6 +135,7 @@ def read_budget_snapshot(broker: Any) -> BudgetSnapshot:
     if quantities != {s: r["qty"] for s, r in after.items()}:
         raise BudgetBlocked("portfolio_fills_and_positions_disagree")
     by_client: dict[str, dict] = {}
+    pending_sells: dict[str, Decimal] = {}
     terminal = {"filled", "canceled", "cancelled", "expired", "replaced", "rejected", "done_for_day"}
     for row in orders:
         client = row.get("client_order_id")
@@ -149,6 +150,14 @@ def read_budget_snapshot(broker: Any) -> BudgetSnapshot:
         if row.get("side") == "sell":
             if row.get("position_intent") not in (None, "sell_to_close"):
                 raise BudgetBlocked("portfolio_short_order_unsupported")
+            symbol = str(row.get("symbol") or "")
+            _root(symbol)
+            remaining = _quantity(row.get("qty")) - _quantity(row.get("filled_qty"))
+            if remaining < 0:
+                raise BudgetBlocked("portfolio_filled_quantity_exceeds_order")
+            pending_sells[symbol] = pending_sells.get(symbol, Decimal(0)) + remaining
+            if pending_sells[symbol] > after.get(symbol, {}).get("qty", Decimal(0)):
+                raise BudgetBlocked("portfolio_pending_sell_not_covered")
             continue
         if row.get("side") != "buy" or row.get("position_intent") not in (None, "buy_to_open"):
             raise BudgetBlocked("portfolio_open_order_unclassified")
@@ -309,8 +318,6 @@ def reserve_pair(broker: Any, intents: tuple[Any, ...]) -> Iterator[dict | None]
         try:
             ledger.release_unattempted(specs)
         except (OSError, sqlite3.Error, BudgetBlocked):
-            # Keep the conservative holds. Cleanup failure cannot masquerade as
-            # failure of a pair that already reached the broker.
             print('AUTOBOTT_PREMIUM_LEDGER {"cleanup":"unconfirmed","reservations_retained":true}', flush=True)
 
 
