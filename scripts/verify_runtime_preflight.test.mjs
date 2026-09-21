@@ -15,7 +15,7 @@ test('only exact-host GETs; private token removed; only sanitized report printed
   return {status:200,json:async()=>payload};
  };
  assert.equal(await runReadonlyPreflight({env:e,request,write:s=>logs.push(s)}),true);
- assert.deepEqual(calls,['https://autobott-azl4.onrender.com/api/health','https://autobott-azl4.onrender.com/api/session/status','https://autobott-azl4.onrender.com/api/health']);
+ assert.deepEqual(calls,['https://autobott-azl4.onrender.com/api/health','https://autobott-azl4.onrender.com/api/session/status','https://autobott-azl4.onrender.com/api/health','https://autobott-azl4.onrender.com/api/safety','https://autobott-azl4.onrender.com/api/account/positions','https://autobott-azl4.onrender.com/api/positions/open','https://autobott-azl4.onrender.com/api/health']);
  assert.equal(logs.length,1); assert(!logs[0].includes('private-fixture-token'));assert(!logs[0].includes('PRIVATE-ACCOUNT'));assert(!logs[0].includes('"token"'));
  assert.equal(e.NODE_OPTIONS,undefined);assert.equal(e.AUTOBOTT_VERIFY_READONLY_PREFLIGHT,undefined);
 });
