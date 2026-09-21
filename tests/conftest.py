@@ -1,6 +1,7 @@
 """Proof-only context recording; delegates every event to the unchanged guard."""
 import os
 import sys
+import threading
 import traceback
 
 contexts = []
@@ -9,7 +10,8 @@ original = runner.audit_event
 
 def contextual_audit(event, args, violations):
     if event in runner.NETWORK_EVENTS:
-        contexts.append({'event': event, 'test': os.getenv('PYTEST_CURRENT_TEST'), 'stack': ''.join(traceback.format_stack(limit=16))})
+        frames = [f'{frame.filename}:{frame.lineno}:{frame.name}' for frame in traceback.extract_stack() if '/project/src/' in frame.filename]
+        contexts.append({'event': event, 'test': os.getenv('PYTEST_CURRENT_TEST'), 'thread': threading.current_thread().name, 'frames': frames})
     return original(event, args, violations)
 
 runner.audit_event = contextual_audit
