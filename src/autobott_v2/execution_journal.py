@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import threading
 from dataclasses import asdict, dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -9,6 +10,12 @@ from typing import Any
 from .execution_models import ExecutionOrder, RiskCheckResult, TradeIntent
 from .jsonl_retention import compact_jsonl_tail, read_jsonl_tail
 from .runtime_paths import data_root
+
+
+# Execution receipts provide attribution for broker fills after activity ages
+# out. Keep their original rows through both bounded reads and compaction.
+_DURABLE_EVENT_TYPES = frozenset({"order_submission"})
+_EXECUTION_JOURNAL_LOCK = threading.RLock()
 
 
 def execution_journal_path() -> Path:
@@ -85,34 +92,40 @@ def load_execution_journal(
     journal_path: str | Path | None = None,
     max_tail_bytes: int | None = None,
 ) -> list[dict[str, Any]]:
+    """Read activity without dropping earlier order-submission provenance."""
     path = Path(journal_path) if journal_path is not None else execution_journal_path()
-    if not path.exists():
-        return []
-    rows: list[dict[str, Any]] = []
-    for raw_line in read_jsonl_tail(path, max_tail_bytes=max_tail_bytes):
-        if not raw_line.strip():
-            continue
-        try:
-            rows.append(json.loads(raw_line))
-        except (json.JSONDecodeError, UnicodeDecodeError, TypeError):
-            continue
-    return rows
+    with _EXECUTION_JOURNAL_LOCK:
+        if not path.exists():
+            return []
+        rows: list[dict[str, Any]] = []
+        for raw_line in read_jsonl_tail(
+            path, max_tail_bytes=max_tail_bytes,
+            preserve_event_types=_DURABLE_EVENT_TYPES,
+        ):
+            if not raw_line.strip():
+                continue
+            try:
+                rows.append(json.loads(raw_line))
+            except (json.JSONDecodeError, UnicodeDecodeError, TypeError):
+                continue
+        return rows
 
 
 def _append_record(record: ExecutionJournalRecord, *, journal_path: str | Path | None = None) -> Path:
     path = Path(journal_path) if journal_path is not None else execution_journal_path()
-    path.parent.mkdir(parents=True, exist_ok=True)
-    needs_separator = False
-    if path.exists() and path.stat().st_size:
-        with path.open("rb") as existing:
-            existing.seek(-1, 2)
-            needs_separator = existing.read(1) != b"\n"
-    with path.open("a", encoding="utf-8") as handle:
-        if needs_separator:
+    with _EXECUTION_JOURNAL_LOCK:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        needs_separator = False
+        if path.exists() and path.stat().st_size:
+            with path.open("rb") as existing:
+                existing.seek(-1, 2)
+                needs_separator = existing.read(1) != b"\n"
+        with path.open("a", encoding="utf-8") as handle:
+            if needs_separator:
+                handle.write("\n")
+            handle.write(json.dumps(record.to_json_dict(), sort_keys=True))
             handle.write("\n")
-        handle.write(json.dumps(record.to_json_dict(), sort_keys=True))
-        handle.write("\n")
-    compact_jsonl_tail(path)
+        compact_jsonl_tail(path, preserve_event_types=_DURABLE_EVENT_TYPES)
     return path
 
 
