@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import json
 import threading
 from dataclasses import asdict, dataclass
 from datetime import UTC, datetime, time as daytime
@@ -233,6 +234,21 @@ def _record_cycle_result(cycle_result: dict[str, Any]) -> None:
             "cycle_results": [cycle_result],
         }
         _SESSION_STATE.last_error = cycle_result.get("error")
+
+    # A deliberate, paper-only repair runs after the completed cycle. It never
+    # changes the cycle's rejection result or skips any normal admission gate.
+    if os.getenv("AUTOBOTT_ACCOUNTING_RECOVERY_MODE", "").strip().lower() in {"plan", "apply"}:
+        try:
+            from .accounting_recovery import maybe_recover_blocked_cycle
+            recovery = maybe_recover_blocked_cycle(cycle_result)
+            if recovery is not None:
+                with _SESSION_LOCK:
+                    _SESSION_STATE.last_result["accounting_recovery"] = recovery
+                print("AUTOBOTT_ACCOUNTING_RECOVERY " + json.dumps(recovery, sort_keys=True, allow_nan=False), flush=True)
+        except Exception as exc:
+            # Recovery/diagnostic failures cannot stop position monitoring or
+            # the supervisor; exception text can contain private broker data.
+            print("AUTOBOTT_ACCOUNTING_RECOVERY " + json.dumps({"status": "blocked", "reason": "recovery_hook_failed", "error_type": type(exc).__name__}), flush=True)
 
 
 def _ensure_position_monitor_thread_locked(config: SessionSupervisorConfig) -> None:
