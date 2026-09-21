@@ -16,13 +16,11 @@ from .phase1_engine import (
     select_contract,
 )
 from .phase1_models import (
-    CycleAssessment,
     CycleStatus,
     DecisionCard,
     DecisionInput,
     DecisionStatus,
     DirectionBias,
-    DirectionResult,
     ExecutionLayer,
     Phase1Rules,
     RegimeLabel,
@@ -31,7 +29,7 @@ from .phase1_models import (
     TradeSetup,
     VolatilityResult,
 )
-from .signal_evidence import DirectionEvidence, score_direction_evidence
+from .signal_evidence import score_direction_evidence
 
 
 def build_decision_card(decision_input: DecisionInput, rules: Phase1Rules | None = None) -> DecisionCard:
@@ -87,7 +85,7 @@ def build_decision_card(decision_input: DecisionInput, rules: Phase1Rules | None
         neutral_band=rules.min_direction_score,
     )
     volatility = score_volatility(decision_input, direction)
-    setup = determine_trade_setup_v2(direction, cycle, evidence)
+    setup = determine_trade_setup_v2(direction, cycle)
 
     risk_off_exempt = decision_input.ticker.upper() in {
         symbol.upper() for symbol in rules.risk_off_bullish_exempt_symbols
@@ -215,27 +213,14 @@ def build_decision_card(decision_input: DecisionInput, rules: Phase1Rules | None
     return card
 
 
-def determine_trade_setup_v2(
-    direction: DirectionResult,
-    cycle: CycleAssessment,
-    evidence: DirectionEvidence | None = None,
-) -> TradeSetup:
-    """Classify from same-side evidence, never words in a human explanation.
-
-    An opposing ``reversal_adjustment`` reason can appear in a continuation's
-    explanation. Its presence does not establish a reversal in our direction.
-    Two-argument callers require the corresponding cycle confirmation instead.
-    """
+def determine_trade_setup_v2(direction, cycle) -> TradeSetup:
+    explanation = direction.explanation.lower()
     if direction.bias == DirectionBias.BULLISH:
-        confirmed = (evidence.reversal_adjustment > 0.25 if evidence is not None
-                     else cycle.late_down_cycle and cycle.bullish_confirmation)
-        if confirmed:
+        if "reversal" in explanation or cycle.late_down_cycle:
             return TradeSetup.LATE_CYCLE_BULLISH_REVERSAL
         return TradeSetup.BULLISH_CONTINUATION
     if direction.bias == DirectionBias.BEARISH:
-        confirmed = (evidence.reversal_adjustment < -0.25 if evidence is not None
-                     else cycle.late_up_cycle and cycle.bearish_confirmation)
-        if confirmed:
+        if "reversal" in explanation or cycle.late_up_cycle:
             return TradeSetup.LATE_CYCLE_BEARISH_REVERSAL
         return TradeSetup.BEARISH_CONTINUATION
     return TradeSetup.NO_TRADE

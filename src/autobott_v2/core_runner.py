@@ -114,7 +114,7 @@ def select_core_runner_pair(
 ) -> CoreRunnerPair | None:
     """Select one useful primary plus one distinct, cheaper convex runner.
 
-    The engine-selected primary is required; there is no substitute-primary fallback. The runner must remain cheaper
+    The engine-selected primary is preferred. The runner must remain cheaper
     and farther out-of-the-money, but it must retain enough delta to participate
     in a real directional move instead of becoming a near-zero-delta lottery.
     """
@@ -122,31 +122,14 @@ def select_core_runner_pair(
     resolved = (rules or load_core_runner_rules()).validate()
     option_type = _option_type_value(selected_primary.option_type)
     expiration = selected_primary.expiration
-    chain = list(option_chain)
-    primary_matches = [
-        contract for contract in chain
-        if contract.option_symbol == selected_primary.option_symbol
+    chain = [
+        contract
+        for contract in option_chain
+        if _option_type_value(contract.option_type) == option_type and contract.expiration == expiration
     ]
-    # Missing/ambiguous primary identity is not permission to buy another option.
-    if len(primary_matches) != 1:
-        return None
-    approved_primary = primary_matches[0]
-    if (
-        _option_type_value(approved_primary.option_type) != option_type
-        or approved_primary.expiration != expiration
-        or approved_primary.strike != selected_primary.strike
-        or not _core_is_eligible(approved_primary, resolved)
-    ):
-        return None
-    core_candidates = [approved_primary]
-    runner_candidates = [
-        contract for contract in chain
-        if contract.underlying.strip().upper() == approved_primary.underlying.strip().upper()
-        and _option_type_value(contract.option_type) == option_type
-        and contract.expiration == expiration
-        and _runner_is_liquid(contract, resolved)
-    ]
-    pairs: list[tuple[tuple[float | str, ...], CoreRunnerPair]] = []
+    core_candidates = [contract for contract in chain if _core_is_eligible(contract, resolved)]
+    runner_candidates = [contract for contract in chain if _runner_is_liquid(contract, resolved)]
+    pairs: list[tuple[tuple[float, ...], CoreRunnerPair]] = []
 
     for core in core_candidates:
         for runner in runner_candidates:
@@ -175,7 +158,6 @@ def select_core_runner_pair(
                 core.spread_pct + runner.spread_pct,
                 -float(runner.open_interest),
                 -float(runner.volume),
-                runner.option_symbol,
             )
             pairs.append(
                 (
@@ -233,12 +215,7 @@ def _is_valid_runner(
     runner: OptionContractSnapshot,
     rules: CoreRunnerRules,
 ) -> bool:
-    if (
-        runner.option_symbol == core.option_symbol
-        or runner.underlying.strip().upper() != core.underlying.strip().upper()
-        or runner.expiration != core.expiration
-        or _option_type_value(runner.option_type) != _option_type_value(core.option_type)
-    ):
+    if runner.option_symbol == core.option_symbol:
         return False
     if runner.ask >= core.ask or runner.ask > core.ask * rules.runner_max_cost_ratio:
         return False

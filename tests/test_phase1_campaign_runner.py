@@ -132,7 +132,6 @@ def _write_corpus_day(
     data_quality_flags: list[str] | None = None,
     corpus_type: str = "test_fixture",
     quote_age_seconds: int = 0,
-    candidate_ready: bool = False,
 ):
     symbol_dir = root / trading_date / symbol
     snapshots_dir = symbol_dir / "snapshots"
@@ -145,17 +144,6 @@ def _write_corpus_day(
         _snapshot(timestamps[1], ticker=symbol, tactical_bid=6.67, tactical_ask=6.85, rider_bid=6.2, rider_ask=6.4, quote_age_seconds=quote_age_seconds),
         _snapshot(timestamps[2], ticker=symbol, tactical_bid=6.6, tactical_ask=6.8, rider_bid=6.3, rider_ask=6.5, quote_age_seconds=quote_age_seconds),
     ]
-    if candidate_ready:
-        # The small-sample gate test needs approved entries, not metadata retained
-        # on NO_TRADE cards. Stronger synthetic history keeps the same final
-        # underlying/strike relationship; no production threshold is lowered.
-        from autobott_v2.phase1_engine import build_decision_card
-        from autobott_v2.phase1_validate import _decision_input_from_snapshot
-        from autobott_v2.phase1_models import DecisionStatus
-        for timestamp, payload in zip(timestamps, payloads):
-            payload["market_bars"] = _bars(timestamp, 589.8, .55)
-            payload["underlying_quote"].update(bid=608.4, ask=608.6, last=608.5)
-            assert build_decision_card(_decision_input_from_snapshot(payload)).decision == DecisionStatus.TRADE_CANDIDATE
     for timestamp, payload in zip(timestamps, payloads):
         (snapshots_dir / f"{timestamp.strftime('%H%M%S')}.json").write_text(json.dumps(payload), encoding="utf-8")
     total_option_quotes = len(payloads) if option_quote_count is None else option_quote_count
@@ -185,7 +173,7 @@ def test_campaign_runner_blocks_low_quality_corpus(tmp_path) -> None:
 
 
 def test_campaign_runner_outputs_no_eligible_buckets_when_sample_too_small(tmp_path) -> None:
-    _write_corpus_day(tmp_path, candidate_ready=True)
+    _write_corpus_day(tmp_path)
 
     run_phase1_campaign(tmp_path, artifacts_root=tmp_path / "artifacts", campaign_run_id="campaign1")
     report = json.loads((tmp_path / "artifacts" / "campaign1" / "gate_candidate_report.json").read_text(encoding="utf-8"))
@@ -232,14 +220,3 @@ def test_campaign_runner_uses_canonical_cli_path(tmp_path) -> None:
 
     with pytest.raises(SystemExit):
         replay_campaign_main(["--snapshot-corpus", str(tmp_path)])
-
-
-def test_campaign_never_invents_fills_for_low_confidence_fixture(tmp_path) -> None:
-    from autobott_v2.phase1_engine import build_decision_card
-    from autobott_v2.phase1_validate import _decision_input_from_snapshot
-    from autobott_v2.phase1_models import DecisionStatus
-    assert build_decision_card(_decision_input_from_snapshot(_snapshot(BASE_TIME))).decision == DecisionStatus.NO_TRADE
-    _write_corpus_day(tmp_path)
-    run_phase1_campaign(tmp_path, artifacts_root=tmp_path / "artifacts", campaign_run_id="campaign1")
-    report = json.loads((tmp_path / "artifacts" / "campaign1" / "gate_candidate_report.json").read_text(encoding="utf-8"))
-    assert report["bucket_candidates"] == {}

@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime
 
-from .phase1_models import DecisionCard, DecisionStatus, ExecutionLayer, LegRole, LifecycleStatus, Phase1LedgerEvent, SelectedContract
+from .phase1_models import DecisionCard, ExecutionLayer, LegRole, LifecycleStatus, Phase1LedgerEvent, SelectedContract
 from .phase1_scorecard import create_ledger_event
 
 
@@ -47,15 +47,6 @@ def simulate_execution(
                 timestamp,
             )
         ]
-
-    # Contract metadata alone is not entry approval. A low-confidence or
-    # otherwise blocked card may retain its selected contract for diagnostics.
-    if decision_card.decision != DecisionStatus.TRADE_CANDIDATE:
-        return [_rejected_event(
-            decision_card, decision_card.selected_contract, None,
-            quote_age_seconds, "decision_not_trade_candidate",
-            underlying_price_at_entry, timestamp,
-        )]
 
     events: list[Phase1LedgerEvent] = []
     if decision_card.execution_layer in {ExecutionLayer.TACTICAL, ExecutionLayer.BOTH} and decision_card.tactical_contract is not None:

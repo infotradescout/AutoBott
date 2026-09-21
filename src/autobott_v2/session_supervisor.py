@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import json
 import threading
 from dataclasses import asdict, dataclass
 from datetime import UTC, datetime, time as daytime
@@ -19,7 +20,6 @@ from .hosted_policy import (
 )
 from .options_universe import resolve_symbol_universe
 from .position_monitor import run_position_monitor
-from .primary_runtime_evidence import poll_primary_runtime_evidence_once
 from .runtime_control import arm_paper_execution
 from .session_runner import run_trading_session
 
@@ -58,9 +58,6 @@ class SessionSupervisorState:
     last_error: str | None = None
     last_monitor_result: dict[str, Any] | None = None
     last_monitor_error: str | None = None
-    last_evidence_result: dict[str, Any] | None = None
-    last_evidence_error: str | None = None
-    last_evidence_at: datetime | None = None
     cycles_completed: int = 0
     last_cycle_at: datetime | None = None
 
@@ -69,7 +66,6 @@ class SessionSupervisorState:
         payload["started_at"] = self.started_at.astimezone(UTC).isoformat() if self.started_at else None
         payload["finished_at"] = self.finished_at.astimezone(UTC).isoformat() if self.finished_at else None
         payload["last_cycle_at"] = self.last_cycle_at.astimezone(UTC).isoformat() if self.last_cycle_at else None
-        payload["last_evidence_at"] = self.last_evidence_at.astimezone(UTC).isoformat() if self.last_evidence_at else None
         return payload
 
 
@@ -193,22 +189,6 @@ def session_supervisor_status() -> dict[str, Any]:
         }
 
 
-def _poll_and_record_primary_evidence() -> dict[str, Any]:
-    try:
-        result = poll_primary_runtime_evidence_once()
-    except Exception as exc:  # Defensive: observational evidence cannot stop the supervisor.
-        with _SESSION_LOCK:
-            _SESSION_STATE.last_evidence_result = None
-            _SESSION_STATE.last_evidence_error = f"{type(exc).__name__}: {exc}"
-            _SESSION_STATE.last_evidence_at = datetime.now(tz=UTC)
-        return {"trading_actions": 0, "error": f"{type(exc).__name__}: {exc}"}
-    with _SESSION_LOCK:
-        _SESSION_STATE.last_evidence_result = result
-        _SESSION_STATE.last_evidence_error = None
-        _SESSION_STATE.last_evidence_at = datetime.now(tz=UTC)
-    return result
-
-
 def _run_session(config: SessionSupervisorConfig, stop_event: threading.Event) -> None:
     global _SESSION_STATE
     try:
@@ -229,7 +209,6 @@ def _run_session(config: SessionSupervisorConfig, stop_event: threading.Event) -
                 "current_daily_realized_pnl": config.daily_pnl,
             },
             on_cycle_complete=_record_cycle_result,
-            after_entry_window_runner=_poll_and_record_primary_evidence,
         )
         with _SESSION_LOCK:
             _SESSION_STATE.last_result = result.to_json_dict()
@@ -255,6 +234,21 @@ def _record_cycle_result(cycle_result: dict[str, Any]) -> None:
             "cycle_results": [cycle_result],
         }
         _SESSION_STATE.last_error = cycle_result.get("error")
+
+    # A deliberate, paper-only repair runs after the completed cycle. It never
+    # changes the cycle's rejection result or skips any normal admission gate.
+    if os.getenv("AUTOBOTT_ACCOUNTING_RECOVERY_MODE", "").strip().lower() in {"plan", "apply"}:
+        try:
+            from .accounting_recovery import maybe_recover_blocked_cycle
+            recovery = maybe_recover_blocked_cycle(cycle_result)
+            if recovery is not None:
+                with _SESSION_LOCK:
+                    _SESSION_STATE.last_result["accounting_recovery"] = recovery
+                print("AUTOBOTT_ACCOUNTING_RECOVERY " + json.dumps(recovery, sort_keys=True, allow_nan=False), flush=True)
+        except Exception as exc:
+            # Recovery/diagnostic failures cannot stop position monitoring or
+            # the supervisor; exception text can contain private broker data.
+            print("AUTOBOTT_ACCOUNTING_RECOVERY " + json.dumps({"status": "blocked", "reason": "recovery_hook_failed", "error_type": type(exc).__name__}), flush=True)
 
 
 def _ensure_position_monitor_thread_locked(config: SessionSupervisorConfig) -> None:

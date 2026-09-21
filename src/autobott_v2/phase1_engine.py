@@ -5,8 +5,6 @@ import math
 from datetime import date
 from typing import Any
 
-from .signal_reference import current_market_date_reference
-
 from .phase1_models import (
     ContractScore,
     CycleAssessment,
@@ -727,8 +725,11 @@ def _failed_breakdown(bars: list[MarketBar]) -> bool:
 
 
 def _session_vwap(bars: list[MarketBar]) -> float:
-    # Use the same date-bound bar proxy in regime/cycle and v2 direction.
-    return current_market_date_reference(bars)
+    total_volume = sum(bar.volume for bar in bars)
+    if total_volume <= 0:
+        return bars[-1].close
+    total_value = sum(((bar.high + bar.low + bar.close) / 3) * bar.volume for bar in bars)
+    return total_value / total_volume
 
 
 def _ema(values: list[float], period: int) -> float:

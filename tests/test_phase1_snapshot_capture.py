@@ -27,14 +27,14 @@ class FakeCaptureClient:
         return {
             symbol.upper(): [
                 {
-                    "t": (end - timedelta(minutes=limit - 1 - index)).isoformat(),
+                    "t": (end - timedelta(minutes=34 - index)).isoformat(),
                     "o": base + index * 0.1,
                     "h": base + index * 0.1 + 0.2,
                     "l": base + index * 0.1 - 0.2,
                     "c": base + index * 0.1 + 0.05,
                     "v": 1000 + index * 10,
                 }
-                for index in range(limit)
+                for index in range(35)
             ]
             for symbol, base in ((symbol, _base_price(symbol)) for symbol in symbols)
         }
@@ -245,13 +245,7 @@ def test_snapshot_capture_records_corpus_type(tmp_path) -> None:
     assert manifest["corpus_type"] == "paper_capture"
 
 
-def test_snapshot_capture_records_market_and_utc_timestamps(tmp_path, monkeypatch) -> None:
-    # This fixture asserts an exact receipt timestamp, so its elapsed clock
-    # must also be deterministic. Real capture latency is tested separately.
-    import autobott_v2.phase1_snapshot_capture as capture
-    original_capture = capture.capture_symbol_snapshot
-    monkeypatch.setattr(capture, "capture_symbol_snapshot",
-                        lambda **kwargs: original_capture(**kwargs, monotonic_fn=lambda: 0.0))
+def test_snapshot_capture_records_market_and_utc_timestamps(tmp_path) -> None:
     capture_snapshot_session(
         symbols=["SPY"],
         corpus_root=tmp_path,

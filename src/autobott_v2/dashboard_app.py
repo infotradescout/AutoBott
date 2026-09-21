@@ -37,7 +37,7 @@ from .session_supervisor import (
     start_session_supervisor,
 )
 from .session_runner import run_trading_session
-from .trading_cycle_v2 import load_decision_cards, run_trading_cycle
+from .trading_cycle import load_decision_cards, run_trading_cycle
 from .execution_broker import AlpacaExecutionBroker
 from .execution_reconciler import reconcile_open_positions
 from .exit_orchestrator import cancel_open_order, replace_open_order, submit_exit_for_position

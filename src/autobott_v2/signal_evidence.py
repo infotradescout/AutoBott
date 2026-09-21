@@ -5,7 +5,6 @@ from dataclasses import dataclass
 from statistics import median
 
 from .phase1_models import CycleAssessment, DirectionBias, DirectionResult, MarketBar
-from .signal_reference import aligned_benchmark_return, current_market_date_reference
 
 
 @dataclass(frozen=True)
@@ -19,7 +18,6 @@ class DirectionEvidence:
     cycle_adjustment: float
     reversal_adjustment: float
     composite_score: float
-    benchmark_series_used: int = 0
 
     def to_reason_codes(self) -> list[str]:
         ranked = sorted(
@@ -73,11 +71,8 @@ def score_direction_evidence(
     atr_pct = max(_atr_percent(bars[-20:]), 0.0025)
     medium_raw = _pct_change(closes[-20], latest)
     short_raw = _pct_change(closes[-5], latest)
-    benchmark_raw, benchmark_count = aligned_benchmark_return(
-        spy_bars, qqq_bars, start=bars[-20].timestamp, end=bars[-1].timestamp)
-    # Unavailable market data is not a flat benchmark, and may not duplicate
-    # the instrument's own momentum as supposedly independent strength.
-    relative_raw = medium_raw - benchmark_raw if benchmark_raw is not None else 0.0
+    benchmark_raw = _benchmark_momentum(spy_bars, qqq_bars)
+    relative_raw = medium_raw - benchmark_raw
 
     medium = _squash(medium_raw / max(atr_pct * math.sqrt(20), 0.005))
     short = _squash(short_raw / max(atr_pct * math.sqrt(5), 0.003))
@@ -115,16 +110,6 @@ def score_direction_evidence(
         + relative * 0.15
         + volume * 0.10
     )
-    if reversal_adjustment == 0.0:
-        # Cycle age can reduce an existing directional thesis. By itself it
-        # cannot create, amplify or reverse a buy direction. Confirmed reversal
-        # evidence retains the existing reversal weights and behavior.
-        if base > 0:
-            cycle_adjustment = max(-base, min(0.0, cycle_adjustment))
-        elif base < 0:
-            cycle_adjustment = min(-base, max(0.0, cycle_adjustment))
-        else:
-            cycle_adjustment = 0.0
     composite = _clamp(base + cycle_adjustment + reversal_adjustment, -1.0, 1.0)
 
     if abs(composite) < neutral_band:
@@ -150,7 +135,6 @@ def score_direction_evidence(
         cycle_adjustment=round(cycle_adjustment, 6),
         reversal_adjustment=round(reversal_adjustment, 6),
         composite_score=round(composite, 6),
-        benchmark_series_used=benchmark_count,
     )
     reasons = ", ".join(evidence.to_reason_codes()) or "no dominant evidence"
     result = DirectionResult(
@@ -162,8 +146,7 @@ def score_direction_evidence(
         failed_breakout=failed_breakout,
         explanation=(
             f"{bias.value} continuous-evidence {mode}; composite={composite:+.3f}; "
-            f"atr_pct={atr_pct:.4f}; benchmark_series_used={benchmark_count}; "
-            f"price_reference=observed_current_ny_date_hlc3; {reasons}."
+            f"atr_pct={atr_pct:.4f}; {reasons}."
         ),
     )
     return result, evidence
@@ -192,8 +175,15 @@ def _ema(values: list[float], period: int) -> float:
 
 
 def _session_vwap(bars: list[MarketBar]) -> float:
-    # Compatibility name; the limited-bar reference is not exact full-session VWAP.
-    return current_market_date_reference(bars)
+    weighted = 0.0
+    volume = 0
+    for bar in bars:
+        typical = (bar.high + bar.low + bar.close) / 3.0
+        weighted += typical * max(bar.volume, 0)
+        volume += max(bar.volume, 0)
+    if volume <= 0:
+        return bars[-1].close if bars else 0.0
+    return weighted / volume
 
 
 def _atr_percent(bars: list[MarketBar]) -> float:
@@ -214,6 +204,14 @@ def _atr_percent(bars: list[MarketBar]) -> float:
     return (sum(true_ranges) / len(true_ranges)) / latest if latest > 0 and true_ranges else 0.0
 
 
+def _benchmark_momentum(spy_bars: list[MarketBar], qqq_bars: list[MarketBar]) -> float:
+    values: list[float] = []
+    for bars in (spy_bars, qqq_bars):
+        if len(bars) >= 20:
+            values.append(_pct_change(bars[-20].close, bars[-1].close))
+    return sum(values) / len(values) if values else 0.0
+
+
 def _volume_impulse(bars: list[MarketBar]) -> float:
     if len(bars) < 11:
         return 0.0
@@ -221,13 +219,8 @@ def _volume_impulse(bars: list[MarketBar]) -> float:
     if baseline <= 0:
         return 0.0
     ratio = bars[-1].volume / baseline
-    current = bars[-1]
-    if current.close == current.open:
-        return 0.0
-    direction = 1.0 if current.close > current.open else -1.0
-    # Low activity is absence of confirmation, not opposite-side buying/selling.
-    # Only excess volume contributes directional evidence; doji bars are neutral.
-    return direction * _squash(max(0.0, ratio - 1.0) / 0.75)
+    direction = 1.0 if bars[-1].close >= bars[-1].open else -1.0
+    return direction * _squash((ratio - 1.0) / 0.75)
 
 
 def _failed_breakout(bars: list[MarketBar]) -> bool:

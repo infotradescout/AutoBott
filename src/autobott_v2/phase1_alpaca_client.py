@@ -27,38 +27,13 @@ class _AlpacaResponseDecodeError(ValueError):
 
 
 class AlpacaPaperClient:
-    option_feed = "indicative"
-
-    requires_entry_context = True
-
-    def get_entry_context(self, symbol: str, *, signal_symbol: str, cutoff: datetime) -> dict[str, Any]:
-        from .entry_market_context import fetch_entry_context
-        base = self.config.data_base_url.rstrip("/")
-        if base != "https://data.alpaca.markets":
-            raise ValueError("entry_context_data_endpoint_not_approved")
-        context = fetch_entry_context(lambda path,params:self._get_json_with_retry(base,path,params),
-                                      symbol,signal_symbol=signal_symbol,cutoff=cutoff,stock_feed="iex")
-        from .entry_schedule_context import EntryScheduleSource, attach_entry_schedule
-        trading_base = self.config.trading_base_url.rstrip("/")
-        if trading_base != "https://paper-api.alpaca.markets":
-            raise ValueError("entry_schedule_paper_calendar_endpoint_required")
-        if not hasattr(self, "_entry_schedule_source"):
-            self._entry_schedule_source = EntryScheduleSource(
-                lambda params: self._get_json_with_retry(trading_base, "/v2/calendar", params))
-        context = attach_entry_schedule(context, self._entry_schedule_source, cutoff)
-        from .entry_sector_context import SectorContextSource, attach_sector_context
-        if not hasattr(self, "_entry_sector_source"):
-            self._entry_sector_source = SectorContextSource(
-                lambda path,params: self._get_json_with_retry(base,path,params))
-        return attach_sector_context(context, self._entry_sector_source)
-
-
     def __init__(self, config: AlpacaPaperConfig | None = None) -> None:
         self.config = (config or require_alpaca_paper_config()).validate()
         # One client instance is reused for a complete trading cycle. Cache the
         # repeated SPY/QQQ/VIXY context reads so a 25-symbol scan does not spend
         # most of Alpaca's request budget downloading identical bars.
         self._stock_bars_cache: dict[tuple[Any, ...], dict[str, list[dict[str, Any]]]] = {}
+        self._latest_stock_quote_cache: dict[str, dict[str, Any]] = {}
         self._account_cache: dict[str, Any] | None = None
 
     def get_account(self) -> dict[str, Any]:
@@ -112,19 +87,22 @@ class AlpacaPaperClient:
         return bars
 
     def get_latest_stock_quotes(self, symbols: list[str]) -> dict[str, dict[str, Any]]:
-        # Re-read the whole requested set. A cached quote is not "latest" and
-        # must never be substituted when a later response omits a symbol.
-        normalized = list(dict.fromkeys(symbol.strip().upper() for symbol in symbols if symbol.strip()))
-        if not normalized:
-            return {}
+        normalized = [symbol.upper() for symbol in symbols]
+        missing = [symbol for symbol in normalized if symbol not in self._latest_stock_quote_cache]
+        if not missing:
+            return {symbol: dict(self._latest_stock_quote_cache[symbol]) for symbol in normalized}
         payload = self._get_json_with_retry(
             self.config.data_base_url,
             "/v2/stocks/quotes/latest",
-            {"symbols": ",".join(normalized)},
+            {"symbols": ",".join(missing)},
         )
-        return {str(symbol).upper(): dict(row) for symbol, row in (payload.get("quotes") or {}).items()
-                if str(symbol).upper() in normalized}
-
+        quotes = payload.get("quotes", {})
+        self._latest_stock_quote_cache.update({symbol.upper(): dict(row) for symbol, row in quotes.items()})
+        return {
+            symbol: dict(self._latest_stock_quote_cache[symbol])
+            for symbol in normalized
+            if symbol in self._latest_stock_quote_cache
+        }
 
     def get_option_chain_snapshots(self, symbol: str) -> dict[str, dict[str, Any]]:
         # Without an expiration window, Alpaca's snapshot endpoint defaults to
@@ -138,7 +116,7 @@ class AlpacaPaperClient:
         today = datetime.now(UTC).date()
         min_dte = HOSTED_TACTICAL_MIN_DTE if is_hosted_paper_runtime() else 1
         base_params = {
-            "feed": self.option_feed,
+            "feed": "indicative",
             "limit": "1000",
             "expiration_date_gte": (today + timedelta(days=min_dte)).isoformat(),
             "expiration_date_lte": (today + timedelta(days=45)).isoformat(),
@@ -197,7 +175,7 @@ class AlpacaPaperClient:
         payload = self._get_json_with_retry(
             self.config.data_base_url,
             "/v1beta1/options/quotes/latest",
-            {"symbols": ",".join(symbols), "feed": self.option_feed},
+            {"symbols": ",".join(symbols), "feed": "indicative"},
         )
         return {
             str(option_symbol).upper(): dict(quote)

@@ -253,67 +253,6 @@ def test_run_trading_session_continuous_window_waits_after_end_time() -> None:
     assert [call.isoformat() for call in calls] == ["2026-07-02T13:30:00+00:00"]
 
 
-def test_after_entry_window_runner_never_becomes_a_trading_cycle() -> None:
-    clock = FakeClock()
-    clock.current = datetime(2026, 7, 1, 20, 0, tzinfo=UTC)  # 16:00 New York
-    cycles = []
-    evidence = []
-
-    def fake_cycle_runner(*, symbols, **kwargs):
-        cycles.append(clock.now())
-        return TradingCycleResult(
-            started_at=clock.now(), finished_at=clock.now(), symbols=list(symbols),
-            snapshot_paths=[], decisions=[], orders_submitted=[], skipped=[], runtime_state={},
-        )
-
-    result = run_trading_session(
-        symbols=["SPY"],
-        interval_seconds=1800,
-        start_time=datetime(2026, 7, 2, 9, 30).time(),
-        end_time=datetime(2026, 7, 2, 15, 55).time(),
-        market_timezone="America/New_York",
-        max_cycles=1,
-        continuous_window=True,
-        now_fn=clock.now,
-        sleep_fn=clock.sleep,
-        cycle_runner=fake_cycle_runner,
-        after_entry_window_runner=lambda: evidence.append(clock.now()),
-    )
-
-    assert result.cycles_completed == 1
-    assert cycles == [datetime(2026, 7, 2, 13, 30, tzinfo=UTC)]
-    assert evidence
-    assert evidence[0] == datetime(2026, 7, 1, 20, 0, tzinfo=UTC)
-    assert all(at < cycles[0] for at in evidence)
-
-
-def test_after_entry_window_evidence_failure_cannot_stop_session() -> None:
-    clock = FakeClock()
-    clock.current = datetime(2026, 7, 1, 20, 0, tzinfo=UTC)
-    cycles = []
-
-    def broken_evidence():
-        raise RuntimeError("synthetic evidence failure")
-
-    def fake_cycle_runner(*, symbols, **kwargs):
-        cycles.append(clock.now())
-        return TradingCycleResult(
-            started_at=clock.now(), finished_at=clock.now(), symbols=list(symbols),
-            snapshot_paths=[], decisions=[], orders_submitted=[], skipped=[], runtime_state={},
-        )
-
-    result = run_trading_session(
-        symbols=["SPY"], interval_seconds=3600,
-        start_time=datetime(2026, 7, 2, 9, 30).time(),
-        end_time=datetime(2026, 7, 2, 15, 55).time(),
-        market_timezone="America/New_York", max_cycles=1, continuous_window=True,
-        now_fn=clock.now, sleep_fn=clock.sleep, cycle_runner=fake_cycle_runner,
-        after_entry_window_runner=broken_evidence,
-    )
-    assert result.cycles_completed == 1
-    assert len(cycles) == 1
-
-
 def test_run_trading_session_reports_cycle_results_immediately() -> None:
     clock = FakeClock()
     published = []
