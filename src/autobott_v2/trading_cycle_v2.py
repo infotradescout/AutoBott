@@ -25,6 +25,19 @@ def run_trading_cycle(*, symbols: list[str], **kwargs: Any) -> TradingCycleResul
         raise TypeError("cycle_shell_must_be_python_function")
     namespace = {**shell.__globals__, "build_decision_card": build_decision_card_v2,
                  "run_position_monitor": run_position_monitor_v2}
+    # The autonomous shell may process a slow batch. A later symbol must not
+    # inherit the first symbol's data cutoff. Keep recorded/historical callers
+    # explicit, and bind this wrapper only to this invocation's namespace.
+    if "capture_symbol_snapshot" in namespace:
+        original_capture = namespace["capture_symbol_snapshot"]
+        def current_capture(**capture_kwargs):
+            if kwargs.get("scheduled_market_time") is None:
+                observed = datetime.now(UTC)
+                capture_kwargs = {**capture_kwargs, "scheduled_market_time": observed}
+                if kwargs.get("captured_at_utc") is None:
+                    capture_kwargs["captured_at_utc"] = observed
+            return original_capture(**capture_kwargs)
+        namespace["capture_symbol_snapshot"] = current_capture
     coverage: list[dict[str, Any]] = []
     clients: dict[str, Any] = {}
     if kwargs.get("data_client") is not None:
