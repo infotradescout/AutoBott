@@ -203,7 +203,7 @@ def run_trading_cycle(
                 quality_rules = None
         except Exception as exc:
             execution_outcomes.append({"disposition": "primary_entry_quality_config_invalid",
-                                       "error_type": type(exc).__name__, "detail": str(exc)})
+                                       "error_type": type(exc).__name__})
         try:
             observation_account_scope = paper_capture_scope(resolved_broker)
         except Exception as exc:
@@ -421,7 +421,7 @@ def run_trading_cycle(
                 payload={"ghost": ghost},
             )
             continue
-        blocked_underlyings = set(loss_guard.get("blocked_underlyings", []))
+        blocked_underlyings = set(loss_guard.get("blocked_underlyings") or [])
         learning_underlying = "VOLATILITY" if is_volatility_symbol(symbol) else symbol.upper()
         if symbol.upper() in blocked_underlyings or learning_underlying in blocked_underlyings:
             _append_skip(
