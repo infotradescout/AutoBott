@@ -16,7 +16,18 @@ from .phase1_alpaca_client import AlpacaPaperClient
 from .primary_fill_capture import poll_primary_fills
 from .primary_development_metrics import materialize_primary_development_metrics
 from .primary_followthrough import poll_primary_observations
+from .primary_quality_runtime import evaluate_completed_primary_watches
 from .runtime_paths import artifacts_root
+
+
+def _empty_entry_quality_summary() -> dict[str, Any]:
+    return {
+        "checked": 0, "evaluated": 0, "already_evaluated": 0,
+        "not_configured": 0, "not_ready": 0, "errors": [],
+        "quality_statuses": {}, "underlying_diagnostics": {},
+        "broker_reads": 0, "broker_writes": 0, "journal_writes": 0,
+        "edge_established": False,
+    }
 
 
 def poll_primary_runtime_evidence_once(
@@ -37,6 +48,7 @@ def poll_primary_runtime_evidence_once(
             "observations": {"checked": 0, "observed": 0, "window_closed": 0,
                              "errors": [], "underlying_observed": 0,
                              "underlying_errors": [], "broker_writes": 0},
+            "entry_quality": _empty_entry_quality_summary(),
             "development_metrics": {
                 "checked": 0, "materialized": 0, "already_materialized": 0,
                 "not_development": 0, "not_ready": 0, "errors": [],
@@ -67,6 +79,17 @@ def poll_primary_runtime_evidence_once(
                         "underlying_observed": 0, "underlying_errors": [],
                         "broker_writes": 0}
 
+    # A watch can close after new entries stop. Score it in this same
+    # continuation using its already-bound protocol; never load current
+    # environment rules or turn development capture into a scored study.
+    try:
+        entry_quality = evaluate_completed_primary_watches(evidence_root)
+    except Exception as exc:
+        entry_quality = {
+            **_empty_entry_quality_summary(),
+            "errors": [{"reason": f"{type(exc).__name__}:{exc}"}],
+        }
+
     try:
         development_metrics = materialize_primary_development_metrics(evidence_root)
     except Exception as exc:
@@ -84,6 +107,7 @@ def poll_primary_runtime_evidence_once(
         "root": str(evidence_root),
         "fills": fills,
         "observations": observations,
+        "entry_quality": entry_quality,
         "development_metrics": development_metrics,
         "trading_actions": 0,
     }
