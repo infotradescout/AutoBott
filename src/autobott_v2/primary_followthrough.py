@@ -5,7 +5,6 @@ missed intervals, unknown fills and feed changes remain visible to the study.
 """
 from __future__ import annotations
 
-from contextlib import contextmanager
 from copy import deepcopy
 from dataclasses import asdict, dataclass
 from datetime import datetime, timedelta
@@ -18,6 +17,7 @@ from typing import Any, Callable, Mapping
 
 from .bar_timing import aware_utc
 from .entry_quality import EntryQualityRules
+from .observation_lock import observation_store_lock as _locked
 from .primary_entry_study import case_from_runtime_evidence, digest
 from .quote_observation import observed_quote_fields
 
@@ -76,18 +76,6 @@ def _observation_window_end(snapshot: Mapping[str, Any], start: datetime,
     if remaining <= 0 or remaining > rules.window_seconds:
         raise ValueError("development_capture_session_bound_invalid")
     return closing
-
-
-@contextmanager
-def _locked(root: Path):
-    root.mkdir(parents=True, exist_ok=True)
-    lock = root / ".primary-observation.lock"
-    fd = os.open(lock, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
-    try:
-        os.close(fd)
-        yield
-    finally:
-        lock.unlink()
 
 
 def _write(path: Path, row: dict, rules: PrimaryObservationRules) -> None:
