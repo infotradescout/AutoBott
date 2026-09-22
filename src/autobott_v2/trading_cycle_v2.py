@@ -25,6 +25,19 @@ def run_trading_cycle(*, symbols: list[str], **kwargs: Any) -> TradingCycleResul
         raise TypeError("cycle_shell_must_be_python_function")
     namespace = {**shell.__globals__, "build_decision_card": build_decision_card_v2,
                  "run_position_monitor": run_position_monitor_v2}
+    # The autonomous shell may process a slow batch. A later symbol must not
+    # inherit the first symbol's data cutoff. Keep recorded/historical callers
+    # explicit, and bind this wrapper only to this invocation's namespace.
+    if "capture_symbol_snapshot" in namespace:
+        original_capture = namespace["capture_symbol_snapshot"]
+        def current_capture(**capture_kwargs):
+            if kwargs.get("scheduled_market_time") is None:
+                observed = datetime.now(UTC)
+                capture_kwargs = {**capture_kwargs, "scheduled_market_time": observed}
+                if kwargs.get("captured_at_utc") is None:
+                    capture_kwargs["captured_at_utc"] = observed
+            return original_capture(**capture_kwargs)
+        namespace["capture_symbol_snapshot"] = current_capture
     coverage: list[dict[str, Any]] = []
     clients: dict[str, Any] = {}
     if kwargs.get("data_client") is not None:
@@ -51,7 +64,8 @@ def run_trading_cycle(*, symbols: list[str], **kwargs: Any) -> TradingCycleResul
         plan = RankedCapturePlan(capture=namespace["capture_symbol_snapshot"], load=namespace["_load_snapshot"],
             make_input=namespace["_decision_input_from_snapshot"], build=build_decision_card_v2,
             execution_rules=namespace["_hosted_execution_rules"], capture_args=capture_args,
-            original_priority=namespace["_prioritize_symbols_by_winners"])
+            original_priority=namespace["_prioritize_symbols_by_winners"],
+            filter_candidates=namespace["filter_entry_quote_candidates"])
         namespace.update(_prioritize_symbols_by_winners=plan.rank_symbols,
             capture_symbol_snapshot=plan.capture_for_execution, build_decision_card=plan.build_for_execution,
             submit_core_runner_to_broker=submit_budgeted_pair)

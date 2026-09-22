@@ -41,6 +41,13 @@ class FakeDataClient:
             for idx, symbol in enumerate(symbols)
         }
 
+    def get_latest_option_quotes(self, symbols):
+        # Deterministic refreshed observations from the same synthetic provider.
+        rows = {}
+        for root in {symbol[:-15] for symbol in symbols}:
+            rows.update(self.get_option_chain_snapshots(root))
+        return {symbol: dict(rows[symbol]["latestQuote"]) for symbol in symbols if symbol in rows}
+
     def get_option_chain_snapshots(self, symbol):
         return {
             f"{symbol}260703C00105000": {
@@ -123,6 +130,16 @@ class CoreRunnerDataClient(FakeDataClient):
 
 
 class HostedCoreRunnerDataClient(CoreRunnerDataClient):
+    def get_stock_bars(self, symbols, *, start, end, timeframe="1Min", limit=35):
+        from autobott_v2.bar_timing import bar_duration
+        rows = super().get_stock_bars(symbols, start=start, end=end, timeframe=timeframe, limit=35)
+        duration = bar_duration(timeframe)
+        cutoff = end.replace(minute=0, second=0, microsecond=0) if "Hour" in timeframe else end.replace(second=0, microsecond=0)
+        for values in rows.values():
+            for i, row in enumerate(values):
+                row["t"] = (cutoff - duration * (len(values) - i)).isoformat()
+        return rows
+
     def get_option_chain_snapshots(self, symbol):
         payload = super().get_option_chain_snapshots(symbol)
         hosted = {}
@@ -219,6 +236,9 @@ class RiskOffVolatilityDataClient(FakeDataClient):
 @pytest.fixture(autouse=True)
 def _legacy_single_leg_default_for_existing_cycle_contracts(monkeypatch):
     monkeypatch.setenv("AUTOBOTT_CORE_RUNNER_ENABLED", "false")
+    # All market fixtures in this module use July 1. The admission clock must
+    # describe that fixture time, not the real wall-clock day the suite runs.
+    monkeypatch.setattr(trading_cycle, "_entry_check_now", lambda: datetime(2026, 7, 1, 15, 35, 10, tzinfo=UTC))
 
 
 class FakeBroker:
