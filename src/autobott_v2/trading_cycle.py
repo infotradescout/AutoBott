@@ -28,6 +28,7 @@ from .hosted_policy import (
     HOSTED_POLICY_VERSION,
     HOSTED_RIDER_MAX_DTE,
     HOSTED_RIDER_MIN_DTE,
+    HOSTED_RIDER_MAX_DTE,
     HOSTED_TACTICAL_MAX_DTE,
     HOSTED_TACTICAL_MIN_DTE,
     is_hosted_paper_runtime,
@@ -203,7 +204,7 @@ def run_trading_cycle(
                 quality_rules = None
         except Exception as exc:
             execution_outcomes.append({"disposition": "primary_entry_quality_config_invalid",
-                                       "error_type": type(exc).__name__})
+                                       "error_type": type(exc).__name__, "detail": str(exc)})
         try:
             observation_account_scope = paper_capture_scope(resolved_broker)
         except Exception as exc:
