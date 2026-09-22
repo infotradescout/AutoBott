@@ -129,8 +129,6 @@ def run_trading_cycle(
             "root": str(resolved_corpus_root),
             "error": f"{type(exc).__name__}: {exc}",
         }
-    snapshot_time = scheduled_market_time or datetime.now(tz=UTC)
-    captured_at = captured_at_utc or datetime.now(tz=UTC)
     resolved_rules = rules or _hosted_capture_rules()
     if hasattr(resolved_broker, "get_order"):
         try:
@@ -224,11 +222,14 @@ def run_trading_cycle(
 
     for symbol in cycle_symbols:
         try:
+            # Capture clocks belong to this symbol, not the start of a slow
+            # batch. Explicit historical cutoff/receipt inputs stay unchanged.
+            observed = datetime.now(tz=UTC)
             snapshot_path = capture_symbol_snapshot(
                 symbol=symbol,
                 corpus_root=resolved_corpus_root,
-                scheduled_market_time=snapshot_time,
-                captured_at_utc=captured_at if captured_at_utc is not None else datetime.now(tz=UTC),
+                scheduled_market_time=scheduled_market_time if scheduled_market_time is not None else observed,
+                captured_at_utc=captured_at_utc if captured_at_utc is not None else observed,
                 corpus_type="production_capture" if resolved_broker.config.environment.value == "live" else "paper_capture",
                 market_timezone="America/New_York",
                 volatility_proxy_symbol="VIXY",
@@ -420,7 +421,7 @@ def run_trading_cycle(
                 payload={"ghost": ghost},
             )
             continue
-        blocked_underlyings = set(loss_guard.get("blocked_underlyings") or [])
+        blocked_underlyings = set(loss_guard.get("blocked_underlyings", []))
         learning_underlying = "VOLATILITY" if is_volatility_symbol(symbol) else symbol.upper()
         if symbol.upper() in blocked_underlyings or learning_underlying in blocked_underlyings:
             _append_skip(
@@ -764,6 +765,15 @@ def run_trading_cycle(
                     payload={"exception_type": type(exc).__name__},
                 )
 
+    # A late broker fill must establish its observation window before the
+    # quote poll decides whether the admission-anchored watch has expired.
+    try:
+        if observation_rules is not None:
+            fills = poll_primary_fills(artifacts_root() / "primary_followthrough", resolved_broker, now_fn=_entry_check_now)
+            execution_outcomes.append({"disposition": "primary_fill_capture_poll", **fills})
+    except Exception as exc:
+        execution_outcomes.append({"disposition": "primary_fill_capture_poll_failed", "error_type": type(exc).__name__})
+
     try:
         if observation_rules is not None:
             followthrough = poll_primary_observations(
@@ -772,13 +782,6 @@ def run_trading_cycle(
     except Exception as exc:
         execution_outcomes.append({"disposition": "primary_observation_poll_failed",
             "error_type": type(exc).__name__, "detail": str(exc)})
-
-    try:
-        if observation_rules is not None:
-            fills = poll_primary_fills(artifacts_root() / "primary_followthrough", resolved_broker, now_fn=_entry_check_now)
-            execution_outcomes.append({"disposition": "primary_fill_capture_poll", **fills})
-    except Exception as exc:
-        execution_outcomes.append({"disposition": "primary_fill_capture_poll_failed", "error_type": type(exc).__name__})
 
     try:
         quality_summary = evaluate_completed_primary_watches(
