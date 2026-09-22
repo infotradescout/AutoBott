@@ -765,20 +765,20 @@ def run_trading_cycle(
                     payload={"exception_type": type(exc).__name__},
                 )
 
+    # Registration configuration controls new watches only. Existing watches
+    # retain their bound rules across restarts and configuration changes.
     # A late broker fill must establish its observation window before the
     # quote poll decides whether the admission-anchored watch has expired.
     try:
-        if observation_rules is not None:
-            fills = poll_primary_fills(artifacts_root() / "primary_followthrough", resolved_broker, now_fn=_entry_check_now)
-            execution_outcomes.append({"disposition": "primary_fill_capture_poll", **fills})
+        fills = poll_primary_fills(artifacts_root() / "primary_followthrough", resolved_broker, now_fn=_entry_check_now)
+        execution_outcomes.append({"disposition": "primary_fill_capture_poll", **fills})
     except Exception as exc:
         execution_outcomes.append({"disposition": "primary_fill_capture_poll_failed", "error_type": type(exc).__name__})
 
     try:
-        if observation_rules is not None:
-            followthrough = poll_primary_observations(
-                artifacts_root() / "primary_followthrough", resolved_data_client, now_fn=_entry_check_now)
-            execution_outcomes.append({"disposition": "primary_observation_poll", **followthrough})
+        followthrough = poll_primary_observations(
+            artifacts_root() / "primary_followthrough", resolved_data_client, now_fn=_entry_check_now)
+        execution_outcomes.append({"disposition": "primary_observation_poll", **followthrough})
     except Exception as exc:
         execution_outcomes.append({"disposition": "primary_observation_poll_failed",
             "error_type": type(exc).__name__, "detail": str(exc)})
