@@ -51,7 +51,8 @@ def run_trading_cycle(*, symbols: list[str], **kwargs: Any) -> TradingCycleResul
         plan = RankedCapturePlan(capture=namespace["capture_symbol_snapshot"], load=namespace["_load_snapshot"],
             make_input=namespace["_decision_input_from_snapshot"], build=build_decision_card_v2,
             execution_rules=namespace["_hosted_execution_rules"], capture_args=capture_args,
-            original_priority=namespace["_prioritize_symbols_by_winners"])
+            original_priority=namespace["_prioritize_symbols_by_winners"],
+            filter_candidates=namespace["filter_entry_quote_candidates"])
         namespace.update(_prioritize_symbols_by_winners=plan.rank_symbols,
             capture_symbol_snapshot=plan.capture_for_execution, build_decision_card=plan.build_for_execution,
             submit_core_runner_to_broker=submit_budgeted_pair)
