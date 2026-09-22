@@ -124,11 +124,17 @@ def test_budgeted_pair_binds_and_observes_only_its_actual_primary_fill(monkeypat
     root = tmp_path / "artifacts" / "primary_followthrough"
     watches = list(root.glob("*.json"))
     assert len(watches) == 1, result.execution_outcomes
-    observed = poll_primary_fills(root, broker, now_fn=lambda: AT+timedelta(seconds=3))
-    assert observed["filled"] == 1, observed
+    native_poll = next(r for r in result.execution_outcomes if r["disposition"] == "primary_fill_capture_poll")
+    assert native_poll["filled"] == 1 and native_poll["checked"] == 1, native_poll
+    assert native_poll["errors"] == []
     row = json.loads(watches[0].read_text())
     assert row["fill_capture_status"] == "filled"
     assert row["case"]["fills"][0]["option_symbol"] == "STRONG261002C00100000"
     assert row["case"]["fills"][0]["price"] == .82
     assert len(row["case"]["fills"]) == 1
+    before = watches[0].read_bytes()
+    observed = poll_primary_fills(root, broker, now_fn=lambda: AT+timedelta(seconds=3))
+    assert observed["filled"] == observed["checked"] == 0, observed
+    assert observed["errors"] == []
+    assert watches[0].read_bytes() == before
     assert len(transport.posts) == 2
