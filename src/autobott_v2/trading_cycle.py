@@ -28,7 +28,6 @@ from .hosted_policy import (
     HOSTED_POLICY_VERSION,
     HOSTED_RIDER_MAX_DTE,
     HOSTED_RIDER_MIN_DTE,
-    HOSTED_RIDER_MAX_DTE,
     HOSTED_TACTICAL_MAX_DTE,
     HOSTED_TACTICAL_MIN_DTE,
     is_hosted_paper_runtime,
