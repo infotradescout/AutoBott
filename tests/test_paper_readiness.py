@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import json
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import autobott_v2.paper_readiness as paper_readiness
@@ -26,14 +26,14 @@ class FakePaperClient:
     def get_stock_bars(self, symbols, *, start, end, timeframe="1Min", limit=35):
         rows = [
             {
-                "t": (end).isoformat().replace("+00:00", "Z"),
+                "t": (end - timedelta(minutes=35-index)).isoformat().replace("+00:00", "Z"),
                 "o": 600.0,
                 "h": 600.2,
                 "l": 599.8,
                 "c": 600.1,
                 "v": 1000,
             }
-            for _ in range(35)
+            for index in range(35)
         ]
         return {symbol.upper(): list(rows) for symbol in symbols}
 

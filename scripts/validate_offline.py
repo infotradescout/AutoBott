@@ -5,6 +5,7 @@ from datetime import UTC, datetime
 import hashlib
 import json
 import os
+import platform
 from pathlib import Path
 import shlex
 import socket
@@ -91,6 +92,11 @@ def main(argv: list[str] | None = None) -> int:
     os.chdir(REPO_ROOT)
     sys.path.insert(0, str(REPO_ROOT / "src"))
 
+    # Pytest's JUnit hostname lookup calls platform.uname(). On Windows,
+    # Python 3.11 may probe the OS with local subprocesses. Cache that local
+    # metadata before installing the guard; never allow those processes in tests.
+    platform.uname()
+
     violations: dict[str, int] = {}
     sys.addaudithook(lambda event, args: audit_event(event, args, violations))
     with socket.socket() as probe:
@@ -129,6 +135,7 @@ def main(argv: list[str] | None = None) -> int:
         "elapsed_seconds": round(elapsed, 4),
         "tests": {key: suite.get(key) for key in ("tests", "failures", "errors", "skipped")} if suite is not None else None,
         "guard_self_test": guard_self_test,
+        "platform_metadata_cached_before_guard": True,
         "blocked_operations_during_tests": dict(violations),
         "isolation": "OS-only inherited environment; empty env sentinel; dedicated runtime/temp roots; socket/DNS/send operations denied; only read-only local Git subprocesses; pytest plugin autoload disabled",
     }
