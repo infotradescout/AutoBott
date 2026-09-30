@@ -14,7 +14,7 @@ from .runtime_paths import data_root
 
 # Execution receipts provide attribution for broker fills after activity ages
 # out. Keep their original rows through both bounded reads and compaction.
-_DURABLE_EVENT_TYPES = frozenset({"order_submission"})
+_DURABLE_EVENT_TYPES = frozenset({"order_submission", "position_monitor_exit_event"})
 _EXECUTION_JOURNAL_LOCK = threading.RLock()
 
 
@@ -57,6 +57,20 @@ def append_order_submission(order: ExecutionOrder, *, journal_path: str | Path |
         payload=_json_safe(asdict(order)),
     )
     return _append_record(record, journal_path=journal_path)
+
+
+def append_monitor_exit_event(
+    action: dict[str, Any], *, journal_path: str | Path | None = None,
+) -> Path:
+    """Keep exit attempts, blocked actions and failures through tail retention."""
+    symbol = str(action.get("symbol") or "")
+    return _append_record(ExecutionJournalRecord(
+        recorded_at=datetime.now(tz=UTC),
+        event_type="position_monitor_exit_event",
+        decision_id=f"monitor-{symbol}",
+        thesis_id=f"monitor:{symbol}:{action.get('reason')}",
+        payload=_json_safe(dict(action)),
+    ), journal_path=journal_path)
 
 
 def append_execution_outcome(

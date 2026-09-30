@@ -7,10 +7,11 @@ from dataclasses import dataclass, replace
 from datetime import UTC, date, datetime
 from pathlib import Path
 from typing import Any
+from uuid import uuid4
 
 from .execution_broker import AlpacaExecutionBroker
-from .execution_journal import append_execution_outcome, append_order_submission
-from .execution_models import BrokerEnvironment, ExecutionOrder, OrderSide, OrderType, TradeIntent
+from .execution_journal import append_execution_outcome, append_monitor_exit_event, append_order_submission, load_execution_journal
+from .execution_models import BrokerEnvironment, ExecutionOrder, ExecutionState, OrderSide, OrderType, TradeIntent
 from .hosted_policy import (
     HOSTED_EXIT_MIN_DTE,
     HOSTED_POLICY_VERSION,
@@ -161,6 +162,9 @@ def run_position_monitor(
     positions = resolved_broker.list_open_positions()
     pending_exits = _pending_exit_orders_by_symbol(resolved_broker)
     pending_orders = _pending_orders_by_symbol(resolved_broker)
+    orders_unavailable = pending_orders is None or pending_exits is None
+    pending_orders = pending_orders or {}
+    unresolved_exits = _unresolved_monitor_exits(journal_path)
     try:
         stored_positions = load_open_positions(store_path=position_store_path)
     except Exception:
@@ -196,7 +200,7 @@ def run_position_monitor(
     )
     actions.extend(stale_entry_actions)
     pending_orders = _without_canceled_orders(pending_orders, stale_entry_actions)
-    over_cap_actions = _cancel_over_cap_pending_entries(pending_orders, broker=resolved_broker)
+    over_cap_actions = [] if orders_unavailable else _cancel_over_cap_pending_entries(pending_orders, broker=resolved_broker)
     actions.extend(over_cap_actions)
     pending_orders = _without_canceled_orders(pending_orders, over_cap_actions)
     for position in positions:
@@ -221,7 +225,35 @@ def run_position_monitor(
             action["paired_option_symbol"] = stored_position.paired_option_symbol
             action["entry_policy_version"] = stored_position.entry_policy_version
             action["entry_build_sha"] = stored_position.entry_build_sha
+            action["entry_broker_order_id"] = stored_position.broker_order_id
+        action.update(submitted=False, attempted=False)
+        action["position_quantity"] = _finite_number(position.get("qty"))
+        prior = unresolved_exits.get(symbol)
+        if (prior is not None and prior.get("entry_broker_order_id") == action.get("entry_broker_order_id")
+                and _prior_exit_blocks(prior, action, resolved_broker,
+                                       pending_orders=pending_orders, pending_exits=pending_exits)):
+            _record_monitor_action(action, journal_path)
+            actions.append(action)
+            continue
+        if orders_unavailable:
+            action.update(exit_status="uncertain" if action.get("broker_order_id") or action.get("client_order_id") else "blocked",
+                          error="open_orders_unavailable")
+            _record_monitor_action(action, journal_path)
+            actions.append(action)
+            continue
         pending_exit = pending_exits.get(action["symbol"])
+        if pending_exit is not None:
+            _include_pending_exit(pending_exit, pending_orders)
+        if action["reason"] == "primary_profit_funds_runner" and pending_exit is not None:
+            action.update(exit_status="pending", broker_order_id=pending_exit.get("id"),
+                          client_order_id=pending_exit.get("client_order_id"), exit_order_reason=action["reason"])
+            _record_monitor_action(action, journal_path)
+            if stored_position is not None and stored_position.trade_group_id:
+                group_state = pair_states.setdefault(stored_position.trade_group_id, {})
+                group_state.update(funding_exit_submitted=True, funding_exit_order_id=action["broker_order_id"],
+                                   funding_exit_status=pending_exit.get("status"))
+            actions.append(action)
+            continue
         if action["reason"] == "take_profit" and pending_exit is not None:
             actions.append(
                 _handle_pending_take_profit_exit(
@@ -234,6 +266,13 @@ def run_position_monitor(
             )
             continue
         try:
+            action["exit_status"] = "evaluating"
+            if pending_exit is not None:
+                action.update(exit_status="uncertain", broker_order_id=pending_exit.get("id"),
+                              client_order_id=pending_exit.get("client_order_id"))
+            if not _record_monitor_action(action, journal_path):
+                actions.append(action)
+                continue
             if action["reason"] in {
                 "stop_loss",
                 "trailing_stop",
@@ -243,8 +282,8 @@ def run_position_monitor(
                 "funded_runner_trailing_drawdown",
                 "funded_runner_catastrophic_stop",
                 "unfunded_runner_stop_loss",
-            } and hasattr(resolved_broker, "cancel_order"):
-                canceled_ids = _cancel_pending_orders_for_symbol(
+            }:
+                canceled_ids, new_sell_fills = _cancel_pending_orders_for_symbol(
                     action["symbol"],
                     pending_orders,
                     broker=resolved_broker,
@@ -252,6 +291,13 @@ def run_position_monitor(
                 if canceled_ids:
                     action["canceled_pending_order_ids"] = canceled_ids
                     action["canceled_pending_exit_order_id"] = canceled_ids[0]
+                    refreshed = _refresh_exit_position(resolved_broker, action, new_sell_fills=new_sell_fills)
+                    if refreshed is None:
+                        action["exit_status"] = "position_not_open"
+                        _record_monitor_action(action, journal_path)
+                        actions.append(action)
+                        continue
+                    position = refreshed
             order = _submit_monitor_exit(
                 position,
                 action=action,
@@ -259,12 +305,10 @@ def run_position_monitor(
                 rules=resolved_rules,
                 journal_path=journal_path,
             )
-            action["submitted"] = True
-            action["broker_order_id"] = order.broker_order_id
-            action["state"] = order.state.value
+            _apply_exit_order_result(action, order)
             if action["reason"] == "primary_profit_funds_runner" and stored_position is not None and stored_position.trade_group_id:
                 group_state = pair_states.setdefault(stored_position.trade_group_id, {})
-                group_state["funding_exit_submitted"] = True
+                group_state["funding_exit_submitted"] = action["submitted"]
                 group_state["funding_exit_order_id"] = order.broker_order_id
                 group_state["funding_exit_status"] = order.state.value
                 if order.broker_order_id:
@@ -277,7 +321,9 @@ def run_position_monitor(
                 group_state["runner_symbol"] = stored_position.paired_option_symbol
         except Exception as exc:
             action["submitted"] = False
+            action["exit_status"] = "uncertain" if action.get("attempted") or pending_exit is not None else "blocked"
             action["error"] = str(exc)
+        _record_monitor_action(action, journal_path)
         actions.append(action)
     _save_pair_states(pair_states, state_path=pair_state_path)
     _save_trailing_peaks(
@@ -295,7 +341,7 @@ def run_position_monitor(
     if len(retained_positions) != len(stored_positions):
         save_open_positions(retained_positions, store_path=position_store_path)
     return {
-        "ok": True,
+        "ok": not any(action.get("error") or action.get("journal_error") for action in actions),
         "enabled": True,
         "checked": len(positions),
         "actions": actions,
@@ -306,6 +352,134 @@ def run_position_monitor(
             if position.trade_group_id and position.option_symbol.upper() in pair_managed_symbols
         }),
     }
+
+
+def _record_monitor_action(action: dict[str, Any], journal_path: str | None) -> bool:
+    try:
+        append_monitor_exit_event(action, journal_path=journal_path)
+        return True
+    except Exception as exc:
+        action["journal_error"] = str(exc)
+        return False
+
+
+def _unresolved_monitor_exits(journal_path: str | None) -> dict[str, dict[str, Any]]:
+    latest: dict[str, dict[str, Any]] = {}
+    for record in load_execution_journal(journal_path=journal_path):
+        if record.get("event_type") == "position_monitor_exit_event":
+            payload = record.get("payload") or {}
+            symbol = str(payload.get("symbol") or "").upper()
+            if symbol:
+                latest[symbol] = payload
+    return {symbol: payload for symbol, payload in latest.items()
+            if payload.get("exit_status") in {"attempting", "uncertain", "pending", "partially_filled", "broker_reported_filled"}}
+
+
+def _include_pending_exit(order: dict[str, Any], pending_orders: dict[str, list[dict[str, Any]]]) -> None:
+    symbol = str(order.get("symbol") or "").upper()
+    rows = pending_orders.setdefault(symbol, [])
+    order_id = order.get("id") or order.get("broker_order_id")
+    if order_id:
+        rows[:] = [row for row in rows if (row.get("id") or row.get("broker_order_id")) != order_id]
+    rows.append(order)
+
+
+def _prior_exit_blocks(prior: dict[str, Any], action: dict[str, Any], broker: Any, *,
+                       pending_orders: dict[str, list[dict[str, Any]]],
+                       pending_exits: dict[str, dict[str, Any]]) -> bool:
+    """Reconcile the last sell before replacing it, including after a restart."""
+    action.update(broker_order_id=prior.get("broker_order_id"), client_order_id=prior.get("client_order_id"))
+    action["exit_order_reason"] = prior.get("exit_order_reason") or prior.get("reason")
+    try:
+        order_id = prior.get("broker_order_id")
+        if order_id:
+            order = broker.get_order(order_id)
+        elif prior.get("client_order_id") and hasattr(broker, "get_order_by_client_order_id"):
+            order = broker.get_order_by_client_order_id(prior["client_order_id"])
+        else:
+            raise ValueError("prior_exit_identity_requires_reconciliation")
+        if (str(order.get("symbol") or "").upper() != action["symbol"]
+                or str(order.get("side") or "").lower() != "sell"
+                or not order.get("id")
+                or (order_id and order.get("id") != order_id)
+                or (order.get("client_order_id") and order.get("client_order_id") != prior.get("client_order_id"))):
+            raise ValueError("prior_exit_order_identity_mismatch")
+        predecessor_fills = 0.0
+        seen = {order["id"]}
+        while str(order.get("status") or "").lower() == "replaced":
+            successor = order.get("replaced_by")
+            filled = _finite_number(order.get("filled_qty"))
+            if not successor or successor in seen or len(seen) >= 8 or filled is None or filled < 0:
+                raise ValueError("prior_exit_replacement_requires_reconciliation")
+            predecessor_fills += filled
+            successor_order = broker.get_order(successor)
+            if (successor_order.get("id") != successor
+                    or str(successor_order.get("symbol") or "").upper() != action["symbol"]
+                    or str(successor_order.get("side") or "").lower() != "sell"):
+                raise ValueError("prior_exit_replacement_identity_mismatch")
+            seen.add(successor)
+            order = successor_order
+        filled = _finite_number(order.get("filled_qty"))
+        total_fills = predecessor_fills + (filled or 0.0)
+        if str(order.get("status") or "").lower() == "filled":
+            action.update(broker_order_id=order["id"], exit_status="broker_reported_filled")
+            return True
+        if total_fills > 0:
+            original = _finite_number(prior.get("position_quantity"))
+            current = _finite_number(action.get("position_quantity"))
+            if original is None or current is None or current > original - total_fills:
+                raise ValueError("prior_exit_position_fill_requires_reconciliation")
+        action["broker_order_id"] = order["id"]
+        if len(seen) > 1:
+            action["client_order_id"] = order.get("client_order_id")
+        status = str(order.get("status") or "").lower()
+        action["state"] = status
+        if status in {"canceled", "cancelled", "expired", "rejected"}:
+            filled = _finite_number(order.get("filled_qty"))
+            if filled is None or filled < 0:
+                raise ValueError("prior_exit_fill_quantity_unavailable")
+            return False
+        if status in {"new", "accepted", "pending_new", "pending_replace", "pending_cancel", "partially_filled", "suspended", "done_for_day"}:
+            # A profit limit can be canceled by the urgent-loss path below.
+            if action["exit_order_reason"] in {"take_profit", "primary_profit_funds_runner"}:
+                # Direct reconciliation is stronger than stale list enumeration.
+                pending_exits[action["symbol"]] = order
+                _include_pending_exit(order, pending_orders)
+                return False
+            action["exit_status"] = "partially_filled" if status == "partially_filled" else "pending"
+            return True
+        raise ValueError("prior_exit_order_status_unresolved")
+    except Exception as exc:
+        action.update(exit_status="uncertain", error=str(exc))
+        return True
+
+
+def _apply_exit_order_result(action: dict[str, Any], order: ExecutionOrder) -> None:
+    accepted = order.state in {ExecutionState.SUBMITTED, ExecutionState.PARTIALLY_FILLED, ExecutionState.FILLED}
+    action.update(attempted=True, submitted=accepted and bool(order.broker_order_id),
+                  broker_order_id=order.broker_order_id, client_order_id=order.client_order_id,
+                  state=order.state.value)
+    action["exit_status"] = (
+        "uncertain" if accepted and not order.broker_order_id else
+        "pending" if order.state is ExecutionState.SUBMITTED else
+        "broker_reported_filled" if order.state is ExecutionState.FILLED else order.state.value
+    )
+
+
+def _refresh_exit_position(broker: Any, action: dict[str, Any], *, new_sell_fills: float = 0.0) -> dict[str, Any] | None:
+    positions = broker.list_open_positions()
+    position = next((p for p in positions if str(p.get("symbol") or "").upper() == action["symbol"]), None)
+    if position is None:
+        return None
+    quantity = _finite_number(position.get("qty"))
+    if str(position.get("side") or "long").lower() != "long" or quantity is None or quantity <= 0 or not quantity.is_integer():
+        raise ValueError("exit_position_quantity_unresolved")
+    before = _finite_number(action.get("position_quantity"))
+    if new_sell_fills > 0 and (before is None or quantity > before - new_sell_fills):
+        raise ValueError("exit_position_fill_requires_reconciliation")
+    action["quantity"] = min(action["quantity"], int(quantity))
+    action["position_quantity"] = quantity
+    return position
 
 
 def _pair_rules(rules: PositionMonitorRules) -> PairLifecycleRules:
@@ -440,7 +614,9 @@ def _pair_leg_mark(
     peak_return_pct: float | None,
 ) -> PairLegMark | None:
     entry_price = _float_or_none(position.get("avg_entry_price")) or stored.entry_limit_price
-    current_price = _float_or_none(position.get("current_price")) or entry_price
+    current_price = _float_or_none(position.get("current_price"))
+    if current_price is None:
+        current_price = entry_price
     quantity = int(float(position.get("qty") or stored.quantity or 0))
     if entry_price <= 0 or current_price < 0 or quantity <= 0:
         return None
@@ -459,12 +635,15 @@ def _pair_action_payload(
     stored: OpenPosition,
     decision: Any,
 ) -> dict[str, Any]:
+    current_price = _float_or_none(position.get("current_price"))
+    if current_price is None:
+        current_price = _float_or_none(position.get("avg_entry_price")) or stored.entry_limit_price
     return {
         "reason": decision.reason,
         "symbol": symbol,
         "quantity": int(float(position.get("qty") or stored.quantity)),
         "unrealized_plpc": float(position.get("unrealized_plpc") or 0.0),
-        "current_price": float(position.get("current_price") or position.get("avg_entry_price") or stored.entry_limit_price),
+        "current_price": current_price,
         "leg_role": stored.leg_role,
         "pair_entry_cost": decision.pair_entry_cost,
         "pair_mark_value": decision.pair_mark_value,
@@ -857,6 +1036,7 @@ def _submit_monitor_exit(
         thesis_id=f"monitor:{symbol}:{action['reason']}",
         metadata={
             "position_monitor": True,
+            "exit_client_order_id": f"autobott-exit-{uuid4().hex}",
             "exit_reason": action["reason"],
             "exit_order_style": "urgent_market" if order_type is OrderType.MARKET else "profit_ladder_limit",
             "take_profit_tier": action.get("take_profit_tier"),
@@ -873,14 +1053,20 @@ def _submit_monitor_exit(
             "build_sha": active_build_sha(),
         },
     )
+    action.update(exit_status="attempting", broker_order_id=None, client_order_id=intent.metadata["exit_client_order_id"],
+                  exit_order_reason=action["reason"])
+    # A crash or unknown POST result must leave an attributable pending attempt.
+    append_monitor_exit_event(action, journal_path=journal_path)
+    action["attempted"] = True
     order = broker.submit_order(intent, open_positions=0)
+    _apply_exit_order_result(action, order)
     try:
         append_order_submission(order, journal_path=journal_path)
         append_execution_outcome(
             decision_id=intent.decision_id,
             thesis_id=intent.thesis_id,
             symbol=symbol,
-            disposition="position_monitor_exit_submitted",
+            disposition="position_monitor_exit_submitted" if action["submitted"] else "position_monitor_exit_not_accepted",
             detail=action["reason"],
             payload={
                 "quantity": intent.quantity,
@@ -895,8 +1081,8 @@ def _submit_monitor_exit(
             },
             journal_path=journal_path,
         )
-    except Exception:
-        pass
+    except Exception as exc:
+        action["journal_error"] = str(exc)
     return order
 
 
@@ -933,18 +1119,20 @@ def _pending_exit_orders_by_symbol(broker: Any) -> dict[str, dict[str, Any]] | N
     return pending
 
 
-def _pending_orders_by_symbol(broker: Any) -> dict[str, list[dict[str, Any]]]:
+def _pending_orders_by_symbol(broker: Any) -> dict[str, list[dict[str, Any]]] | None:
     if not hasattr(broker, "list_orders"):
-        return {}
+        return None
     try:
         orders = broker.list_orders(status="open", limit=100, direction="desc")
     except Exception:
-        return {}
+        return None
     pending: dict[str, list[dict[str, Any]]] = {}
     for order in orders:
         symbol = str(order.get("symbol") or "").upper()
         status = str(order.get("status") or "").lower()
-        if not symbol or status not in {"new", "accepted", "partially_filled", "pending_new", "pending_replace"}:
+        if not symbol:
+            return None
+        if status in _TERMINAL_FUNDING_STATUSES:
             continue
         pending.setdefault(symbol, []).append(order)
     return pending
@@ -955,20 +1143,38 @@ def _cancel_pending_orders_for_symbol(
     pending_orders: dict[str, list[dict[str, Any]]],
     *,
     broker: AlpacaExecutionBroker,
-) -> list[str]:
+) -> tuple[list[str], float]:
     canceled: list[str] = []
+    new_sell_fills = 0.0
     for order in pending_orders.get(symbol, []):
         order_id = str(order.get("id") or order.get("broker_order_id") or "")
         if not order_id:
-            continue
+            raise ValueError("exit_cancellation_identity_unavailable")
+        if not hasattr(broker, "cancel_order"):
+            raise ValueError("exit_cancellation_confirmation_unavailable")
+        if not hasattr(broker, "get_order"):
+            raise ValueError("exit_cancellation_confirmation_unavailable")
         try:
             broker.cancel_order(order_id)
         except Exception as exc:
             normalized = str(exc).strip().lower()
             if not any(token in normalized for token in ("already canceled", "already cancelled", "not found", "404")):
                 raise
+        confirmed = broker.get_order(order_id)
+        if (
+            str(confirmed.get("id") or confirmed.get("broker_order_id") or "") != order_id
+            or str(confirmed.get("symbol") or "").upper() != symbol
+            or str(confirmed.get("status") or "").lower() not in {"canceled", "cancelled", "filled", "expired", "rejected"}
+        ):
+            raise ValueError("exit_cancellation_requires_reconciliation")
+        filled = _finite_number(confirmed.get("filled_qty"))
+        before = _finite_number(order.get("filled_qty"))
+        if filled is None or filled < 0 or (filled > 0 and before is None):
+            raise ValueError("exit_cancellation_fill_quantity_unavailable")
+        if str(confirmed.get("side") or order.get("side") or "").lower() == "sell":
+            new_sell_fills += max(0.0, filled - (before or 0.0))
         canceled.append(order_id)
-    return canceled
+    return canceled, new_sell_fills
 
 
 def _without_canceled_orders(
@@ -1153,30 +1359,45 @@ def _handle_pending_take_profit_exit(
     )
     if action.get("take_profit_tier") == "force_exit":
         try:
-            if order_id and hasattr(broker, "cancel_order"):
-                broker.cancel_order(order_id)
+            action.update(submitted=False, attempted=False, exit_status="uncertain",
+                          broker_order_id=order_id, client_order_id=pending_exit.get("client_order_id"))
+            if not _record_monitor_action(action, journal_path):
+                return action
+            if not order_id or not hasattr(broker, "cancel_order"):
+                raise ValueError("exit_cancellation_confirmation_unavailable")
+            _, new_sell_fills = _cancel_pending_orders_for_symbol(action["symbol"], {action["symbol"]: [pending_exit]}, broker=broker)
+            action["canceled_pending_exit_order_id"] = order_id
+            if _refresh_exit_position(broker, action, new_sell_fills=new_sell_fills) is None:
+                action["exit_status"] = "position_not_open"
+                _record_monitor_action(action, journal_path)
+                return action
             order = _submit_forced_take_profit_exit(
                 action=action,
                 broker=broker,
                 rules=rules,
                 journal_path=journal_path,
             )
-            return {
+            _apply_exit_order_result(action, order)
+            result = {
                 **action,
-                "reason": "take_profit_force_exit_submitted",
-                "submitted": True,
+                "reason": "take_profit_force_exit_submitted" if action["submitted"] else "take_profit_force_exit_not_accepted",
                 "canceled_pending_exit_order_id": order_id or None,
                 "broker_order_id": order.broker_order_id,
                 "state": order.state.value,
             }
+            _record_monitor_action(result, journal_path)
+            return result
         except Exception as exc:
-            return {
+            result = {
                 **action,
                 "reason": "take_profit_force_exit_failed",
                 "submitted": False,
+                "exit_status": "uncertain",
                 "canceled_pending_exit_order_id": order_id or None,
                 "error": str(exc),
             }
+            _record_monitor_action(result, journal_path)
+            return result
     result = {
         **action,
         "reason": "take_profit_exit_already_pending",
@@ -1184,15 +1405,37 @@ def _handle_pending_take_profit_exit(
         "broker_order_id": order_id,
         "existing_limit_price": current_limit,
         "target_limit_price": target_limit,
+        "client_order_id": pending_exit.get("client_order_id"),
+        "exit_order_reason": "take_profit",
+        "exit_status": "pending" if order_id else "uncertain",
     }
     if not order_id or current_limit is None or target_limit >= current_limit or not hasattr(broker, "replace_order"):
+        _record_monitor_action(result, journal_path)
+        return result
+    result.update(exit_status="uncertain", replacement_from_order_id=order_id, replace_attempted=False)
+    if not _record_monitor_action(result, journal_path):
         return result
     try:
+        result.update(attempted=True, replace_attempted=True)
         payload = broker.replace_order(order_id, limit_price=target_limit)
+        status = str(payload.get("status") or "").lower()
+        if (not payload.get("id") or str(payload.get("symbol") or "").upper() != action["symbol"]
+                or str(payload.get("side") or "").lower() != "sell"
+                or status not in {"new", "accepted", "pending_new", "pending_replace", "partially_filled", "filled"}):
+            raise ValueError("exit_replacement_requires_reconciliation")
         result["reason"] = "take_profit_exit_repriced"
         result["replaced"] = True
-        result["broker_order_id"] = payload.get("id") or order_id
+        result["broker_order_id"] = payload["id"]
+        result["client_order_id"] = payload.get("client_order_id")
+        result["exit_status"] = "broker_reported_filled" if status == "filled" else "pending"
         result["new_limit_price"] = target_limit
+    except Exception as exc:
+        result["replaced"] = False
+        result["error"] = str(exc)
+        _record_monitor_action(result, journal_path)
+        return result
+    _record_monitor_action(result, journal_path)
+    try:
         append_execution_outcome(
             decision_id=f"monitor-{action['symbol']}",
             thesis_id=f"monitor:{action['symbol']}:take_profit_reprice",
@@ -1209,8 +1452,7 @@ def _handle_pending_take_profit_exit(
             journal_path=journal_path,
         )
     except Exception as exc:
-        result["replaced"] = False
-        result["error"] = str(exc)
+        result["journal_error"] = str(exc)
     return result
 
 

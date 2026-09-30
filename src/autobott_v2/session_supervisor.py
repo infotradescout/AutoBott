@@ -21,7 +21,7 @@ from .hosted_policy import (
 from .options_universe import resolve_symbol_universe
 from .position_monitor import run_position_monitor
 from .primary_runtime_evidence import poll_primary_runtime_evidence_once
-from .runtime_control import arm_paper_execution
+from .runtime_control import load_runtime_state
 from .session_runner import run_trading_session
 
 
@@ -92,7 +92,7 @@ def load_session_supervisor_config() -> SessionSupervisorConfig:
     raw_batch_size = os.getenv("AUTOBOTT_SESSION_SYMBOL_BATCH_SIZE")
     run_forever = True if hosted_paper else _normalize_bool(os.getenv("AUTOBOTT_SESSION_RUN_FOREVER"), default=False)
     return SessionSupervisorConfig(
-        enabled=_normalize_bool(os.getenv("AUTOBOTT_SESSION_AUTOSTART"), default=True),
+        enabled=_normalize_bool(os.getenv("AUTOBOTT_SESSION_AUTOSTART"), default=False),
         symbols=symbols,
         interval_seconds=HOSTED_SESSION_INTERVAL_SECONDS if hosted_paper else int(os.getenv("AUTOBOTT_SESSION_INTERVAL_SECONDS", "300")),
         max_cycles=None if run_forever else (int(raw_max_cycles) if raw_max_cycles else None),
@@ -103,7 +103,7 @@ def load_session_supervisor_config() -> SessionSupervisorConfig:
         start_time=_normalize_time_text(HOSTED_SESSION_START_TIME if hosted_paper else (os.getenv("AUTOBOTT_SESSION_START_TIME") or "09:35")),
         end_time=_normalize_time_text(HOSTED_SESSION_END_TIME if hosted_paper else (os.getenv("AUTOBOTT_SESSION_END_TIME") or "15:55")),
         market_timezone=(HOSTED_SESSION_MARKET_TIMEZONE if hosted_paper else (os.getenv("AUTOBOTT_SESSION_MARKET_TIMEZONE") or "America/New_York").strip() or "America/New_York"),
-        arm_paper_execution_on_start=_normalize_bool(os.getenv("AUTOBOTT_SESSION_ARM_PAPER_EXECUTION"), default=True),
+        arm_paper_execution_on_start=_normalize_bool(os.getenv("AUTOBOTT_SESSION_ARM_PAPER_EXECUTION"), default=False),
         position_monitor_heartbeat_enabled=(HOSTED_POSITION_MONITOR_HEARTBEAT_ENABLED if hosted_paper
             else _normalize_bool(os.getenv("AUTOBOTT_POSITION_MONITOR_HEARTBEAT_ENABLED"), default=False)),
         position_monitor_heartbeat_seconds=(HOSTED_POSITION_MONITOR_HEARTBEAT_SECONDS if hosted_paper
@@ -115,6 +115,9 @@ def load_session_supervisor_config() -> SessionSupervisorConfig:
 def maybe_start_session_supervisor() -> bool:
     config = load_session_supervisor_config()
     if not config.enabled:
+        return False
+    state = load_runtime_state()
+    if state.kill_switch_enabled or not state.execution_enabled:
         return False
     return _start_session_thread(config, consume_autostart=True)
 
@@ -184,8 +187,7 @@ def _poll_and_record_primary_evidence() -> dict[str, Any]:
 def _run_session(config: SessionSupervisorConfig, stop_event: threading.Event) -> None:
     global _SESSION_STATE
     try:
-        if config.arm_paper_execution_on_start:
-            arm_paper_execution(reason="session_supervisor_autostart")
+        # Session startup never changes persisted operator safety controls.
         result = run_trading_session(
             symbols=config.symbols, interval_seconds=config.interval_seconds,
             start_time=_parse_optional_time(config.start_time), end_time=_parse_optional_time(config.end_time),

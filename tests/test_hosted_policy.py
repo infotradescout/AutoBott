@@ -129,8 +129,8 @@ def test_hosted_hard_safety_controls_honor_explicit_off_values(monkeypatch, valu
     assert execution.allow_order_placement is enabled
     assert execution.risk_controls().allow_order_placement is enabled
     assert paper.allow_order_placement is enabled
-    assert session.enabled is enabled
-    assert session.arm_paper_execution_on_start is enabled
+    assert session.enabled is (enabled if value is not None else False)
+    assert session.arm_paper_execution_on_start is (enabled if value is not None else False)
     assert execution.allow_live_trading is False
     assert paper.paper_only is True
     assert paper.live_trading_enabled is False

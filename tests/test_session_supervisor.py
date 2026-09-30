@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import threading
+from dataclasses import replace
 
 import pytest
 
 import autobott_v2.session_supervisor as supervisor
+from autobott_v2.runtime_control import default_runtime_state, load_runtime_state, save_runtime_state, set_kill_switch
 
 
 
@@ -108,8 +110,7 @@ def test_hosted_arm_off_does_not_rearm_runtime_when_session_runs(monkeypatch) ->
     monkeypatch.setenv("AUTOBOTT_SESSION_ARM_PAPER_EXECUTION", "false")
     monkeypatch.setattr(supervisor, "_SESSION_STATE", supervisor.SessionSupervisorState())
     monkeypatch.setattr(
-        supervisor,
-        "arm_paper_execution",
+        "autobott_v2.runtime_control.arm_paper_execution",
         lambda **_kwargs: pytest.fail("Disabled startup arming must preserve the runtime lock"),
     )
     calls = []
@@ -142,8 +143,9 @@ def test_load_session_supervisor_config_expands_top_options_universe(monkeypatch
     assert config.symbols[:5] == ["SPY", "QQQ", "IWM", "DIA", "TLT"]
 
 
-def test_maybe_start_session_supervisor_starts_once(monkeypatch) -> None:
+def test_maybe_start_session_supervisor_starts_once(monkeypatch, tmp_path) -> None:
     _reset_supervisor_state()
+    _persist_authorized_test_state(monkeypatch, tmp_path)
     monkeypatch.setenv("AUTOBOTT_SESSION_AUTOSTART", "true")
     monkeypatch.setenv("AUTOBOTT_SESSION_MAX_CYCLES", "1")
     calls = []
@@ -223,13 +225,13 @@ def test_supervisor_publishes_each_cycle_before_session_finishes() -> None:
     assert status["last_result"]["cycle_results"][0]["trade_attempted_count"] == 2
 
 
-def test_maybe_start_session_supervisor_can_arm_paper_execution(monkeypatch) -> None:
+def test_maybe_start_session_supervisor_preserves_existing_paper_arm(monkeypatch, tmp_path) -> None:
     _reset_supervisor_state()
+    _persist_authorized_test_state(monkeypatch, tmp_path)
     monkeypatch.setenv("AUTOBOTT_SESSION_AUTOSTART", "true")
     monkeypatch.setenv("AUTOBOTT_SESSION_MAX_CYCLES", "1")
     monkeypatch.setenv("AUTOBOTT_SESSION_ARM_PAPER_EXECUTION", "true")
     calls = []
-    armed = []
 
     def fake_run_trading_session(**kwargs):
         calls.append(kwargs)
@@ -241,7 +243,6 @@ def test_maybe_start_session_supervisor_can_arm_paper_execution(monkeypatch) -> 
         return Result()
 
     monkeypatch.setattr(supervisor, "run_trading_session", fake_run_trading_session)
-    monkeypatch.setattr(supervisor, "arm_paper_execution", lambda *, reason: armed.append(reason))
     started = supervisor.maybe_start_session_supervisor()
     import time
     for _ in range(20):
@@ -251,7 +252,7 @@ def test_maybe_start_session_supervisor_can_arm_paper_execution(monkeypatch) -> 
         time.sleep(0.01)
     assert started is True
     assert calls
-    assert armed == ["session_supervisor_autostart"]
+    assert load_runtime_state().reason == "synthetic_operator_arm"
     assert calls[0]["continuous_window"] is True
 
 
@@ -348,8 +349,9 @@ def test_position_monitor_heartbeat_survives_finished_session(monkeypatch) -> No
     assert monitor_calls
 
 
-def test_consumed_autostart_still_ensures_position_monitor(monkeypatch) -> None:
+def test_consumed_autostart_still_ensures_position_monitor(monkeypatch, tmp_path) -> None:
     _reset_supervisor_state()
+    _persist_authorized_test_state(monkeypatch, tmp_path)
     monkeypatch.setenv("AUTOBOTT_SESSION_AUTOSTART", "true")
     monkeypatch.setenv("AUTOBOTT_SESSION_MAX_CYCLES", "1")
     monkeypatch.setenv("AUTOBOTT_POSITION_MONITOR_HEARTBEAT_ENABLED", "true")
@@ -381,3 +383,79 @@ def test_consumed_autostart_still_ensures_position_monitor(monkeypatch) -> None:
     assert supervisor.maybe_start_session_supervisor() is False
     assert supervisor._POSITION_MONITOR_THREAD is not None
     assert supervisor._POSITION_MONITOR_THREAD is not old_thread
+
+
+def _persist_authorized_test_state(monkeypatch, tmp_path) -> None:
+    monkeypatch.setenv("AUTOBOTT_DATA_ROOT", str(tmp_path))
+    save_runtime_state(replace(default_runtime_state(), execution_enabled=True,
+                               reason="synthetic_operator_arm"))
+
+
+def test_supervisor_startup_defaults_disabled(monkeypatch) -> None:
+    monkeypatch.delenv("AUTOBOTT_SESSION_AUTOSTART", raising=False)
+    monkeypatch.delenv("AUTOBOTT_SESSION_ARM_PAPER_EXECUTION", raising=False)
+    config = supervisor.load_session_supervisor_config()
+    assert config.enabled is False
+    assert config.arm_paper_execution_on_start is False
+
+
+@pytest.mark.parametrize("state_kind", ["missing", "paused", "kill_switch"])
+def test_autostart_requires_persisted_enabled_state(monkeypatch, tmp_path, state_kind) -> None:
+    _reset_supervisor_state()
+    monkeypatch.setenv("AUTOBOTT_DATA_ROOT", str(tmp_path))
+    monkeypatch.setenv("AUTOBOTT_SESSION_AUTOSTART", "true")
+    monkeypatch.setenv("AUTOBOTT_SESSION_ARM_PAPER_EXECUTION", "true")
+    monkeypatch.setenv("AUTOBOTT_POSITION_MONITOR_HEARTBEAT_ENABLED", "true")
+    if state_kind == "paused":
+        save_runtime_state(default_runtime_state())
+    elif state_kind == "kill_switch":
+        set_kill_switch(True, reason="synthetic_operator_stop")
+    before = load_runtime_state().to_json_dict() if state_kind != "missing" else None
+    monkeypatch.setattr(supervisor, "_start_session_thread",
+                        lambda *args, **kwargs: pytest.fail("paused startup created worker"))
+    assert supervisor.maybe_start_session_supervisor() is False
+    assert supervisor._SESSION_THREAD is None
+    assert supervisor._POSITION_MONITOR_THREAD is None
+    assert supervisor._SESSION_AUTOSTART_CONSUMED is False
+    if before is not None:
+        assert load_runtime_state().to_json_dict() == before
+
+
+@pytest.mark.parametrize("killed", [False, True])
+def test_manual_session_retained_arm_flag_preserves_safety_state(monkeypatch, tmp_path, killed) -> None:
+    _reset_supervisor_state()
+    monkeypatch.setenv("AUTOBOTT_DATA_ROOT", str(tmp_path))
+    monkeypatch.setenv("AUTOBOTT_SESSION_ARM_PAPER_EXECUTION", "true")
+    stopped = set_kill_switch(killed, reason="synthetic_operator_stop")
+    class Result:
+        def to_json_dict(self):
+            return {"cycles_completed": 0}
+    monkeypatch.setattr(supervisor, "run_trading_session", lambda **kwargs: Result())
+    stop_event = threading.Event()
+    supervisor._run_session(supervisor.load_session_supervisor_config(), stop_event)
+    assert stop_event.is_set()
+    assert load_runtime_state().to_json_dict() == stopped.to_json_dict()
+
+
+@pytest.mark.parametrize("field,value", [("execution_enabled", "false"), ("kill_switch_enabled", "false"),
+                                        ("kill_switch_enabled", None), ("live_mode_enabled", None)])
+def test_retained_autostart_does_not_start_with_invalid_safety_fields(monkeypatch, tmp_path, field, value):
+    import json
+    from autobott_v2.runtime_control import runtime_state_path
+    _reset_supervisor_state()
+    monkeypatch.setenv("AUTOBOTT_DATA_ROOT", str(tmp_path))
+    monkeypatch.setenv("AUTOBOTT_SESSION_AUTOSTART", "true")
+    monkeypatch.setenv("AUTOBOTT_SESSION_ARM_PAPER_EXECUTION", "true")
+    payload = default_runtime_state().to_json_dict()
+    payload["execution_enabled"] = True
+    if value is None:
+        del payload[field]
+    else:
+        payload[field] = value
+    path = runtime_state_path()
+    path.parent.mkdir(parents=True)
+    path.write_text(json.dumps(payload), encoding="utf-8")
+    monkeypatch.setattr(supervisor, "_start_session_thread",
+                        lambda *args, **kwargs: pytest.fail("invalid safety state created worker"))
+    assert supervisor.maybe_start_session_supervisor() is False
+    assert supervisor._POSITION_MONITOR_THREAD is None
