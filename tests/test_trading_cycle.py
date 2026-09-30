@@ -332,6 +332,8 @@ class FakeBrokerWithAllOrders(FakeBroker):
 
 class FailingOutcomeBroker(FakeBrokerWithLivePositions):
     def list_orders(self, *, status="open", limit=100, direction="desc"):
+        if status == "open":
+            return []  # Known exit inventory; only historical outcome learning is unavailable.
         raise RuntimeError("broker_history_unavailable")
 
 
