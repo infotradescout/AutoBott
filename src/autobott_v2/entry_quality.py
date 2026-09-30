@@ -158,8 +158,9 @@ def evaluate_entry_quality(
         except (ValueError, TypeError, OverflowError):
             issues.append("invalid_snapshot_timestamp")
             continue
-        observed_through = max(observed_through, timestamp)
         if start <= timestamp <= end:
+            # A later snapshot cannot establish coverage inside this fixed window.
+            observed_through = max(observed_through, timestamp)
             candidates.append((timestamp, snapshot))
     candidates.sort(key=lambda item: item[0])
     points: list[tuple[datetime, datetime, Decimal]] = []

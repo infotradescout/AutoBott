@@ -123,6 +123,20 @@ class EntryQualityTests(unittest.TestCase):
         self.assertEqual(result["status"], "unscorable")
         self.assertIn("holding_window_incomplete", result["data_issues"])
 
+    def test_outside_window_cannot_rescue_an_incomplete_horizon(self):
+        for horizon in (120, 180, 300):
+            with self.subTest(horizon=horizon):
+                rules = policy(holding_seconds=horizon)
+                rows = [snapshot(0, .99)] + [snapshot(t, 1.2) for t in range(30, horizon, 30)]
+                truncated = assess(rows, rules)
+                self.assertEqual(truncated["status"], "unscorable")
+                self.assertIn("holding_window_incomplete", truncated["data_issues"])
+                self.assertEqual(assess(rows + [snapshot(horizon + 1, 3)], rules), truncated)
+                complete = rows + [snapshot(horizon, 1.2)]
+                self.assertEqual(assess(complete, rules)["status"], "pass")
+                self.assertEqual(assess(complete + [snapshot(horizon + 1, 0)], rules),
+                                 assess(complete, rules))
+
     def test_missing_contract_is_unscorable(self):
         rows = path()
         rows[2]["option_chain"] = []
