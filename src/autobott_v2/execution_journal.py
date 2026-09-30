@@ -16,6 +16,13 @@ from .runtime_paths import data_root
 # out. Keep their original rows through both bounded reads and compaction.
 _DURABLE_EVENT_TYPES = frozenset({"order_submission", "position_monitor_exit_event"})
 _EXECUTION_JOURNAL_LOCK = threading.RLock()
+_EXIT_TRANSITION_FIELDS = (
+    "symbol", "entry_broker_order_id", "reason", "broker_order_id", "client_order_id",
+    "exit_status", "state", "attempted", "submitted", "replace_attempted", "replaced",
+    "error", "journal_error", "position_quantity", "quantity", "exit_order_reason",
+    "exit_position_quantity", "replacement_from_order_id", "canceled_pending_order_ids",
+    "canceled_pending_exit_order_id",
+)
 
 
 def execution_journal_path() -> Path:
@@ -64,13 +71,23 @@ def append_monitor_exit_event(
 ) -> Path:
     """Keep exit attempts, blocked actions and failures through tail retention."""
     symbol = str(action.get("symbol") or "")
-    return _append_record(ExecutionJournalRecord(
-        recorded_at=datetime.now(tz=UTC),
-        event_type="position_monitor_exit_event",
-        decision_id=f"monitor-{symbol}",
-        thesis_id=f"monitor:{symbol}:{action.get('reason')}",
-        payload=_json_safe(dict(action)),
-    ), journal_path=journal_path)
+    path = Path(journal_path) if journal_path is not None else execution_journal_path()
+    with _EXECUTION_JOURNAL_LOCK:
+        # Keep every attempt and safety transition, without permanently storing
+        # identical held-order heartbeat rows on the small persistent disk.
+        for row in reversed(load_execution_journal(journal_path=path)):
+            previous = row.get("payload") or {}
+            if row.get("event_type") == "position_monitor_exit_event" and previous.get("symbol") == symbol:
+                if all(previous.get(field) == action.get(field) for field in _EXIT_TRANSITION_FIELDS):
+                    return path
+                break
+        return _append_record(ExecutionJournalRecord(
+            recorded_at=datetime.now(tz=UTC),
+            event_type="position_monitor_exit_event",
+            decision_id=f"monitor-{symbol}",
+            thesis_id=f"monitor:{symbol}:{action.get('reason')}",
+            payload=_json_safe(dict(action)),
+        ), journal_path=path)
 
 
 def append_execution_outcome(

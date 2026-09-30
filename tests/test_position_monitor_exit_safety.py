@@ -3,6 +3,7 @@ import pytest
 from autobott_v2.execution_models import ExecutionState, OrderSide
 from autobott_v2.execution_journal import append_monitor_exit_event, append_execution_outcome, load_execution_journal
 from autobott_v2.jsonl_retention import compact_jsonl_tail
+from autobott_v2.position_monitor import PositionMonitorRules
 from test_position_monitor_pair_lifecycle import FakeBroker, PRIMARY, RUNNER, _broker_position, _run
 
 
@@ -251,3 +252,58 @@ def test_failed_durable_reprice_record_blocks_patch(tmp_path, monkeypatch):
                         lambda *_a, **_kw: (_ for _ in ()).throw(OSError("synthetic write failure")))
     result = _run(tmp_path, broker)
     assert result["actions"][0]["journal_error"]
+
+
+def test_successful_patch_preserves_predecessor_fills_and_original_quantity(tmp_path):
+    broker = FakeBroker([_broker_position(PRIMARY, entry=.30, current=.42)])
+    broker.positions[0]["qty"] = "2"
+    broker.orders["primary-order"]["filled_qty"] = "2"
+    seed_profit_receipt(tmp_path, broker)
+    append_monitor_exit_event({"symbol": PRIMARY, "reason": "take_profit", "exit_status": "pending",
+                               "broker_order_id": "profit-order", "entry_broker_order_id": "primary-order",
+                               "position_quantity": 2}, journal_path=tmp_path / "journal.jsonl")
+    def replace_order(order_id, *, limit_price):
+        broker.orders[order_id].update(status="replaced", replaced_by="successor", filled_qty="1")
+        broker.orders["successor"] = {"id": "successor", "symbol": PRIMARY, "side": "sell", "status": "new",
+                                      "limit_price": str(limit_price), "filled_qty": "0"}
+        return dict(broker.orders["successor"])
+    broker.replace_order = replace_order
+    rules = PositionMonitorRules(exit_min_dte=-1, max_contracts_per_option=2)
+    first = _run(tmp_path, broker, rules=rules)
+    assert first["actions"][0]["replaced"]
+    assert first["actions"][0]["replacement_from_order_id"] == "profit-order"
+    broker.positions[0].update(current_price=".10", unrealized_plpc="-.67")
+    broker.list_orders = lambda **kwargs: []
+    stale = _run(tmp_path, broker, rules=rules)
+    assert stale["actions"][0]["error"] == "prior_exit_position_fill_requires_reconciliation"
+    assert broker.submitted == []
+    broker.positions[0]["qty"] = "1"
+    reconciled = _run(tmp_path, broker, rules=rules)
+    assert len(broker.submitted) == 1
+    assert broker.submitted[0].quantity == 1
+    assert reconciled["actions"][0]["submitted"]
+    assert "replacement_from_order_id" not in reconciled["actions"][0]
+
+
+def test_excess_quantity_trim_confirms_existing_sell_cancel_before_submission(tmp_path):
+    broker = FakeBroker([_broker_position(PRIMARY, entry=.30, current=.42)])
+    broker.positions[0]["qty"] = "2"
+    seed_profit_receipt(tmp_path, broker)
+    broker.orders["profit-order"]["status"] = "pending_cancel"
+    broker.cancel_order = lambda order_id: {"id": order_id, "status": "canceled"}
+    result = _run(tmp_path, broker)
+    assert result["actions"][0]["reason"] == "trim_excess_contracts"
+    assert result["actions"][0]["exit_status"] == "uncertain"
+    assert broker.submitted == []
+
+
+def test_held_heartbeat_receipts_are_bounded_but_new_attempts_are_retained(tmp_path):
+    path = tmp_path / "journal.jsonl"
+    action = {"symbol": PRIMARY, "exit_status": "uncertain", "client_order_id": "attempt-1", "attempted": False}
+    for price in range(100):
+        append_monitor_exit_event({**action, "current_price": price / 100}, journal_path=path)
+    append_monitor_exit_event({**action, "client_order_id": "attempt-2"}, journal_path=path)
+    append_monitor_exit_event({**action, "client_order_id": "attempt-2", "exit_status": "pending"}, journal_path=path)
+    rows = load_execution_journal(journal_path=path)
+    assert len(rows) == 3
+    assert [r["payload"]["client_order_id"] for r in rows] == ["attempt-1", "attempt-2", "attempt-2"]

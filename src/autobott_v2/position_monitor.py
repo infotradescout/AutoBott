@@ -241,7 +241,8 @@ def run_position_monitor(
             _record_monitor_action(action, journal_path)
             actions.append(action)
             continue
-        pending_exit = pending_exits.get(action["symbol"])
+        pending_exit = pending_exits.get(action["symbol"]) or next(
+            (row for row in pending_orders.get(action["symbol"], []) if str(row.get("side") or "").lower() == "sell"), None)
         if pending_exit is not None:
             _include_pending_exit(pending_exit, pending_orders)
         if action["reason"] == "primary_profit_funds_runner" and pending_exit is not None:
@@ -273,16 +274,7 @@ def run_position_monitor(
             if not _record_monitor_action(action, journal_path):
                 actions.append(action)
                 continue
-            if action["reason"] in {
-                "stop_loss",
-                "trailing_stop",
-                "dte_floor",
-                "position_cost_cap_breached",
-                "pair_max_loss_reached",
-                "funded_runner_trailing_drawdown",
-                "funded_runner_catastrophic_stop",
-                "unfunded_runner_stop_loss",
-            }:
+            if action["reason"] not in {"take_profit", "primary_profit_funds_runner"}:
                 canceled_ids, new_sell_fills = _cancel_pending_orders_for_symbol(
                     action["symbol"],
                     pending_orders,
@@ -390,8 +382,12 @@ def _prior_exit_blocks(prior: dict[str, Any], action: dict[str, Any], broker: An
     """Reconcile the last sell before replacing it, including after a restart."""
     action.update(broker_order_id=prior.get("broker_order_id"), client_order_id=prior.get("client_order_id"))
     action["exit_order_reason"] = prior.get("exit_order_reason") or prior.get("reason")
+    action["exit_position_quantity"] = prior.get("exit_position_quantity", prior.get("position_quantity"))
+    if prior.get("replacement_from_order_id"):
+        action["replacement_from_order_id"] = prior["replacement_from_order_id"]
     try:
-        order_id = prior.get("broker_order_id")
+        expected_id = prior.get("broker_order_id")
+        order_id = prior.get("replacement_from_order_id") or expected_id
         if order_id:
             order = broker.get_order(order_id)
         elif prior.get("client_order_id") and hasattr(broker, "get_order_by_client_order_id"):
@@ -402,7 +398,8 @@ def _prior_exit_blocks(prior: dict[str, Any], action: dict[str, Any], broker: An
                 or str(order.get("side") or "").lower() != "sell"
                 or not order.get("id")
                 or (order_id and order.get("id") != order_id)
-                or (order.get("client_order_id") and order.get("client_order_id") != prior.get("client_order_id"))):
+                or (order_id == expected_id and order.get("client_order_id")
+                    and order.get("client_order_id") != prior.get("client_order_id"))):
             raise ValueError("prior_exit_order_identity_mismatch")
         predecessor_fills = 0.0
         seen = {order["id"]}
@@ -419,13 +416,15 @@ def _prior_exit_blocks(prior: dict[str, Any], action: dict[str, Any], broker: An
                 raise ValueError("prior_exit_replacement_identity_mismatch")
             seen.add(successor)
             order = successor_order
+        if expected_id and expected_id not in seen:
+            raise ValueError("prior_exit_replacement_successor_requires_reconciliation")
         filled = _finite_number(order.get("filled_qty"))
         total_fills = predecessor_fills + (filled or 0.0)
         if str(order.get("status") or "").lower() == "filled":
             action.update(broker_order_id=order["id"], exit_status="broker_reported_filled")
             return True
         if total_fills > 0:
-            original = _finite_number(prior.get("position_quantity"))
+            original = _finite_number(action.get("exit_position_quantity"))
             current = _finite_number(action.get("position_quantity"))
             if original is None or current is None or current > original - total_fills:
                 raise ValueError("prior_exit_position_fill_requires_reconciliation")
@@ -1053,8 +1052,9 @@ def _submit_monitor_exit(
             "build_sha": active_build_sha(),
         },
     )
+    action.pop("replacement_from_order_id", None)
     action.update(exit_status="attempting", broker_order_id=None, client_order_id=intent.metadata["exit_client_order_id"],
-                  exit_order_reason=action["reason"])
+                  exit_order_reason=action["reason"], exit_position_quantity=action.get("position_quantity"))
     # A crash or unknown POST result must leave an attributable pending attempt.
     append_monitor_exit_event(action, journal_path=journal_path)
     action["attempted"] = True
@@ -1412,7 +1412,9 @@ def _handle_pending_take_profit_exit(
     if not order_id or current_limit is None or target_limit >= current_limit or not hasattr(broker, "replace_order"):
         _record_monitor_action(result, journal_path)
         return result
-    result.update(exit_status="uncertain", replacement_from_order_id=order_id, replace_attempted=False)
+    result.update(exit_status="uncertain", replacement_from_order_id=action.get("replacement_from_order_id") or order_id,
+                  exit_position_quantity=action.get("exit_position_quantity", action.get("position_quantity")),
+                  replace_attempted=False)
     if not _record_monitor_action(result, journal_path):
         return result
     try:

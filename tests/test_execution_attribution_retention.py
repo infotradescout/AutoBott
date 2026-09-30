@@ -172,7 +172,7 @@ def test_append_uses_receipt_preservation_under_concurrent_compaction(tmp_path, 
     path = tmp_path / "events.jsonl"
     original_compact = journal.compact_jsonl_tail
     def small_compact(target, **kwargs):
-        assert kwargs["preserve_event_types"] == PROTECTED
+        assert kwargs["preserve_event_types"] == PROTECTED | {"position_monitor_exit_event"}
         return original_compact(target, max_bytes=1000, retain_bytes=500, **kwargs)
     monkeypatch.setattr(journal, "compact_jsonl_tail", small_compact)
     def append(index):

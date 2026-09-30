@@ -176,6 +176,7 @@ def test_build_trade_intent_from_decision_rejects_non_trade_candidate() -> None:
         build_trade_intent_from_decision(_decision_card(decision=DecisionStatus.NO_TRADE))
 
 
+@pytest.mark.usefixtures("synthetic_execution_armed")
 def test_submit_decision_to_broker_writes_journal_and_returns_order(tmp_path) -> None:
     broker = FakeBroker(max_position_cost=100.0, paper_ignore_position_cost_limit=True)
     journal_path = tmp_path / "execution_orders.jsonl"
@@ -194,6 +195,7 @@ def test_submit_decision_to_broker_writes_journal_and_returns_order(tmp_path) ->
     assert '"event_type": "order_submission"' in lines[1]
 
 
+@pytest.mark.usefixtures("synthetic_execution_armed")
 def test_submit_decision_to_broker_raises_exact_risk_rejection(tmp_path) -> None:
     broker = FakeBroker()
     broker.config = _config(allow_order_placement=False)
@@ -213,6 +215,7 @@ def test_submit_decision_to_broker_raises_exact_risk_rejection(tmp_path) -> None
     assert '"event_type": "risk_check"' in lines[0]
 
 
+@pytest.mark.usefixtures("synthetic_execution_armed")
 def test_submit_core_runner_uses_two_distinct_contracts_atomically(tmp_path, monkeypatch) -> None:
     import autobott_v2.execution_orchestrator as orchestrator
 
@@ -262,6 +265,7 @@ def test_submit_core_runner_uses_two_distinct_contracts_atomically(tmp_path, mon
     assert len(journal_path.read_text(encoding="utf-8").splitlines()) == 4
 
 
+@pytest.mark.usefixtures("synthetic_execution_armed")
 def test_submit_core_runner_can_use_linked_simple_orders_for_paper_collection(tmp_path, monkeypatch) -> None:
     import autobott_v2.execution_orchestrator as orchestrator
 
@@ -313,6 +317,7 @@ def test_submit_core_runner_can_use_linked_simple_orders_for_paper_collection(tm
     assert runner_order.intent.metadata["leg_role"] == "runner"
 
 
+@pytest.mark.usefixtures("synthetic_execution_armed")
 def test_hosted_pair_ignores_stale_mleg_and_limit_order_environment(tmp_path, monkeypatch) -> None:
     import autobott_v2.execution_orchestrator as orchestrator
 
@@ -361,6 +366,7 @@ def test_hosted_pair_ignores_stale_mleg_and_limit_order_environment(tmp_path, mo
     assert [intent.limit_price for intent in broker.intents] == [0.70, 0.25]
 
 
+@pytest.mark.usefixtures("synthetic_execution_armed")
 def test_hosted_direct_vix_pair_posts_exact_returned_vixw_symbols(tmp_path, monkeypatch) -> None:
     import autobott_v2.execution_orchestrator as orchestrator
 
@@ -408,6 +414,7 @@ def test_hosted_direct_vix_pair_posts_exact_returned_vixw_symbols(tmp_path, monk
 
 
 @pytest.mark.parametrize("observer_fails", [False, True])
+@pytest.mark.usefixtures("synthetic_execution_armed")
 def test_linked_pair_runner_failure_market_closes_filled_primary(tmp_path, monkeypatch, observer_fails) -> None:
     import autobott_v2.execution_orchestrator as orchestrator
 
@@ -493,6 +500,7 @@ def test_linked_pair_runner_failure_market_closes_filled_primary(tmp_path, monke
     assert broker.intents[-1].metadata["compensating_exit"] is True
 
 
+@pytest.mark.usefixtures("synthetic_execution_armed")
 def test_submit_core_runner_allows_pair_above_manual_mirror_budget(tmp_path, monkeypatch) -> None:
     import autobott_v2.execution_orchestrator as orchestrator
 
@@ -533,6 +541,7 @@ def test_submit_core_runner_allows_pair_above_manual_mirror_budget(tmp_path, mon
     assert len(broker.mleg_calls) == 1
 
 
+@pytest.mark.usefixtures("synthetic_execution_armed")
 def test_submit_core_runner_fails_closed_without_atomic_mleg_support(tmp_path) -> None:
     class SingleLegOnlyBroker:
         def __init__(self) -> None:

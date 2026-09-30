@@ -27,3 +27,16 @@ def join_test_owned_autobott_workers(monkeypatch):
         if thread.ident is not None:
             thread.join(timeout=2)
         assert not thread.is_alive(), 'test-owned AutoBott worker outlived its provider fixtures'
+
+
+@pytest.fixture
+def synthetic_execution_armed(monkeypatch):
+    """Opt-in arm for fake-broker tests that exercise execution admission."""
+    from dataclasses import replace
+    from autobott_v2 import execution_orchestrator
+    from autobott_v2.runtime_control import default_runtime_state
+
+    state = replace(default_runtime_state(), execution_enabled=True,
+                    reason="synthetic_operator_arm")
+    monkeypatch.setattr(execution_orchestrator, "load_runtime_state", lambda: state)
+    return state

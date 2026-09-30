@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from dataclasses import replace
+
 import json
 from datetime import UTC, datetime
 
@@ -84,7 +86,7 @@ def test_build_exit_intent_from_position_creates_sell_to_close() -> None:
 
 
 def test_submit_exit_for_position_marks_position_closing(tmp_path) -> None:
-    save_runtime_state(default_runtime_state())
+    save_runtime_state(replace(default_runtime_state(), execution_enabled=True, reason="synthetic_operator_arm"))
     store_path = tmp_path / "open_positions.json"
     journal_path = tmp_path / "journal.jsonl"
     save_open_positions([_position()], store_path=store_path)

@@ -4,6 +4,7 @@ Run through scripts/validate_offline.py so sockets, credentials and subprocesses
 remain guarded independently of these synthetic provider adapters.
 """
 from copy import deepcopy
+from dataclasses import replace
 from datetime import datetime, timedelta
 import json
 from pathlib import Path
@@ -136,7 +137,7 @@ def test_native_session_cache_expiry_and_unavailable_refresh(tmp_path, monkeypat
     monkeypatch.setenv("AUTOBOTT_DATA_ROOT", str(tmp_path / "state"))
     monkeypatch.setenv("AUTOBOTT_ARTIFACTS_ROOT", str(tmp_path / "artifacts"))
     monkeypatch.setenv("AUTOBOTT_CORE_RUNNER_ENABLED", "false")
-    save_runtime_state(default_runtime_state())
+    save_runtime_state(replace(default_runtime_state(), execution_enabled=True, reason="synthetic_operator_arm"))
     monkeypatch.setattr(shell, "load_open_positions", lambda: [])
     monkeypatch.setattr(shell, "_entry_check_now", clock.now)
     capture = shell.capture_symbol_snapshot

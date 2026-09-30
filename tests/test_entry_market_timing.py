@@ -98,7 +98,7 @@ class EntryTape(CoreRunnerDataClient):
 def run_cycle(tmp_path, monkeypatch, *, defect=None, pair=False, v2=False, now=None, clock=None):
     monkeypatch.setenv("AUTOBOTT_DATA_ROOT", str(tmp_path / "state"))
     monkeypatch.setenv("AUTOBOTT_CORE_RUNNER_ENABLED", "true" if pair else "false")
-    save_runtime_state(default_runtime_state())
+    save_runtime_state(replace(default_runtime_state(), execution_enabled=True, reason="synthetic_operator_arm"))
     monkeypatch.setattr(cycle, "load_open_positions", lambda: [])
     monkeypatch.setattr(cycle, "_entry_check_now", clock or (lambda: now or START + timedelta(seconds=10)), raising=False)
     broker, client = FakeBroker(), (V2EntryTape(defect) if v2 else EntryTape(defect))

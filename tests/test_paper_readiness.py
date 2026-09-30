@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from dataclasses import replace
+
 import json
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -65,7 +67,7 @@ def test_paper_readiness_probe_returns_paper_ready(monkeypatch, tmp_path) -> Non
     monkeypatch.setenv("AUTOBOTT_PAPER_ONLY", "true")
     monkeypatch.setenv("AUTOBOTT_ALLOW_ORDER_PLACEMENT", "true")
     monkeypatch.setenv("AUTOBOTT_DATA_ROOT", str(tmp_path / "data"))
-    save_runtime_state(default_runtime_state(), state_path=tmp_path / "data" / "execution" / "runtime_state.json")
+    save_runtime_state(replace(default_runtime_state(), execution_enabled=True, reason="synthetic_operator_arm"), state_path=tmp_path / "data" / "execution" / "runtime_state.json")
 
     result = run_paper_readiness_probe(
         symbol="SPY",

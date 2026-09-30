@@ -14,11 +14,13 @@ from zoneinfo import ZoneInfo
 
 
 PROTECTED = {
-    "execution_broker.py": "2592084287f06476aff654aed1d2f91fa8a6b1d9",
+    # Exit client identity and durable exit receipts intentionally change these
+    # two blobs. Other restored risk/accounting/policy locks remain unchanged.
+    "execution_broker.py": "f04f11cfc6e42fc6dc552bca057ba2ed68fc159e",
     "execution_config.py": "945d2c64a16307acfec96c2dafb41739b45d4012",
     "portfolio_budget.py": "4a78c8892de174dd85e20c058f1ccb90ccc63b7b",
     "strategy_policy.py": "268687abd8261d75caf01807c08152eb935f0c3b",
-    "execution_journal.py": "e27b091b18e36778b29ccd643402fc78725d0e45",
+    "execution_journal.py": "fcceb00a80cfc4dd854cb9f56b29e18c1874a3d0",
     "jsonl_retention.py": "9a308454f3d17fd1e27843680b5a7d681051154d",
 }
 REQUIRED = ("bar_timing", "entry_admission", "entry_quality", "entry_fomc_context",
