@@ -3,6 +3,7 @@ import json
 import threading
 from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -476,6 +477,7 @@ def test_dashboard_health_fails_when_run_forever_session_crashed_and_finished(mo
 
 def test_dashboard_safety_reports_live_locked(monkeypatch, tmp_path) -> None:
     _auth_env(monkeypatch, tmp_path)
+    save_runtime_state(replace(default_runtime_state(), execution_enabled=True, reason="synthetic_operator_arm"))
     monkeypatch.setenv("ALPACA_ENV", "paper")
     monkeypatch.setenv("AUTOBOTT_ALLOW_ORDER_PLACEMENT", "true")
     status, body = _invoke_app("GET", "/api/safety", token="dashboard-token")

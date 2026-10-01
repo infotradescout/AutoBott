@@ -7,10 +7,12 @@ from dataclasses import dataclass, replace
 from datetime import UTC, date, datetime
 from pathlib import Path
 from typing import Any
+from uuid import uuid4
 
 from .execution_broker import AlpacaExecutionBroker
-from .execution_journal import append_execution_outcome, append_order_submission
-from .execution_models import BrokerEnvironment, ExecutionOrder, OrderSide, OrderType, TradeIntent
+from .execution_journal import append_execution_outcome, append_monitor_exit_event, append_order_submission, load_execution_journal
+from .execution_models import BrokerEnvironment, ExecutionOrder, ExecutionState, OrderSide, OrderType, TradeIntent
+from .exit_protection import exit_protection_summary
 from .hosted_policy import (
     HOSTED_EXIT_MIN_DTE,
     HOSTED_POLICY_VERSION,
@@ -109,21 +111,56 @@ def pair_lifecycle_state_path() -> Path:
     return data_root() / "execution" / "pair_lifecycle_state.json"
 
 
-def _load_trailing_peaks(*, state_path: str | Path | None = None) -> dict[str, float]:
+@dataclass(frozen=True)
+class _TrailingPeakState:
+    peaks: dict[str, float]
+    invalid_entries: dict[str, Any]
+    error: str | None = None
+
+
+def _load_trailing_peaks(*, state_path: str | Path | None = None) -> _TrailingPeakState:
     path = Path(state_path) if state_path is not None else trailing_peak_state_path()
-    if not path.exists():
-        return {}
     try:
+        if not path.exists():
+            return _TrailingPeakState({}, {})
         payload = json.loads(path.read_text(encoding="utf-8"))
-    except (json.JSONDecodeError, OSError):
-        return {}
-    return {str(symbol): float(value) for symbol, value in payload.items()}
+    except (json.JSONDecodeError, UnicodeDecodeError, RecursionError):
+        return _TrailingPeakState({}, {}, "invalid_trailing_state_json")
+    except OSError:
+        return _TrailingPeakState({}, {}, "trailing_state_unreadable")
+    if not isinstance(payload, dict):
+        return _TrailingPeakState({}, {}, "invalid_trailing_state_shape")
+    peaks: dict[str, float] = {}
+    invalid: dict[str, Any] = {}
+    for symbol, value in payload.items():
+        number = None if isinstance(value, bool) else _finite_number(value)
+        if number is None:
+            invalid[symbol] = value
+        else:
+            peaks[symbol] = number
+    return _TrailingPeakState(peaks, invalid)
 
 
-def _save_trailing_peaks(peaks: dict[str, float], *, state_path: str | Path | None = None) -> None:
+def _save_trailing_peaks(
+    peaks: dict[str, float], *, state_path: str | Path | None = None, snapshot: _TrailingPeakState | None = None,
+) -> str | None:
+    if snapshot is not None and snapshot.error:
+        return None  # Unknown original content must remain available for review.
     path = Path(state_path) if state_path is not None else trailing_peak_state_path()
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(peaks, indent=2, sort_keys=True), encoding="utf-8")
+    payload = {**peaks, **(snapshot.invalid_entries if snapshot is not None else {})}
+    temporary = path.with_name(f".{path.name}.{uuid4().hex}.tmp")
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        temporary.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
+        temporary.replace(path)
+    except OSError:
+        return "trailing_state_persistence_failed"
+    finally:
+        try:
+            temporary.unlink(missing_ok=True)
+        except OSError:
+            pass
+    return None
 
 
 def _load_pair_states(*, state_path: str | Path | None = None) -> dict[str, dict[str, Any]]:
@@ -154,13 +191,19 @@ def run_position_monitor(
 ) -> dict[str, Any]:
     resolved_rules = rules or load_position_monitor_rules()
     if not resolved_rules.enabled:
-        return {"ok": True, "enabled": False, "checked": 0, "actions": []}
+        result = {"ok": True, "enabled": False, "checked": 0, "actions": []}
+        return {**result, "exit_protection": exit_protection_summary(result)}
     resolved_broker = broker or AlpacaExecutionBroker()
     if not hasattr(resolved_broker, "list_open_positions"):
-        return {"ok": True, "enabled": True, "checked": 0, "actions": []}
+        return {"ok": False, "enabled": True, "checked": 0, "actions": [],
+                "exit_protection": exit_protection_summary(None)}
     positions = resolved_broker.list_open_positions()
     pending_exits = _pending_exit_orders_by_symbol(resolved_broker)
     pending_orders = _pending_orders_by_symbol(resolved_broker)
+    orders_unavailable = pending_orders is None or pending_exits is None
+    pending_orders = pending_orders or {}
+    latest_exits = _latest_monitor_exits(journal_path)
+    unresolved_exits = _unresolved_monitor_exits(journal_path, latest=latest_exits)
     try:
         stored_positions = load_open_positions(store_path=position_store_path)
     except Exception:
@@ -171,7 +214,11 @@ def run_position_monitor(
         for position in positions
         if str(position.get("symbol") or "").strip()
     }
-    peaks = _load_trailing_peaks(state_path=trailing_state_path)
+    peak_state = _load_trailing_peaks(state_path=trailing_state_path)
+    peaks = peak_state.peaks
+    unavailable_peaks = {symbol.upper() for symbol in peak_state.invalid_entries}
+    if peak_state.error:
+        unavailable_peaks.update(broker_by_symbol)
     pair_states = _load_pair_states(state_path=pair_state_path)
     _reconcile_pair_funding(
         pair_states,
@@ -181,22 +228,30 @@ def run_position_monitor(
         pending_exits=pending_exits,
     )
     pending_exits = pending_exits or {}
-    pair_actions, pair_managed_symbols = _build_pair_actions(
+    pair_actions, pair_managed_symbols, invalid_pair_symbols = _build_pair_actions(
         broker_by_symbol=broker_by_symbol,
         stored_positions=stored_positions,
         peaks=peaks,
         pair_states=pair_states,
         rules=resolved_rules,
+        unavailable_peaks=unavailable_peaks,
     )
     open_symbols: set[str] = set()
     actions: list[dict[str, Any]] = []
+    exit_observations: list[dict[str, Any]] = []
+    for symbol in sorted(unavailable_peaks & broker_by_symbol.keys()):
+        exit_observations.append({"symbol": symbol, "reason": "invalid_trailing_peak",
+                                  "exit_status": "blocked", "source": "persisted_exit_state"})
+    if peak_state.error or unavailable_peaks - broker_by_symbol.keys():
+        exit_observations.append({"symbol": None, "reason": peak_state.error or "invalid_trailing_peak_for_untracked_position",
+                                  "exit_status": "blocked", "source": "persisted_exit_state"})
     stale_entry_actions = _cancel_stale_pending_entries(
         resolved_broker,
         max_age_seconds=resolved_rules.pending_entry_max_age_seconds,
     )
     actions.extend(stale_entry_actions)
     pending_orders = _without_canceled_orders(pending_orders, stale_entry_actions)
-    over_cap_actions = _cancel_over_cap_pending_entries(pending_orders, broker=resolved_broker)
+    over_cap_actions = [] if orders_unavailable else _cancel_over_cap_pending_entries(pending_orders, broker=resolved_broker)
     actions.extend(over_cap_actions)
     pending_orders = _without_canceled_orders(pending_orders, over_cap_actions)
     for position in positions:
@@ -204,16 +259,49 @@ def run_position_monitor(
         if symbol:
             open_symbols.add(symbol)
         stored_position = stored_by_symbol.get(symbol)
+        if _exit_quantity(position) is None:
+            exit_observations.append({"symbol": symbol, "reason": "invalid_exit_quantity: qty",
+                                      "exit_status": "blocked", "source": "current_exit_observation"})
+            pending_exit = pending_exits.get(symbol) or next(
+                (row for row in pending_orders.get(symbol, []) if str(row.get("side") or "").lower() == "sell"), None)
+            observation = _existing_exit_observation(symbol, stored_position, latest_exits.get(symbol), pending_exit)
+            if observation is not None:
+                exit_observations.append(observation)
+            continue
+        if symbol in invalid_pair_symbols:
+            exit_observations.append({"symbol": symbol, "reason": "invalid_pair_exit_observation: " + ", ".join(invalid_pair_symbols[symbol]),
+                                      "exit_status": "blocked", "source": "current_exit_observation"})
+            quantity = _finite_number(position.get("qty"))
+            if (quantity is None or quantity <= 0 or not quantity.is_integer()
+                    or str(position.get("side") or "long").lower() != "long"
+                    or _standalone_exit_inputs(position) is None):
+                observation = _existing_exit_observation(symbol, stored_position, latest_exits.get(symbol), pending_exits.get(symbol))
+                if observation is not None:
+                    exit_observations.append(observation)
+                continue
+            # Independently evaluable DTE/size/cost safeguards still apply.
+            # Pair policy remains reserved; standalone soft exits cannot take over.
         leg_role = stored_position.leg_role if stored_position is not None else None
         hard_action = _hard_safety_action(position, resolved_rules, leg_role=leg_role)
         pair_action = pair_actions.get(symbol) if symbol in pair_managed_symbols else None
         rules_action = (
             pair_action
             if symbol in pair_managed_symbols
-            else _monitor_action(position, _rules_for_leg(resolved_rules, leg_role), peaks, leg_role=leg_role)
+            else _monitor_action(position, _rules_for_leg(resolved_rules, leg_role), peaks,
+                                 leg_role=leg_role, trailing_available=symbol not in unavailable_peaks)
         )
         action = _position_cost_cap_action(position, broker=resolved_broker, leg_role=leg_role) or hard_action or rules_action
         if action is None:
+            inputs = _standalone_exit_inputs(position)
+            if (symbol not in pair_managed_symbols and str(position.get("side") or "long").lower() == "long"
+                    and (inputs is None or (inputs[0] == 0 and inputs[1] >= 0))):
+                exit_observations.append({"symbol": symbol, "reason": "invalid_exit_observation",
+                                          "exit_status": "blocked", "source": "current_exit_observation"})
+            pending_exit = pending_exits.get(symbol) or next(
+                (row for row in pending_orders.get(symbol, []) if str(row.get("side") or "").lower() == "sell"), None)
+            observation = _existing_exit_observation(symbol, stored_position, latest_exits.get(symbol), pending_exit)
+            if observation is not None:
+                exit_observations.append(observation)
             continue
         if stored_position is not None:
             action["trade_group_id"] = stored_position.trade_group_id
@@ -221,7 +309,36 @@ def run_position_monitor(
             action["paired_option_symbol"] = stored_position.paired_option_symbol
             action["entry_policy_version"] = stored_position.entry_policy_version
             action["entry_build_sha"] = stored_position.entry_build_sha
-        pending_exit = pending_exits.get(action["symbol"])
+            action["entry_broker_order_id"] = stored_position.broker_order_id
+        action.update(submitted=False, attempted=False)
+        action["position_quantity"] = _finite_number(position.get("qty"))
+        prior = unresolved_exits.get(symbol)
+        if (prior is not None and prior.get("entry_broker_order_id") == action.get("entry_broker_order_id")
+                and _prior_exit_blocks(prior, action, resolved_broker,
+                                       pending_orders=pending_orders, pending_exits=pending_exits)):
+            _record_monitor_action(action, journal_path)
+            actions.append(action)
+            continue
+        if orders_unavailable:
+            action.update(exit_status="uncertain" if action.get("broker_order_id") or action.get("client_order_id") else "blocked",
+                          error="open_orders_unavailable")
+            _record_monitor_action(action, journal_path)
+            actions.append(action)
+            continue
+        pending_exit = pending_exits.get(action["symbol"]) or next(
+            (row for row in pending_orders.get(action["symbol"], []) if str(row.get("side") or "").lower() == "sell"), None)
+        if pending_exit is not None:
+            _include_pending_exit(pending_exit, pending_orders)
+        if action["reason"] == "primary_profit_funds_runner" and pending_exit is not None:
+            action.update(exit_status="pending", broker_order_id=pending_exit.get("id"),
+                          client_order_id=pending_exit.get("client_order_id"), exit_order_reason=action["reason"])
+            _record_monitor_action(action, journal_path)
+            if stored_position is not None and stored_position.trade_group_id:
+                group_state = pair_states.setdefault(stored_position.trade_group_id, {})
+                group_state.update(funding_exit_submitted=True, funding_exit_order_id=action["broker_order_id"],
+                                   funding_exit_status=pending_exit.get("status"))
+            actions.append(action)
+            continue
         if action["reason"] == "take_profit" and pending_exit is not None:
             actions.append(
                 _handle_pending_take_profit_exit(
@@ -234,17 +351,15 @@ def run_position_monitor(
             )
             continue
         try:
-            if action["reason"] in {
-                "stop_loss",
-                "trailing_stop",
-                "dte_floor",
-                "position_cost_cap_breached",
-                "pair_max_loss_reached",
-                "funded_runner_trailing_drawdown",
-                "funded_runner_catastrophic_stop",
-                "unfunded_runner_stop_loss",
-            } and hasattr(resolved_broker, "cancel_order"):
-                canceled_ids = _cancel_pending_orders_for_symbol(
+            action["exit_status"] = "evaluating"
+            if pending_exit is not None:
+                action.update(exit_status="uncertain", broker_order_id=pending_exit.get("id"),
+                              client_order_id=pending_exit.get("client_order_id"))
+            if not _record_monitor_action(action, journal_path):
+                actions.append(action)
+                continue
+            if action["reason"] not in {"take_profit", "primary_profit_funds_runner"}:
+                canceled_ids, new_sell_fills = _cancel_pending_orders_for_symbol(
                     action["symbol"],
                     pending_orders,
                     broker=resolved_broker,
@@ -252,6 +367,13 @@ def run_position_monitor(
                 if canceled_ids:
                     action["canceled_pending_order_ids"] = canceled_ids
                     action["canceled_pending_exit_order_id"] = canceled_ids[0]
+                    refreshed = _refresh_exit_position(resolved_broker, action, new_sell_fills=new_sell_fills)
+                    if refreshed is None:
+                        action["exit_status"] = "position_not_open"
+                        _record_monitor_action(action, journal_path)
+                        actions.append(action)
+                        continue
+                    position = refreshed
             order = _submit_monitor_exit(
                 position,
                 action=action,
@@ -259,12 +381,10 @@ def run_position_monitor(
                 rules=resolved_rules,
                 journal_path=journal_path,
             )
-            action["submitted"] = True
-            action["broker_order_id"] = order.broker_order_id
-            action["state"] = order.state.value
+            _apply_exit_order_result(action, order)
             if action["reason"] == "primary_profit_funds_runner" and stored_position is not None and stored_position.trade_group_id:
                 group_state = pair_states.setdefault(stored_position.trade_group_id, {})
-                group_state["funding_exit_submitted"] = True
+                group_state["funding_exit_submitted"] = action["submitted"]
                 group_state["funding_exit_order_id"] = order.broker_order_id
                 group_state["funding_exit_status"] = order.state.value
                 if order.broker_order_id:
@@ -277,13 +397,19 @@ def run_position_monitor(
                 group_state["runner_symbol"] = stored_position.paired_option_symbol
         except Exception as exc:
             action["submitted"] = False
+            action["exit_status"] = "uncertain" if action.get("attempted") or pending_exit is not None else "blocked"
             action["error"] = str(exc)
+        _record_monitor_action(action, journal_path)
         actions.append(action)
     _save_pair_states(pair_states, state_path=pair_state_path)
-    _save_trailing_peaks(
+    peak_save_error = _save_trailing_peaks(
         {symbol: value for symbol, value in peaks.items() if symbol in open_symbols},
         state_path=trailing_state_path,
+        snapshot=peak_state,
     )
+    if peak_save_error:
+        exit_observations.append({"symbol": None, "reason": peak_save_error,
+                                  "exit_status": "blocked", "source": "persisted_exit_state"})
     retained_store_symbols = open_symbols | {
         symbol
         for symbol, orders in pending_orders.items()
@@ -294,11 +420,12 @@ def run_position_monitor(
     ]
     if len(retained_positions) != len(stored_positions):
         save_open_positions(retained_positions, store_path=position_store_path)
-    return {
-        "ok": True,
+    result = {
+        "ok": not orders_unavailable and not any(action.get("error") or action.get("journal_error") for action in actions),
         "enabled": True,
         "checked": len(positions),
         "actions": actions,
+        "exit_observations": exit_observations,
         "position_store_pruned": len(stored_positions) - len(retained_positions),
         "pair_groups_managed": len({
             position.trade_group_id
@@ -306,6 +433,175 @@ def run_position_monitor(
             if position.trade_group_id and position.option_symbol.upper() in pair_managed_symbols
         }),
     }
+    result["exit_protection"] = exit_protection_summary(result)
+    if result["exit_protection"]["status"] in {"attention_required", "unavailable"}:
+        result["ok"] = False
+    return result
+
+
+def _record_monitor_action(action: dict[str, Any], journal_path: str | None) -> bool:
+    try:
+        append_monitor_exit_event(action, journal_path=journal_path)
+        return True
+    except Exception as exc:
+        action["journal_error"] = str(exc)
+        return False
+
+
+def _latest_monitor_exits(journal_path: str | None) -> dict[str, dict[str, Any]]:
+    latest: dict[str, dict[str, Any]] = {}
+    for record in load_execution_journal(journal_path=journal_path):
+        if record.get("event_type") == "position_monitor_exit_event":
+            payload = record.get("payload") or {}
+            symbol = str(payload.get("symbol") or "").upper()
+            if symbol:
+                latest[symbol] = payload
+    return latest
+
+
+def _unresolved_monitor_exits(journal_path: str | None, *, latest=None) -> dict[str, dict[str, Any]]:
+    latest = _latest_monitor_exits(journal_path) if latest is None else latest
+    return {symbol: payload for symbol, payload in latest.items()
+            if payload.get("exit_status") in {"attempting", "uncertain", "pending", "partially_filled", "broker_reported_filled"}}
+
+
+def _existing_exit_observation(symbol: str, stored_position: Any, prior: dict[str, Any] | None,
+                               pending_exit: dict[str, Any] | None) -> dict[str, Any] | None:
+    """Expose existing evidence when no new exit triggers; never reconcile or execute."""
+    entry_id = stored_position.broker_order_id if stored_position is not None else None
+    if prior is not None and prior.get("entry_broker_order_id") != entry_id:
+        prior = None  # A previous holding of this contract is not this position.
+    reason = (prior or {}).get("reason") or "existing_exit_order"
+    if pending_exit is not None:
+        outcome = "partially_filled" if pending_exit.get("status") == "partially_filled" else "pending"
+        if not (pending_exit.get("id") or pending_exit.get("broker_order_id")):
+            outcome = "uncertain"
+        return {"symbol": symbol, "reason": reason, "exit_status": outcome,
+                "source": "existing_exit_evidence"}
+    if prior is None:
+        return None
+    outcome = str(prior.get("exit_status") or "").lower()
+    if outcome == "position_not_open":
+        return None
+    if outcome in {"attempting", "evaluating", "pending", "submitted", "partially_filled"}:
+        # Disappearance from the open-order list does not prove a terminal fill.
+        outcome = "uncertain"
+    return {"symbol": symbol, "reason": reason, "exit_status": outcome,
+            "source": "existing_exit_evidence"}
+
+
+def _include_pending_exit(order: dict[str, Any], pending_orders: dict[str, list[dict[str, Any]]]) -> None:
+    symbol = str(order.get("symbol") or "").upper()
+    rows = pending_orders.setdefault(symbol, [])
+    order_id = order.get("id") or order.get("broker_order_id")
+    if order_id:
+        rows[:] = [row for row in rows if (row.get("id") or row.get("broker_order_id")) != order_id]
+    rows.append(order)
+
+
+def _prior_exit_blocks(prior: dict[str, Any], action: dict[str, Any], broker: Any, *,
+                       pending_orders: dict[str, list[dict[str, Any]]],
+                       pending_exits: dict[str, dict[str, Any]]) -> bool:
+    """Reconcile the last sell before replacing it, including after a restart."""
+    action.update(broker_order_id=prior.get("broker_order_id"), client_order_id=prior.get("client_order_id"))
+    action["exit_order_reason"] = prior.get("exit_order_reason") or prior.get("reason")
+    action["exit_position_quantity"] = prior.get("exit_position_quantity", prior.get("position_quantity"))
+    if prior.get("replacement_from_order_id"):
+        action["replacement_from_order_id"] = prior["replacement_from_order_id"]
+    try:
+        expected_id = prior.get("broker_order_id")
+        order_id = prior.get("replacement_from_order_id") or expected_id
+        if order_id:
+            order = broker.get_order(order_id)
+        elif prior.get("client_order_id") and hasattr(broker, "get_order_by_client_order_id"):
+            order = broker.get_order_by_client_order_id(prior["client_order_id"])
+        else:
+            raise ValueError("prior_exit_identity_requires_reconciliation")
+        if (str(order.get("symbol") or "").upper() != action["symbol"]
+                or str(order.get("side") or "").lower() != "sell"
+                or not order.get("id")
+                or (order_id and order.get("id") != order_id)
+                or (order_id == expected_id and order.get("client_order_id")
+                    and order.get("client_order_id") != prior.get("client_order_id"))):
+            raise ValueError("prior_exit_order_identity_mismatch")
+        predecessor_fills = 0.0
+        seen = {order["id"]}
+        while str(order.get("status") or "").lower() == "replaced":
+            successor = order.get("replaced_by")
+            filled = _finite_number(order.get("filled_qty"))
+            if not successor or successor in seen or len(seen) >= 8 or filled is None or filled < 0:
+                raise ValueError("prior_exit_replacement_requires_reconciliation")
+            predecessor_fills += filled
+            successor_order = broker.get_order(successor)
+            if (successor_order.get("id") != successor
+                    or str(successor_order.get("symbol") or "").upper() != action["symbol"]
+                    or str(successor_order.get("side") or "").lower() != "sell"):
+                raise ValueError("prior_exit_replacement_identity_mismatch")
+            seen.add(successor)
+            order = successor_order
+        if expected_id and expected_id not in seen:
+            raise ValueError("prior_exit_replacement_successor_requires_reconciliation")
+        filled = _finite_number(order.get("filled_qty"))
+        total_fills = predecessor_fills + (filled or 0.0)
+        if str(order.get("status") or "").lower() == "filled":
+            action.update(broker_order_id=order["id"], exit_status="broker_reported_filled")
+            return True
+        if total_fills > 0:
+            original = _finite_number(action.get("exit_position_quantity"))
+            current = _finite_number(action.get("position_quantity"))
+            if original is None or current is None or current > original - total_fills:
+                raise ValueError("prior_exit_position_fill_requires_reconciliation")
+        action["broker_order_id"] = order["id"]
+        if len(seen) > 1:
+            action["client_order_id"] = order.get("client_order_id")
+        status = str(order.get("status") or "").lower()
+        action["state"] = status
+        if status in {"canceled", "cancelled", "expired", "rejected"}:
+            filled = _finite_number(order.get("filled_qty"))
+            if filled is None or filled < 0:
+                raise ValueError("prior_exit_fill_quantity_unavailable")
+            return False
+        if status in {"new", "accepted", "pending_new", "pending_replace", "pending_cancel", "partially_filled", "suspended", "done_for_day"}:
+            # A profit limit can be canceled by the urgent-loss path below.
+            if action["exit_order_reason"] in {"take_profit", "primary_profit_funds_runner"}:
+                # Direct reconciliation is stronger than stale list enumeration.
+                pending_exits[action["symbol"]] = order
+                _include_pending_exit(order, pending_orders)
+                return False
+            action["exit_status"] = "partially_filled" if status == "partially_filled" else "pending"
+            return True
+        raise ValueError("prior_exit_order_status_unresolved")
+    except Exception as exc:
+        action.update(exit_status="uncertain", error=str(exc))
+        return True
+
+
+def _apply_exit_order_result(action: dict[str, Any], order: ExecutionOrder) -> None:
+    accepted = order.state in {ExecutionState.SUBMITTED, ExecutionState.PARTIALLY_FILLED, ExecutionState.FILLED}
+    action.update(attempted=True, submitted=accepted and bool(order.broker_order_id),
+                  broker_order_id=order.broker_order_id, client_order_id=order.client_order_id,
+                  state=order.state.value)
+    action["exit_status"] = (
+        "uncertain" if accepted and not order.broker_order_id else
+        "pending" if order.state is ExecutionState.SUBMITTED else
+        "broker_reported_filled" if order.state is ExecutionState.FILLED else order.state.value
+    )
+
+
+def _refresh_exit_position(broker: Any, action: dict[str, Any], *, new_sell_fills: float = 0.0) -> dict[str, Any] | None:
+    positions = broker.list_open_positions()
+    position = next((p for p in positions if str(p.get("symbol") or "").upper() == action["symbol"]), None)
+    if position is None:
+        return None
+    quantity = _finite_number(position.get("qty"))
+    if str(position.get("side") or "long").lower() != "long" or quantity is None or quantity <= 0 or not quantity.is_integer():
+        raise ValueError("exit_position_quantity_unresolved")
+    before = _finite_number(action.get("position_quantity"))
+    if new_sell_fills > 0 and (before is None or quantity > before - new_sell_fills):
+        raise ValueError("exit_position_fill_requires_reconciliation")
+    action["quantity"] = min(action["quantity"], int(quantity))
+    action["position_quantity"] = quantity
+    return position
 
 
 def _pair_rules(rules: PositionMonitorRules) -> PairLifecycleRules:
@@ -326,7 +622,8 @@ def _build_pair_actions(
     peaks: dict[str, float],
     pair_states: dict[str, dict[str, Any]],
     rules: PositionMonitorRules,
-) -> tuple[dict[str, dict[str, Any]], set[str]]:
+    unavailable_peaks: set[str] | None = None,
+) -> tuple[dict[str, dict[str, Any]], set[str], dict[str, tuple[str, ...]]]:
     groups: dict[str, dict[str, OpenPosition]] = {}
     for stored in stored_positions:
         if not stored.trade_group_id or stored.leg_role not in {"primary", "runner"}:
@@ -335,6 +632,7 @@ def _build_pair_actions(
 
     actions: dict[str, dict[str, Any]] = {}
     managed: set[str] = set()
+    invalid: dict[str, tuple[str, ...]] = {}
     resolved_pair_rules = _pair_rules(rules)
     for group_id, group in groups.items():
         primary_store = group.get("primary")
@@ -349,21 +647,30 @@ def _build_pair_actions(
 
         if runner_position is None:
             continue
-        runner_return = float(runner_position.get("unrealized_plpc") or 0.0)
-        runner_peak = max(peaks.get(runner_symbol, runner_return), runner_return)
-        peaks[runner_symbol] = runner_peak
-        runner_mark = _pair_leg_mark(runner_position, runner_store, peak_return_pct=runner_peak)
-        if runner_mark is None:
+        runner_inputs = _pair_exit_inputs(runner_position, runner_store, peaks.get(runner_symbol),
+                                         trailing_available=runner_symbol not in (unavailable_peaks or set()))
+        primary_inputs = (
+            _pair_exit_inputs(primary_position, primary_store, peaks.get(primary_symbol or ""),
+                              trailing_available=primary_symbol not in (unavailable_peaks or set()))
+            if primary_position is not None and primary_store is not None else None
+        )
+        issues = tuple(sorted(set(runner_inputs[2] + (primary_inputs[2] if primary_inputs is not None else ()))))
+        if issues:
+            # An unevaluable group must not fall into standalone policy or stop
+            # valid independent positions from reaching their own exit checks.
+            present = {runner_symbol}
+            if primary_position is not None and primary_symbol:
+                present.add(primary_symbol)
+            managed.update(present)
+            invalid.update({symbol: issues for symbol in present})
             continue
+        runner_mark, runner_peak, _ = runner_inputs
+        peaks[runner_symbol] = runner_peak
 
         if primary_position is not None and primary_store is not None:
-            primary_return = float(primary_position.get("unrealized_plpc") or 0.0)
-            primary_peak = max(peaks.get(primary_symbol or "", primary_return), primary_return)
+            primary_mark, primary_peak, _ = primary_inputs
             if primary_symbol:
                 peaks[primary_symbol] = primary_peak
-            primary_mark = _pair_leg_mark(primary_position, primary_store, peak_return_pct=primary_peak)
-            if primary_mark is None:
-                continue
             decision = evaluate_pair_lifecycle(
                 primary=primary_mark,
                 runner=runner_mark,
@@ -430,7 +737,23 @@ def _build_pair_actions(
                 decision=decision,
             )
     managed.discard("")
-    return actions, managed
+    return actions, managed, invalid
+
+
+def _pair_exit_inputs(
+    position: dict[str, Any], stored: OpenPosition, previous_peak: float | None,
+    *, trailing_available: bool = True,
+) -> tuple[PairLegMark | None, float | None, tuple[str, ...]]:
+    issues: list[str] = []
+    pnl = position.get("unrealized_plpc")
+    current_return = _finite_number(0.0 if pnl is None else pnl)
+    if current_return is None:
+        issues.append("unrealized_plpc")
+    if trailing_available and previous_peak is not None and _finite_number(previous_peak) is None:
+        issues.append("trailing_peak")
+    peak = None if issues else max(previous_peak if previous_peak is not None and trailing_available else current_return, current_return)
+    mark = _pair_leg_mark(position, stored, peak_return_pct=peak if trailing_available else None, invalid_fields=issues)
+    return (None, None, tuple(issues)) if issues else (mark, peak, ())
 
 
 def _pair_leg_mark(
@@ -438,16 +761,27 @@ def _pair_leg_mark(
     stored: OpenPosition,
     *,
     peak_return_pct: float | None,
+    invalid_fields: list[str] | None = None,
 ) -> PairLegMark | None:
-    entry_price = _float_or_none(position.get("avg_entry_price")) or stored.entry_limit_price
-    current_price = _float_or_none(position.get("current_price")) or entry_price
-    quantity = int(float(position.get("qty") or stored.quantity or 0))
-    if entry_price <= 0 or current_price < 0 or quantity <= 0:
+    entry_value = position.get("avg_entry_price")
+    entry_price = _finite_number(stored.entry_limit_price if entry_value is None else entry_value)
+    mark_value = position.get("current_price")
+    current_price = entry_price if mark_value is None else _finite_number(mark_value)
+    quantity = _exit_quantity(position)
+    issues = [field for field, valid in (
+        ("avg_entry_price", entry_price is not None and entry_price > 0),
+        ("current_price", current_price is not None and current_price >= 0),
+        ("qty", quantity is not None),
+        ("side", str(position.get("side") or "long").lower() == "long"),
+    ) if not valid]
+    if issues:
+        if invalid_fields is not None:
+            invalid_fields.extend(issues)
         return None
     return PairLegMark(
         entry_price=entry_price,
         current_price=current_price,
-        quantity=quantity,
+        quantity=int(quantity),
         peak_return_pct=peak_return_pct,
     )
 
@@ -459,12 +793,15 @@ def _pair_action_payload(
     stored: OpenPosition,
     decision: Any,
 ) -> dict[str, Any]:
+    current_price = _float_or_none(position.get("current_price"))
+    if current_price is None:
+        current_price = _float_or_none(position.get("avg_entry_price")) or stored.entry_limit_price
     return {
         "reason": decision.reason,
         "symbol": symbol,
         "quantity": int(float(position.get("qty") or stored.quantity)),
         "unrealized_plpc": float(position.get("unrealized_plpc") or 0.0),
-        "current_price": float(position.get("current_price") or position.get("avg_entry_price") or stored.entry_limit_price),
+        "current_price": current_price,
         "leg_role": stored.leg_role,
         "pair_entry_cost": decision.pair_entry_cost,
         "pair_mark_value": decision.pair_mark_value,
@@ -669,6 +1006,29 @@ def _reconcile_pair_funding(
             payload.pop("funding_reconciliation_error", None)
 
 
+def _standalone_exit_inputs(position: dict[str, Any]) -> tuple[float, float] | None:
+    # A supplied zero is an observed mark, not a missing quote or a fill price.
+    mark = position.get("current_price")
+    if mark is None:
+        mark = position.get("avg_entry_price") or 0.0
+    current_price = _float_or_none(mark)
+    pnl = position.get("unrealized_plpc")
+    unrealized_plpc = _float_or_none(0.0 if pnl is None else pnl)
+    if (current_price is None or not isfinite(current_price) or current_price < 0
+            or unrealized_plpc is None or not isfinite(unrealized_plpc)
+            or (current_price == 0 and unrealized_plpc > 0)):
+        return None
+    return current_price, unrealized_plpc
+
+
+def _exit_quantity(position: dict[str, Any]) -> int | None:
+    value = position.get("qty")
+    quantity = None if isinstance(value, bool) else _finite_number(value)
+    if quantity is None or quantity <= 0 or not quantity.is_integer():
+        return None
+    return int(quantity)
+
+
 def _hard_safety_action(
     position: dict[str, Any],
     rules: PositionMonitorRules,
@@ -678,9 +1038,13 @@ def _hard_safety_action(
     symbol = str(position.get("symbol") or "").upper()
     if not symbol:
         return None
-    qty = int(float(position.get("qty") or 0))
-    current_price = float(position.get("current_price") or position.get("avg_entry_price") or 0.0)
-    unrealized_plpc = float(position.get("unrealized_plpc") or 0.0)
+    qty = _exit_quantity(position)
+    if qty is None:
+        return None
+    inputs = _standalone_exit_inputs(position)
+    if inputs is None:
+        return None
+    current_price, unrealized_plpc = inputs
     expiration = _option_expiration(symbol)
     dte = (expiration - _monitor_now().date()).days if expiration is not None else None
     if rules.exit_min_dte >= 0 and dte is not None and dte <= rules.exit_min_dte:
@@ -712,6 +1076,7 @@ def _monitor_action(
     peaks: dict[str, float],
     *,
     leg_role: str | None = None,
+    trailing_available: bool = True,
 ) -> dict[str, Any] | None:
     symbol = str(position.get("symbol") or "").upper()
     if not symbol:
@@ -719,13 +1084,16 @@ def _monitor_action(
     side = str(position.get("side") or "long").lower()
     if side != "long":
         return None
-    qty = int(float(position.get("qty") or 0))
-    if qty <= 0:
+    qty = _exit_quantity(position)
+    if qty is None:
         return None
-    current_price = float(position.get("current_price") or position.get("avg_entry_price") or 0.0)
-    if current_price <= 0:
+    inputs = _standalone_exit_inputs(position)
+    if inputs is None:
         return None
-    unrealized_plpc = float(position.get("unrealized_plpc") or 0.0)
+    current_price, unrealized_plpc = inputs
+
+    if current_price == 0 and unrealized_plpc >= 0:
+        return None
 
     peak_plpc = max(peaks.get(symbol, unrealized_plpc), unrealized_plpc)
     peaks[symbol] = peak_plpc
@@ -762,7 +1130,7 @@ def _monitor_action(
             "current_price": current_price,
             "leg_role": leg_role,
         }
-    if peak_plpc >= rules.trailing_activation_pct and unrealized_plpc <= peak_plpc - rules.trailing_drawdown_pct:
+    if trailing_available and peak_plpc >= rules.trailing_activation_pct and unrealized_plpc <= peak_plpc - rules.trailing_drawdown_pct:
         return {
             "reason": "trailing_stop",
             "symbol": symbol,
@@ -772,7 +1140,7 @@ def _monitor_action(
             "peak_unrealized_plpc": peak_plpc,
             "leg_role": leg_role,
         }
-    if unrealized_plpc >= rules.take_profit_pct:
+    if current_price > 0 and unrealized_plpc >= rules.take_profit_pct:
         tier = _take_profit_tier(unrealized_plpc, rules)
         return {
             "reason": "take_profit",
@@ -804,8 +1172,10 @@ def _position_cost_cap_action(
         return None
     symbol = str(position.get("symbol") or "").upper()
     side = str(position.get("side") or "long").lower()
-    quantity = int(float(position.get("qty") or 0))
-    average_entry = _float_or_none(position.get("avg_entry_price"))
+    quantity = _exit_quantity(position)
+    if quantity is None:
+        return None
+    average_entry = _finite_number(position.get("avg_entry_price"))
     current_price = _float_or_none(position.get("current_price")) or average_entry
     if not symbol or side != "long" or quantity <= 0 or average_entry is None or average_entry <= 0:
         return None
@@ -857,6 +1227,7 @@ def _submit_monitor_exit(
         thesis_id=f"monitor:{symbol}:{action['reason']}",
         metadata={
             "position_monitor": True,
+            "exit_client_order_id": f"autobott-exit-{uuid4().hex}",
             "exit_reason": action["reason"],
             "exit_order_style": "urgent_market" if order_type is OrderType.MARKET else "profit_ladder_limit",
             "take_profit_tier": action.get("take_profit_tier"),
@@ -873,14 +1244,21 @@ def _submit_monitor_exit(
             "build_sha": active_build_sha(),
         },
     )
+    action.pop("replacement_from_order_id", None)
+    action.update(exit_status="attempting", broker_order_id=None, client_order_id=intent.metadata["exit_client_order_id"],
+                  exit_order_reason=action["reason"], exit_position_quantity=action.get("position_quantity"))
+    # A crash or unknown POST result must leave an attributable pending attempt.
+    append_monitor_exit_event(action, journal_path=journal_path)
+    action["attempted"] = True
     order = broker.submit_order(intent, open_positions=0)
+    _apply_exit_order_result(action, order)
     try:
         append_order_submission(order, journal_path=journal_path)
         append_execution_outcome(
             decision_id=intent.decision_id,
             thesis_id=intent.thesis_id,
             symbol=symbol,
-            disposition="position_monitor_exit_submitted",
+            disposition="position_monitor_exit_submitted" if action["submitted"] else "position_monitor_exit_not_accepted",
             detail=action["reason"],
             payload={
                 "quantity": intent.quantity,
@@ -895,8 +1273,8 @@ def _submit_monitor_exit(
             },
             journal_path=journal_path,
         )
-    except Exception:
-        pass
+    except Exception as exc:
+        action["journal_error"] = str(exc)
     return order
 
 
@@ -933,18 +1311,20 @@ def _pending_exit_orders_by_symbol(broker: Any) -> dict[str, dict[str, Any]] | N
     return pending
 
 
-def _pending_orders_by_symbol(broker: Any) -> dict[str, list[dict[str, Any]]]:
+def _pending_orders_by_symbol(broker: Any) -> dict[str, list[dict[str, Any]]] | None:
     if not hasattr(broker, "list_orders"):
-        return {}
+        return None
     try:
         orders = broker.list_orders(status="open", limit=100, direction="desc")
     except Exception:
-        return {}
+        return None
     pending: dict[str, list[dict[str, Any]]] = {}
     for order in orders:
         symbol = str(order.get("symbol") or "").upper()
         status = str(order.get("status") or "").lower()
-        if not symbol or status not in {"new", "accepted", "partially_filled", "pending_new", "pending_replace"}:
+        if not symbol:
+            return None
+        if status in _TERMINAL_FUNDING_STATUSES:
             continue
         pending.setdefault(symbol, []).append(order)
     return pending
@@ -955,20 +1335,38 @@ def _cancel_pending_orders_for_symbol(
     pending_orders: dict[str, list[dict[str, Any]]],
     *,
     broker: AlpacaExecutionBroker,
-) -> list[str]:
+) -> tuple[list[str], float]:
     canceled: list[str] = []
+    new_sell_fills = 0.0
     for order in pending_orders.get(symbol, []):
         order_id = str(order.get("id") or order.get("broker_order_id") or "")
         if not order_id:
-            continue
+            raise ValueError("exit_cancellation_identity_unavailable")
+        if not hasattr(broker, "cancel_order"):
+            raise ValueError("exit_cancellation_confirmation_unavailable")
+        if not hasattr(broker, "get_order"):
+            raise ValueError("exit_cancellation_confirmation_unavailable")
         try:
             broker.cancel_order(order_id)
         except Exception as exc:
             normalized = str(exc).strip().lower()
             if not any(token in normalized for token in ("already canceled", "already cancelled", "not found", "404")):
                 raise
+        confirmed = broker.get_order(order_id)
+        if (
+            str(confirmed.get("id") or confirmed.get("broker_order_id") or "") != order_id
+            or str(confirmed.get("symbol") or "").upper() != symbol
+            or str(confirmed.get("status") or "").lower() not in {"canceled", "cancelled", "filled", "expired", "rejected"}
+        ):
+            raise ValueError("exit_cancellation_requires_reconciliation")
+        filled = _finite_number(confirmed.get("filled_qty"))
+        before = _finite_number(order.get("filled_qty"))
+        if filled is None or filled < 0 or (filled > 0 and before is None):
+            raise ValueError("exit_cancellation_fill_quantity_unavailable")
+        if str(confirmed.get("side") or order.get("side") or "").lower() == "sell":
+            new_sell_fills += max(0.0, filled - (before or 0.0))
         canceled.append(order_id)
-    return canceled
+    return canceled, new_sell_fills
 
 
 def _without_canceled_orders(
@@ -1153,30 +1551,45 @@ def _handle_pending_take_profit_exit(
     )
     if action.get("take_profit_tier") == "force_exit":
         try:
-            if order_id and hasattr(broker, "cancel_order"):
-                broker.cancel_order(order_id)
+            action.update(submitted=False, attempted=False, exit_status="uncertain",
+                          broker_order_id=order_id, client_order_id=pending_exit.get("client_order_id"))
+            if not _record_monitor_action(action, journal_path):
+                return action
+            if not order_id or not hasattr(broker, "cancel_order"):
+                raise ValueError("exit_cancellation_confirmation_unavailable")
+            _, new_sell_fills = _cancel_pending_orders_for_symbol(action["symbol"], {action["symbol"]: [pending_exit]}, broker=broker)
+            action["canceled_pending_exit_order_id"] = order_id
+            if _refresh_exit_position(broker, action, new_sell_fills=new_sell_fills) is None:
+                action["exit_status"] = "position_not_open"
+                _record_monitor_action(action, journal_path)
+                return action
             order = _submit_forced_take_profit_exit(
                 action=action,
                 broker=broker,
                 rules=rules,
                 journal_path=journal_path,
             )
-            return {
+            _apply_exit_order_result(action, order)
+            result = {
                 **action,
-                "reason": "take_profit_force_exit_submitted",
-                "submitted": True,
+                "reason": "take_profit_force_exit_submitted" if action["submitted"] else "take_profit_force_exit_not_accepted",
                 "canceled_pending_exit_order_id": order_id or None,
                 "broker_order_id": order.broker_order_id,
                 "state": order.state.value,
             }
+            _record_monitor_action(result, journal_path)
+            return result
         except Exception as exc:
-            return {
+            result = {
                 **action,
                 "reason": "take_profit_force_exit_failed",
                 "submitted": False,
+                "exit_status": "uncertain",
                 "canceled_pending_exit_order_id": order_id or None,
                 "error": str(exc),
             }
+            _record_monitor_action(result, journal_path)
+            return result
     result = {
         **action,
         "reason": "take_profit_exit_already_pending",
@@ -1184,15 +1597,39 @@ def _handle_pending_take_profit_exit(
         "broker_order_id": order_id,
         "existing_limit_price": current_limit,
         "target_limit_price": target_limit,
+        "client_order_id": pending_exit.get("client_order_id"),
+        "exit_order_reason": "take_profit",
+        "exit_status": "pending" if order_id else "uncertain",
     }
     if not order_id or current_limit is None or target_limit >= current_limit or not hasattr(broker, "replace_order"):
+        _record_monitor_action(result, journal_path)
+        return result
+    result.update(exit_status="uncertain", replacement_from_order_id=action.get("replacement_from_order_id") or order_id,
+                  exit_position_quantity=action.get("exit_position_quantity", action.get("position_quantity")),
+                  replace_attempted=False)
+    if not _record_monitor_action(result, journal_path):
         return result
     try:
+        result.update(attempted=True, replace_attempted=True)
         payload = broker.replace_order(order_id, limit_price=target_limit)
+        status = str(payload.get("status") or "").lower()
+        if (not payload.get("id") or str(payload.get("symbol") or "").upper() != action["symbol"]
+                or str(payload.get("side") or "").lower() != "sell"
+                or status not in {"new", "accepted", "pending_new", "pending_replace", "partially_filled", "filled"}):
+            raise ValueError("exit_replacement_requires_reconciliation")
         result["reason"] = "take_profit_exit_repriced"
         result["replaced"] = True
-        result["broker_order_id"] = payload.get("id") or order_id
+        result["broker_order_id"] = payload["id"]
+        result["client_order_id"] = payload.get("client_order_id")
+        result["exit_status"] = "broker_reported_filled" if status == "filled" else "pending"
         result["new_limit_price"] = target_limit
+    except Exception as exc:
+        result["replaced"] = False
+        result["error"] = str(exc)
+        _record_monitor_action(result, journal_path)
+        return result
+    _record_monitor_action(result, journal_path)
+    try:
         append_execution_outcome(
             decision_id=f"monitor-{action['symbol']}",
             thesis_id=f"monitor:{action['symbol']}:take_profit_reprice",
@@ -1209,8 +1646,7 @@ def _handle_pending_take_profit_exit(
             journal_path=journal_path,
         )
     except Exception as exc:
-        result["replaced"] = False
-        result["error"] = str(exc)
+        result["journal_error"] = str(exc)
     return result
 
 
@@ -1276,7 +1712,7 @@ def _submit_forced_take_profit_exit(
 def _float_or_none(value: Any) -> float | None:
     try:
         return float(value)
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
         return None
 
 

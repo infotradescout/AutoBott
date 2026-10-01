@@ -16,11 +16,13 @@ from typing import Any
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from .core_runner import CoreRunnerRules, load_core_runner_rules
+from .bar_timing import completed_stock_bars
 from .hosted_policy import HOSTED_CAPTURE_OPTION_QUOTE_FILES, is_hosted_paper_runtime, signal_proxy_for
 from .options_math import RISK_FREE_RATE, solve_forward_iv_and_greeks, solve_iv_and_greeks
 from .phase1_alpaca_client import _merge_option_contract_metadata, _option_chain_request_symbols
 from .phase1_config import AlpacaReadOnlyConfig, load_alpaca_read_only_config
 from .phase1_snapshot_contract import validate_market_snapshot
+from .quote_observation import QuoteObservationError, observed_quote_fields
 
 
 DAY_MANIFEST_SCHEMA_VERSION = "phase1_snapshot_day_manifest.v1"
@@ -50,6 +52,27 @@ class CaptureRules:
 
 
 class AlpacaMarketDataClient:
+    requires_entry_context = True
+
+    def get_entry_context(self, symbol: str, *, signal_symbol: str, cutoff: datetime) -> dict[str, Any]:
+        from .entry_market_context import fetch_entry_context
+        if self.data_url.rstrip("/") != "https://data.alpaca.markets":
+            raise ValueError("entry_context_data_endpoint_not_approved")
+        context = fetch_entry_context(lambda path,params:self._get_json_with_retry(path,params),
+                                      symbol,signal_symbol=signal_symbol,cutoff=cutoff,stock_feed=self.stock_feed)
+        from .entry_schedule_context import EntryScheduleSource, attach_entry_schedule
+        if self.trading_url.rstrip("/") != "https://paper-api.alpaca.markets":
+            raise ValueError("entry_schedule_paper_calendar_endpoint_required")
+        if not hasattr(self, "_entry_schedule_source"):
+            self._entry_schedule_source = EntryScheduleSource(
+                lambda params: self._get_json_with_retry("/v2/calendar", params, base_url=self.trading_url))
+        context = attach_entry_schedule(context, self._entry_schedule_source, cutoff)
+        from .entry_sector_context import SectorContextSource, attach_sector_context
+        if not hasattr(self, "_entry_sector_source"):
+            self._entry_sector_source = SectorContextSource(
+                lambda path,params: self._get_json_with_retry(path,params))
+        return attach_sector_context(context, self._entry_sector_source)
+
     def __init__(self, config: AlpacaReadOnlyConfig | None = None, *, feed: str = "indicative", stock_feed: str = "iex") -> None:
         self.config = config or load_alpaca_read_only_config()
         if not self.config.has_credentials:
@@ -315,7 +338,10 @@ def capture_symbol_snapshot(
     volatility_proxy_symbol: str,
     data_client: Any,
     rules: CaptureRules,
+    monotonic_fn: Any | None = None,
 ) -> str:
+    clock = monotonic_fn or time.monotonic
+    collection_started = clock()
     symbol = symbol.upper()
     tz = _market_timezone_info(market_timezone, scheduled_market_time.date())
     market_date = scheduled_market_time.astimezone(tz).date()
@@ -342,17 +368,39 @@ def capture_symbol_snapshot(
             bar_symbol,
             start=lookback_start,
             end=as_of_utc,
-            lookback_bars=rules.lookback_bars,
+            lookback_bars=rules.lookback_bars + 1,
             timeframe=rules.bar_timeframe,
             lookback_calendar_days=rules.lookback_calendar_days,
         )
-    quotes = data_client.get_latest_stock_quotes(bar_symbols)
+    entry_context = None
+    context_getter = getattr(data_client, "get_entry_context", None)
+    if callable(context_getter) or getattr(data_client, "requires_entry_context", False):
+        try:
+            entry_context = context_getter(symbol, signal_symbol=signal_symbol, cutoff=as_of_utc)
+            if not isinstance(entry_context, dict):
+                raise ValueError("entry_context_response_invalid")
+        except Exception as exc:
+            entry_context = {"schema_version":"entry_context.v1", "status":"unavailable",
+                             "reason":type(exc).__name__, "symbol":symbol,
+                             "signal_symbol":signal_symbol, "cutoff":as_of_utc.isoformat()}
     option_snapshots = data_client.get_option_chain_snapshots(symbol)
+    quotes = data_client.get_latest_stock_quotes(bar_symbols)
+    # Latest quotes arrive after the scheduled scan tick. Timestamp their
+    # observation, not the earlier request schedule. Anchor elapsed monotonic
+    # time to the supplied capture-start clock (also supports deterministic feeds).
+    elapsed = clock() - collection_started
+    if not math.isfinite(elapsed) or elapsed < 0:
+        raise ValueError("invalid_capture_elapsed_time")
+    if captured_at_utc.tzinfo is None or captured_at_utc.utcoffset() is None:
+        raise ValueError("capture_start_requires_timezone")
+    observed_at_utc = captured_at_utc.astimezone(UTC) + timedelta(seconds=elapsed)
+    if entry_context is not None:
+        entry_context = {**entry_context, "received_at":observed_at_utc.isoformat()}
 
-    signal_bars = _normalize_stock_bars(signal_symbol, bars, rules.lookback_bars)
-    spy_bars = _normalize_stock_bars(context_symbols["spy"], bars, rules.lookback_bars)
-    qqq_bars = _normalize_stock_bars(context_symbols["qqq"], bars, rules.lookback_bars)
-    vix_bars = _normalize_stock_bars(context_symbols["vix"], bars, rules.lookback_bars)
+    signal_bars = _normalize_stock_bars(signal_symbol, bars, rules.lookback_bars, as_of=as_of_utc, timeframe=rules.bar_timeframe)
+    spy_bars = _normalize_stock_bars(context_symbols["spy"], bars, rules.lookback_bars, as_of=as_of_utc, timeframe=rules.bar_timeframe)
+    qqq_bars = _normalize_stock_bars(context_symbols["qqq"], bars, rules.lookback_bars, as_of=as_of_utc, timeframe=rules.bar_timeframe)
+    vix_bars = _normalize_stock_bars(context_symbols["vix"], bars, rules.lookback_bars, as_of=as_of_utc, timeframe=rules.bar_timeframe)
     signal_quote = _normalize_stock_quote(signal_symbol, quotes, fallback_price=signal_bars[-1]["close"])
     index_expiry_forwards: dict[tuple[str, str], float] = {}
     if signal_symbol != symbol:
@@ -372,6 +420,7 @@ def capture_symbol_snapshot(
     else:
         underlying_bars = signal_bars
         underlying_quote = signal_quote
+    quote_rejections: list[dict[str, str]] = []
     normalized_option_chain = _normalize_option_chain(
         symbol=symbol,
         option_snapshots=option_snapshots,
@@ -380,6 +429,7 @@ def capture_symbol_snapshot(
         rules=rules,
         select_subset=False,
         index_expiry_forwards=index_expiry_forwards,
+        quote_rejections=quote_rejections,
     )
     option_chain = _select_chain_subset(normalized_option_chain, float(underlying_quote["last"]), market_date, rules)
     manual_mirror_chain = _select_manual_mirror_candidates(
@@ -397,20 +447,32 @@ def capture_symbol_snapshot(
             "environment": "paper" if corpus_type == "paper_capture" else "production_capture",
             "latency_assumption": "retail_api_latency",
             "corpus_type": corpus_type,
+            "options_feed": getattr(data_client, "option_feed", getattr(data_client, "feed", "unreported")),
         },
-        "captured_at": captured_at_utc.astimezone(UTC).isoformat(),
+        "captured_at": observed_at_utc.isoformat(),
         "market_timezone": market_timezone,
-        "timestamp_utc": _isoformat_z(as_of_utc),
-        "timestamp_market": scheduled_market_time.astimezone(tz).isoformat(),
+        "timestamp_utc": _isoformat_z(observed_at_utc),
+        "timestamp_market": observed_at_utc.astimezone(tz).isoformat(),
         "ticker": symbol,
-        "timestamp": _isoformat_z(as_of_utc),
+        "timestamp": _isoformat_z(observed_at_utc),
+        "scheduled_timestamp_utc": _isoformat_z(as_of_utc),
+        "capture_started_at": captured_at_utc.astimezone(UTC).isoformat(),
+        "capture_elapsed_seconds": elapsed,
         "underlying_quote": underlying_quote,
         "market_bars": underlying_bars,
+        "bar_evidence": {
+            "timestamp_semantics": "interval_start",
+            "timeframe": rules.bar_timeframe,
+            "cutoff": _isoformat_z(as_of_utc),
+            "signal_symbol": signal_symbol,
+            "completed_bars_only": True,
+        },
         "option_chain": option_chain,
         # Dashboard-only candidates. The execution engine reads option_chain;
         # this separate list makes the affordable Manual Mirror panel reliable
         # without turning its display cap into a paper-execution constraint.
         "manual_mirror_chain": manual_mirror_chain,
+        "data_quality": {"option_quote_rejections": quote_rejections},
         "context": {
             "spy_bars": spy_bars,
             "qqq_bars": qqq_bars,
@@ -429,6 +491,12 @@ def capture_symbol_snapshot(
             "last_pivot_type": "unknown",
         },
     }
+    if entry_context is not None:
+        payload["entry_context"] = entry_context
+        payload["context"]["event_labels"] = ["scheduled_event_calendar_unverified",
+            "news_context_" + ("observed" if entry_context.get("status")=="observed" else "unavailable")]
+        # The legacy blackout flag does not certify news/calendar coverage.
+        # Native admission requires this capsule, so unavailable data cannot authorize entry.
     validate_market_snapshot(payload)
 
     filename = f"{scheduled_market_time.astimezone(tz).strftime('%H%M%S')}.json"
@@ -440,9 +508,9 @@ def capture_symbol_snapshot(
             json.dumps(
                 {
                     "schema_version": "phase1_option_quote_capture.v1",
-                    "captured_at": captured_at_utc.astimezone(UTC).isoformat(),
-                    "timestamp_utc": _isoformat_z(as_of_utc),
-                    "timestamp_market": scheduled_market_time.astimezone(tz).isoformat(),
+                    "captured_at": observed_at_utc.isoformat(),
+                    "timestamp_utc": _isoformat_z(observed_at_utc),
+                    "timestamp_market": observed_at_utc.astimezone(tz).isoformat(),
                     "ticker": symbol,
                     "contract_count": len(option_chain),
                     "contracts": option_chain,
@@ -505,8 +573,13 @@ def _fetch_stock_bars_with_retries(
         rows = list(payload.get(symbol_key, []))
         if len(rows) > len(best_rows):
             best_rows = rows
-        if len(rows) >= 30:
-            return rows
+        try:
+            completed_stock_bars(rows, cutoff=end, timeframe=timeframe, lookback=lookback_bars)
+        except ValueError as exc:
+            if str(exc) == "insufficient_completed_market_bars":
+                continue
+            raise
+        return rows
     return best_rows
 
 
@@ -538,7 +611,10 @@ def write_snapshot_day_manifest(
 
     resolved_symbol = symbol or str(snapshots[0]["ticker"])
     resolved_date = _resolve_trading_date(trading_date, timestamps[0].date())
-    missing_intervals = _detect_missing_intervals(timestamps, capture_interval_seconds)
+    # Missing scheduled ticks are independent of variable provider/API latency.
+    # Keep receipt timestamps for observation coverage; never shift raw quotes.
+    scheduled_timestamps = sorted(_parse_datetime(item.get("scheduled_timestamp_utc", item["timestamp"])) for item in snapshots)
+    missing_intervals = _detect_missing_intervals(scheduled_timestamps, capture_interval_seconds)
     combined_flags = set(data_quality_flags or [])
     if missing_intervals:
         combined_flags.add("missing_intervals_detected")
@@ -649,49 +725,30 @@ def _scheduled_market_times(
     return scheduled
 
 
-def _normalize_stock_bars(symbol: str, bars: dict[str, list[dict[str, Any]]], lookback_bars: int) -> list[dict[str, Any]]:
-    rows = list(bars.get(symbol.upper(), []))
-    if len(rows) < 30:
-        raise ValueError(f"insufficient_bars_for_symbol:{symbol}")
-    normalized = [
-        {
-            "timestamp": _normalize_timestamp(bar.get("t") or bar.get("timestamp")),
-            "open": round(float(bar.get("o") or bar.get("open")), 4),
-            "high": round(float(bar.get("h") or bar.get("high")), 4),
-            "low": round(float(bar.get("l") or bar.get("low")), 4),
-            "close": round(float(bar.get("c") or bar.get("close")), 4),
-            "volume": int(bar.get("v") or bar.get("volume") or 0),
-        }
-        for bar in rows[-lookback_bars:]
-    ]
-    return normalized
+def _normalize_stock_bars(symbol: str, bars: dict[str, list[dict[str, Any]]], lookback_bars: int,
+                          *, as_of: datetime, timeframe: str) -> list[dict[str, Any]]:
+    return completed_stock_bars(bars.get(symbol.upper(), []), cutoff=as_of,
+                                timeframe=timeframe, lookback=lookback_bars)
 
 
 def _normalize_stock_quote(symbol: str, quotes: dict[str, dict[str, Any]], *, fallback_price: float) -> dict[str, Any]:
+    # fallback_price remains in the signature for call compatibility only.
+    # Missing market data must not become a made-up, zero-spread fresh quote.
     quote = quotes.get(symbol.upper())
-    if not quote:
-        return {
-            "symbol": symbol.upper(),
-            "bid": round(fallback_price, 4),
-            "ask": round(fallback_price, 4),
-            "last": round(fallback_price, 4),
-            "spread": 0.0,
-            "spread_pct": 0.0,
-            "quote_timestamp": datetime.now(UTC).isoformat(),
-        }
-    bid = float(quote.get("bp") or quote.get("bid_price") or fallback_price)
-    ask = float(quote.get("ap") or quote.get("ask_price") or fallback_price)
-    last = float(quote.get("last") or quote.get("ap") or quote.get("ask_price") or fallback_price)
-    mid = (bid + ask) / 2 if bid > 0 and ask > 0 else max(last, fallback_price)
-    spread = max(0.0, ask - bid)
+    bid, ask, quote_timestamp = observed_quote_fields(quote, allow_zero_bid=False)
+    last = quote.get("last", ask)
+    if isinstance(last, bool) or not isinstance(last, (int, float)) or not math.isfinite(last) or last <= 0:
+        raise QuoteObservationError("invalid_observed_stock_reference_price")
+    mid = (bid + ask) / 2
+    spread = ask - bid
     return {
         "symbol": symbol.upper(),
-        "bid": round(max(0.01, bid), 4),
-        "ask": round(max(0.01, ask), 4),
-        "last": round(max(0.01, last), 4),
+        "bid": round(bid, 4),
+        "ask": round(ask, 4),
+        "last": round(float(last), 4),
         "spread": round(spread, 4),
-        "spread_pct": round(spread / mid, 4) if mid > 0 else 0.0,
-        "quote_timestamp": _normalize_timestamp(quote.get("t") or quote.get("timestamp") or datetime.now(UTC).isoformat()),
+        "spread_pct": round(spread / mid, 4),
+        "quote_timestamp": quote_timestamp,
     }
 
 
@@ -704,6 +761,7 @@ def _normalize_option_chain(
     rules: CaptureRules,
     select_subset: bool = True,
     index_expiry_forwards: dict[tuple[str, str], float] | None = None,
+    quote_rejections: list[dict[str, str]] | None = None,
 ) -> list[dict[str, Any]]:
     normalized: list[dict[str, Any]] = []
     for option_symbol, snapshot in option_snapshots.items():
@@ -722,9 +780,11 @@ def _normalize_option_chain(
             continue
         if symbol.upper() not in {"VIX", "VIXW"} and strike_distance_pct > rules.max_strike_distance_pct:
             continue
-        bid = float(quote.get("bp") or quote.get("bid_price") or 0.0)
-        ask = float(quote.get("ap") or quote.get("ask_price") or 0.0)
-        if bid < 0 or ask < 0 or (ask > 0 and ask < bid):
+        try:
+            bid, ask, quote_timestamp = observed_quote_fields(quote, allow_zero_bid=True)
+        except QuoteObservationError as exc:
+            if quote_rejections is not None:
+                quote_rejections.append({"option_symbol": option_symbol, "reason": str(exc)})
             continue
         last = latest_trade.get("p") if latest_trade.get("p") is not None else latest_trade.get("price")
         mid = (bid + ask) / 2 if bid >= 0 and ask > 0 else float(last or 0.0)
@@ -784,7 +844,7 @@ def _normalize_option_chain(
                 "last": round(float(last), 4) if last is not None else round(mid, 4),
                 "spread": round(spread, 4),
                 "spread_pct": round(spread / mid, 4) if mid > 0 else 0.0,
-                "quote_timestamp": _normalize_timestamp(quote.get("t") or quote.get("timestamp") or latest_trade.get("t") or latest_trade.get("timestamp") or datetime.now(UTC).isoformat()),
+                "quote_timestamp": quote_timestamp,
                 "volume": int(volume_value or 0),
                 "volume_available": volume_value is not None,
                 "open_interest": int(snapshot.get("open_interest") or snapshot.get("openInterest") or 0),

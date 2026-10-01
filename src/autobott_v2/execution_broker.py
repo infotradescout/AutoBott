@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 import json
+import re
 import threading
 import time
 import urllib.error
 import urllib.parse
 import urllib.request
 from datetime import UTC, datetime, timedelta
+from dataclasses import replace
 from typing import Protocol
 
 from .execution_config import AlpacaExecutionConfig, require_alpaca_execution_config
@@ -61,6 +63,13 @@ class AlpacaExecutionBroker:
         risk_check = validate_trade_intent(intent, self.config.risk_controls(),
             current_daily_realized_pnl=current_daily_realized_pnl, open_positions=open_positions)
         order = build_execution_order(intent, risk_check)
+        monitor_client_id = intent.metadata.get("exit_client_order_id")
+        if monitor_client_id is not None:
+            if (intent.side is not OrderSide.SELL_TO_CLOSE or intent.metadata.get("position_monitor") is not True
+                    or not isinstance(monitor_client_id, str)
+                    or re.fullmatch(r"autobott-exit-[0-9a-f]{32}", monitor_client_id) is None):
+                raise ValueError("monitor_exit_client_identity_invalid")
+            order = replace(order, client_order_id=monitor_client_id)
         # No broker POST can precede this durable reservation. In ordinary mode
         # and for sell-to-close, prepare_order is an identity operation.
         order = portfolio_budget.prepare_order(self, order)
@@ -220,6 +229,9 @@ class AlpacaExecutionBroker:
                 raise RuntimeError("broker_order_history_pagination_stalled")
             until = min(timestamps)
         raise RuntimeError("broker_order_history_pagination_limit")
+
+    def get_order_by_client_order_id(self, client_order_id: str) -> dict:
+        return self._get_order_by_client_order_id(client_order_id)
 
     def _get_order_by_client_order_id(self, client_order_id: str) -> dict:
         query = urllib.parse.urlencode({"client_order_id": client_order_id})

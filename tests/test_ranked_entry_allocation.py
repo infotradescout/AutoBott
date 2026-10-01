@@ -1,5 +1,6 @@
 from dataclasses import dataclass, field, replace
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
+import json
 from types import SimpleNamespace
 
 import pytest
@@ -10,8 +11,7 @@ from autobott_v2.phase1_models import (DecisionCard, DecisionStatus, DirectionBi
     RegimeLabel, RegimeResult, CycleAssessment, CycleStatus, VolatilityResult, TradeSetup,
     ExecutionLayer, SelectedContract, OptionContractSnapshot, OptionType, ContractScore, Phase1Rules)
 from autobott_v2.ranked_entry_scan import RankedCapturePlan
-from autobott_v2.runtime_control import arm_paper_execution
-from test_budgeted_broker_integration import setup
+from ranked_entry_fixtures import AT, run_combined
 
 
 @dataclass
@@ -71,10 +71,12 @@ def contracts(symbol):
 
 
 def native_card(input_, rules):
+    """Fixed ranking scores isolate allocation; they are not a fitted strategy."""
     symbol = input_.ticker
-    selected = SelectedContract.from_score(ContractScore(contracts(symbol)[0], .8, 1, []), Phase1Rules())
+    primary = next(c for c in input_.option_chain if c.strike == 100)
+    selected = SelectedContract.from_score(ContractScore(primary, .8, 1, []), Phase1Rules())
     return DecisionCard(schema_version="phase1_decision_card.v1", decision_id=symbol + "-decision", ticker=symbol,
-        timestamp=datetime.now(UTC), regime=RegimeResult(RegimeLabel.TREND, [RegimeLabel.TREND], .8, "fixture"),
+        timestamp=input_.timestamp, regime=RegimeResult(RegimeLabel.TREND, [RegimeLabel.TREND], .8, "fixture"),
         direction=DirectionResult(DirectionBias.BULLISH, .8, .8, .4, .2, False, "fixture"),
         cycle=CycleAssessment(CycleStatus.MEDIUM, 3, 2, 2, 10, 10, False, False, False, False, False, "valley", "fixture", "fixture"),
         volatility=VolatilityResult(.8, .5, 1, False, False, "fixture"), selected_contract=selected,
@@ -84,41 +86,55 @@ def native_card(input_, rules):
 
 
 def test_actual_cycle_allocates_to_higher_scoring_later_symbol_before_six_slot_cutoff(monkeypatch, tmp_path):
-    monkeypatch.setenv("AUTOBOTT_DATA_ROOT", str(tmp_path / "data"))
-    monkeypatch.setenv("AUTOBOTT_ARTIFACTS_ROOT", str(tmp_path / "artifacts"))
-    monkeypatch.setenv("AUTOBOTT_GATE_PATH", str(tmp_path / "gate.json"))
-    broker, ledger, transport = setup(monkeypatch, tmp_path, cap=150)
-    arm_paper_execution(reason="synthetic ranked capacity test")
-    trace = []
-    def capture(*, symbol, **kwargs):
-        trace.append(("capture", symbol))
-        return tmp_path / symbol
-    original_request = transport.request
-    def request(method, path, **kwargs):
-        if method == "POST":
-            trace.append(("POST", kwargs["payload"]["symbol"]))
-        return original_request(method, path, **kwargs)
-    monkeypatch.setattr(broker, "_request_json_once", request)
-    monkeypatch.setattr(legacy, "capture_symbol_snapshot", capture)
-    monkeypatch.setattr(legacy, "_load_snapshot", lambda path: path.name)
-    monkeypatch.setattr(legacy, "_decision_input_from_snapshot", lambda symbol: SimpleNamespace(ticker=symbol, option_chain=contracts(symbol)))
-    monkeypatch.setattr(adapter, "build_decision_card_v2", native_card)
-    monkeypatch.setattr(adapter, "run_position_monitor_v2", lambda **_: {"ok": True, "checked": 0, "actions": []})
-    monkeypatch.setattr(legacy, "observe_ghost_trades", lambda *_, **__: [])
-    monkeypatch.setattr(legacy, "select_defined_risk_spread", lambda *_, **__: None)
-    result = adapter.run_trading_cycle(symbols=["WEAK", "STRONG"], broker=broker, data_client=SimpleNamespace(),
-        corpus_root=tmp_path / "captures", execution_log_path=str(tmp_path / "execution_orders.jsonl"),
-        decision_log_path=tmp_path / "decisions.jsonl")
+    result, broker, ledger, transport, trace = run_combined(monkeypatch, tmp_path, native_card)
     assert result.symbols == ["STRONG", "WEAK"]
-    assert len(result.orders_submitted) == 2
+    assert len(result.orders_submitted) == 2, result.skipped
     assert all(row["symbol"] == "STRONG" for row in result.orders_submitted)
     assert len(transport.posts) == 2
     assert all(row["type"] == "limit" for row in transport.posts)
     assert result.execution_rejected_count_by_reason["portfolio_premium_budget_exceeded"] == 1
     assert result.trade_attempted_count == 1
     assert trace[:3] == [("capture", "WEAK"), ("capture", "STRONG"), ("capture", "STRONG")]
+    assert next(i for i, row in enumerate(trace) if row[0] == "refresh") < next(i for i, row in enumerate(trace) if row[0] == "POST")
     ranked = next(row for row in result.execution_outcomes if row["disposition"] == "ranked_entry_scan")
     assert ranked["symbols"][0]["symbol"] == "STRONG"
     assert not ranked["ranking_is_profitability_evidence"]
     accounting = next(row for row in result.execution_outcomes if row["disposition"] == "trade_outcome_learning_summary")
     assert accounting["ok"]
+    revalidated = [r for r in result.execution_outcomes if r["disposition"] == "entry_market_revalidated"]
+    assert len(revalidated) == 1
+    assert revalidated[0]["primary_option_symbol"] == result.orders_submitted[0]["option_symbol"]
+
+
+@pytest.mark.parametrize("defect", ["stale", "chased"])
+def test_ranked_budgeted_candidate_still_cannot_bypass_final_quote_admission(monkeypatch, tmp_path, defect):
+    result, broker, ledger, transport, trace = run_combined(monkeypatch, tmp_path, native_card, refresh_defect=defect)
+    assert result.scanner_candidates_count == 2
+    assert result.orders_submitted == []
+    assert result.trade_attempted_count == 0
+    assert not transport.posts
+    assert any(event[0] == "refresh" for event in trace)
+    assert all(row["reason"].startswith("entry_") for row in result.skipped), result.skipped
+
+
+def test_budgeted_pair_binds_and_observes_only_its_actual_primary_fill(monkeypatch, tmp_path):
+    from autobott_v2.primary_fill_capture import poll_primary_fills
+    result, broker, ledger, transport, trace = run_combined(monkeypatch, tmp_path, native_card, observe=True)
+    assert len(transport.posts) == 2, result.skipped
+    root = tmp_path / "artifacts" / "primary_followthrough"
+    watches = list(root.glob("*.json"))
+    assert len(watches) == 1, result.execution_outcomes
+    native_poll = next(r for r in result.execution_outcomes if r["disposition"] == "primary_fill_capture_poll")
+    assert native_poll["filled"] == 1 and native_poll["checked"] == 1, native_poll
+    assert native_poll["errors"] == []
+    row = json.loads(watches[0].read_text())
+    assert row["fill_capture_status"] == "filled"
+    assert row["case"]["fills"][0]["option_symbol"] == "STRONG261002C00100000"
+    assert row["case"]["fills"][0]["price"] == .82
+    assert len(row["case"]["fills"]) == 1
+    before = watches[0].read_bytes()
+    observed = poll_primary_fills(root, broker, now_fn=lambda: AT+timedelta(seconds=3))
+    assert observed["filled"] == observed["checked"] == 0, observed
+    assert observed["errors"] == []
+    assert watches[0].read_bytes() == before
+    assert len(transport.posts) == 2

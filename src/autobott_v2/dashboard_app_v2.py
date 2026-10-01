@@ -205,7 +205,35 @@ function renderPairs(data){
   document.getElementById('standalone-section').hidden=!other.length;
   document.getElementById('standalone').innerHTML=other.map(leg=>legCard(leg,'OPEN POSITION')).join('');
 }
-function renderAccount(data){const a=data.account||{};document.getElementById('equity').textContent=money(a.equity);document.getElementById('cash').textContent=`Cash ${money(a.cash)}`;const pl=Number(a.day_pl||0),e=document.getElementById('daypl');e.textContent=money(a.day_pl);e.className=`value ${pl>=0?'goodText':'badText'}`;document.getElementById('daypct').textContent=a.day_pl_pct==null?'—':`${Number(a.day_pl_pct).toFixed(2)}% today`}
+function renderAccount(data){const a=data.account||{};document.getElementById('equity').textContent=money(a.equity);document.getElementById('cash').textContent=`Cash ${money(a.cash)}`;const pl=Number(a.day_pl||0),e=document.getElementById('daypl');e.textContent=money(a.day_pl);e.className=`value ${pl>=0?'goodText':'badText'}`;document.getElementById('daypct').textContent=a.day_pl_pct==null?'-':`${Number(a.day_pl_pct).toFixed(2)}% today`}
+function exitProtectionRows(session){
+  const alive=session.position_monitor_thread_alive===true;
+  const state=session.state||{},result=state.last_monitor_result?.exit_protection;
+  const checked=state.last_monitor_at,validCheck=typeof checked==='string'&&Number.isFinite(Date.parse(checked));
+  const conditions={
+    attention_required:['Attention required','An exit request failed, is uncertain, or is held. Review the latest exit details.'],
+    awaiting_fill:['Awaiting fill','Accepted or existing exit orders are pending; partial fills remain incomplete.'],
+    awaiting_reconciliation:['Awaiting position reconciliation','The broker reported a fill; position closure is not yet confirmed.'],
+    monitoring:['Monitoring','The latest exit check reported no current concern.'],
+    disabled:['Disabled','Exit monitoring is disabled.'],
+    unavailable:['Unavailable','Exit monitoring has no usable latest observation.']
+  };
+  let status=Object.hasOwn(conditions,result?.status)?result.status:'unavailable';
+  if(!validCheck||(state.last_monitor_error&&status!=='attention_required'))status='unavailable';
+  const [label,summary]=conditions[status];
+  const rows=[['Exit protection',label],['Exit summary',summary],['Latest exit check',validCheck?new Date(checked).toLocaleString():'No check recorded'],['Exit monitor',alive?'Running':'Inactive; latest check is historical']];
+  if(!alive&&status==='monitoring'){rows[0][1]='Inactive';rows[1][1]='The exit monitor is inactive; the recorded exit check does not establish current protection.'}
+  if(validCheck&&Array.isArray(result?.issues)){
+    const issueLabels={failed:'Failed',rejected:'Rejected',canceled:'Canceled',draft:'Not accepted',approved:'Not accepted',uncertain:'Uncertain',blocked:'Held',pending:'Pending',partially_filled:'Partially filled',reported_fill:'Broker reported fill; reconciliation pending',broker_reported_filled:'Broker reported fill; reconciliation pending'};
+    result.issues.slice(0,8).forEach(issue=>{
+      if(!issue||typeof issue!=='object')return;
+      const symbol=String(issue.symbol||'Unknown symbol').slice(0,80),reason=String(issue.reason||'Exit check').slice(0,100);
+      rows.push(['Exit detail',`${symbol} / ${reason}: ${issueLabels[issue.status]||'Review required'}`]);
+    });
+    if(result.issues.length>8)rows.push(['Exit details','Additional issues are present in the latest check.']);
+  }
+  return rows;
+}
 function renderState(safety,session,health){
   killed=!!safety.kill_switch_enabled;const armed=!!safety.execution_enabled&&!killed,blocked=armed&&safety.order_placement_enabled!==true;
   const runtime=killed?'KILLED':blocked?'BLOCKED':armed?'ARMED':'PAUSED';
@@ -213,7 +241,7 @@ function renderState(safety,session,health){
   const stalled=health.session_supervisor?.stalled===true,alive=!!session.thread_alive&&!stalled,chip=document.getElementById('session-chip');chip.textContent=stalled?'SESSION STALLED':alive?'SESSION RUNNING':'SESSION STOPPED';chip.className=`chip ${stalled?'bad':alive?'good':'warn'}`;
   document.getElementById('policy').textContent=health.policy_version||'Paper trading';
   const lastCycle=session.state?.last_cycle_at;
-  document.getElementById('state').innerHTML=[['Broker','Alpaca paper'],['Real money','Locked off'],['Execution',blocked?'Blocked by safety configuration':armed?'Armed':'Paused'],['Kill switch',killed?'Active':'Off'],['Session',stalled?'Stopped unexpectedly':alive?'Running':'Stopped'],['Last cycle',lastCycle?new Date(lastCycle).toLocaleString():'No cycle recorded'],['Policy',health.policy_version||'Unknown']].map(([a,b])=>`<div class="state-row"><span class="muted">${esc(a)}</span><strong>${esc(b)}</strong></div>`).join('');
+  document.getElementById('state').innerHTML=[['Broker','Alpaca paper'],['Real money','Locked off'],['Execution',blocked?'Blocked by safety configuration':armed?'Armed':'Paused'],['Kill switch',killed?'Active':'Off'],['Session',stalled?'Stopped unexpectedly':alive?'Running':'Stopped'],...exitProtectionRows(session),['Last cycle',lastCycle?new Date(lastCycle).toLocaleString():'No cycle recorded'],['Policy',health.policy_version||'Unknown']].map(([a,b])=>`<div class="state-row"><span class="muted">${esc(a)}</span><strong>${esc(b)}</strong></div>`).join('');
 }
 function renderFeed(data){
   const rows=data.decisions||[],root=document.getElementById('feed');

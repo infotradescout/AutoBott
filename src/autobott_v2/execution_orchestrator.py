@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import logging
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Callable
@@ -105,6 +106,7 @@ def submit_core_runner_to_broker(
     open_positions: int = 0,
     journal_path: str | None = None,
     on_submission_attempt: Callable[[TradeIntent], None] | None = None,
+    on_order_submitted: Callable[[ExecutionOrder], None] | None = None,
 ) -> tuple[ExecutionOrder, ExecutionOrder]:
     """Submit one primary plus one distinct runner as an atomic paper order."""
 
@@ -204,6 +206,7 @@ def submit_core_runner_to_broker(
             # primary was accepted, cancel the primary or immediately flatten
             # any filled quantity instead of leaving an accidental single leg.
             for order in simple_orders:
+                _notify_order_submitted(order, on_order_submitted)
                 _persist_submitted_order_safely(order, journal_path=journal_path)
                 try:
                     compensation = _neutralize_partial_pair_order(
@@ -230,6 +233,7 @@ def submit_core_runner_to_broker(
 
     primary_order, runner_order = submitted_orders
     for order in submitted_orders:
+        _notify_order_submitted(order, on_order_submitted)
         _persist_submitted_order_safely(order, journal_path=journal_path)
     return primary_order, runner_order
 
@@ -289,6 +293,7 @@ def submit_decision_to_broker(
     open_positions: int = 0,
     journal_path: str | None = None,
     on_submission_attempt: Callable[[TradeIntent], None] | None = None,
+    on_order_submitted: Callable[[ExecutionOrder], None] | None = None,
 ) -> ExecutionOrder:
     resolved_broker = broker or AlpacaExecutionBroker(config)
     runtime_state = load_runtime_state()
@@ -324,6 +329,7 @@ def submit_decision_to_broker(
         current_daily_realized_pnl=current_daily_realized_pnl,
         open_positions=open_positions,
     )
+    _notify_order_submitted(order, on_order_submitted)
     _persist_submitted_order_safely(order, journal_path=journal_path)
     return order
 
@@ -473,3 +479,12 @@ def _entry_limit_extra() -> float:
     if value is None or not value.strip():
         return 0.0
     return max(0.0, float(value))
+
+
+def _notify_order_submitted(order: ExecutionOrder, callback: Callable[[ExecutionOrder], None] | None) -> None:
+    # Evidence must never reinterpret a successful order as a failed submission.
+    if callback is not None:
+        try:
+            callback(order)
+        except Exception as exc:
+            logging.getLogger(__name__).warning("submission_evidence_callback_failed:%s", type(exc).__name__)

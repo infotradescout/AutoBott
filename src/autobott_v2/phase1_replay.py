@@ -2,14 +2,15 @@ from __future__ import annotations
 
 import hashlib
 import json
-from dataclasses import replace
+from dataclasses import asdict, replace
 from pathlib import Path
 from typing import Any
 
+from .entry_quality import EntryQualityRules, evaluate_entry_quality, summarize_entry_quality
 from .phase1_engine import build_decision_card
 from .phase1_execution_sim import ExecutionSimRules, simulate_execution
 from .phase1_exit_engine import ExitRules, evaluate_exit
-from .phase1_models import LifecycleStatus
+from .phase1_models import LifecycleStatus, Phase1Rules
 from .phase1_scorecard import load_phase1_gate, update_phase1_gate
 from .phase1_validate import _decision_input_from_snapshot, _load_snapshot, _parse_datetime
 from .runtime_paths import artifacts_root as default_artifacts_root
@@ -24,7 +25,23 @@ def run_replay(
     fill_model: str = "realistic_mid_penalty",
     promote_gate: bool = False,
     active_gate_path: str | Path | None = None,
+    entry_quality_rules_by_role: dict[str, EntryQualityRules] | None = None,
+    entry_engine: str = "legacy",
+    decision_rules: Phase1Rules | None = None,
 ) -> dict[str, Any]:
+    if entry_engine not in {"legacy", "v2"}:
+        raise ValueError("entry_engine must be legacy or v2")
+    if decision_rules is not None and not isinstance(decision_rules, Phase1Rules):
+        raise ValueError("decision_rules must be Phase1Rules")
+    resolved_decision_rules = decision_rules if decision_rules is not None else Phase1Rules()
+    decision_builder = build_decision_card
+    if entry_engine == "v2":
+        from .phase1_engine_v2 import build_decision_card as decision_builder
+    # Explicit per-role horizons/thresholds: never infer them from future prices.
+    entry_quality_rules_by_role = dict(entry_quality_rules_by_role or {})
+    if any(role not in {"tactical", "rider"} or not isinstance(rules, EntryQualityRules)
+           for role, rules in entry_quality_rules_by_role.items()):
+        raise ValueError("entry quality rules must map tactical/rider roles to EntryQualityRules")
     snapshot_paths = _snapshot_paths(snapshots)
     artifact_dir = (Path(artifacts_root) if artifacts_root is not None else default_artifacts_root() / "phase1_replay") / run_id
     artifact_dir.mkdir(parents=True, exist_ok=True)
@@ -35,6 +52,7 @@ def run_replay(
     positions_path = artifact_dir / "positions.jsonl"
     outcomes_path = artifact_dir / "outcomes.jsonl"
     thesis_path = artifact_dir / "thesis_validation.jsonl"
+    entry_quality_path = artifact_dir / "entry_quality.jsonl"
     manifest_path = artifact_dir / "manifest.json"
 
     decisions: list[dict[str, Any]] = []
@@ -43,12 +61,32 @@ def run_replay(
     positions: list[dict[str, Any]] = []
     outcomes: list[dict[str, Any]] = []
     thesis_results = []
+    entry_quality_results = []
     terminal_events = []
     open_positions = []
     execution_rules = _execution_rules(fill_model)
     exit_rules = _exit_rules(fill_model)
     snapshots_payload = [_load_snapshot(snapshot_path) for snapshot_path in snapshot_paths]
     manifest = _manifest(run_id, snapshot_paths, snapshots_payload, fill_model, execution_rules, exit_rules)
+    manifest["engine_version"] = "phase1_engine.v1" if entry_engine == "legacy" else "phase1_engine_v2"
+    manifest["entry_engine"] = entry_engine
+    manifest["decision_rules"] = asdict(resolved_decision_rules)
+    manifest["decision_rules_source"] = "explicit" if decision_rules is not None else "Phase1Rules_defaults"
+    manifest["entry_config_hash"] = hashlib.sha256(json.dumps({
+        "entry_engine": entry_engine, "decision_rules": manifest["decision_rules"],
+    }, sort_keys=True, allow_nan=False).encode("utf-8")).hexdigest()
+    # This replay still simulates tactical/rider legs, not the hosted core/runner
+    # broker lifecycle. Selecting v2 does not make it full production parity.
+    manifest["execution_model"] = "phase1_tactical_rider_simulation"
+    manifest["hosted_execution_parity_verified"] = False
+    # Freeze the assessment protocol alongside unchanged exit/fill settings.
+    # This records configuration, not proof of preregistration or a held-out test.
+    manifest["entry_quality_protocols"] = {
+        role: {"rules": rules.to_json_dict(), "rules_hash": rules.config_hash}
+        for role, rules in sorted(entry_quality_rules_by_role.items())
+    }
+    manifest["entry_quality_preregistration_verified"] = False
+    manifest["entry_quality_evidence_kind"] = "simulated_fill"
     manifest_path.write_text(json.dumps(manifest, indent=2, sort_keys=True), encoding="utf-8")
 
     for snapshot_path, snapshot in zip(snapshot_paths, snapshots_payload):
@@ -90,7 +128,9 @@ def run_replay(
                 closed_this_bar.append(open_position.decision_id)
         open_positions = [event for event in open_positions if event.decision_id not in closed_this_bar]
 
-        decision_card = build_decision_card(_decision_input_from_snapshot(snapshot))
+        decision_input = _decision_input_from_snapshot(snapshot)
+        decision_card = (decision_builder(decision_input, rules=resolved_decision_rules)
+                         if decision_rules is not None else decision_builder(decision_input))
         decision_record = {
             "snapshot_path": str(snapshot_path),
             **decision_card.to_json_dict(),
@@ -111,7 +151,18 @@ def run_replay(
         for event in execution_events:
             orders.append(event.to_json_dict())
             if event.filled:
-                fills.append(event.to_json_dict())
+                # Assess the filled contract and fill basis, never an unfilled
+                # candidate or another leg's option. This has no order/gate effect.
+                event_row = event.to_json_dict()
+                primary_symbol = decision_card.selected_contract.option_symbol if decision_card.selected_contract else None
+                entry_quality_results.append(evaluate_entry_quality(
+                    event_row,
+                    snapshots_payload,
+                    entry_quality_rules_by_role.get(event_row.get("leg_role")),
+                    is_primary=bool(event.selected_contract and event.selected_contract.option_symbol == primary_symbol),
+                    evidence_kind="simulated_fill",
+                ))
+                fills.append(event_row)
                 positions.append(event.to_json_dict())
                 open_positions.append(event)
             else:
@@ -123,6 +174,7 @@ def run_replay(
     _write_jsonl(positions_path, positions)
     _write_jsonl(outcomes_path, outcomes)
     _write_jsonl(thesis_path, [result.to_json_dict() for result in thesis_results])
+    _write_jsonl(entry_quality_path, entry_quality_results)
 
     replay_gate_path = artifact_dir / "gate.json"
     scorecard = update_phase1_gate(terminal_events, replay_gate_path)
@@ -130,7 +182,17 @@ def run_replay(
     scorecard["decision_stats"]["decisions_generated"] = len(decisions)
     scorecard["decision_stats"]["no_trade_decisions"] = len([decision for decision in decisions if decision.get("decision") == "NO_TRADE"])
     scorecard["fill_model"] = fill_model
-    scorecard["thesis_validation"] = summarize_thesis_results(thesis_results)
+    scorecard["entry_engine"] = entry_engine
+    scorecard["entry_config_hash"] = manifest["entry_config_hash"]
+    scorecard["execution_model"] = manifest["execution_model"]
+    scorecard["hosted_execution_parity_verified"] = False
+    thesis_summary = {
+        **summarize_thesis_results(thesis_results),
+        "measurement_basis": "underlying_direction_only",
+        "entry_quality_evidence": False,
+    }
+    scorecard["thesis_validation"] = thesis_summary
+    scorecard["entry_quality"] = summarize_entry_quality(entry_quality_results)
     replay_gate_path.write_text(json.dumps(scorecard, indent=2, sort_keys=True), encoding="utf-8")
     gate_result = load_phase1_gate(replay_gate_path)
     if promote_gate:
@@ -145,6 +207,9 @@ def run_replay(
 
     return {
         "run_id": run_id,
+        "entry_engine": entry_engine,
+        "entry_config_hash": manifest["entry_config_hash"],
+        "hosted_execution_parity_verified": False,
         "artifact_dir": str(artifact_dir),
         "fill_model": fill_model,
         "snapshots_processed": len(snapshot_paths),
@@ -153,7 +218,8 @@ def run_replay(
         "orders_filled": len(fills),
         "closed_trades": len(outcomes),
         "gate_reason": gate_result.reason,
-        "thesis_validation": summarize_thesis_results(thesis_results),
+        "thesis_validation": thesis_summary,
+        "entry_quality": scorecard["entry_quality"],
     }
 
 
@@ -196,6 +262,8 @@ def _summary(
     return "\n".join(
         [
             f"Run ID: {run_id}",
+            f"Entry engine: {scorecard.get('entry_engine', 'legacy')}",
+            "Hosted execution parity: not verified (tactical/rider simulation).",
             f"Fill model: {scorecard.get('fill_model', 'unknown')}",
             f"Snapshots processed: {len(snapshot_paths)}",
             f"Decisions generated: {len(decisions)}",
@@ -208,9 +276,11 @@ def _summary(
             f"Win rate: {scorecard.get('win_rate', 0.0)}",
             f"Profit factor: {scorecard.get('profit_factor', 0.0)}",
             f"Max drawdown: {scorecard.get('max_drawdown_pct_observed', 0.0)}",
-            f"Theory pass rate: {scorecard.get('thesis_validation', {}).get('pass_rate', 0.0)}",
+            f"Underlying-direction diagnostic (not entry quality): {scorecard.get('thesis_validation', {}).get('pass_rate', 0.0)}",
             f"2DTE thesis pass rate: {scorecard.get('thesis_validation', {}).get('tactical_2dte_pass_rate', 0.0)}",
             f"Reversal thesis pass rate: {scorecard.get('thesis_validation', {}).get('reversal_pass_rate', 0.0)}",
+            f"Primary entry opportunity assessment: {scorecard.get('entry_quality', {}).get('primary', {})}",
+            "Entry-method edge: not established by opportunity diagnostics alone.",
             f"Gate eligibility result: {gate_reason}",
         ]
     )

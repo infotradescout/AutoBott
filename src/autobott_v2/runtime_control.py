@@ -30,7 +30,7 @@ class RuntimeControlState:
 def default_runtime_state() -> RuntimeControlState:
     return RuntimeControlState(
         kill_switch_enabled=False,
-        execution_enabled=True,
+        execution_enabled=False,
         live_mode_enabled=False,
         updated_at=datetime.now(tz=UTC),
         reason="default_startup_state",
@@ -41,14 +41,31 @@ def load_runtime_state(*, state_path: str | Path | None = None) -> RuntimeContro
     path = Path(state_path) if state_path is not None else runtime_state_path()
     if not path.exists():
         return default_runtime_state()
-    payload = json.loads(path.read_text(encoding="utf-8"))
-    return RuntimeControlState(
-        kill_switch_enabled=bool(payload.get("kill_switch_enabled", False)),
-        execution_enabled=bool(payload.get("execution_enabled", True)),
-        live_mode_enabled=bool(payload.get("live_mode_enabled", False)),
-        updated_at=datetime.fromisoformat(str(payload["updated_at"]).replace("Z", "+00:00")).astimezone(UTC),
-        reason=payload.get("reason"),
-    )
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        safety_fields = ("kill_switch_enabled", "execution_enabled", "live_mode_enabled")
+        if not isinstance(payload, dict) or any(type(payload.get(key)) is not bool for key in safety_fields):
+            raise ValueError("runtime safety fields must be JSON booleans")
+        updated_at = datetime.fromisoformat(str(payload["updated_at"]).replace("Z", "+00:00"))
+        if updated_at.tzinfo is None:
+            raise ValueError("runtime timestamp must include a timezone")
+        killed = payload["kill_switch_enabled"]
+        return RuntimeControlState(
+            kill_switch_enabled=killed,
+            execution_enabled=payload["execution_enabled"] and not killed,
+            live_mode_enabled=payload["live_mode_enabled"] and not killed,
+            updated_at=updated_at.astimezone(UTC),
+            reason=payload.get("reason"),
+        )
+    except (OSError, ValueError, KeyError, TypeError):
+        # Do not overwrite the evidence or interpret truthy strings as an arm.
+        return RuntimeControlState(
+            kill_switch_enabled=True,
+            execution_enabled=False,
+            live_mode_enabled=False,
+            updated_at=datetime.now(tz=UTC),
+            reason="invalid_runtime_state",
+        )
 
 
 def save_runtime_state(state: RuntimeControlState, *, state_path: str | Path | None = None) -> Path:

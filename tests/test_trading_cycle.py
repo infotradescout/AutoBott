@@ -41,6 +41,13 @@ class FakeDataClient:
             for idx, symbol in enumerate(symbols)
         }
 
+    def get_latest_option_quotes(self, symbols):
+        # Deterministic refreshed observations from the same synthetic provider.
+        rows = {}
+        for root in {symbol[:-15] for symbol in symbols}:
+            rows.update(self.get_option_chain_snapshots(root))
+        return {symbol: dict(rows[symbol]["latestQuote"]) for symbol in symbols if symbol in rows}
+
     def get_option_chain_snapshots(self, symbol):
         return {
             f"{symbol}260703C00105000": {
@@ -123,6 +130,16 @@ class CoreRunnerDataClient(FakeDataClient):
 
 
 class HostedCoreRunnerDataClient(CoreRunnerDataClient):
+    def get_stock_bars(self, symbols, *, start, end, timeframe="1Min", limit=35):
+        from autobott_v2.bar_timing import bar_duration
+        rows = super().get_stock_bars(symbols, start=start, end=end, timeframe=timeframe, limit=35)
+        duration = bar_duration(timeframe)
+        cutoff = end.replace(minute=0, second=0, microsecond=0) if "Hour" in timeframe else end.replace(second=0, microsecond=0)
+        for values in rows.values():
+            for i, row in enumerate(values):
+                row["t"] = (cutoff - duration * (len(values) - i)).isoformat()
+        return rows
+
     def get_option_chain_snapshots(self, symbol):
         payload = super().get_option_chain_snapshots(symbol)
         hosted = {}
@@ -219,6 +236,9 @@ class RiskOffVolatilityDataClient(FakeDataClient):
 @pytest.fixture(autouse=True)
 def _legacy_single_leg_default_for_existing_cycle_contracts(monkeypatch):
     monkeypatch.setenv("AUTOBOTT_CORE_RUNNER_ENABLED", "false")
+    # All market fixtures in this module use July 1. The admission clock must
+    # describe that fixture time, not the real wall-clock day the suite runs.
+    monkeypatch.setattr(trading_cycle, "_entry_check_now", lambda: datetime(2026, 7, 1, 15, 35, 10, tzinfo=UTC))
 
 
 class FakeBroker:
@@ -312,11 +332,14 @@ class FakeBrokerWithAllOrders(FakeBroker):
 
 class FailingOutcomeBroker(FakeBrokerWithLivePositions):
     def list_orders(self, *, status="open", limit=100, direction="desc"):
+        if status == "open":
+            return []  # Known exit inventory; only historical outcome learning is unavailable.
         raise RuntimeError("broker_history_unavailable")
 
 
+@pytest.mark.usefixtures("synthetic_execution_armed")
 def test_run_trading_cycle_captures_decides_and_submits(tmp_path) -> None:
-    save_runtime_state(default_runtime_state(), state_path=tmp_path / "runtime_state.json")
+    save_runtime_state(replace(default_runtime_state(), execution_enabled=True, reason="synthetic_operator_arm"), state_path=tmp_path / "runtime_state.json")
     original = trading_cycle.load_runtime_state
     original_positions = trading_cycle.load_open_positions
     trading_cycle.load_runtime_state = lambda: original(state_path=tmp_path / "runtime_state.json")
@@ -349,8 +372,9 @@ def test_run_trading_cycle_captures_decides_and_submits(tmp_path) -> None:
     assert "pass_trade_attempted" in dispositions
 
 
+@pytest.mark.usefixtures("synthetic_execution_armed")
 def test_same_hour_setup_cannot_reenter_after_first_submission(tmp_path) -> None:
-    save_runtime_state(default_runtime_state(), state_path=tmp_path / "runtime_state.json")
+    save_runtime_state(replace(default_runtime_state(), execution_enabled=True, reason="synthetic_operator_arm"), state_path=tmp_path / "runtime_state.json")
     original = trading_cycle.load_runtime_state
     original_positions = trading_cycle.load_open_positions
     trading_cycle.load_runtime_state = lambda: original(state_path=tmp_path / "runtime_state.json")
@@ -379,11 +403,12 @@ def test_same_hour_setup_cannot_reenter_after_first_submission(tmp_path) -> None
     assert any(row["reason"] == "setup_event_already_traded" for row in second.skipped)
 
 
+@pytest.mark.usefixtures("synthetic_execution_armed")
 def test_paper_cycle_survives_restart_reconciles_and_prevents_duplicate_order(
     tmp_path, monkeypatch
 ) -> None:
     monkeypatch.setenv("AUTOBOTT_DATA_ROOT", str(tmp_path / "paper-data"))
-    save_runtime_state(default_runtime_state(), state_path=tmp_path / "runtime_state.json")
+    save_runtime_state(replace(default_runtime_state(), execution_enabled=True, reason="synthetic_operator_arm"), state_path=tmp_path / "runtime_state.json")
     original_runtime = trading_cycle.load_runtime_state
     trading_cycle.load_runtime_state = lambda: original_runtime(
         state_path=tmp_path / "runtime_state.json"
@@ -464,8 +489,9 @@ def test_setup_cooldown_fails_closed_when_journal_cannot_be_read(tmp_path, monke
     assert trading_cycle._SETUP_REGISTRY_UNAVAILABLE in events
 
 
+@pytest.mark.usefixtures("synthetic_execution_armed")
 def test_setup_cooldown_write_failure_blocks_broker_post(tmp_path, monkeypatch) -> None:
-    save_runtime_state(default_runtime_state(), state_path=tmp_path / "runtime_state.json")
+    save_runtime_state(replace(default_runtime_state(), execution_enabled=True, reason="synthetic_operator_arm"), state_path=tmp_path / "runtime_state.json")
     original = trading_cycle.load_runtime_state
     original_positions = trading_cycle.load_open_positions
     trading_cycle.load_runtime_state = lambda: original(state_path=tmp_path / "runtime_state.json")
@@ -610,8 +636,9 @@ def test_run_trading_cycle_skips_when_kill_switch_enabled(tmp_path) -> None:
     assert result.zero_trade_cycle is False
 
 
+@pytest.mark.usefixtures("synthetic_execution_armed")
 def test_run_trading_cycle_uses_persisted_open_positions_for_risk_count(tmp_path) -> None:
-    save_runtime_state(default_runtime_state(), state_path=tmp_path / "runtime_state.json")
+    save_runtime_state(replace(default_runtime_state(), execution_enabled=True, reason="synthetic_operator_arm"), state_path=tmp_path / "runtime_state.json")
     save_open_positions(
         [
             OpenPosition(
@@ -657,12 +684,13 @@ def test_run_trading_cycle_uses_persisted_open_positions_for_risk_count(tmp_path
     assert broker.open_positions_seen == [1]
 
 
+@pytest.mark.usefixtures("synthetic_execution_armed")
 def test_run_trading_cycle_prefers_live_broker_position_count_over_stale_store(tmp_path) -> None:
     # The local open_positions.json store never removes entries when a
     # position is closed by the monitor, so it drifts upward forever. The
     # risk-count used for sizing new entries must come from the broker's
     # live truth instead, not that ever-growing local file.
-    save_runtime_state(default_runtime_state(), state_path=tmp_path / "runtime_state.json")
+    save_runtime_state(replace(default_runtime_state(), execution_enabled=True, reason="synthetic_operator_arm"), state_path=tmp_path / "runtime_state.json")
     save_open_positions(
         [
             OpenPosition(
@@ -708,8 +736,9 @@ def test_run_trading_cycle_prefers_live_broker_position_count_over_stale_store(t
     assert broker.open_positions_seen == [1]
 
 
+@pytest.mark.usefixtures("synthetic_execution_armed")
 def test_run_trading_cycle_skips_symbol_with_existing_active_underlying(tmp_path) -> None:
-    save_runtime_state(default_runtime_state(), state_path=tmp_path / "runtime_state.json")
+    save_runtime_state(replace(default_runtime_state(), execution_enabled=True, reason="synthetic_operator_arm"), state_path=tmp_path / "runtime_state.json")
     save_open_positions(
         [
             OpenPosition(
@@ -757,8 +786,9 @@ def test_run_trading_cycle_skips_symbol_with_existing_active_underlying(tmp_path
     assert result.execution_rejected_count_by_reason == {"underlying_exposure_already_open": 1}
 
 
+@pytest.mark.usefixtures("synthetic_execution_armed")
 def test_run_trading_cycle_uses_live_broker_positions_for_underlying_guard(tmp_path) -> None:
-    save_runtime_state(default_runtime_state(), state_path=tmp_path / "runtime_state.json")
+    save_runtime_state(replace(default_runtime_state(), execution_enabled=True, reason="synthetic_operator_arm"), state_path=tmp_path / "runtime_state.json")
     original_runtime = trading_cycle.load_runtime_state
     original_positions = trading_cycle.load_open_positions
     original_reconcile = trading_cycle.reconcile_open_positions
@@ -839,8 +869,9 @@ def test_retained_runner_does_not_freeze_next_entry_for_same_underlying(monkeypa
     assert trading_cycle._active_underlying_symbols(broker) == set()
 
 
+@pytest.mark.usefixtures("synthetic_execution_armed")
 def test_run_trading_cycle_uses_pending_buy_orders_for_underlying_guard(tmp_path) -> None:
-    save_runtime_state(default_runtime_state(), state_path=tmp_path / "runtime_state.json")
+    save_runtime_state(replace(default_runtime_state(), execution_enabled=True, reason="synthetic_operator_arm"), state_path=tmp_path / "runtime_state.json")
     original_runtime = trading_cycle.load_runtime_state
     original_positions = trading_cycle.load_open_positions
     original_reconcile = trading_cycle.reconcile_open_positions
@@ -882,8 +913,9 @@ def test_run_trading_cycle_uses_pending_buy_orders_for_underlying_guard(tmp_path
     assert result.execution_rejected_count_by_reason == {"underlying_exposure_already_open": 1}
 
 
+@pytest.mark.usefixtures("synthetic_execution_armed")
 def test_run_trading_cycle_records_exact_execution_rejection_reason(tmp_path) -> None:
-    save_runtime_state(default_runtime_state(), state_path=tmp_path / "runtime_state.json")
+    save_runtime_state(replace(default_runtime_state(), execution_enabled=True, reason="synthetic_operator_arm"), state_path=tmp_path / "runtime_state.json")
     original = trading_cycle.load_runtime_state
     original_positions = trading_cycle.load_open_positions
     trading_cycle.load_runtime_state = lambda: original(state_path=tmp_path / "runtime_state.json")
@@ -911,8 +943,9 @@ def test_run_trading_cycle_records_exact_execution_rejection_reason(tmp_path) ->
     assert result.zero_trade_cycle is True
 
 
+@pytest.mark.usefixtures("synthetic_execution_armed")
 def test_run_trading_cycle_paper_trade_through_allows_multiple_attempts(tmp_path) -> None:
-    save_runtime_state(default_runtime_state(), state_path=tmp_path / "runtime_state.json")
+    save_runtime_state(replace(default_runtime_state(), execution_enabled=True, reason="synthetic_operator_arm"), state_path=tmp_path / "runtime_state.json")
     original = trading_cycle.load_runtime_state
     original_positions = trading_cycle.load_open_positions
     trading_cycle.load_runtime_state = lambda: original(state_path=tmp_path / "runtime_state.json")
@@ -944,8 +977,9 @@ def test_run_trading_cycle_paper_trade_through_allows_multiple_attempts(tmp_path
     assert broker.open_positions_seen == [0, 1, 2, 3]
 
 
+@pytest.mark.usefixtures("synthetic_execution_armed")
 def test_run_trading_cycle_uses_recent_loss_guard(tmp_path) -> None:
-    save_runtime_state(default_runtime_state(), state_path=tmp_path / "runtime_state.json")
+    save_runtime_state(replace(default_runtime_state(), execution_enabled=True, reason="synthetic_operator_arm"), state_path=tmp_path / "runtime_state.json")
     original = trading_cycle.load_runtime_state
     original_positions = trading_cycle.load_open_positions
     trading_cycle.load_runtime_state = lambda: original(state_path=tmp_path / "runtime_state.json")
@@ -1018,8 +1052,9 @@ def test_run_trading_cycle_uses_recent_loss_guard(tmp_path) -> None:
     assert result.execution_rejected_count_by_reason == {"recent_loss_guard": 1}
 
 
+@pytest.mark.usefixtures("synthetic_execution_armed")
 def test_account_wide_same_day_realized_loss_blocks_new_entry(tmp_path) -> None:
-    save_runtime_state(default_runtime_state(), state_path=tmp_path / "runtime_state.json")
+    save_runtime_state(replace(default_runtime_state(), execution_enabled=True, reason="synthetic_operator_arm"), state_path=tmp_path / "runtime_state.json")
     original = trading_cycle.load_runtime_state
     original_positions = trading_cycle.load_open_positions
     trading_cycle.load_runtime_state = lambda: original(state_path=tmp_path / "runtime_state.json")
@@ -1078,10 +1113,11 @@ def test_account_wide_same_day_realized_loss_blocks_new_entry(tmp_path) -> None:
 
 
 @pytest.mark.parametrize("journal_conflict", [False, True])
+@pytest.mark.usefixtures("synthetic_execution_armed")
 def test_hosted_outcome_sync_failure_blocks_entries_but_not_risk_reducing_exits(tmp_path, monkeypatch, journal_conflict) -> None:
     monkeypatch.setenv("RENDER", "true")
     monkeypatch.setenv("ALPACA_ENV", "paper")
-    save_runtime_state(default_runtime_state(), state_path=tmp_path / "runtime_state.json")
+    save_runtime_state(replace(default_runtime_state(), execution_enabled=True, reason="synthetic_operator_arm"), state_path=tmp_path / "runtime_state.json")
     original = trading_cycle.load_runtime_state
     original_positions = trading_cycle.load_open_positions
     trading_cycle.load_runtime_state = lambda: original(state_path=tmp_path / "runtime_state.json")
@@ -1137,8 +1173,9 @@ def test_hosted_outcome_sync_failure_blocks_entries_but_not_risk_reducing_exits(
     }
 
 
+@pytest.mark.usefixtures("synthetic_execution_armed")
 def test_run_trading_cycle_paper_ignores_real_money_cost_limit(tmp_path) -> None:
-    save_runtime_state(default_runtime_state(), state_path=tmp_path / "runtime_state.json")
+    save_runtime_state(replace(default_runtime_state(), execution_enabled=True, reason="synthetic_operator_arm"), state_path=tmp_path / "runtime_state.json")
     original = trading_cycle.load_runtime_state
     original_positions = trading_cycle.load_open_positions
     trading_cycle.load_runtime_state = lambda: original(state_path=tmp_path / "runtime_state.json")
@@ -1167,8 +1204,9 @@ def test_run_trading_cycle_paper_ignores_real_money_cost_limit(tmp_path) -> None
     assert not (tmp_path / "ghost_trades.jsonl").exists()
 
 
+@pytest.mark.usefixtures("synthetic_execution_armed")
 def test_run_trading_cycle_keeps_cost_limit_when_paper_bypass_is_off(tmp_path) -> None:
-    save_runtime_state(default_runtime_state(), state_path=tmp_path / "runtime_state.json")
+    save_runtime_state(replace(default_runtime_state(), execution_enabled=True, reason="synthetic_operator_arm"), state_path=tmp_path / "runtime_state.json")
     original = trading_cycle.load_runtime_state
     original_positions = trading_cycle.load_open_positions
     trading_cycle.load_runtime_state = lambda: original(state_path=tmp_path / "runtime_state.json")
@@ -1265,8 +1303,9 @@ def test_run_trading_cycle_prioritizes_recent_winners(tmp_path) -> None:
     assert learning["winner_bias"]["preferred_underlyings"] == ["MSFT"]
 
 
+@pytest.mark.usefixtures("synthetic_execution_armed")
 def test_run_trading_cycle_routes_to_ghost_when_open_basket_drawdown_is_bad(tmp_path) -> None:
-    save_runtime_state(default_runtime_state(), state_path=tmp_path / "runtime_state.json")
+    save_runtime_state(replace(default_runtime_state(), execution_enabled=True, reason="synthetic_operator_arm"), state_path=tmp_path / "runtime_state.json")
     original = trading_cycle.load_runtime_state
     original_positions = trading_cycle.load_open_positions
     trading_cycle.load_runtime_state = lambda: original(state_path=tmp_path / "runtime_state.json")
@@ -1305,9 +1344,10 @@ def test_run_trading_cycle_routes_to_ghost_when_open_basket_drawdown_is_bad(tmp_
     assert "ghost_entry" in (tmp_path / "ghost_trades.jsonl").read_text(encoding="utf-8")
 
 
+@pytest.mark.usefixtures("synthetic_execution_armed")
 def test_run_trading_cycle_can_disable_single_leg_real_entries(tmp_path, monkeypatch) -> None:
     monkeypatch.setenv("AUTOBOTT_SINGLE_LEG_REAL_ENTRIES_DISABLED", "true")
-    save_runtime_state(default_runtime_state(), state_path=tmp_path / "runtime_state.json")
+    save_runtime_state(replace(default_runtime_state(), execution_enabled=True, reason="synthetic_operator_arm"), state_path=tmp_path / "runtime_state.json")
     original = trading_cycle.load_runtime_state
     original_positions = trading_cycle.load_open_positions
     trading_cycle.load_runtime_state = lambda: original(state_path=tmp_path / "runtime_state.json")
@@ -1362,13 +1402,14 @@ def test_run_trading_cycle_records_defined_risk_spread_backtest_candidate(tmp_pa
     assert "defined_risk_spread.v1" in (tmp_path / "defined_risk_spreads.jsonl").read_text(encoding="utf-8")
 
 
+@pytest.mark.usefixtures("synthetic_execution_armed")
 def test_run_trading_cycle_paper_opportunistic_mode_does_not_override_spread_block(tmp_path, monkeypatch) -> None:
     # Liquidity is a hard floor, not a discovery-mode toggle: a contract wide
     # enough to be BLOCKED_BY_SPREAD under the strict engine bleeds the same
     # real cost in paper as it would live, so opportunistic mode must not
     # rescue it. See _paper_opportunistic_rules().
     monkeypatch.delenv("AUTOBOTT_PAPER_OPPORTUNISTIC_ENTRIES", raising=False)
-    save_runtime_state(default_runtime_state(), state_path=tmp_path / "runtime_state.json")
+    save_runtime_state(replace(default_runtime_state(), execution_enabled=True, reason="synthetic_operator_arm"), state_path=tmp_path / "runtime_state.json")
     original = trading_cycle.load_runtime_state
     original_positions = trading_cycle.load_open_positions
     trading_cycle.load_runtime_state = lambda: original(state_path=tmp_path / "runtime_state.json")

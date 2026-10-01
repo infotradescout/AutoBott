@@ -38,14 +38,20 @@ class FakeBroker:
         return self.positions
 
     def list_orders(self, *, status="open", limit=100, direction="desc"):
-        return self.orders
+        return [order for order in self.orders if order.get("status") not in {"canceled", "filled", "rejected", "expired"}]
+
+    def get_order(self, broker_order_id):
+        return {"filled_qty": "0", **next(order for order in self.orders if order["id"] == broker_order_id)}
 
     def replace_order(self, broker_order_id, *, limit_price):
         self.replaced.append({"id": broker_order_id, "limit_price": limit_price})
-        return {"id": broker_order_id, "status": "new", "limit_price": str(limit_price)}
+        return {**self.get_order(broker_order_id), "status": "new", "limit_price": str(limit_price)}
 
     def cancel_order(self, broker_order_id):
         self.canceled.append(broker_order_id)
+        for order in self.orders:
+            if order["id"] == broker_order_id:
+                order["status"] = "canceled"
         return {"id": broker_order_id, "status": "canceled"}
 
     def submit_order(self, intent, *, current_daily_realized_pnl=0.0, open_positions=0):
@@ -363,17 +369,20 @@ def test_position_monitor_trailing_stop_overrides_take_profit_after_big_giveback
     rules = PositionMonitorRules()
 
     peak_broker = FakeBroker([_position(unrealized_plpc="0.72")])
-    run_position_monitor(broker=peak_broker, rules=rules, journal_path=journal_path, trailing_state_path=trailing_state_path)
+    peak_result = run_position_monitor(broker=peak_broker, rules=rules, journal_path=journal_path, trailing_state_path=trailing_state_path)
+    pending_id = peak_result["actions"][0]["broker_order_id"]
 
     reversal_broker = FakeBroker(
         [_position(unrealized_plpc="0.35")],
         orders=[
             {
-                "id": "pending-exit-1",
+                "id": pending_id,
                 "symbol": "QQQ260708P00726000",
                 "side": "sell",
                 "status": "new",
                 "limit_price": "6.01",
+                "type": "limit",
+                "filled_qty": "0",
             }
         ],
     )
@@ -381,8 +390,8 @@ def test_position_monitor_trailing_stop_overrides_take_profit_after_big_giveback
 
     assert result["actions"][0]["reason"] == "trailing_stop"
     assert result["actions"][0]["peak_unrealized_plpc"] == 0.72
-    assert result["actions"][0]["canceled_pending_exit_order_id"] == "pending-exit-1"
-    assert reversal_broker.canceled == ["pending-exit-1"]
+    assert result["actions"][0]["canceled_pending_exit_order_id"] == pending_id
+    assert reversal_broker.canceled == [pending_id]
     assert reversal_broker.submitted[0].order_type.value == "market"
 
 

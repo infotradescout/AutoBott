@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+from dataclasses import replace
+
 import json
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import autobott_v2.paper_readiness as paper_readiness
@@ -26,14 +28,14 @@ class FakePaperClient:
     def get_stock_bars(self, symbols, *, start, end, timeframe="1Min", limit=35):
         rows = [
             {
-                "t": (end).isoformat().replace("+00:00", "Z"),
+                "t": (end - timedelta(minutes=35-index)).isoformat().replace("+00:00", "Z"),
                 "o": 600.0,
                 "h": 600.2,
                 "l": 599.8,
                 "c": 600.1,
                 "v": 1000,
             }
-            for _ in range(35)
+            for index in range(35)
         ]
         return {symbol.upper(): list(rows) for symbol in symbols}
 
@@ -65,7 +67,7 @@ def test_paper_readiness_probe_returns_paper_ready(monkeypatch, tmp_path) -> Non
     monkeypatch.setenv("AUTOBOTT_PAPER_ONLY", "true")
     monkeypatch.setenv("AUTOBOTT_ALLOW_ORDER_PLACEMENT", "true")
     monkeypatch.setenv("AUTOBOTT_DATA_ROOT", str(tmp_path / "data"))
-    save_runtime_state(default_runtime_state(), state_path=tmp_path / "data" / "execution" / "runtime_state.json")
+    save_runtime_state(replace(default_runtime_state(), execution_enabled=True, reason="synthetic_operator_arm"), state_path=tmp_path / "data" / "execution" / "runtime_state.json")
 
     result = run_paper_readiness_probe(
         symbol="SPY",

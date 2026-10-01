@@ -24,7 +24,7 @@ def _finite(value: Any) -> float:
 class RankedCapturePlan:
     def __init__(self, *, capture: Callable, load: Callable, make_input: Callable,
                  build: Callable, execution_rules: Callable, capture_args: Callable,
-                 original_priority: Callable):
+                 original_priority: Callable, filter_candidates: Callable | None = None):
         self.capture = capture
         self.load = load
         self.make_input = make_input
@@ -32,6 +32,7 @@ class RankedCapturePlan:
         self.execution_rules = execution_rules
         self.capture_args = capture_args
         self.original_priority = original_priority
+        self.filter_candidates = filter_candidates
         self.rows: dict[str, dict] = {}
         self.summary: list[dict] = []
 
@@ -44,14 +45,20 @@ class RankedCapturePlan:
                 continue
             try:
                 path = self.capture(symbol=symbol, **self.capture_args())
-                decision = self.build(self.make_input(self.load(Path(path))), self.execution_rules())
+                snapshot = self.load(Path(path))
+                input_ = self.make_input(snapshot)
+                quote_filter = None
+                if self.filter_candidates is not None:
+                    input_, quote_filter = self.filter_candidates(input_, snapshot)
+                decision = self.build(input_, self.execution_rules())
                 contract = decision.selected_contract
                 candidate = decision.decision is DecisionStatus.TRADE_CANDIDATE and contract is not None
                 scores = (0.0, 0.0, 0.0, 0.0)
                 if candidate:
                     scores = (_finite(decision.confidence_score), _finite(contract.reward_risk_ratio),
                               _finite(contract.contract_score), _finite(contract.spread_pct))
-                self.rows[symbol] = {"path": path, "decision": decision, "candidate": candidate}
+                self.rows[symbol] = {"path": path, "decision": decision, "candidate": candidate,
+                                     "entry_quote_filter": quote_filter}
                 # Preserve prior ordering among non-candidates and exact ties.
                 key = (not candidate, -scores[0], -scores[1], -scores[2], scores[3], index)
                 sortable.append((key, symbol))
@@ -65,6 +72,7 @@ class RankedCapturePlan:
             self.summary.append({"symbol": symbol, "scan_rank": position,
                 "candidate": row["candidate"], "confidence": decision.confidence_score if decision else None,
                 "selected_contract": decision.selected_contract.option_symbol if decision and decision.selected_contract else None,
+                "entry_quote_filter": row.get("entry_quote_filter"),
                 "error_type": row.get("error_type")})
         return result
 

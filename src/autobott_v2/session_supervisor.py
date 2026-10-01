@@ -20,7 +20,9 @@ from .hosted_policy import (
 )
 from .options_universe import resolve_symbol_universe
 from .position_monitor import run_position_monitor
-from .runtime_control import arm_paper_execution
+from .exit_protection import exit_protection_summary
+from .primary_runtime_evidence import poll_primary_runtime_evidence_once
+from .runtime_control import load_runtime_state
 from .session_runner import run_trading_session
 
 
@@ -58,6 +60,10 @@ class SessionSupervisorState:
     last_error: str | None = None
     last_monitor_result: dict[str, Any] | None = None
     last_monitor_error: str | None = None
+    last_monitor_at: datetime | None = None
+    last_evidence_result: dict[str, Any] | None = None
+    last_evidence_error: str | None = None
+    last_evidence_at: datetime | None = None
     cycles_completed: int = 0
     last_cycle_at: datetime | None = None
 
@@ -66,6 +72,8 @@ class SessionSupervisorState:
         payload["started_at"] = self.started_at.astimezone(UTC).isoformat() if self.started_at else None
         payload["finished_at"] = self.finished_at.astimezone(UTC).isoformat() if self.finished_at else None
         payload["last_cycle_at"] = self.last_cycle_at.astimezone(UTC).isoformat() if self.last_cycle_at else None
+        payload["last_evidence_at"] = self.last_evidence_at.astimezone(UTC).isoformat() if self.last_evidence_at else None
+        payload["last_monitor_at"] = self.last_monitor_at.astimezone(UTC).isoformat() if self.last_monitor_at else None
         return payload
 
 
@@ -87,7 +95,7 @@ def load_session_supervisor_config() -> SessionSupervisorConfig:
     raw_batch_size = os.getenv("AUTOBOTT_SESSION_SYMBOL_BATCH_SIZE")
     run_forever = True if hosted_paper else _normalize_bool(os.getenv("AUTOBOTT_SESSION_RUN_FOREVER"), default=False)
     return SessionSupervisorConfig(
-        enabled=_normalize_bool(os.getenv("AUTOBOTT_SESSION_AUTOSTART"), default=True),
+        enabled=_normalize_bool(os.getenv("AUTOBOTT_SESSION_AUTOSTART"), default=False),
         symbols=symbols,
         interval_seconds=HOSTED_SESSION_INTERVAL_SECONDS if hosted_paper else int(os.getenv("AUTOBOTT_SESSION_INTERVAL_SECONDS", "300")),
         max_cycles=None if run_forever else (int(raw_max_cycles) if raw_max_cycles else None),
@@ -98,7 +106,7 @@ def load_session_supervisor_config() -> SessionSupervisorConfig:
         start_time=_normalize_time_text(HOSTED_SESSION_START_TIME if hosted_paper else (os.getenv("AUTOBOTT_SESSION_START_TIME") or "09:35")),
         end_time=_normalize_time_text(HOSTED_SESSION_END_TIME if hosted_paper else (os.getenv("AUTOBOTT_SESSION_END_TIME") or "15:55")),
         market_timezone=(HOSTED_SESSION_MARKET_TIMEZONE if hosted_paper else (os.getenv("AUTOBOTT_SESSION_MARKET_TIMEZONE") or "America/New_York").strip() or "America/New_York"),
-        arm_paper_execution_on_start=_normalize_bool(os.getenv("AUTOBOTT_SESSION_ARM_PAPER_EXECUTION"), default=True),
+        arm_paper_execution_on_start=_normalize_bool(os.getenv("AUTOBOTT_SESSION_ARM_PAPER_EXECUTION"), default=False),
         position_monitor_heartbeat_enabled=(HOSTED_POSITION_MONITOR_HEARTBEAT_ENABLED if hosted_paper
             else _normalize_bool(os.getenv("AUTOBOTT_POSITION_MONITOR_HEARTBEAT_ENABLED"), default=False)),
         position_monitor_heartbeat_seconds=(HOSTED_POSITION_MONITOR_HEARTBEAT_SECONDS if hosted_paper
@@ -110,6 +118,9 @@ def load_session_supervisor_config() -> SessionSupervisorConfig:
 def maybe_start_session_supervisor() -> bool:
     config = load_session_supervisor_config()
     if not config.enabled:
+        return False
+    state = load_runtime_state()
+    if state.kill_switch_enabled or not state.execution_enabled:
         return False
     return _start_session_thread(config, consume_autostart=True)
 
@@ -135,6 +146,10 @@ def _start_session_thread(config: SessionSupervisorConfig, *, consume_autostart:
         _SESSION_STATE.last_result = None
         _SESSION_STATE.last_monitor_error = None
         _SESSION_STATE.last_monitor_result = None
+        _SESSION_STATE.last_monitor_at = None
+        _SESSION_STATE.last_evidence_result = None
+        _SESSION_STATE.last_evidence_error = None
+        _SESSION_STATE.last_evidence_at = None
         _SESSION_STATE.cycles_completed = 0
         _SESSION_STATE.last_cycle_at = None
         _SESSION_STOP_EVENT = threading.Event()
@@ -157,11 +172,26 @@ def session_supervisor_status() -> dict[str, Any]:
     return status
 
 
+def _poll_and_record_primary_evidence() -> dict[str, Any]:
+    try:
+        result = poll_primary_runtime_evidence_once()
+    except Exception as exc:  # Defensive: observational evidence cannot stop the supervisor.
+        with _SESSION_LOCK:
+            _SESSION_STATE.last_evidence_result = None
+            _SESSION_STATE.last_evidence_error = f"{type(exc).__name__}: {exc}"
+            _SESSION_STATE.last_evidence_at = datetime.now(tz=UTC)
+        return {"trading_actions": 0, "error": f"{type(exc).__name__}: {exc}"}
+    with _SESSION_LOCK:
+        _SESSION_STATE.last_evidence_result = result
+        _SESSION_STATE.last_evidence_error = None
+        _SESSION_STATE.last_evidence_at = datetime.now(tz=UTC)
+    return result
+
+
 def _run_session(config: SessionSupervisorConfig, stop_event: threading.Event) -> None:
     global _SESSION_STATE
     try:
-        if config.arm_paper_execution_on_start:
-            arm_paper_execution(reason="session_supervisor_autostart")
+        # Session startup never changes persisted operator safety controls.
         result = run_trading_session(
             symbols=config.symbols, interval_seconds=config.interval_seconds,
             start_time=_parse_optional_time(config.start_time), end_time=_parse_optional_time(config.end_time),
@@ -169,7 +199,8 @@ def _run_session(config: SessionSupervisorConfig, stop_event: threading.Event) -
             symbol_batch_size=config.symbol_batch_size, continuous_window=True,
             cycle_kwargs={"quantity": config.quantity, "position_count": config.position_count,
                           "current_daily_realized_pnl": config.daily_pnl},
-            on_cycle_complete=_record_cycle_result)
+            on_cycle_complete=_record_cycle_result,
+            after_entry_window_runner=_poll_and_record_primary_evidence)
         with _SESSION_LOCK:
             _SESSION_STATE.last_result = result.to_json_dict()
             _SESSION_STATE.last_error = None
@@ -218,12 +249,24 @@ def _run_position_monitor_heartbeat(config: SessionSupervisorConfig, stop_event:
     while not stop_event.is_set():
         try:
             result = run_position_monitor()
+            summary = result.get("exit_protection") if isinstance(result, dict) else None
+            if not isinstance(summary, dict):
+                summary = exit_protection_summary(result)
+            if isinstance(result, dict):
+                result = {**result, "exit_protection": summary}
             with _SESSION_LOCK:
                 _SESSION_STATE.last_monitor_result = result
-                _SESSION_STATE.last_monitor_error = None
-        except Exception as exc:  # pragma: no cover
+                _SESSION_STATE.last_monitor_error = (
+                    summary["message"] if summary["status"] in {"attention_required", "unavailable"}
+                    else "The exit monitor reported an error. Review the latest observation."
+                    if isinstance(result, dict) and result.get("ok") is False else None)
+                _SESSION_STATE.last_monitor_at = datetime.now(tz=UTC)
+        except Exception:
             with _SESSION_LOCK:
-                _SESSION_STATE.last_monitor_error = f"{type(exc).__name__}: {exc}"
+                summary = exit_protection_summary(None)
+                _SESSION_STATE.last_monitor_result = {"ok": False, "exit_protection": summary}
+                _SESSION_STATE.last_monitor_error = summary["message"]
+                _SESSION_STATE.last_monitor_at = datetime.now(tz=UTC)
         stop_event.wait(config.position_monitor_heartbeat_seconds)
 
 
