@@ -223,6 +223,10 @@ def run_position_monitor(
         )
         action = _position_cost_cap_action(position, broker=resolved_broker, leg_role=leg_role) or hard_action or rules_action
         if action is None:
+            if (symbol not in pair_managed_symbols and str(position.get("side") or "long").lower() == "long"
+                    and _standalone_exit_inputs(position) is None):
+                exit_observations.append({"symbol": symbol, "reason": "invalid_exit_observation",
+                                          "exit_status": "blocked", "source": "current_exit_observation"})
             pending_exit = pending_exits.get(symbol) or next(
                 (row for row in pending_orders.get(symbol, []) if str(row.get("side") or "").lower() == "sell"), None)
             observation = _existing_exit_observation(symbol, stored_position, latest_exits.get(symbol), pending_exit)
@@ -892,6 +896,20 @@ def _reconcile_pair_funding(
             payload.pop("funding_reconciliation_error", None)
 
 
+def _standalone_exit_inputs(position: dict[str, Any]) -> tuple[float, float] | None:
+    # A supplied zero is an observed mark, not a missing quote or a fill price.
+    mark = position.get("current_price")
+    if mark is None:
+        mark = position.get("avg_entry_price") or 0.0
+    current_price = _float_or_none(mark)
+    unrealized_plpc = _float_or_none(position.get("unrealized_plpc") or 0.0)
+    if (current_price is None or not isfinite(current_price) or current_price < 0
+            or unrealized_plpc is None or not isfinite(unrealized_plpc)
+            or (current_price == 0 and unrealized_plpc > 0)):
+        return None
+    return current_price, unrealized_plpc
+
+
 def _hard_safety_action(
     position: dict[str, Any],
     rules: PositionMonitorRules,
@@ -902,8 +920,10 @@ def _hard_safety_action(
     if not symbol:
         return None
     qty = int(float(position.get("qty") or 0))
-    current_price = float(position.get("current_price") or position.get("avg_entry_price") or 0.0)
-    unrealized_plpc = float(position.get("unrealized_plpc") or 0.0)
+    inputs = _standalone_exit_inputs(position)
+    if inputs is None:
+        return None
+    current_price, unrealized_plpc = inputs
     expiration = _option_expiration(symbol)
     dte = (expiration - _monitor_now().date()).days if expiration is not None else None
     if rules.exit_min_dte >= 0 and dte is not None and dte <= rules.exit_min_dte:
@@ -945,10 +965,10 @@ def _monitor_action(
     qty = int(float(position.get("qty") or 0))
     if qty <= 0:
         return None
-    current_price = float(position.get("current_price") or position.get("avg_entry_price") or 0.0)
-    if current_price <= 0:
+    inputs = _standalone_exit_inputs(position)
+    if inputs is None:
         return None
-    unrealized_plpc = float(position.get("unrealized_plpc") or 0.0)
+    current_price, unrealized_plpc = inputs
 
     peak_plpc = max(peaks.get(symbol, unrealized_plpc), unrealized_plpc)
     peaks[symbol] = peak_plpc
@@ -995,7 +1015,7 @@ def _monitor_action(
             "peak_unrealized_plpc": peak_plpc,
             "leg_role": leg_role,
         }
-    if unrealized_plpc >= rules.take_profit_pct:
+    if current_price > 0 and unrealized_plpc >= rules.take_profit_pct:
         tier = _take_profit_tier(unrealized_plpc, rules)
         return {
             "reason": "take_profit",
