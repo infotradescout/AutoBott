@@ -12,13 +12,92 @@ def losing_broker():
                        _broker_position(RUNNER, entry=.25, current=.10)])
 
 
-@pytest.mark.parametrize("state", [ExecutionState.REJECTED, ExecutionState.FAILED, ExecutionState.CANCELED])
+@pytest.mark.parametrize("outcome,expected", [
+    ("uncertain", "attention_required"), ("attempting", "attention_required"),
+    ("rejected", "attention_required"), ("blocked", "attention_required"),
+    ("pending", "attention_required"), ("broker_reported_filled", "awaiting_reconciliation"),
+])
+def test_existing_exit_evidence_survives_no_new_trigger_without_execution(tmp_path, outcome, expected):
+    broker = FakeBroker([_broker_position(PRIMARY, entry=.70, current=.70),
+                         _broker_position(RUNNER, entry=.25, current=.25)])
+    append_monitor_exit_event({"symbol": PRIMARY, "reason": "pair_max_loss_reached", "exit_status": outcome,
+                               "entry_broker_order_id": "primary-order"}, journal_path=tmp_path / "journal.jsonl")
+    before = (tmp_path / "journal.jsonl").read_bytes()
+    result = _run(tmp_path, broker)
+    assert result["actions"] == []  # Existing observations are not new trading actions.
+    assert result["exit_protection"]["status"] == expected
+    assert result["exit_protection"]["issues"][0]["symbol"] == PRIMARY
+    assert broker.submitted == broker.canceled == []
+    assert (tmp_path / "journal.jsonl").read_bytes() == before
+    broker.positions = []
+    assert _run(tmp_path, broker)["exit_protection"]["status"] == "monitoring"
+
+
+@pytest.mark.parametrize("state,count", [("new", "pending_count"), ("partially_filled", "partially_filled_count")])
+def test_existing_open_sell_without_fresh_trigger_stays_visible(tmp_path, state, count):
+    broker = FakeBroker([_broker_position(PRIMARY, entry=.70, current=.70),
+                         _broker_position(RUNNER, entry=.25, current=.25)])
+    broker.orders["existing-exit"] = {"id": "existing-exit", "symbol": PRIMARY, "side": "sell", "status": state}
+    result = _run(tmp_path, broker)
+    assert result["actions"] == []
+    assert result["exit_protection"]["status"] == "awaiting_fill"
+    assert result["exit_protection"][count] == 1
+    assert broker.submitted == broker.canceled == []
+
+
+def test_old_holding_receipt_and_unavailable_inventory_do_not_create_false_recovery(tmp_path):
+    broker = FakeBroker([_broker_position(PRIMARY, entry=.70, current=.70),
+                         _broker_position(RUNNER, entry=.25, current=.25)])
+    append_monitor_exit_event({"symbol": PRIMARY, "reason": "stop_loss", "exit_status": "uncertain",
+                               "entry_broker_order_id": "previous-holding"}, journal_path=tmp_path / "journal.jsonl")
+    assert _run(tmp_path, broker)["exit_protection"]["status"] == "monitoring"
+    broker.open_orders_error = True
+    result = _run(tmp_path, broker)
+    assert result["ok"] is False
+    assert result["exit_protection"]["status"] == "unavailable"
+    assert broker.submitted == broker.canceled == []
+
+
+def test_accepted_exit_without_identity_is_visible_as_uncertain(tmp_path):
+    from dataclasses import replace
+    broker = losing_broker()
+    original_submit = broker.submit_order
+
+    def without_identity(intent, **kwargs):
+        return replace(original_submit(intent, **kwargs), broker_order_id=None)
+
+    broker.submit_order = without_identity
+    result = _run(tmp_path, broker)
+    assert len(broker.submitted) == 2
+    assert result["ok"] is False
+    assert result["exit_protection"]["status"] == "attention_required"
+    assert result["exit_protection"]["uncertain_count"] == 2
+
+
+@pytest.mark.parametrize("state,count", [(ExecutionState.SUBMITTED, "pending_count"),
+                                        (ExecutionState.PARTIALLY_FILLED, "partially_filled_count")])
+def test_accepted_exit_waits_for_fill_without_claiming_closed(tmp_path, state, count):
+    broker = losing_broker()
+    broker.submit_state = state
+    result = _run(tmp_path, broker)
+    assert result["ok"] is True
+    assert result["exit_protection"]["status"] == "awaiting_fill"
+    assert result["exit_protection"][count] == 2
+
+
+@pytest.mark.parametrize("state", [ExecutionState.REJECTED, ExecutionState.FAILED, ExecutionState.CANCELED,
+                                 ExecutionState.DRAFT, ExecutionState.APPROVED])
 def test_returned_failure_is_attempted_but_not_accepted(tmp_path, state):
     broker = losing_broker()
     broker.submit_state = state
     result = _run(tmp_path, broker)
     assert len(result["actions"]) == 2
     assert all(a["attempted"] and not a["submitted"] and a["exit_status"] == state.value for a in result["actions"])
+    assert result["ok"] is False
+    assert result["exit_protection"]["status"] == "attention_required"
+    assert result["exit_protection"]["failed_count"] == 2
+    assert {issue["symbol"] for issue in result["exit_protection"]["issues"]} == {PRIMARY, RUNNER}
+    assert all(issue["reason"] for issue in result["exit_protection"]["issues"])
     rows = load_execution_journal(journal_path=tmp_path / "journal.jsonl")
     assert sum(r["payload"].get("disposition") == "position_monitor_exit_not_accepted" for r in rows) == 2
 
@@ -84,6 +163,11 @@ def test_pending_and_filled_exit_are_reconciled_before_new_sell(tmp_path):
     last = _run(tmp_path, broker)  # Deliberately stale broker position snapshot.
     assert len(broker.submitted) == 2
     assert all(a["exit_status"] == "broker_reported_filled" for a in last["actions"])
+    assert last["exit_protection"]["status"] == "awaiting_reconciliation"
+    broker.positions = []
+    reconciled = _run(tmp_path, broker)
+    assert reconciled["exit_protection"]["status"] == "monitoring"
+    assert reconciled["exit_protection"]["reported_fill_count"] == 0
 
 
 def test_failed_durable_record_blocks_submission(tmp_path, monkeypatch):

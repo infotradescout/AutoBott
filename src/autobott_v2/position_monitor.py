@@ -12,6 +12,7 @@ from uuid import uuid4
 from .execution_broker import AlpacaExecutionBroker
 from .execution_journal import append_execution_outcome, append_monitor_exit_event, append_order_submission, load_execution_journal
 from .execution_models import BrokerEnvironment, ExecutionOrder, ExecutionState, OrderSide, OrderType, TradeIntent
+from .exit_protection import exit_protection_summary
 from .hosted_policy import (
     HOSTED_EXIT_MIN_DTE,
     HOSTED_POLICY_VERSION,
@@ -155,16 +156,19 @@ def run_position_monitor(
 ) -> dict[str, Any]:
     resolved_rules = rules or load_position_monitor_rules()
     if not resolved_rules.enabled:
-        return {"ok": True, "enabled": False, "checked": 0, "actions": []}
+        result = {"ok": True, "enabled": False, "checked": 0, "actions": []}
+        return {**result, "exit_protection": exit_protection_summary(result)}
     resolved_broker = broker or AlpacaExecutionBroker()
     if not hasattr(resolved_broker, "list_open_positions"):
-        return {"ok": True, "enabled": True, "checked": 0, "actions": []}
+        return {"ok": False, "enabled": True, "checked": 0, "actions": [],
+                "exit_protection": exit_protection_summary(None)}
     positions = resolved_broker.list_open_positions()
     pending_exits = _pending_exit_orders_by_symbol(resolved_broker)
     pending_orders = _pending_orders_by_symbol(resolved_broker)
     orders_unavailable = pending_orders is None or pending_exits is None
     pending_orders = pending_orders or {}
-    unresolved_exits = _unresolved_monitor_exits(journal_path)
+    latest_exits = _latest_monitor_exits(journal_path)
+    unresolved_exits = _unresolved_monitor_exits(journal_path, latest=latest_exits)
     try:
         stored_positions = load_open_positions(store_path=position_store_path)
     except Exception:
@@ -194,6 +198,7 @@ def run_position_monitor(
     )
     open_symbols: set[str] = set()
     actions: list[dict[str, Any]] = []
+    exit_observations: list[dict[str, Any]] = []
     stale_entry_actions = _cancel_stale_pending_entries(
         resolved_broker,
         max_age_seconds=resolved_rules.pending_entry_max_age_seconds,
@@ -218,6 +223,11 @@ def run_position_monitor(
         )
         action = _position_cost_cap_action(position, broker=resolved_broker, leg_role=leg_role) or hard_action or rules_action
         if action is None:
+            pending_exit = pending_exits.get(symbol) or next(
+                (row for row in pending_orders.get(symbol, []) if str(row.get("side") or "").lower() == "sell"), None)
+            observation = _existing_exit_observation(symbol, stored_position, latest_exits.get(symbol), pending_exit)
+            if observation is not None:
+                exit_observations.append(observation)
             continue
         if stored_position is not None:
             action["trade_group_id"] = stored_position.trade_group_id
@@ -332,11 +342,12 @@ def run_position_monitor(
     ]
     if len(retained_positions) != len(stored_positions):
         save_open_positions(retained_positions, store_path=position_store_path)
-    return {
-        "ok": not any(action.get("error") or action.get("journal_error") for action in actions),
+    result = {
+        "ok": not orders_unavailable and not any(action.get("error") or action.get("journal_error") for action in actions),
         "enabled": True,
         "checked": len(positions),
         "actions": actions,
+        "exit_observations": exit_observations,
         "position_store_pruned": len(stored_positions) - len(retained_positions),
         "pair_groups_managed": len({
             position.trade_group_id
@@ -344,6 +355,10 @@ def run_position_monitor(
             if position.trade_group_id and position.option_symbol.upper() in pair_managed_symbols
         }),
     }
+    result["exit_protection"] = exit_protection_summary(result)
+    if result["exit_protection"]["status"] in {"attention_required", "unavailable"}:
+        result["ok"] = False
+    return result
 
 
 def _record_monitor_action(action: dict[str, Any], journal_path: str | None) -> bool:
@@ -355,7 +370,7 @@ def _record_monitor_action(action: dict[str, Any], journal_path: str | None) -> 
         return False
 
 
-def _unresolved_monitor_exits(journal_path: str | None) -> dict[str, dict[str, Any]]:
+def _latest_monitor_exits(journal_path: str | None) -> dict[str, dict[str, Any]]:
     latest: dict[str, dict[str, Any]] = {}
     for record in load_execution_journal(journal_path=journal_path):
         if record.get("event_type") == "position_monitor_exit_event":
@@ -363,8 +378,38 @@ def _unresolved_monitor_exits(journal_path: str | None) -> dict[str, dict[str, A
             symbol = str(payload.get("symbol") or "").upper()
             if symbol:
                 latest[symbol] = payload
+    return latest
+
+
+def _unresolved_monitor_exits(journal_path: str | None, *, latest=None) -> dict[str, dict[str, Any]]:
+    latest = _latest_monitor_exits(journal_path) if latest is None else latest
     return {symbol: payload for symbol, payload in latest.items()
             if payload.get("exit_status") in {"attempting", "uncertain", "pending", "partially_filled", "broker_reported_filled"}}
+
+
+def _existing_exit_observation(symbol: str, stored_position: Any, prior: dict[str, Any] | None,
+                               pending_exit: dict[str, Any] | None) -> dict[str, Any] | None:
+    """Expose existing evidence when no new exit triggers; never reconcile or execute."""
+    entry_id = stored_position.broker_order_id if stored_position is not None else None
+    if prior is not None and prior.get("entry_broker_order_id") != entry_id:
+        prior = None  # A previous holding of this contract is not this position.
+    reason = (prior or {}).get("reason") or "existing_exit_order"
+    if pending_exit is not None:
+        outcome = "partially_filled" if pending_exit.get("status") == "partially_filled" else "pending"
+        if not (pending_exit.get("id") or pending_exit.get("broker_order_id")):
+            outcome = "uncertain"
+        return {"symbol": symbol, "reason": reason, "exit_status": outcome,
+                "source": "existing_exit_evidence"}
+    if prior is None:
+        return None
+    outcome = str(prior.get("exit_status") or "").lower()
+    if outcome == "position_not_open":
+        return None
+    if outcome in {"attempting", "evaluating", "pending", "submitted", "partially_filled"}:
+        # Disappearance from the open-order list does not prove a terminal fill.
+        outcome = "uncertain"
+    return {"symbol": symbol, "reason": reason, "exit_status": outcome,
+            "source": "existing_exit_evidence"}
 
 
 def _include_pending_exit(order: dict[str, Any], pending_orders: dict[str, list[dict[str, Any]]]) -> None:

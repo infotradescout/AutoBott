@@ -48,11 +48,56 @@ def _reset_supervisor_state() -> None:
     supervisor._SESSION_STATE.last_error = None
     supervisor._SESSION_STATE.last_monitor_result = None
     supervisor._SESSION_STATE.last_monitor_error = None
+    supervisor._SESSION_STATE.last_monitor_at = None
     supervisor._SESSION_STATE.last_evidence_result = None
     supervisor._SESSION_STATE.last_evidence_error = None
     supervisor._SESSION_STATE.last_evidence_at = None
     supervisor._SESSION_STATE.cycles_completed = 0
     supervisor._SESSION_STATE.last_cycle_at = None
+
+
+def test_monitor_heartbeat_publishes_fault_exception_and_fresh_recovery(monkeypatch):
+    from datetime import UTC, datetime, timedelta
+    from types import SimpleNamespace
+    _reset_supervisor_state()
+    supervisor._SESSION_STATE.running = True
+    observations = [
+        {"ok": False, "enabled": True, "checked": 1, "actions": [
+            {"symbol": "SYNTHETIC", "reason": "stop_loss", "exit_status": "rejected"}]},
+        RuntimeError("private broker error and identity"),
+        {"ok": True, "enabled": False, "checked": 0, "actions": []},
+        None,
+        {"ok": True, "enabled": True, "checked": 0, "actions": []},
+    ]
+    observed = []
+    times = iter(datetime(2026, 10, 1, tzinfo=UTC) + timedelta(seconds=i) for i in range(5))
+    monkeypatch.setattr(supervisor, "datetime", SimpleNamespace(now=lambda **kwargs: next(times)))
+
+    def monitor():
+        value = observations[len(observed)]
+        if isinstance(value, Exception):
+            raise value
+        return value
+
+    class Stop:
+        def is_set(self):
+            return len(observed) == len(observations)
+
+        def wait(self, seconds):
+            observed.append(supervisor._SESSION_STATE.to_json_dict())
+
+    monkeypatch.setattr(supervisor, "run_position_monitor", monitor)
+    supervisor._run_position_monitor_heartbeat(SimpleNamespace(position_monitor_heartbeat_seconds=15), Stop())
+    assert observed[0]["last_monitor_result"]["exit_protection"]["status"] == "attention_required"
+    assert observed[0]["last_monitor_error"]
+    assert observed[1]["last_monitor_result"]["exit_protection"]["status"] == "unavailable"
+    assert observed[1]["last_monitor_error"] and "private" not in str(observed[1])
+    assert observed[2]["last_monitor_result"]["exit_protection"]["status"] == "disabled"
+    assert observed[3]["last_monitor_error"]
+    assert observed[4]["last_monitor_result"]["exit_protection"]["status"] == "monitoring"
+    assert observed[4]["last_monitor_error"] is None
+    assert all(row["running"] for row in observed)
+    assert len({row["last_monitor_at"] for row in observed}) == 5
 
 
 def test_load_session_supervisor_config_from_env(monkeypatch) -> None:

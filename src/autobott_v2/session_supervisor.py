@@ -20,6 +20,7 @@ from .hosted_policy import (
 )
 from .options_universe import resolve_symbol_universe
 from .position_monitor import run_position_monitor
+from .exit_protection import exit_protection_summary
 from .primary_runtime_evidence import poll_primary_runtime_evidence_once
 from .runtime_control import load_runtime_state
 from .session_runner import run_trading_session
@@ -59,6 +60,7 @@ class SessionSupervisorState:
     last_error: str | None = None
     last_monitor_result: dict[str, Any] | None = None
     last_monitor_error: str | None = None
+    last_monitor_at: datetime | None = None
     last_evidence_result: dict[str, Any] | None = None
     last_evidence_error: str | None = None
     last_evidence_at: datetime | None = None
@@ -71,6 +73,7 @@ class SessionSupervisorState:
         payload["finished_at"] = self.finished_at.astimezone(UTC).isoformat() if self.finished_at else None
         payload["last_cycle_at"] = self.last_cycle_at.astimezone(UTC).isoformat() if self.last_cycle_at else None
         payload["last_evidence_at"] = self.last_evidence_at.astimezone(UTC).isoformat() if self.last_evidence_at else None
+        payload["last_monitor_at"] = self.last_monitor_at.astimezone(UTC).isoformat() if self.last_monitor_at else None
         return payload
 
 
@@ -143,6 +146,7 @@ def _start_session_thread(config: SessionSupervisorConfig, *, consume_autostart:
         _SESSION_STATE.last_result = None
         _SESSION_STATE.last_monitor_error = None
         _SESSION_STATE.last_monitor_result = None
+        _SESSION_STATE.last_monitor_at = None
         _SESSION_STATE.last_evidence_result = None
         _SESSION_STATE.last_evidence_error = None
         _SESSION_STATE.last_evidence_at = None
@@ -245,12 +249,24 @@ def _run_position_monitor_heartbeat(config: SessionSupervisorConfig, stop_event:
     while not stop_event.is_set():
         try:
             result = run_position_monitor()
+            summary = result.get("exit_protection") if isinstance(result, dict) else None
+            if not isinstance(summary, dict):
+                summary = exit_protection_summary(result)
+            if isinstance(result, dict):
+                result = {**result, "exit_protection": summary}
             with _SESSION_LOCK:
                 _SESSION_STATE.last_monitor_result = result
-                _SESSION_STATE.last_monitor_error = None
-        except Exception as exc:  # pragma: no cover
+                _SESSION_STATE.last_monitor_error = (
+                    summary["message"] if summary["status"] in {"attention_required", "unavailable"}
+                    else "The exit monitor reported an error. Review the latest observation."
+                    if isinstance(result, dict) and result.get("ok") is False else None)
+                _SESSION_STATE.last_monitor_at = datetime.now(tz=UTC)
+        except Exception:
             with _SESSION_LOCK:
-                _SESSION_STATE.last_monitor_error = f"{type(exc).__name__}: {exc}"
+                summary = exit_protection_summary(None)
+                _SESSION_STATE.last_monitor_result = {"ok": False, "exit_protection": summary}
+                _SESSION_STATE.last_monitor_error = summary["message"]
+                _SESSION_STATE.last_monitor_at = datetime.now(tz=UTC)
         stop_event.wait(config.position_monitor_heartbeat_seconds)
 
 

@@ -37,11 +37,11 @@ function cockpit() {
     },
     confirm: () => true, setInterval() {},
   });
-  const state = { execution: true, orderPlacement: true };
+  const state = { execution: true, orderPlacement: true, killed: false, session: { ok: true, thread_alive: true } };
   const payload = route => {
     if (route === '/api/v2/pairs') return { ok: true, account: { equity: 100 }, pairs: [], standalone_positions: [] };
-    if (route === '/api/safety') return { execution_enabled: state.execution, kill_switch_enabled: false, order_placement_enabled: state.orderPlacement && state.execution };
-    if (route === '/api/session/status') return { ok: true, thread_alive: true };
+    if (route === '/api/safety') return { execution_enabled: state.execution, kill_switch_enabled: state.killed, order_placement_enabled: state.orderPlacement && state.execution };
+    if (route === '/api/session/status') return state.session;
     if (route === '/api/decisions/latest') return { ok: true, decisions: [] };
     return { ok: true };
   };
@@ -206,4 +206,141 @@ test('available broker marks preserve genuine zero, profit, and loss', () => {
     assert.match(html, /\$0\.00/);
     assert.match(html, /0\.0%/);
   }
+});
+
+function observation(e, status, issues = [], extra = {}) {
+  e.state.session = { ok: true, thread_alive: true, position_monitor_thread_alive: true, state: {
+    last_monitor_at: '2026-10-01T12:00:00+00:00',
+    last_monitor_result: { ok: status !== 'attention_required', exit_protection: {
+      status, message: 'RAW BROKER SECRET', issues,
+    } }, last_monitor_error: status === 'attention_required' ? 'Exit protection needs attention.' : null, ...extra,
+  } };
+}
+
+module.exports = { cockpit };
+
+for (const status of ['failed', 'rejected', 'canceled', 'draft', 'approved', 'uncertain', 'blocked']) {
+  test(`exit ${status} stays visible with running session and readable account`, async () => {
+    const e = cockpit();
+    observation(e, 'attention_required', [{ symbol: 'SPY', reason: 'loss_exit', status, message: 'RAW BROKER SECRET' }]);
+    await e.run('refreshAll()');
+    assert.equal(e.get('equity').textContent, '$100.00');
+    assert.equal(e.get('session-chip').textContent, 'SESSION RUNNING');
+    assert.equal(e.get('runtime').textContent, 'ARMED');
+    assert.equal(e.controlsDisabled(), false);
+    assert.match(e.get('state').innerHTML, /Exit protection.*Attention required/);
+    assert.match(e.get('state').innerHTML, /SPY \/ loss_exit/);
+    assert.doesNotMatch(e.get('state').innerHTML, /RAW BROKER SECRET/);
+  });
+}
+
+for (const status of ['pending', 'partially_filled']) {
+  test(`exit ${status} awaits fill without claiming failure or closure`, async () => {
+    const e = cockpit();
+    observation(e, 'awaiting_fill', [{ symbol: 'SPY', reason: 'existing_profit_exit', status }]);
+    await e.run('refreshAll()');
+    assert.match(e.get('state').innerHTML, /Awaiting fill/);
+    assert.match(e.get('state').innerHTML, /existing_profit_exit/);
+    assert.doesNotMatch(e.get('state').innerHTML, /Attention required|Closed|confirmed closure|Failed/);
+    assert.equal(e.get('equity').textContent, '$100.00');
+  });
+}
+
+test('broker reported fill awaits position reconciliation', async () => {
+  const e = cockpit();
+  observation(e, 'awaiting_reconciliation', [{ symbol: 'SPY', reason: 'loss_exit', status: 'reported_fill' }]);
+  await e.run('refreshAll()');
+  assert.match(e.get('state').innerHTML, /Awaiting position reconciliation/);
+  assert.match(e.get('state').innerHTML, /position closure is not yet confirmed/);
+  assert.match(e.get('state').innerHTML, /loss_exit: Broker reported fill; reconciliation pending/);
+  assert.doesNotMatch(e.get('state').innerHTML, /Closed|Exit protection<\/span><strong>Monitoring/);
+});
+
+test('missing, empty, disabled, and unknown observations cannot imply monitoring', async () => {
+  const e = cockpit();
+  for (const state of [{}, { last_monitor_result: {} },
+    { last_monitor_at: 'invalid', last_monitor_result: { exit_protection: { status: 'monitoring' } } },
+    { last_monitor_at: '2026-10-01T12:00:00Z', last_monitor_result: { exit_protection: { status: 'invented' } } },
+    { last_monitor_at: '2026-10-01T12:00:00Z', last_monitor_result: { exit_protection: { status: 'disabled' } } }]) {
+    e.state.session.state = state;
+    await e.run('refreshAll()');
+    assert.doesNotMatch(e.get('state').innerHTML, /Exit protection<\/span><strong>Monitoring/);
+    assert.match(e.get('state').innerHTML, /Unavailable|Disabled/);
+    assert.equal(e.get('equity').textContent, '$100.00');
+  }
+});
+
+test('inactive monitor and deliberate controls remain separate from historical exit outcomes', async () => {
+  const e = cockpit();
+  observation(e, 'monitoring');
+  e.state.session.position_monitor_thread_alive = false;
+  e.state.execution = false;
+  await e.run('refreshAll()');
+  assert.match(e.get('state').innerHTML, /Exit protection<\/span><strong>Inactive/);
+  assert.match(e.get('state').innerHTML, /recorded exit check does not establish current protection/);
+  assert.equal(e.get('runtime').textContent, 'PAUSED');
+  observation(e, 'attention_required', [{ symbol: 'SPY', reason: 'loss_exit', status: 'rejected' }]);
+  e.state.session.position_monitor_thread_alive = false;
+  await e.run('refreshAll()');
+  assert.match(e.get('state').innerHTML, /Attention required/);
+  assert.match(e.get('state').innerHTML, /Inactive; latest check is historical/);
+  assert.equal(e.get('runtime').textContent, 'PAUSED');
+  e.state.killed = true;
+  await e.run('refreshAll()');
+  assert.equal(e.get('runtime').textContent, 'KILLED');
+  assert.match(e.get('state').innerHTML, /Kill switch<\/span><strong>Active/);
+  assert.match(e.get('state').innerHTML, /SPY \/ loss_exit: Rejected/);
+});
+
+test('exit monitor liveness is independent of the entry session', async () => {
+  const e = cockpit();
+  observation(e, 'monitoring');
+  e.state.session.thread_alive = false;
+  await e.run('refreshAll()');
+  assert.equal(e.get('session-chip').textContent, 'SESSION STOPPED');
+  assert.match(e.get('state').innerHTML, /Exit protection<\/span><strong>Monitoring/);
+  assert.match(e.get('state').innerHTML, /Exit monitor<\/span><strong>Running/);
+  e.state.session.thread_alive = true;
+  e.state.session.position_monitor_thread_alive = false;
+  await e.run('refreshAll()');
+  assert.equal(e.get('session-chip').textContent, 'SESSION RUNNING');
+  assert.match(e.get('state').innerHTML, /Exit protection<\/span><strong>Inactive/);
+});
+
+test('monitor exception is unavailable and a genuine newer observation clears it', async () => {
+  const e = cockpit();
+  observation(e, 'monitoring', [], { last_monitor_error: 'token / broker / order-id secret' });
+  await e.run('refreshAll()');
+  assert.match(e.get('state').innerHTML, /Exit protection<\/span><strong>Unavailable/);
+  assert.doesNotMatch(e.get('state').innerHTML, /token \/ broker|order-id secret/);
+  assert.equal(e.get('session-chip').textContent, 'SESSION RUNNING');
+  assert.equal(e.get('equity').textContent, '$100.00');
+  observation(e, 'attention_required');
+  await e.run('refreshAll()');
+  assert.match(e.get('state').innerHTML, /Attention required/);
+  observation(e, 'monitoring');
+  await e.run('refreshAll()');
+  assert.match(e.get('state').innerHTML, /Exit protection<\/span><strong>Monitoring/);
+  assert.doesNotMatch(e.get('state').innerHTML, /Attention required/);
+});
+
+test('exit details are escaped, bounded, and cleared on lock or unauthorized refresh', async () => {
+  const e = cockpit();
+  observation(e, 'attention_required', Array.from({ length: 10 }, () => ({
+    symbol: '<img src=x>', reason: '<script>&loss_exit', status: 'rejected', message: 'secret',
+  })));
+  await e.run('refreshAll()');
+  const html = e.get('state').innerHTML;
+  assert.match(html, /&lt;img src=x&gt; \/ &lt;script&gt;&amp;loss_exit/);
+  assert.doesNotMatch(html, /<img|<script|secret/);
+  assert.equal((html.match(/Exit detail<\/span>/g) || []).length, 8);
+  assert.match(html, /Additional issues/);
+  e.run('lock()');
+  assert.equal(e.get('state').innerHTML, '');
+  e.storage.set('dashboardToken', 'synthetic-token');
+  await e.run('refreshAll()');
+  e.context.fetch = async () => e.response({ ok: false }, 401);
+  await e.run('refreshAll()');
+  assert.equal(e.get('state').innerHTML, '');
+  assert.notEqual(e.get('equity').textContent, '$100.00');
 });
