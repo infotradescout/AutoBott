@@ -767,12 +767,11 @@ def _pair_leg_mark(
     entry_price = _finite_number(stored.entry_limit_price if entry_value is None else entry_value)
     mark_value = position.get("current_price")
     current_price = entry_price if mark_value is None else _finite_number(mark_value)
-    quantity_value = position.get("qty")
-    quantity = _finite_number(stored.quantity if quantity_value is None else quantity_value)
+    quantity = _exit_quantity(position)
     issues = [field for field, valid in (
         ("avg_entry_price", entry_price is not None and entry_price > 0),
         ("current_price", current_price is not None and current_price >= 0),
-        ("qty", quantity is not None and quantity > 0 and quantity.is_integer()),
+        ("qty", quantity is not None),
         ("side", str(position.get("side") or "long").lower() == "long"),
     ) if not valid]
     if issues:

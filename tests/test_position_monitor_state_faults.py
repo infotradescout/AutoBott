@@ -232,3 +232,47 @@ def test_peak_persistence_failure_keeps_original_and_reports_attention(tmp_path,
     assert "trailing_state_persistence_failed" in _reasons(result)
     assert result["ok"] is False
     assert list(tmp_path.glob(".peaks.json.*.tmp")) == []
+
+
+@pytest.mark.parametrize("symbol", [PRIMARY, RUNNER])
+@pytest.mark.parametrize("missing", [False, True])
+@pytest.mark.parametrize("policy", ["funding", "combined_loss"])
+def test_unknown_pair_quantity_cannot_select_partner_soft_exit(tmp_path, symbol, missing, policy):
+    prices = (1.0, .25) if policy == "funding" else (.10, .05)
+    pair = [_broker_position(PRIMARY, entry=.70, current=prices[0]),
+            _broker_position(RUNNER, entry=.25, current=prices[1])]
+    broker = PairBroker(pair)
+    broker.positions = [dict(row) for row in pair]
+    unknown = next(row for row in broker.positions if row["symbol"] == symbol)
+    if missing:
+        del unknown["qty"]
+    else:
+        unknown["qty"] = None
+    broker.positions.append(_broker_position(LOSER, entry=5, current=3.5))
+    result = _run_pair(tmp_path, broker)
+    assert [(a["symbol"], a["reason"]) for a in result["actions"]] == [(LOSER, "stop_loss")]
+    assert [i.option_symbol for i in broker.submitted] == [LOSER]
+    assert {issue["symbol"] for issue in result["exit_protection"]["issues"]
+            if issue["status"] == "blocked"} == {PRIMARY, RUNNER}
+    assert result["ok"] is False
+
+
+def test_unknown_pair_quantity_preserves_evaluable_partner_dte(tmp_path, monkeypatch):
+    pair = [_broker_position(PRIMARY, entry=.70, current=1.0),
+            _broker_position(RUNNER, entry=.25, current=.25)]
+    broker = PairBroker(pair)
+    broker.positions = [dict(row) for row in pair]
+    broker.positions[1]["qty"] = None
+    monkeypatch.setattr(monitor, "_monitor_now", lambda: datetime(2026, 10, 16, tzinfo=UTC))
+    result = _run_pair(tmp_path, broker, rules=monitor.PositionMonitorRules(exit_min_dte=0))
+    assert [(a["symbol"], a["reason"]) for a in result["actions"]] == [(PRIMARY, "dte_floor")]
+    assert [i.option_symbol for i in broker.submitted] == [PRIMARY]
+
+
+def test_unknown_lone_runner_quantity_is_held_without_stored_sizing(tmp_path):
+    runner = _broker_position(RUNNER, entry=.25, current=.01)
+    broker = PairBroker([runner])
+    broker.positions = [{**runner, "qty": None}, _broker_position(LOSER, entry=5, current=3.5)]
+    result = _run_pair(tmp_path, broker)
+    assert [(a["symbol"], a["reason"]) for a in result["actions"]] == [(LOSER, "stop_loss")]
+    assert [i.option_symbol for i in broker.submitted] == [LOSER]
