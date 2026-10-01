@@ -111,6 +111,17 @@ def test_zero_with_inconsistent_profit_and_old_peak_is_held(tmp_path, plpc):
     assert broker.submitted == []
 
 
+@pytest.mark.parametrize("plpc", ["", "   ", None, 0.0, "0", False])
+def test_zero_with_unknown_or_neutral_pnl_cannot_invent_trailing_loss(tmp_path, plpc):
+    (tmp_path / "peaks.json").write_text(json.dumps({SYMBOL: 0.28}))
+    broker = FakeBroker([_position("0", unrealized_plpc=plpc)])
+    result = _run(tmp_path, broker)
+    assert result["actions"] == []
+    assert result["ok"] is False
+    assert result["exit_protection"]["issues"][0]["reason"] == "invalid_exit_observation"
+    assert broker.submitted == broker.canceled == []
+
+
 @pytest.mark.parametrize("plpc", ["nan", float("nan"), "inf", float("inf"), "-inf", "bad"])
 @pytest.mark.parametrize("hard", [False, True])
 def test_invalid_pnl_never_admits_zero_standalone_exit(tmp_path, plpc, hard):

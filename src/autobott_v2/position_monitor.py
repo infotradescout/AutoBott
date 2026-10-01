@@ -223,8 +223,9 @@ def run_position_monitor(
         )
         action = _position_cost_cap_action(position, broker=resolved_broker, leg_role=leg_role) or hard_action or rules_action
         if action is None:
+            inputs = _standalone_exit_inputs(position)
             if (symbol not in pair_managed_symbols and str(position.get("side") or "long").lower() == "long"
-                    and _standalone_exit_inputs(position) is None):
+                    and (inputs is None or (inputs[0] == 0 and inputs[1] >= 0))):
                 exit_observations.append({"symbol": symbol, "reason": "invalid_exit_observation",
                                           "exit_status": "blocked", "source": "current_exit_observation"})
             pending_exit = pending_exits.get(symbol) or next(
@@ -902,7 +903,8 @@ def _standalone_exit_inputs(position: dict[str, Any]) -> tuple[float, float] | N
     if mark is None:
         mark = position.get("avg_entry_price") or 0.0
     current_price = _float_or_none(mark)
-    unrealized_plpc = _float_or_none(position.get("unrealized_plpc") or 0.0)
+    pnl = position.get("unrealized_plpc")
+    unrealized_plpc = _float_or_none(0.0 if pnl is None else pnl)
     if (current_price is None or not isfinite(current_price) or current_price < 0
             or unrealized_plpc is None or not isfinite(unrealized_plpc)
             or (current_price == 0 and unrealized_plpc > 0)):
@@ -969,6 +971,9 @@ def _monitor_action(
     if inputs is None:
         return None
     current_price, unrealized_plpc = inputs
+
+    if current_price == 0 and unrealized_plpc >= 0:
+        return None
 
     peak_plpc = max(peaks.get(symbol, unrealized_plpc), unrealized_plpc)
     peaks[symbol] = peak_plpc
