@@ -189,7 +189,7 @@ def run_position_monitor(
         pending_exits=pending_exits,
     )
     pending_exits = pending_exits or {}
-    pair_actions, pair_managed_symbols = _build_pair_actions(
+    pair_actions, pair_managed_symbols, invalid_pair_symbols = _build_pair_actions(
         broker_by_symbol=broker_by_symbol,
         stored_positions=stored_positions,
         peaks=peaks,
@@ -213,6 +213,19 @@ def run_position_monitor(
         if symbol:
             open_symbols.add(symbol)
         stored_position = stored_by_symbol.get(symbol)
+        if symbol in invalid_pair_symbols:
+            exit_observations.append({"symbol": symbol, "reason": "invalid_pair_exit_observation: " + ", ".join(invalid_pair_symbols[symbol]),
+                                      "exit_status": "blocked", "source": "current_exit_observation"})
+            quantity = _finite_number(position.get("qty"))
+            if (quantity is None or quantity <= 0 or not quantity.is_integer()
+                    or str(position.get("side") or "long").lower() != "long"
+                    or _standalone_exit_inputs(position) is None):
+                observation = _existing_exit_observation(symbol, stored_position, latest_exits.get(symbol), pending_exits.get(symbol))
+                if observation is not None:
+                    exit_observations.append(observation)
+                continue
+            # Independently evaluable DTE/size/cost safeguards still apply.
+            # Pair policy remains reserved; standalone soft exits cannot take over.
         leg_role = stored_position.leg_role if stored_position is not None else None
         hard_action = _hard_safety_action(position, resolved_rules, leg_role=leg_role)
         pair_action = pair_actions.get(symbol) if symbol in pair_managed_symbols else None
@@ -549,7 +562,7 @@ def _build_pair_actions(
     peaks: dict[str, float],
     pair_states: dict[str, dict[str, Any]],
     rules: PositionMonitorRules,
-) -> tuple[dict[str, dict[str, Any]], set[str]]:
+) -> tuple[dict[str, dict[str, Any]], set[str], dict[str, tuple[str, ...]]]:
     groups: dict[str, dict[str, OpenPosition]] = {}
     for stored in stored_positions:
         if not stored.trade_group_id or stored.leg_role not in {"primary", "runner"}:
@@ -558,6 +571,7 @@ def _build_pair_actions(
 
     actions: dict[str, dict[str, Any]] = {}
     managed: set[str] = set()
+    invalid: dict[str, tuple[str, ...]] = {}
     resolved_pair_rules = _pair_rules(rules)
     for group_id, group in groups.items():
         primary_store = group.get("primary")
@@ -572,21 +586,28 @@ def _build_pair_actions(
 
         if runner_position is None:
             continue
-        runner_return = float(runner_position.get("unrealized_plpc") or 0.0)
-        runner_peak = max(peaks.get(runner_symbol, runner_return), runner_return)
-        peaks[runner_symbol] = runner_peak
-        runner_mark = _pair_leg_mark(runner_position, runner_store, peak_return_pct=runner_peak)
-        if runner_mark is None:
+        runner_inputs = _pair_exit_inputs(runner_position, runner_store, peaks.get(runner_symbol))
+        primary_inputs = (
+            _pair_exit_inputs(primary_position, primary_store, peaks.get(primary_symbol or ""))
+            if primary_position is not None and primary_store is not None else None
+        )
+        issues = tuple(sorted(set(runner_inputs[2] + (primary_inputs[2] if primary_inputs is not None else ()))))
+        if issues:
+            # An unevaluable group must not fall into standalone policy or stop
+            # valid independent positions from reaching their own exit checks.
+            present = {runner_symbol}
+            if primary_position is not None and primary_symbol:
+                present.add(primary_symbol)
+            managed.update(present)
+            invalid.update({symbol: issues for symbol in present})
             continue
+        runner_mark, runner_peak, _ = runner_inputs
+        peaks[runner_symbol] = runner_peak
 
         if primary_position is not None and primary_store is not None:
-            primary_return = float(primary_position.get("unrealized_plpc") or 0.0)
-            primary_peak = max(peaks.get(primary_symbol or "", primary_return), primary_return)
+            primary_mark, primary_peak, _ = primary_inputs
             if primary_symbol:
                 peaks[primary_symbol] = primary_peak
-            primary_mark = _pair_leg_mark(primary_position, primary_store, peak_return_pct=primary_peak)
-            if primary_mark is None:
-                continue
             decision = evaluate_pair_lifecycle(
                 primary=primary_mark,
                 runner=runner_mark,
@@ -653,7 +674,22 @@ def _build_pair_actions(
                 decision=decision,
             )
     managed.discard("")
-    return actions, managed
+    return actions, managed, invalid
+
+
+def _pair_exit_inputs(
+    position: dict[str, Any], stored: OpenPosition, previous_peak: float | None,
+) -> tuple[PairLegMark | None, float | None, tuple[str, ...]]:
+    issues: list[str] = []
+    pnl = position.get("unrealized_plpc")
+    current_return = _finite_number(0.0 if pnl is None else pnl)
+    if current_return is None:
+        issues.append("unrealized_plpc")
+    if previous_peak is not None and _finite_number(previous_peak) is None:
+        issues.append("trailing_peak")
+    peak = None if issues else max(previous_peak if previous_peak is not None else current_return, current_return)
+    mark = _pair_leg_mark(position, stored, peak_return_pct=peak, invalid_fields=issues)
+    return (None, None, tuple(issues)) if issues else (mark, peak, ())
 
 
 def _pair_leg_mark(
@@ -661,18 +697,28 @@ def _pair_leg_mark(
     stored: OpenPosition,
     *,
     peak_return_pct: float | None,
+    invalid_fields: list[str] | None = None,
 ) -> PairLegMark | None:
-    entry_price = _float_or_none(position.get("avg_entry_price")) or stored.entry_limit_price
-    current_price = _float_or_none(position.get("current_price"))
-    if current_price is None:
-        current_price = entry_price
-    quantity = int(float(position.get("qty") or stored.quantity or 0))
-    if entry_price <= 0 or current_price < 0 or quantity <= 0:
+    entry_value = position.get("avg_entry_price")
+    entry_price = _finite_number(stored.entry_limit_price if entry_value is None else entry_value)
+    mark_value = position.get("current_price")
+    current_price = entry_price if mark_value is None else _finite_number(mark_value)
+    quantity_value = position.get("qty")
+    quantity = _finite_number(stored.quantity if quantity_value is None else quantity_value)
+    issues = [field for field, valid in (
+        ("avg_entry_price", entry_price is not None and entry_price > 0),
+        ("current_price", current_price is not None and current_price >= 0),
+        ("qty", quantity is not None and quantity > 0 and quantity.is_integer()),
+        ("side", str(position.get("side") or "long").lower() == "long"),
+    ) if not valid]
+    if issues:
+        if invalid_fields is not None:
+            invalid_fields.extend(issues)
         return None
     return PairLegMark(
         entry_price=entry_price,
         current_price=current_price,
-        quantity=quantity,
+        quantity=int(quantity),
         peak_return_pct=peak_return_pct,
     )
 
@@ -1053,7 +1099,7 @@ def _position_cost_cap_action(
     symbol = str(position.get("symbol") or "").upper()
     side = str(position.get("side") or "long").lower()
     quantity = int(float(position.get("qty") or 0))
-    average_entry = _float_or_none(position.get("avg_entry_price"))
+    average_entry = _finite_number(position.get("avg_entry_price"))
     current_price = _float_or_none(position.get("current_price")) or average_entry
     if not symbol or side != "long" or quantity <= 0 or average_entry is None or average_entry <= 0:
         return None
