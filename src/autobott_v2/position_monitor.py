@@ -111,21 +111,56 @@ def pair_lifecycle_state_path() -> Path:
     return data_root() / "execution" / "pair_lifecycle_state.json"
 
 
-def _load_trailing_peaks(*, state_path: str | Path | None = None) -> dict[str, float]:
+@dataclass(frozen=True)
+class _TrailingPeakState:
+    peaks: dict[str, float]
+    invalid_entries: dict[str, Any]
+    error: str | None = None
+
+
+def _load_trailing_peaks(*, state_path: str | Path | None = None) -> _TrailingPeakState:
     path = Path(state_path) if state_path is not None else trailing_peak_state_path()
-    if not path.exists():
-        return {}
     try:
+        if not path.exists():
+            return _TrailingPeakState({}, {})
         payload = json.loads(path.read_text(encoding="utf-8"))
-    except (json.JSONDecodeError, OSError):
-        return {}
-    return {str(symbol): float(value) for symbol, value in payload.items()}
+    except (json.JSONDecodeError, UnicodeDecodeError, RecursionError):
+        return _TrailingPeakState({}, {}, "invalid_trailing_state_json")
+    except OSError:
+        return _TrailingPeakState({}, {}, "trailing_state_unreadable")
+    if not isinstance(payload, dict):
+        return _TrailingPeakState({}, {}, "invalid_trailing_state_shape")
+    peaks: dict[str, float] = {}
+    invalid: dict[str, Any] = {}
+    for symbol, value in payload.items():
+        number = None if isinstance(value, bool) else _finite_number(value)
+        if number is None:
+            invalid[symbol] = value
+        else:
+            peaks[symbol] = number
+    return _TrailingPeakState(peaks, invalid)
 
 
-def _save_trailing_peaks(peaks: dict[str, float], *, state_path: str | Path | None = None) -> None:
+def _save_trailing_peaks(
+    peaks: dict[str, float], *, state_path: str | Path | None = None, snapshot: _TrailingPeakState | None = None,
+) -> str | None:
+    if snapshot is not None and snapshot.error:
+        return None  # Unknown original content must remain available for review.
     path = Path(state_path) if state_path is not None else trailing_peak_state_path()
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(peaks, indent=2, sort_keys=True), encoding="utf-8")
+    payload = {**peaks, **(snapshot.invalid_entries if snapshot is not None else {})}
+    temporary = path.with_name(f".{path.name}.{uuid4().hex}.tmp")
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        temporary.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
+        temporary.replace(path)
+    except OSError:
+        return "trailing_state_persistence_failed"
+    finally:
+        try:
+            temporary.unlink(missing_ok=True)
+        except OSError:
+            pass
+    return None
 
 
 def _load_pair_states(*, state_path: str | Path | None = None) -> dict[str, dict[str, Any]]:
@@ -179,7 +214,11 @@ def run_position_monitor(
         for position in positions
         if str(position.get("symbol") or "").strip()
     }
-    peaks = _load_trailing_peaks(state_path=trailing_state_path)
+    peak_state = _load_trailing_peaks(state_path=trailing_state_path)
+    peaks = peak_state.peaks
+    unavailable_peaks = {symbol.upper() for symbol in peak_state.invalid_entries}
+    if peak_state.error:
+        unavailable_peaks.update(broker_by_symbol)
     pair_states = _load_pair_states(state_path=pair_state_path)
     _reconcile_pair_funding(
         pair_states,
@@ -195,10 +234,17 @@ def run_position_monitor(
         peaks=peaks,
         pair_states=pair_states,
         rules=resolved_rules,
+        unavailable_peaks=unavailable_peaks,
     )
     open_symbols: set[str] = set()
     actions: list[dict[str, Any]] = []
     exit_observations: list[dict[str, Any]] = []
+    for symbol in sorted(unavailable_peaks & broker_by_symbol.keys()):
+        exit_observations.append({"symbol": symbol, "reason": "invalid_trailing_peak",
+                                  "exit_status": "blocked", "source": "persisted_exit_state"})
+    if peak_state.error or unavailable_peaks - broker_by_symbol.keys():
+        exit_observations.append({"symbol": None, "reason": peak_state.error or "invalid_trailing_peak_for_untracked_position",
+                                  "exit_status": "blocked", "source": "persisted_exit_state"})
     stale_entry_actions = _cancel_stale_pending_entries(
         resolved_broker,
         max_age_seconds=resolved_rules.pending_entry_max_age_seconds,
@@ -213,6 +259,15 @@ def run_position_monitor(
         if symbol:
             open_symbols.add(symbol)
         stored_position = stored_by_symbol.get(symbol)
+        if _exit_quantity(position) is None:
+            exit_observations.append({"symbol": symbol, "reason": "invalid_exit_quantity: qty",
+                                      "exit_status": "blocked", "source": "current_exit_observation"})
+            pending_exit = pending_exits.get(symbol) or next(
+                (row for row in pending_orders.get(symbol, []) if str(row.get("side") or "").lower() == "sell"), None)
+            observation = _existing_exit_observation(symbol, stored_position, latest_exits.get(symbol), pending_exit)
+            if observation is not None:
+                exit_observations.append(observation)
+            continue
         if symbol in invalid_pair_symbols:
             exit_observations.append({"symbol": symbol, "reason": "invalid_pair_exit_observation: " + ", ".join(invalid_pair_symbols[symbol]),
                                       "exit_status": "blocked", "source": "current_exit_observation"})
@@ -232,7 +287,8 @@ def run_position_monitor(
         rules_action = (
             pair_action
             if symbol in pair_managed_symbols
-            else _monitor_action(position, _rules_for_leg(resolved_rules, leg_role), peaks, leg_role=leg_role)
+            else _monitor_action(position, _rules_for_leg(resolved_rules, leg_role), peaks,
+                                 leg_role=leg_role, trailing_available=symbol not in unavailable_peaks)
         )
         action = _position_cost_cap_action(position, broker=resolved_broker, leg_role=leg_role) or hard_action or rules_action
         if action is None:
@@ -346,10 +402,14 @@ def run_position_monitor(
         _record_monitor_action(action, journal_path)
         actions.append(action)
     _save_pair_states(pair_states, state_path=pair_state_path)
-    _save_trailing_peaks(
+    peak_save_error = _save_trailing_peaks(
         {symbol: value for symbol, value in peaks.items() if symbol in open_symbols},
         state_path=trailing_state_path,
+        snapshot=peak_state,
     )
+    if peak_save_error:
+        exit_observations.append({"symbol": None, "reason": peak_save_error,
+                                  "exit_status": "blocked", "source": "persisted_exit_state"})
     retained_store_symbols = open_symbols | {
         symbol
         for symbol, orders in pending_orders.items()
@@ -562,6 +622,7 @@ def _build_pair_actions(
     peaks: dict[str, float],
     pair_states: dict[str, dict[str, Any]],
     rules: PositionMonitorRules,
+    unavailable_peaks: set[str] | None = None,
 ) -> tuple[dict[str, dict[str, Any]], set[str], dict[str, tuple[str, ...]]]:
     groups: dict[str, dict[str, OpenPosition]] = {}
     for stored in stored_positions:
@@ -586,9 +647,11 @@ def _build_pair_actions(
 
         if runner_position is None:
             continue
-        runner_inputs = _pair_exit_inputs(runner_position, runner_store, peaks.get(runner_symbol))
+        runner_inputs = _pair_exit_inputs(runner_position, runner_store, peaks.get(runner_symbol),
+                                         trailing_available=runner_symbol not in (unavailable_peaks or set()))
         primary_inputs = (
-            _pair_exit_inputs(primary_position, primary_store, peaks.get(primary_symbol or ""))
+            _pair_exit_inputs(primary_position, primary_store, peaks.get(primary_symbol or ""),
+                              trailing_available=primary_symbol not in (unavailable_peaks or set()))
             if primary_position is not None and primary_store is not None else None
         )
         issues = tuple(sorted(set(runner_inputs[2] + (primary_inputs[2] if primary_inputs is not None else ()))))
@@ -679,16 +742,17 @@ def _build_pair_actions(
 
 def _pair_exit_inputs(
     position: dict[str, Any], stored: OpenPosition, previous_peak: float | None,
+    *, trailing_available: bool = True,
 ) -> tuple[PairLegMark | None, float | None, tuple[str, ...]]:
     issues: list[str] = []
     pnl = position.get("unrealized_plpc")
     current_return = _finite_number(0.0 if pnl is None else pnl)
     if current_return is None:
         issues.append("unrealized_plpc")
-    if previous_peak is not None and _finite_number(previous_peak) is None:
+    if trailing_available and previous_peak is not None and _finite_number(previous_peak) is None:
         issues.append("trailing_peak")
-    peak = None if issues else max(previous_peak if previous_peak is not None else current_return, current_return)
-    mark = _pair_leg_mark(position, stored, peak_return_pct=peak, invalid_fields=issues)
+    peak = None if issues else max(previous_peak if previous_peak is not None and trailing_available else current_return, current_return)
+    mark = _pair_leg_mark(position, stored, peak_return_pct=peak if trailing_available else None, invalid_fields=issues)
     return (None, None, tuple(issues)) if issues else (mark, peak, ())
 
 
@@ -958,6 +1022,14 @@ def _standalone_exit_inputs(position: dict[str, Any]) -> tuple[float, float] | N
     return current_price, unrealized_plpc
 
 
+def _exit_quantity(position: dict[str, Any]) -> int | None:
+    value = position.get("qty")
+    quantity = None if isinstance(value, bool) else _finite_number(value)
+    if quantity is None or quantity <= 0 or not quantity.is_integer():
+        return None
+    return int(quantity)
+
+
 def _hard_safety_action(
     position: dict[str, Any],
     rules: PositionMonitorRules,
@@ -967,7 +1039,9 @@ def _hard_safety_action(
     symbol = str(position.get("symbol") or "").upper()
     if not symbol:
         return None
-    qty = int(float(position.get("qty") or 0))
+    qty = _exit_quantity(position)
+    if qty is None:
+        return None
     inputs = _standalone_exit_inputs(position)
     if inputs is None:
         return None
@@ -1003,6 +1077,7 @@ def _monitor_action(
     peaks: dict[str, float],
     *,
     leg_role: str | None = None,
+    trailing_available: bool = True,
 ) -> dict[str, Any] | None:
     symbol = str(position.get("symbol") or "").upper()
     if not symbol:
@@ -1010,8 +1085,8 @@ def _monitor_action(
     side = str(position.get("side") or "long").lower()
     if side != "long":
         return None
-    qty = int(float(position.get("qty") or 0))
-    if qty <= 0:
+    qty = _exit_quantity(position)
+    if qty is None:
         return None
     inputs = _standalone_exit_inputs(position)
     if inputs is None:
@@ -1056,7 +1131,7 @@ def _monitor_action(
             "current_price": current_price,
             "leg_role": leg_role,
         }
-    if peak_plpc >= rules.trailing_activation_pct and unrealized_plpc <= peak_plpc - rules.trailing_drawdown_pct:
+    if trailing_available and peak_plpc >= rules.trailing_activation_pct and unrealized_plpc <= peak_plpc - rules.trailing_drawdown_pct:
         return {
             "reason": "trailing_stop",
             "symbol": symbol,
@@ -1098,7 +1173,9 @@ def _position_cost_cap_action(
         return None
     symbol = str(position.get("symbol") or "").upper()
     side = str(position.get("side") or "long").lower()
-    quantity = int(float(position.get("qty") or 0))
+    quantity = _exit_quantity(position)
+    if quantity is None:
+        return None
     average_entry = _finite_number(position.get("avg_entry_price"))
     current_price = _float_or_none(position.get("current_price")) or average_entry
     if not symbol or side != "long" or quantity <= 0 or average_entry is None or average_entry <= 0:
@@ -1636,7 +1713,7 @@ def _submit_forced_take_profit_exit(
 def _float_or_none(value: Any) -> float | None:
     try:
         return float(value)
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
         return None
 
 
